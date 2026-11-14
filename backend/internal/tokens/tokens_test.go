@@ -72,7 +72,7 @@ func newIssuer(t *testing.T) (*Issuer, *rsa.PublicKey) {
 		t.Fatal(err)
 	}
 	der, _ := x509.MarshalPKCS8PrivateKey(key)
-	issuer, err := NewIssuer(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	issuer, err := NewIssuer(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), LabelSend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func mint(t *testing.T, issuer *Issuer, pub *rsa.PublicKey, epoch uint64, keyID 
 	input := binary.BigEndian.AppendUint16(nil, Type)
 	nonce := make([]byte, 32)
 	_, _ = rand.Read(nonce)
-	challenge := Challenge(epoch)
+	challenge := Challenge(LabelSend, epoch)
 	input = append(append(append(input, nonce...), challenge[:]...), keyID[:]...)
 	client, err := blindrsa.NewClient(blindrsa.SHA384PSSDeterministic, pub)
 	if err != nil {
@@ -154,7 +154,7 @@ func TestNewIssuerRejects(t *testing.T) {
 		"1024 bits":  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
 		"wrong type": pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}),
 	} {
-		if _, err := NewIssuer(in); err == nil {
+		if _, err := NewIssuer(in, LabelSend); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -163,8 +163,12 @@ func TestNewIssuerRejects(t *testing.T) {
 func TestChallengeVector(t *testing.T) {
 	// Computed independently (Node) and checked by the client (web/src/protocol/token.test.ts).
 	epoch := EpochOf(now)
-	got := Challenge(epoch)
+	got := Challenge(LabelSend, epoch)
 	if epoch != 2976 || hex.EncodeToString(got[:]) != "3ff2ca2b7e3d94fa8b80f80f0f44814f65decd7bbd029649ed7f22149d457f93" {
 		t.Fatalf("epoch %d, challenge %x", epoch, got)
+	}
+	media := Challenge(LabelMedia, epoch)
+	if hex.EncodeToString(media[:]) != "59f485cea0cde111a1beb5ce12a245bebc8cc0bd23118181ea14f9de282ea8f6" {
+		t.Fatalf("media challenge %x", media)
 	}
 }

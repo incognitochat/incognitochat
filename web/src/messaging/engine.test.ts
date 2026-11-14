@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { createLink, listLinks, replaceLink } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
-import { fromBase64Url, toBase64Url } from '../crypto/encoding';
+import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import { generateVaultKey } from '../crypto/vault';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
 import { checkBundle, type LinkRef } from '../protocol/link';
+import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER } from '../account/wallet';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
@@ -31,6 +32,7 @@ async function fakeBackend() {
   const key: IssuerKey = { key: pair.publicKey, n: big(jwk.n!), e: big(jwk.e!), k: 256 };
   const issuer: TokenIssuer = { key, keyId: new Uint8Array(await crypto.subtle.digest('SHA-256', await crypto.subtle.exportKey('spki', pair.publicKey))) };
   const d = big(jwk.d!);
+  let mediaSigned = 0;
 
   const mailboxes = new Map<string, string>(); // mailbox -> owner account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
@@ -73,7 +75,10 @@ async function fakeBackend() {
       }
       if (method === 'POST' && path === '/media') {
         const { size, deleteHash, tokens } = JSON.parse(init.body!) as { size: number; deleteHash: string; tokens: string[] };
-        if (tokens.length !== Math.ceil(size / (5 * 1024 * 1024)) || tokens.some((t) => spent.has(t))) throw new ApiError(401, 'invalid_token');
+        // One media token per started MiB; send tokens don't pay for uploads.
+        const media = toHex(await challenge(epochOf(Math.floor(Date.now() / 1000)), LABEL_MEDIA_TOKEN));
+        const isMedia = (t: string) => toHex(fromBase64Url(t).slice(34, 66)) === media;
+        if (tokens.length !== Math.ceil(size / (1024 * 1024)) || tokens.some((t) => spent.has(t) || !isMedia(t))) throw new ApiError(401, 'invalid_token');
         tokens.forEach((t) => spent.add(t));
         const id = rand();
         uploads.set(id, { size, deleteHash, body: null });
@@ -115,7 +120,8 @@ async function fakeBackend() {
           ids.forEach((id) => mailboxes.set(id, account));
           return check({ mailboxes: ids });
         }
-        if (path === '/tokens') {
+        if (path === '/tokens' || path === '/tokens/media') {
+          if (path === '/tokens/media') mediaSigned += (b.blinded as string[]).length;
           return check({
             signatures: (b.blinded as string[]).map((x) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(x)), d, key.n), 256))),
           });
@@ -157,14 +163,14 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, uploads, transfer, down };
+  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, uploads, transfer, down, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
   const db: Database = await openDatabase(`engine-test-${n++}`);
   await putKey(db, 'vault-key', await generateVaultKey());
   const session = backend.session(account);
-  return { db, session, messaging: createMessaging({ db, api: backend.api, session, issuer: backend.issuer, transfer: backend.transfer, ...(now ? { now } : {}) }) };
+  return { db, session, messaging: createMessaging({ db, api: backend.api, session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, ...(now ? { now } : {}) }) };
 }
 
 async function linkOf(backend: Awaited<ReturnType<typeof fakeBackend>>, owner: Awaited<ReturnType<typeof person>>) {
@@ -918,7 +924,9 @@ describe('attachments', () => {
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
 
-    // 6 MiB: two tokens; the bucket only takes the padded, encrypted size.
+    // 6 MiB, padded to 7: seven media tokens, and no send token beyond the
+    // message's own; the bucket only takes the padded, encrypted size.
+    const sendTokens = await countTokens(sender.db);
     const file = crypto.getRandomValues(new Uint8Array(65536));
     const big = new Uint8Array(6 * 1024 * 1024);
     big.set(file);
@@ -927,6 +935,10 @@ describe('attachments', () => {
     expect(progress).toEqual([1]);
     const [upload] = [...backend.uploads.values()];
     expect(upload!.body!.length).toBe(7 * 1024 * 1024);
+    expect(backend.mediaSigned()).toBeGreaterThanOrEqual(7);
+    expect(await countTokens(sender.db)).toBe(sendTokens - 1);
+    // What the batch brought beyond the upload's cost stays in the media wallet.
+    expect(await countTokens(sender.db, undefined, 'media')).toBe(backend.mediaSigned() - 7);
     // The server's copy is ciphertext: the file's bytes aren't in it.
     const needle = toBase64Url(file.slice(0, 48));
     expect(toBase64Url(upload!.body!).includes(needle)).toBe(false);

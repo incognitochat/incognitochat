@@ -113,8 +113,8 @@ it. This is how close it gets.
   and key updates are marked so they don't trigger a notice. The server sees the mark, not
   which of these it is or who sent it.
 - **Attachment sizes, roughly.** Files are padded before upload (to the next
-  power of two up to 1 MiB, then the next whole MiB), and paid with one send
-  token per started 5 MiB. So the server sees a size class, not the type, name
+  power of two up to 1 MiB, then the next whole MiB), and paid with one media
+  token per started MiB. So the server sees a size class, not the type, name
   or content.
 - **Attachments wait on the server, encrypted.** An upload stays in the bucket
   until the recipient deletes the message or the conversation, or 31 days

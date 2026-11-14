@@ -60,7 +60,7 @@ func TestDownloadURL(t *testing.T) {
 }
 
 func TestTokensFor(t *testing.T) {
-	for size, want := range map[int64]int{1: 1, TokenBytes: 1, TokenBytes + 1: 2, MaxSize: 6} {
+	for size, want := range map[int64]int{1: 1, TokenBytes: 1, TokenBytes + 1: 2, MaxSize: 26} {
 		if got := TokensFor(size); got != want {
 			t.Errorf("TokensFor(%d) = %d, want %d", size, got, want)
 		}

@@ -66,7 +66,7 @@ func main() {
 func setup(ctx context.Context) (*api.Server, error) {
 	env, err := config.Env(os.Getenv,
 		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_ENDPOINT", "MEDIA_BUCKET",
-		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY")
+		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY")
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,8 @@ func setup(ctx context.Context) (*api.Server, error) {
 		return nil, err
 	}
 	params, err := config.Load(ctx, ssm.NewFromConfig(aws),
-		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"])
+		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"],
+		env["PARAM_MEDIA_ISSUER_KEY"])
 	if err != nil {
 		return nil, err
 	}
@@ -93,9 +94,18 @@ func setup(ctx context.Context) (*api.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokenIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_ISSUER_KEY"]]))
+	tokenIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_ISSUER_KEY"]]), tokens.LabelSend)
 	if err != nil {
 		return nil, err
+	}
+	mediaIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_MEDIA_ISSUER_KEY"]]), tokens.LabelMedia)
+	if err != nil {
+		return nil, err
+	}
+	// The two kinds of token must not share a key: a blind signer can't
+	// tell them apart, so one key would mean one budget.
+	if tokenIssuer.KeyID() == mediaIssuer.KeyID() {
+		return nil, errors.New("api: the send and media issuer keys are the same")
 	}
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same
@@ -118,22 +128,23 @@ func setup(ctx context.Context) (*api.Server, error) {
 	})
 	now := time.Now
 	return &api.Server{
-		Telegram:   initdata.NewVerifier(botID),
-		Sessions:   issuer,
-		Directory:  &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]},
-		Nonces:     &ephemeral.Nonces{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Limits:     &ephemeral.Limiter{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Pepper:     pepper,
-		Now:        now,
-		InviteOnly: config.InviteOnly(os.Getenv("INVITE_ONLY")),
-		Admins:     admins,
-		Inbox:      &inbox.Store{DB: db, Table: env["TABLE_MESSAGES"]},
-		Pause:      api.RandomPause,
-		Issuer:     tokenIssuer,
-		Spent:      &ephemeral.Spent{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Notices:    &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
-		Media:      &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
-		Uploads:    &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Telegram:    initdata.NewVerifier(botID),
+		Sessions:    issuer,
+		Directory:   &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]},
+		Nonces:      &ephemeral.Nonces{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Limits:      &ephemeral.Limiter{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Pepper:      pepper,
+		Now:         now,
+		InviteOnly:  config.InviteOnly(os.Getenv("INVITE_ONLY")),
+		Admins:      admins,
+		Inbox:       &inbox.Store{DB: db, Table: env["TABLE_MESSAGES"]},
+		Pause:       api.RandomPause,
+		Issuer:      tokenIssuer,
+		MediaIssuer: mediaIssuer,
+		Spent:       &ephemeral.Spent{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Notices:     &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
+		Media:       &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
+		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Push: &push.Pusher{
 			Sockets: &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 			API: apigatewaymanagementapi.NewFromConfig(aws, func(o *apigatewaymanagementapi.Options) {

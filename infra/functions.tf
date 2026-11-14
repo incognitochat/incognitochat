@@ -18,7 +18,7 @@ locals {
       # About 30 ms a request: room for roughly 3,000 requests a second.
       concurrency = 100
       tables      = ["directory", "messages", "ephemeral"]
-      parameters  = ["bot-id", "session-key", "telegram-id-pepper", "issuer-key"]
+      parameters  = ["bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key"]
       environment = {
         TABLE_DIRECTORY          = aws_dynamodb_table.table["directory"].name
         TABLE_MESSAGES           = aws_dynamodb_table.table["messages"].name
@@ -27,6 +27,7 @@ locals {
         PARAM_SESSION_KEY        = aws_ssm_parameter.parameter["session-key"].name
         PARAM_TELEGRAM_ID_PEPPER = aws_ssm_parameter.parameter["telegram-id-pepper"].name
         PARAM_ISSUER_KEY         = aws_ssm_parameter.parameter["issuer-key"].name
+        PARAM_MEDIA_ISSUER_KEY   = aws_ssm_parameter.parameter["media-issuer-key"].name
         NOTIFY_FUNCTION          = "${local.prefix}-notify"
         MEDIA_BUCKET             = aws_s3_bucket.media.id
         WS_ENDPOINT              = local.ws_endpoint

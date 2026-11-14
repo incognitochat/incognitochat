@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { fromBase64Url, fromHex, toHex } from '../crypto/encoding';
 import issuerKeys from '../../issuer-keys.json';
-import { challenge, epochOf, TOKEN_INPUT_LENGTH, tokenInput } from './token';
+import { challenge, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH, tokenInput } from './token';
 
 describe('send tokens', () => {
   it('derive the weekly challenge exactly like the backend', async () => {
     // backend/internal/tokens: TestChallengeVector.
     expect(epochOf(1_800_000_000)).toBe(2976);
     expect(toHex(await challenge(2976))).toBe('3ff2ca2b7e3d94fa8b80f80f0f44814f65decd7bbd029649ed7f22149d457f93');
+    // Media tokens have their own label, so their own challenge.
+    expect(toHex(await challenge(2976, LABEL_MEDIA_TOKEN))).toBe('59f485cea0cde111a1beb5ce12a245bebc8cc0bd23118181ea14f9de282ea8f6');
   });
 
   it('build a 98-byte input with a fresh nonce', async () => {
@@ -22,12 +24,18 @@ describe('send tokens', () => {
   });
 
   it('publish only keys whose ID matches them', async () => {
+    const seen = new Set<string>();
     for (const [name, entry] of Object.entries(issuerKeys)) {
       if (name === '_comment' || typeof entry === 'string') continue;
-      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(entry.spki)));
-      expect(digest).toEqual(fromHex(entry.keyId));
-      const key = await crypto.subtle.importKey('spki', fromBase64Url(entry.spki), { name: 'RSA-PSS', hash: 'SHA-384' }, true, ['verify']);
-      expect((key.algorithm as RsaHashedKeyAlgorithm).modulusLength).toBe(2048);
+      // Each environment publishes a send key and a media key, all different.
+      for (const published of [entry, entry.media]) {
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(published.spki)));
+        expect(digest).toEqual(fromHex(published.keyId));
+        const key = await crypto.subtle.importKey('spki', fromBase64Url(published.spki), { name: 'RSA-PSS', hash: 'SHA-384' }, true, ['verify']);
+        expect((key.algorithm as RsaHashedKeyAlgorithm).modulusLength).toBe(2048);
+        expect(seen.has(published.keyId)).toBe(false);
+        seen.add(published.keyId);
+      }
     }
   });
 });

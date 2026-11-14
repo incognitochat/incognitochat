@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { i2osp, modPow, os2ip, verify, type IssuerKey } from '../crypto/blindrsa';
-import { fromBase64Url, toBase64Url } from '../crypto/encoding';
+import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import type { Session } from '../net/session';
-import { challenge, EPOCH_SECONDS, epochOf, TOKEN_INPUT_LENGTH } from '../protocol/token';
+import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { openDatabase } from '../storage/db';
 import { countTokens, refillTokens, returnToken, takeToken, type TokenIssuer } from './wallet';
 
@@ -11,7 +11,7 @@ let n = 0;
 const NOW = 1_800_000_000;
 
 /** An issuer with a fresh key, and a fake session whose POST /tokens signs like the server. */
-async function issuerAndSession(): Promise<{ issuer: TokenIssuer; session: Session; signed: () => number }> {
+async function issuerAndSession(route = '/tokens'): Promise<{ issuer: TokenIssuer; session: Session; signed: () => number }> {
   const pair = await crypto.subtle.generateKey(
     { name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-384' },
     true,
@@ -27,7 +27,7 @@ async function issuerAndSession(): Promise<{ issuer: TokenIssuer; session: Sessi
     use: () => {},
       token: async () => 'v1.test.token',
     async call(_method, path, body, check) {
-      if (path !== '/tokens') throw new Error(path);
+      if (path !== route) throw new Error(path);
       const blinded = (body as { blinded: string[] }).blinded;
       count += blinded.length;
       const d = big(jwk.d!);
@@ -38,6 +38,25 @@ async function issuerAndSession(): Promise<{ issuer: TokenIssuer; session: Sessi
 }
 
 describe('token wallet', () => {
+  it('keeps media tokens apart: their own route, label and wallet', async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    const { issuer, session, signed } = await issuerAndSession('/tokens/media');
+    expect(await refillTokens(db, session, issuer, 3, NOW, 'media')).toBe(3);
+    expect(signed()).toBe(3);
+    expect(await countTokens(db, NOW, 'media')).toBe(3);
+    // The send wallet is untouched.
+    expect(await countTokens(db, NOW)).toBe(0);
+    expect(await takeToken(db, NOW)).toBeNull();
+
+    const t = await takeToken(db, NOW, 'media');
+    const raw = fromBase64Url(t!.token);
+    expect(toHex(raw.slice(34, 66))).toBe(toHex(await challenge(epochOf(NOW), LABEL_MEDIA_TOKEN)));
+    expect(toHex(raw.slice(34, 66))).not.toBe(toHex(await challenge(epochOf(NOW))));
+    expect(await verify(issuer.key, raw.slice(0, TOKEN_INPUT_LENGTH), raw.slice(TOKEN_INPUT_LENGTH))).toBe(true);
+    await returnToken(db, t!.token, t!.epoch, 'media');
+    expect(await countTokens(db, NOW, 'media')).toBe(3);
+  });
+
   it('fills with valid tokens and hands out each once', async () => {
     const db = await openDatabase(`wallet-test-${n++}`);
     const { issuer, session, signed } = await issuerAndSession();

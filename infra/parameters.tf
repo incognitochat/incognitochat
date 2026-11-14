@@ -42,6 +42,7 @@ locals {
     "webhook-secret"     = var.secrets_version
     "chat-key"           = var.secrets_version
     "issuer-key"         = var.issuer_key_version
+    "media-issuer-key"   = var.media_issuer_key_version
   }
 
   # The bot ID is the token's numeric prefix. Writing it here means nobody
@@ -55,6 +56,7 @@ locals {
     "webhook-secret"     = ephemeral.random_password.webhook_secret.result
     "chat-key"           = ephemeral.random_password.chat_key.result
     "issuer-key"         = var.issuer_key
+    "media-issuer-key"   = var.media_issuer_key
   }
 }
 

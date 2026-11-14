@@ -42,6 +42,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           ISSUER_KEY: ${{ secrets.ISSUER_KEY }}
+          MEDIA_ISSUER_KEY: ${{ secrets.MEDIA_ISSUER_KEY }}
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
@@ -55,7 +56,7 @@ jobs:
           LAMBDA_CODE_SIGNING_CONFIG: ${{ secrets.LAMBDA_CODE_SIGNING_CONFIG }}
         run: |
           missing=0
-          for name in BOT_TOKEN ISSUER_KEY AWS_ROLE_ARN AWS_ACCOUNT_ID TF_STATE_BUCKET AWS_REGION CLIENT_ORIGINS \
+          for name in BOT_TOKEN ISSUER_KEY MEDIA_ISSUER_KEY AWS_ROLE_ARN AWS_ACCOUNT_ID TF_STATE_BUCKET AWS_REGION CLIENT_ORIGINS \
             PAGES_REPO PAGES_URL PAGES_DISPATCH_TOKEN LAMBDA_BUILDS_BUCKET LAMBDA_SIGNING_PROFILE LAMBDA_CODE_SIGNING_CONFIG; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is not set in the ${ENVIRONMENT} environment"
@@ -67,8 +68,14 @@ jobs:
             echo "::error::BOT_TOKEN doesn't look like a Telegram bot token"
             missing=1
           fi
-          if [ -n "$ISSUER_KEY" ] && [[ "$ISSUER_KEY" != "-----BEGIN PRIVATE KEY-----"* ]]; then
-            echo "::error::ISSUER_KEY isn't a PKCS#8 PEM private key"
+          for name in ISSUER_KEY MEDIA_ISSUER_KEY; do
+            if [ -n "${!name}" ] && [[ "${!name}" != "-----BEGIN PRIVATE KEY-----"* ]]; then
+              echo "::error::$name isn't a PKCS#8 PEM private key"
+              missing=1
+            fi
+          done
+          if [ -n "$ISSUER_KEY" ] && [ "$ISSUER_KEY" = "$MEDIA_ISSUER_KEY" ]; then
+            echo "::error::ISSUER_KEY and MEDIA_ISSUER_KEY must be different keys"
             missing=1
           fi
           exit "$missing"
@@ -145,6 +152,8 @@ jobs:
           TF_VAR_bot_token_version: ${{ vars.BOT_TOKEN_VERSION || '1' }}
           TF_VAR_issuer_key: ${{ secrets.ISSUER_KEY }}
           TF_VAR_issuer_key_version: ${{ vars.ISSUER_KEY_VERSION || '1' }}
+          TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
+          TF_VAR_media_issuer_key_version: ${{ vars.MEDIA_ISSUER_KEY_VERSION || '1' }}
           TF_VAR_secrets_version: ${{ vars.SECRETS_VERSION || '1' }}
           TF_VAR_client_origins: ${{ vars.CLIENT_ORIGINS }}
           TF_VAR_deletion_protection: ${{ vars.DELETION_PROTECTION || 'true' }}
@@ -170,6 +179,7 @@ jobs:
           # Ephemeral variables aren't saved in the plan file; supply them again.
           TF_VAR_bot_token: ${{ secrets.BOT_TOKEN }}
           TF_VAR_issuer_key: ${{ secrets.ISSUER_KEY }}
+          TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
         # Resource IDs (such as the WebSocket API's) are printed on creation.
         # pipefail: without it, a failed apply would pass through sed as a success.
         run: |

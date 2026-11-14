@@ -35,12 +35,12 @@ type Uploads interface {
 type uploadRequest struct {
 	Size       int64    `json:"size"`
 	DeleteHash bytes64  `json:"deleteHash"` // SHA-256 of the delete secret, which only the message carries
-	Tokens     []string `json:"tokens"`     // base64url send tokens, media.TokensFor(size) of them
+	Tokens     []string `json:"tokens"`     // base64url media tokens, media.TokensFor(size) of them
 }
 
 // upload takes payment for an upload and returns where to put it. Like a
-// send, it needs no login: anonymous send tokens pay for it (one per started
-// 5 MiB), so an upload can't be tied to an account. The app then PUTs
+// send, it needs no login: anonymous media tokens pay for it (one per started
+// MiB), so an upload can't be tied to an account. The app then PUTs
 // exactly size bytes of ciphertext to the URL.
 func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media"
@@ -48,7 +48,7 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 	if err := httpapi.DecodeJSON(req, &in); err != nil {
 		return httpapi.DecodeError(err)
 	}
-	if s.Media == nil {
+	if s.Media == nil || s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
 	if in.Size < 1 || in.Size > media.MaxSize || len(in.DeleteHash) != sha256.Size {
@@ -69,7 +69,7 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 		if err != nil {
 			return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 		}
-		nonce, forgetAfter, err := s.Issuer.Check(raw, now)
+		nonce, forgetAfter, err := s.MediaIssuer.Check(raw, now)
 		if err != nil {
 			return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 		}

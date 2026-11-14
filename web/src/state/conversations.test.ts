@@ -86,7 +86,7 @@ async function backend() {
         ids.forEach((id) => owners.set(id, account));
         return check({ mailboxes: ids });
       }
-      if (path === '/tokens') {
+      if (path === '/tokens' || path === '/tokens/media') {
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
@@ -121,7 +121,7 @@ function launchWith(startParam: string, allowsWrite = true): Launch {
 /** Sets up an account (two launches) and returns the app of the registration launch. */
 async function person(b: Awaited<ReturnType<typeof backend>>, startParam = ''): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
   const db = await openDatabase(`conv-test-${n++}`);
-  const deps = { config, api: b.api, db, bridge: bridge(), broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer };
+  const deps = { config, api: b.api, db, bridge: bridge(), broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -246,7 +246,7 @@ describe('conversations in the app', () => {
         return () => {};
       },
     } as Bridge;
-    const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer };
+    const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
     await createApp({ ...deps, launch: launchWith('', false) }).setUp();
     const code = 'reg' + (await readAccount(db))!.fingerprint;
     const app = createApp({ ...deps, launch: launchWith(code, false) });

@@ -12,7 +12,18 @@
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { keyName, listLinks, rotateLinkKey } from '../account/links';
-import { countTokens, LOW_WATER, refillTokens, returnToken, takeToken, type StoredToken, type TokenIssuer } from '../account/wallet';
+import {
+  countTokens,
+  LOW_WATER,
+  MAX_BATCH,
+  MEDIA_BATCH,
+  MEDIA_LOW_WATER,
+  refillTokens,
+  returnToken,
+  takeToken,
+  type StoredToken,
+  type TokenIssuer,
+} from '../account/wallet';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
 import { checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
@@ -67,6 +78,8 @@ export interface MessagingDeps {
   /** For logged-in calls: inbox, mailboxes, tokens. */
   session: Session;
   issuer: TokenIssuer;
+  /** The media-token issuer, which pays for uploads; without it attachments can't be sent. */
+  mediaIssuer?: TokenIssuer;
   /** Unix milliseconds. */
   now?: () => number;
   /** Uploads and downloads attachments (tests use a fake). */
@@ -79,8 +92,8 @@ export interface Outgoing {
   media: Omit<Media, 'id' | 'k' | 'd'>;
 }
 
-/** One send token pays for this much of an upload (as the server counts). */
-const TOKEN_BYTES = 5 * 1024 * 1024;
+/** One media token pays for this much of an upload (as the server counts). */
+const TOKEN_BYTES = 1024 * 1024;
 
 function checkUpload(value: unknown): { id: string; url: string } {
   const { id, url } = checkObject(value);
@@ -114,7 +127,7 @@ function checkInbox(value: unknown): { items: InboxItem[]; more: boolean } {
 }
 
 export function createMessaging(deps: MessagingDeps) {
-  const { db, api, session, issuer } = deps;
+  const { db, api, session, issuer, mediaIssuer } = deps;
   const now = deps.now ?? Date.now;
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? xhrTransfer;
@@ -229,20 +242,14 @@ export function createMessaging(deps: MessagingDeps) {
     const key = newFileKey();
     const secret = crypto.getRandomValues(new Uint8Array(16));
     const size = uploadSize(out.file.length);
-    const tokens: StoredToken[] = [];
-    try {
-      for (let i = 0; i < Math.ceil(size / TOKEN_BYTES); i++) tokens.push(await nextToken());
-    } catch (err) {
-      for (const t of tokens) await returnToken(db, t.token, t.epoch);
-      throw err;
-    }
+    const tokens = await takeMediaTokens(Math.ceil(size / TOKEN_BYTES));
     const deleteHash = new Uint8Array(await crypto.subtle.digest('SHA-256', secret));
     let created: { id: string; url: string };
     try {
       created = await api.post('/media', { size, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
     } catch (err) {
       // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
-      if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch);
+      if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
       throw err;
     }
     await transfer.put(created.url, await encryptFile(out.file, key), onProgress);
@@ -566,6 +573,40 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
+  /** Takes the media tokens an upload costs, fetching more if the wallet runs short. */
+  async function takeMediaTokens(count: number): Promise<StoredToken[]> {
+    if (!mediaIssuer) throw new NoTokens();
+    const seconds = () => Math.floor(now() / 1000);
+    const taken: StoredToken[] = [];
+    try {
+      let refilled = false;
+      while (taken.length < count) {
+        const token = await takeToken(db, seconds(), 'media');
+        if (token) {
+          taken.push(token);
+          refilled = false;
+          continue;
+        }
+        // A refill that brought nothing: give up rather than ask again.
+        if (refilled) throw new NoTokens();
+        // Out of tokens: fetching right before an upload is a timing hint,
+        // but the wallet is normally refilled well ahead (maintain()).
+        try {
+          await refillTokens(db, session, mediaIssuer, Math.min(MAX_BATCH, Math.max(MEDIA_BATCH, count - taken.length)), seconds(), 'media');
+        } catch (err) {
+          // The day's media tokens are used up.
+          if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
+          throw err;
+        }
+        refilled = true;
+      }
+    } catch (err) {
+      for (const t of taken) await returnToken(db, t.token, t.epoch, 'media');
+      throw err;
+    }
+    return taken;
+  }
+
   async function nextToken(): Promise<StoredToken> {
     let token = await takeToken(db, Math.floor(now() / 1000));
     if (!token) {
@@ -765,6 +806,9 @@ export function createMessaging(deps: MessagingDeps) {
     if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
     if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
       await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
+    }
+    if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
+      await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
     }
     // Deleting old keys needs no network, so it goes first.
     if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();

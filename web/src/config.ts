@@ -14,9 +14,15 @@ export interface Config {
   appName: string;
   /**
    * The send-token issuer's public key, published in issuer-keys.json and
-   * named by the build: tokens for any other key are refused.
+   * named by the build: tokens for any other key are refused. With it, the
+   * media-token issuer's key, which pays for uploads.
    */
-  issuer: { name: string; spki: Uint8Array<ArrayBuffer>; keyId: Uint8Array<ArrayBuffer> };
+  issuer: {
+    name: string;
+    spki: Uint8Array<ArrayBuffer>;
+    keyId: Uint8Array<ArrayBuffer>;
+    media?: { spki: Uint8Array<ArrayBuffer>; keyId: Uint8Array<ArrayBuffer> };
+  };
   /** The WebSocket that pushes "something arrived"; without it the app polls. */
   wsUrl?: string;
   /** Whether attachments are on (the build names the media bucket, for its security policy). */
@@ -24,12 +30,18 @@ export interface Config {
 }
 
 const env = import.meta.env;
-const keys = issuerKeys as unknown as Record<string, { spki: string; keyId: string } | string>;
+type PublishedKey = { spki: string; keyId: string };
+const keys = issuerKeys as unknown as Record<string, (PublishedKey & { media?: PublishedKey }) | string>;
 
 function issuer(name: string | undefined): Config['issuer'] | null {
   const entry = name && name !== '_comment' ? keys[name] : undefined;
   if (!entry || typeof entry === 'string') return null;
-  return { name: name!, spki: fromBase64Url(entry.spki), keyId: fromHex(entry.keyId) };
+  return {
+    name: name!,
+    spki: fromBase64Url(entry.spki),
+    keyId: fromHex(entry.keyId),
+    ...(entry.media ? { media: { spki: fromBase64Url(entry.media.spki), keyId: fromHex(entry.media.keyId) } } : {}),
+  };
 }
 
 const issuerKey = issuer(env.VITE_ISSUER_KEY);

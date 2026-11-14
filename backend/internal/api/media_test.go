@@ -66,14 +66,14 @@ func TestMedia(t *testing.T) {
 	tokens := func(n int) []any {
 		out := make([]any, n)
 		for i := range out {
-			out[i] = mintToken(t, h.now)
+			out[i] = mintMediaToken(t, h.now)
 		}
 		return out
 	}
 
-	// 6 MiB costs two tokens; no login needed.
-	size := int64(6 << 20)
-	status, out := h.post(t, "/media", map[string]any{"size": size, "deleteHash": b64(hash[:]), "tokens": tokens(2)})
+	// 5 MiB and a byte costs six tokens; no login needed.
+	size := int64(5<<20 + 1)
+	status, out := h.post(t, "/media", map[string]any{"size": size, "deleteHash": b64(hash[:]), "tokens": tokens(6)})
 	if status != http.StatusCreated {
 		t.Fatalf("upload: %d %v", status, out)
 	}
@@ -116,7 +116,7 @@ func TestUploadRejects(t *testing.T) {
 	upload := func(size int64, deleteHash []byte, tokens []any) (int, map[string]any) {
 		return h.post(t, "/media", map[string]any{"size": size, "deleteHash": b64(deleteHash), "tokens": tokens})
 	}
-	one := mintToken(t, h.now)
+	one := mintMediaToken(t, h.now)
 
 	for _, size := range []int64{0, media.MaxSize + 1} {
 		status, out := upload(size, hash[:], []any{one})
@@ -125,11 +125,16 @@ func TestUploadRejects(t *testing.T) {
 	status, out := upload(10, []byte("short"), []any{one})
 	wantError(t, status, out, http.StatusBadRequest, "bad_request")
 	// Too few tokens, the same token twice, a bad token.
-	status, out = upload(6<<20, hash[:], []any{one})
+	status, out = upload(2<<20, hash[:], []any{one})
 	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
-	status, out = upload(6<<20, hash[:], []any{one, one})
+	status, out = upload(2<<20, hash[:], []any{one, one})
 	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
 	status, out = upload(10, hash[:], []any{"nope"})
+	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
+	// Send tokens don't pay for uploads, and media tokens don't pay for sends.
+	status, out = upload(10, hash[:], []any{mintToken(t, h.now)})
+	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
+	status, out = h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": clientEnvelope(t), "token": mintMediaToken(t, h.now)})
 	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
 	// A token pays once: for this upload, then not again.
 	if status, out := upload(10, hash[:], []any{one}); status != http.StatusCreated {
