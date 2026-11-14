@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.3.0](https://github.com/incognitochat/incognitochat/compare/v2.2.0...v2.3.0) (2026-11-14)
+
+
+### Features
+
+* media tokens pay for uploads, from their own daily budget ([#116](https://github.com/incognitochat/incognitochat/issues/116)) ([5d5689c](https://github.com/incognitochat/incognitochat/commit/5d5689c515d02c9e59a532834b0b6e96ed756aab))
+
+
+### Bug Fixes
+
+* **media:** download links last one minute ([#114](https://github.com/incognitochat/incognitochat/issues/114)) ([6f8f000](https://github.com/incognitochat/incognitochat/commit/6f8f0005e8684f5f1019eb73a1e7009cf14c9c1b))
+
 ## [2.2.0](https://github.com/incognitochat/incognitochat/compare/v2.1.0...v2.2.0) (2026-11-14)
 
 
