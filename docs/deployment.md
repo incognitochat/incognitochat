@@ -124,6 +124,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 |---|---|---|
 | `BOT_TOKEN` | secret | The bot's token from BotFather. Raise `BOT_TOKEN_VERSION` to push a changed token. |
 | `ISSUER_KEY` | secret | The send-token issuer's private key (below). Raise `ISSUER_KEY_VERSION` when it changes. |
+| `MEDIA_ISSUER_KEY` | secret | The media-token issuer's private key (below), a different key. Raise `MEDIA_ISSUER_KEY_VERSION` when it changes. |
 | `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins. A secret, so the IDs stay out of the public deploy logs; the API keeps only their keyed hashes. |
 | `CLIENT_ORIGINS` | variable | Origins allowed to call the API from a browser: the app's `https://<org>.github.io`. |
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
@@ -135,22 +136,25 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
 | `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
 
-### The send-token issuer key
+### The token issuer keys
 
-Sends are paid with anonymous tokens signed by the environment's issuer key,
-an RSA-2048 private key kept only as a secret. Its public key is published in
-[`web/issuer-keys.json`](../web/issuer-keys.json), and an app build accepts
-only the key its build names, so the server can't give users different keys:
+Sends are paid with anonymous send tokens and uploads with media tokens,
+each signed by an issuer key of its own: two RSA-2048 private keys kept only
+as secrets (`ISSUER_KEY` and `MEDIA_ISSUER_KEY`). They must differ, since a
+key is what gives a kind of token its own daily budget. Their public keys
+are published in [`web/issuer-keys.json`](../web/issuer-keys.json), and an
+app build accepts only the keys its build names, so the server can't give
+users different keys. For each key:
 
 ```shell
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out issuer.pem
 openssl pkey -in issuer.pem -pubout -outform DER | basenc -w0 --base64url  # the "spki" to publish
-gh secret set ISSUER_KEY --env <env> < issuer.pem && shred -u issuer.pem
+gh secret set ISSUER_KEY --env <env> < issuer.pem && shred -u issuer.pem  # or MEDIA_ISSUER_KEY
 ```
 
-Add the public key to `web/issuer-keys.json` under a new name with its
-`keyId` (the SHA-256 of the DER), and set the hosting repository's
-`ISSUER_KEY` variable to that name.
+Add the send key to `web/issuer-keys.json` under a new name with its `keyId`
+(the SHA-256 of the DER), the media key under `media` in the same entry, and
+set the hosting repository's `ISSUER_KEY` variable to that name.
 
 ### The bot
 

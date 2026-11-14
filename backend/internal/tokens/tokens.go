@@ -1,6 +1,9 @@
-// Package tokens issues and checks anonymous send tokens (design §11):
-// RSA blind signatures (RFC 9474, RSABSSA-SHA384-PSS-Deterministic), in the
-// shape of Privacy Pass token type 2 (RFC 9578).
+// Package tokens issues and checks anonymous tokens (design §11): send
+// tokens, which pay for messages, and media tokens, which pay for uploads.
+// The two kinds have their own issuer keys, because a blind signer can't see
+// what it signs: only a key of its own gives a kind its own daily budget.
+// Both are RSA blind signatures (RFC 9474, RSABSSA-SHA384-PSS-Deterministic),
+// in the shape of Privacy Pass token type 2 (RFC 9578).
 //
 // A logged-in client gets a batch of blinded tokens signed. Unblinded, each
 // is an ordinary RSA-PSS signature the issuer can't link to the request that
@@ -8,7 +11,8 @@
 // sent it. Each token is spent once.
 //
 //	token       = type (2) ‖ nonce (32) ‖ challenge (32) ‖ key ID (32) ‖ authenticator (k)
-//	challenge   = SHA-256(devicesig.Message("incognitochat/v2/send-token", [suite], u64(epoch)))
+//	challenge   = SHA-256(devicesig.Message(label, [suite], u64(epoch)))
+//	label       = "incognitochat/v2/send-token" or "incognitochat/v2/media-token"
 //	key ID      = SHA-256(the issuer key's SubjectPublicKeyInfo, DER)
 //
 // Epochs are weeks. A token is accepted in its own epoch and the next one,
@@ -38,8 +42,11 @@ const (
 	// ModulusBits is the issuer key size for token type 2.
 	ModulusBits = 2048
 
-	labelChallenge = "incognitochat/v2/send-token"
-	inputLen       = 2 + 32 + 32 + 32
+	// LabelSend and LabelMedia name the two kinds of token in their challenges.
+	LabelSend  = "incognitochat/v2/send-token"
+	LabelMedia = "incognitochat/v2/media-token"
+
+	inputLen = 2 + 32 + 32 + 32
 )
 
 var (
@@ -49,8 +56,9 @@ var (
 	ErrKey = errors.New("tokens: invalid issuer key")
 )
 
-// Issuer holds the issuer key.
+// Issuer holds the issuer key of one kind of token.
 type Issuer struct {
+	label    string
 	signer   blindrsa.Signer
 	verifier blindrsa.Verifier
 	public   *rsa.PublicKey
@@ -58,8 +66,9 @@ type Issuer struct {
 	k        int
 }
 
-// NewIssuer reads a PKCS#8 PEM RSA private key of ModulusBits bits.
-func NewIssuer(pemKey []byte) (*Issuer, error) {
+// NewIssuer reads a PKCS#8 PEM RSA private key of ModulusBits bits, for
+// tokens of the kind label names (LabelSend or LabelMedia).
+func NewIssuer(pemKey []byte, label string) (*Issuer, error) {
 	block, _ := pem.Decode(pemKey)
 	if block == nil || block.Type != "PRIVATE KEY" {
 		return nil, ErrKey
@@ -80,7 +89,7 @@ func NewIssuer(pemKey []byte) (*Issuer, error) {
 	if err != nil {
 		return nil, ErrKey
 	}
-	return &Issuer{signer: blindrsa.NewSigner(key), verifier: verifier, public: &key.PublicKey, keyID: id, k: key.Size()}, nil
+	return &Issuer{label: label, signer: blindrsa.NewSigner(key), verifier: verifier, public: &key.PublicKey, keyID: id, k: key.Size()}, nil
 }
 
 // KeyID is the SHA-256 of a public key's SubjectPublicKeyInfo (DER).
@@ -114,9 +123,9 @@ func EpochOf(t time.Time) uint64 {
 	return uint64(t.Unix() / int64(Epoch/time.Second))
 }
 
-// Challenge returns the challenge digest of an epoch.
-func Challenge(epoch uint64) [32]byte {
-	return sha256.Sum256(devicesig.Message(labelChallenge, []byte{devicesig.Suite}, binary.BigEndian.AppendUint64(nil, epoch)))
+// Challenge returns the challenge digest of an epoch for one kind of token.
+func Challenge(label string, epoch uint64) [32]byte {
+	return sha256.Sum256(devicesig.Message(label, []byte{devicesig.Suite}, binary.BigEndian.AppendUint64(nil, epoch)))
 }
 
 // Check verifies a token that is valid now (its epoch is this one or the
@@ -133,9 +142,9 @@ func (i *Issuer) Check(token []byte, now time.Time) (nonce []byte, forgetAfter t
 	challenge := [32]byte(token[34:66])
 	var epoch uint64
 	switch challenge {
-	case Challenge(current):
+	case Challenge(i.label, current):
 		epoch = current
-	case Challenge(current - 1):
+	case Challenge(i.label, current-1):
 		epoch = current - 1
 	default:
 		return nil, time.Time{}, ErrInvalid

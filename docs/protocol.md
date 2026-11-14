@@ -298,7 +298,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 
 - The app encrypts the file with a fresh key, pads it, and asks
   `POST /media {size, deleteHash, tokens}` for an upload URL. No login: it
-  pays with send tokens, one per started 5 MiB (at most 26 MiB). `deleteHash`
+  pays with media tokens, one per started MiB (at most 26 MiB). `deleteHash`
   is the SHA-256 of a random delete secret. The answer is `{id, url}`, and the
   app PUTs exactly `size` bytes of ciphertext, typed
   `application/octet-stream`, to `url` (valid 15 minutes; the length and type
@@ -392,29 +392,41 @@ delivery already tells it. Quiet sends tell it which deliveries are seen
 receipts, though not whose. Telegram learns when someone gets messages, in
 3-minute steps.
 
-## Send tokens
+## Send tokens and media tokens
 
-Every `POST /send` spends one anonymous token, so the server can limit sends
-without learning who sends. Tokens are RSA blind signatures (RFC 9474,
+Every `POST /send` spends one anonymous send token, and every upload one
+media token per started MiB, so the server can limit both without learning
+who sends. Tokens are RSA blind signatures (RFC 9474,
 RSABSSA-SHA384-PSS-Deterministic) in the shape of Privacy Pass token type 2
 (RFC 9578):
 
 ```
 token     = u16(0x0002) ‖ nonce (32) ‖ challenge (32) ‖ key ID (32) ‖ authenticator (256)
-challenge = SHA-256(Message("incognitochat/v2/send-token", [0x01], u64(epoch)))
+challenge = SHA-256(Message(label, [0x01], u64(epoch)))
+label     = "incognitochat/v2/send-token" or "incognitochat/v2/media-token"
 key ID    = SHA-256(issuer public key as SubjectPublicKeyInfo, DER)
 epoch     = floor(unix seconds / 604800)
 ```
 
 The authenticator is an RSA-PSS signature (SHA-384, MGF1-SHA-384, 48-byte
 salt) over the first 98 bytes, by a 2048-bit issuer key. A logged-in device
-blinds token inputs, gets them signed (`POST /tokens`, at most 50 a request and
-200 a day), and unblinds them; the issuer never sees the tokens it signs.
+blinds token inputs, gets them signed, and unblinds them; the issuer never
+sees the tokens it signs:
+
+| Kind | Route | A request | A day (UTC) |
+|---|---|---|---|
+| Send tokens | `POST /tokens` | at most 50 | 200: the messages an account can send |
+| Media tokens | `POST /tokens/media` | at most 50 | 1,024: 1 GiB of uploads |
+
+The two kinds have different issuer keys. A blind signer can't see what it
+signs, so only a key of its own gives a kind its own daily budget; a token
+of one kind is refused where the other is asked for.
 
 A token is accepted in its own week and the next, and only once: the server
 remembers spent nonces until then. A send refused for a cap doesn't spend its
-token. Clients only accept the issuer key their build names
-(`VITE_ISSUER_KEY`), one of those published in `web/issuer-keys.json`, so the
+token. Clients only accept the issuer keys their build names
+(`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
+and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.
 
 ## Test vectors

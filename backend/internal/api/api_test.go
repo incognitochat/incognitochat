@@ -502,27 +502,43 @@ func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
 	return nil
 }
 
-// testIssuer is one issuer key for the whole test binary (RSA keys are slow to make).
-var testIssuer = sync.OnceValue(func() *tokens.Issuer {
+// testIssuer and testMediaIssuer are one issuer key of each kind for the
+// whole test binary (RSA keys are slow to make).
+var (
+	testIssuer      = sync.OnceValue(func() *tokens.Issuer { return newTestIssuer(tokens.LabelSend) })
+	testMediaIssuer = sync.OnceValue(func() *tokens.Issuer { return newTestIssuer(tokens.LabelMedia) })
+)
+
+func newTestIssuer(label string) *tokens.Issuer {
 	key, err := rsa.GenerateKey(rand.Reader, tokens.ModulusBits)
 	if err != nil {
 		panic(err)
 	}
 	der, _ := x509.MarshalPKCS8PrivateKey(key)
-	issuer, err := tokens.NewIssuer(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	issuer, err := tokens.NewIssuer(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), label)
 	if err != nil {
 		panic(err)
 	}
 	return issuer
-})
+}
 
-// mintToken does what a client does: blind a token input for this week, have
-// the issuer sign it, unblind.
+// mintToken makes a send token as a client does: blind a token input for
+// this week, have the issuer sign it, unblind.
 func mintToken(t *testing.T, now time.Time) string {
 	t.Helper()
-	issuer := testIssuer()
+	return mint(t, testIssuer(), tokens.LabelSend, now)
+}
+
+// mintMediaToken makes a media token, which pays for uploads.
+func mintMediaToken(t *testing.T, now time.Time) string {
+	t.Helper()
+	return mint(t, testMediaIssuer(), tokens.LabelMedia, now)
+}
+
+func mint(t *testing.T, issuer *tokens.Issuer, label string, now time.Time) string {
+	t.Helper()
 	keyID := issuer.KeyID()
-	challenge := tokens.Challenge(tokens.EpochOf(now))
+	challenge := tokens.Challenge(label, tokens.EpochOf(now))
 	input := binary.BigEndian.AppendUint16(nil, tokens.Type)
 	input = append(append(append(input, randomBytes(t, 32)...), challenge[:]...), keyID[:]...)
 	client, err := blindrsa.NewClient(blindrsa.SHA384PSSDeterministic, issuer.PublicKey())
@@ -563,17 +579,18 @@ func newHarness(t *testing.T) *harness {
 	}
 	h := &harness{dir: newMemDirectory(), logs: &bytes.Buffer{}, now: start, inbox: &memInbox{items: map[string][]inbox.Item{}}}
 	h.server = &Server{
-		Telegram:  initdatatest.Verifier(botID),
-		Sessions:  issuer,
-		Directory: h.dir,
-		Nonces:    session.NewMemoryNonces(func() time.Time { return h.now }),
-		Limits:    &memLimiter{counts: map[string]int{}},
-		Pepper:    []byte("pepper-pepper-pepper-pepper-pepper"),
-		Log:       logx.New(h.logs, "api"),
-		Now:       func() time.Time { return h.now },
-		Inbox:     h.inbox,
-		Issuer:    testIssuer(),
-		Spent:     &memSpent{spent: map[string]bool{}},
+		Telegram:    initdatatest.Verifier(botID),
+		Sessions:    issuer,
+		Directory:   h.dir,
+		Nonces:      session.NewMemoryNonces(func() time.Time { return h.now }),
+		Limits:      &memLimiter{counts: map[string]int{}},
+		Pepper:      []byte("pepper-pepper-pepper-pepper-pepper"),
+		Log:         logx.New(h.logs, "api"),
+		Now:         func() time.Time { return h.now },
+		Inbox:       h.inbox,
+		Issuer:      testIssuer(),
+		MediaIssuer: testMediaIssuer(),
+		Spent:       &memSpent{spent: map[string]bool{}},
 	}
 	h.router = httpapi.NewRouter()
 	h.server.Routes(h.router)

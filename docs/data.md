@@ -40,7 +40,7 @@ cleared on their own (Data and storage), and their messages stay.
 | Messages waiting for the device, encrypted | Delivery | Until the device confirms them, at most 30 days |
 | Attachments, encrypted, with their padded size | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 31 days; downloading or saving doesn't delete them |
 | Invitation codes the account created, and its invitation level | Invite-only access to links | While the account exists |
-| Short-lived counters, login nonces, spent send tokens, open-socket records | Rate limits, replay protection, live updates | Minutes, up to two weeks |
+| Short-lived counters, login nonces, spent send and media tokens, open-socket records | Rate limits, replay protection, live updates | Minutes, up to two weeks |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 
 When a user deletes their account, all of the above goes at once. Only

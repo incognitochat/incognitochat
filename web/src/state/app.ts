@@ -187,8 +187,9 @@ export interface Deps {
   broadcast(event: SyncEvent): void;
   /** Waits before closing the old copy after asking Telegram to reopen. */
   closeDelayMs?: number;
-  /** The token issuer to use instead of the build's (tests). */
+  /** The token issuers to use instead of the build's (tests). */
   issuer?: TokenIssuer;
+  mediaIssuer?: TokenIssuer;
   /** Run the inbox poll and upkeep in the background (off in tests). */
   background?: boolean;
 }
@@ -351,7 +352,9 @@ export function createApp(deps: Deps) {
     if (!messaging && deps.config && deps.api) {
       try {
         const issuer = deps.issuer ?? { key: await importIssuerKey(deps.config.issuer.spki), keyId: deps.config.issuer.keyId };
-        messaging = createMessaging({ db: deps.db, api: deps.api, session: session!, issuer });
+        const media = deps.config.issuer.media;
+        const mediaIssuer = deps.mediaIssuer ?? (media ? { key: await importIssuerKey(media.spki), keyId: media.keyId } : undefined);
+        messaging = createMessaging({ db: deps.db, api: deps.api, session: session!, issuer, ...(mediaIssuer ? { mediaIssuer } : {}) });
       } catch {
         // Without a usable issuer key the app still works, but can't send.
         return;

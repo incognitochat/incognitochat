@@ -26,6 +26,10 @@ function checkSettings(env: Record<string, string>): BuildSettings {
   if (issuer === '_comment' || !(issuer in issuerKeys)) {
     throw new Error(`VITE_ISSUER_KEY must name a key published in issuer-keys.json`);
   }
+  // Uploads are paid with media tokens, which need the entry's media key.
+  if (env.VITE_MEDIA_ORIGIN && !('media' in (issuerKeys as unknown as Record<string, object>)[issuer]!)) {
+    throw new Error('The key VITE_ISSUER_KEY names has no media key in issuer-keys.json');
+  }
   const url = new URL(api);
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error('VITE_API_URL must be a plain https:// URL');

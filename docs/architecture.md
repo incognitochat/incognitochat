@@ -153,6 +153,9 @@ secret: one person keeps the same label through the same link.
   can't link a spent token to the account it signed it for. The issuer's
   public key is published in [`web/issuer-keys.json`](../web/issuer-keys.json),
   and the app accepts no other, so the server can't tell users apart by key.
+- **Media tokens** pay for uploads the same way, one per started MiB, from a
+  budget of their own (at most 1,024 a day, so 1 GiB), signed by a second
+  issuer key.
 - **Caps:** at most 30 messages a minute to one mailbox, and 60 first messages
   an hour through one link.
 - **Delivery:** the server stores each envelope for the mailbox owner's device
@@ -169,8 +172,8 @@ secret: one person keeps the same label through the same link.
 Photos, videos, GIFs, files, music, voice messages and round video messages
 are encrypted on the device with a fresh key for each file, padded, and
 uploaded straight to an S3 bucket with a presigned URL whose exact size is
-part of its signature. The upload is paid with send tokens (one per started
-5 MiB, files up to 25 MB), not a login. The message carries the file's key;
+part of its signature. The upload is paid with media tokens (one per started
+MiB, files up to 25 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
 - Photos are redrawn on the device (up to 1280 px), which drops their
@@ -230,7 +233,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 | Function | Entry | Can read |
 |---|---|---|
 | `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token |
-| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token issuer key; the tables; the bucket |
+| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket |
 | `ws` | WebSocket connect and disconnect | the session key; socket records only |
 | `notify` | invoked by `api` | the bot token and the key that opens chat IDs |
 
@@ -238,7 +241,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 |---|---|---|
 | `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations | mailboxes expire |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
-| `ephemeral` | socket connections, rate counters, login nonces, spent send tokens, upload records (size and the hash of a delete secret) | minutes to 31 days |
+| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size and the hash of a delete secret) | minutes to 31 days |
 
 - No precise timestamps: keys are random IDs, and times are rounded.
 - Point-in-time recovery stays off, so deleted data can't be restored.

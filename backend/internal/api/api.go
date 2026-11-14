@@ -98,9 +98,11 @@ type Server struct {
 	// so the answer takes about as long as a delivery (RandomPause).
 	Pause func()
 
-	// Issuer signs and checks anonymous send tokens; Spent remembers spent ones.
-	Issuer Issuer
-	Spent  Spent
+	// Issuer signs and checks anonymous send tokens, MediaIssuer media
+	// tokens (uploads); Spent remembers spent ones of both kinds.
+	Issuer      Issuer
+	MediaIssuer Issuer
+	Spent       Spent
 
 	// Notices, if set, sends Telegram notices after deliveries.
 	Notices Notices
@@ -141,6 +143,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodPost, "/mailboxes/check", s.withDevice("POST /mailboxes/check", s.checkMailboxes))
 	r.Handle(http.MethodPost, "/send", s.send)
 	r.Handle(http.MethodPost, "/tokens", s.withDevice("POST /tokens", s.issueTokens))
+	r.Handle(http.MethodPost, "/tokens/media", s.withDevice("POST /tokens/media", s.issueMediaTokens))
 	r.Handle(http.MethodGet, "/inbox", s.withDevice("GET /inbox", s.listInbox))
 	r.Handle(http.MethodPost, "/ack", s.withDevice("POST /ack", s.ack))
 	r.Handle(http.MethodPost, "/notices", s.withDevice("POST /notices", s.setNotices))

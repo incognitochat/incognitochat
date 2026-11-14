@@ -12,9 +12,12 @@ import (
 const (
 	// TokenBatch is the most tokens one request signs.
 	TokenBatch = 50
-	// TokensPerDay limits the tokens an account gets per UTC day, and with
-	// them the messages it can send to other people.
+	// TokensPerDay limits the send tokens an account gets per UTC day, and
+	// with them the messages it can send to other people.
 	TokensPerDay = 200
+	// MediaTokensPerDay limits the media tokens an account gets per UTC day.
+	// One pays for a started MiB of upload, so this is 1 GiB a day.
+	MediaTokensPerDay = 1024
 )
 
 // Issuer signs and checks anonymous send tokens (internal/tokens).
@@ -31,10 +34,23 @@ type Spent interface {
 	Unspend(ctx context.Context, nonce []byte) error
 }
 
-// issueTokens signs a batch of blinded tokens for a logged-in device. The
-// issuer can't see the tokens, so it can't link their later use to the account.
+// issueTokens signs a batch of blinded send tokens for a logged-in device.
+// The issuer can't see the tokens, so it can't link their later use to the
+// account.
 func (s *Server) issueTokens(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
-	const route = "POST /tokens"
+	return s.signTokens(ctx, req, "POST /tokens", s.Issuer, "tok#"+c.AccountID, TokensPerDay)
+}
+
+// issueMediaTokens does the same for media tokens, which pay for uploads.
+// They have their own issuer key and their own daily budget.
+func (s *Server) issueMediaTokens(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
+	if s.MediaIssuer == nil {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok#"+c.AccountID, MediaTokensPerDay)
+}
+
+func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, limitKey string, perDay int) httpapi.Response {
 	var in struct {
 		Blinded []string `json:"blinded"`
 	}
@@ -47,12 +63,12 @@ func (s *Server) issueTokens(ctx context.Context, req httpapi.Request, c caller)
 	blinded := make([][]byte, len(in.Blinded))
 	for i, b := range in.Blinded {
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(b)
-		if err != nil || len(raw) != s.Issuer.BlindedLen() {
+		if err != nil || len(raw) != issuer.BlindedLen() {
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
 		}
 		blinded[i] = raw
 	}
-	ok, err := s.Limits.AllowN(ctx, "tok#"+c.AccountID, len(blinded), TokensPerDay, 24*time.Hour)
+	ok, err := s.Limits.AllowN(ctx, limitKey, len(blinded), perDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -61,7 +77,7 @@ func (s *Server) issueTokens(ctx context.Context, req httpapi.Request, c caller)
 	}
 	signatures := make([]string, len(blinded))
 	for i, b := range blinded {
-		sig, err := s.Issuer.Sign(b)
+		sig, err := issuer.Sign(b)
 		if err != nil {
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
 		}

@@ -16,9 +16,9 @@ import (
 const (
 	// MaxSize is the largest upload: a 25 MB file, padded, plus encryption overhead.
 	MaxSize = 26 << 20
-	// TokenBytes is how much one send token pays for: an upload costs one
-	// token per started 5 MiB.
-	TokenBytes = 5 << 20
+	// TokenBytes is how much one media token pays for: an upload costs one
+	// token per started MiB.
+	TokenBytes = 1 << 20
 	// UploadURLTTL and DownloadURLTTL are how long presigned URLs work. A
 	// download URL can be fetched any number of times while it lasts, and
 	// each fetch costs traffic, so it lasts only long enough to start: the
@@ -34,7 +34,7 @@ const (
 	ContentType = "application/octet-stream"
 )
 
-// TokensFor is how many send tokens an upload of size bytes costs.
+// TokensFor is how many media tokens an upload of size bytes costs.
 func TokensFor(size int64) int { return int((size + TokenBytes - 1) / TokenBytes) }
 
 // Presigner signs S3 requests for the app to make (s3.PresignClient).
