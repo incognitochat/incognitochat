@@ -311,6 +311,54 @@ describe('seen receipts', () => {
       ['two', 'seen'],
     ]);
   });
+
+  it("take none of the owner's mailboxes: only a reply does", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await owner.messaging.sync();
+    const pool = await poolSize(owner.db);
+
+    // Read: the sender sees it, but keeps writing to the link.
+    await owner.messaging.markSeen(conv);
+    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    expect(await poolSize(owner.db)).toBe(pool);
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).map((m) => m.status)).toEqual(['seen']);
+    expect((await getConversation(sender.db, conv))!.sendTo).toBe(bundle.mailbox);
+
+    // Their next message still arrives, for the key the receipt brought.
+    await sender.messaging.send(conv, 'two');
+    expect(await owner.messaging.sync()).toBe(1);
+    await owner.messaging.markSeen(conv);
+    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    expect(await poolSize(owner.db)).toBe(pool);
+
+    // A reply takes one, and they move to it.
+    await owner.messaging.send(conv, 'hi');
+    const mine = (await getConversation(owner.db, conv))!.myMailbox;
+    expect(mine).not.toBeNull();
+    await sender.messaging.sync();
+    expect((await getConversation(sender.db, conv))!.sendTo).toBe(mine);
+    await sender.messaging.send(conv, 'three');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three']);
+  });
+
+  it('a chat deleted for both before any reply takes no mailbox either', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'spam');
+    await owner.messaging.sync();
+    await owner.messaging.remove(conv, true);
+    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    expect(await sender.messaging.sync()).toBeGreaterThanOrEqual(0);
+    expect(await listMessages(sender.db, conv)).toEqual([]);
+  });
 });
 
 describe('blocks', () => {
