@@ -24,6 +24,7 @@
 //	invalid_envelope                      the envelope's layout can't be valid
 //	mailbox_limit                         the account has the most mailboxes allowed
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
+//	in_progress                           the account is being deleted in steps; repeat the request
 //	not_found                             no such route, or no such link (revoked links included)
 //	internal                              something failed on the server
 package api
@@ -67,7 +68,9 @@ type Directory interface {
 	DiscardMailbox(ctx context.Context, accountID, id string) error
 	Devices(ctx context.Context, accountID string, now time.Time) ([]string, error)
 	Mailboxes(ctx context.Context, accountID string) ([]string, error)
-	Delete(ctx context.Context, accountID, telegramHash string) error
+	// Delete deletes about max items of an account per call, and reports
+	// whether it has finished (directory.Store.Delete).
+	Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error)
 }
 
 // Limiter counts uses of a key in fixed windows.

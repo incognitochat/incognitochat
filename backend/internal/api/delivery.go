@@ -18,7 +18,7 @@ import (
 
 const (
 	// MaxMailboxes is how many pool and conversation mailboxes one account can own.
-	MaxMailboxes = 200
+	MaxMailboxes = 2000
 	// MailboxBatch is the most mailboxes one request creates.
 	MailboxBatch = 10
 	// MailboxesPerDay limits how many mailboxes an account creates per UTC day.
@@ -38,7 +38,9 @@ type Inbox interface {
 	Deliver(ctx context.Context, accountID string, devices []string, mailbox string, envelope []byte, now time.Time) error
 	List(ctx context.Context, accountID, deviceID string, limit int, now time.Time) ([]inbox.Item, bool, error)
 	Ack(ctx context.Context, accountID, deviceID string, itemIDs []string) error
-	Clear(ctx context.Context, accountID, deviceID string) error
+	// Clear deletes up to max of a device's items; it reports how many, and
+	// whether more may be left.
+	Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error)
 }
 
 type sendRequest struct {

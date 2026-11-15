@@ -82,7 +82,11 @@ mailboxes (sends to them get the usual answer and are dropped), invitation
 codes, device list, devices and the account itself, and the item that keeps
 one account per Telegram user, so the same user can set up again. Unlike a
 replacement, it keeps no marker; only rate-limit counters and socket records
-remain until they expire (within a day). Before asking, the app deletes the uploads
+remain until they expire (within a day). It works in steps of about 150
+items, so a big account neither outlasts a request nor takes the table's whole
+write capacity: while more is left the server answers `409 in_progress`, and
+the app repeats the request a second later (links go in the first step, the
+account and its devices in the last). Before asking, the app deletes the uploads
 still waiting for it (`POST /media/{id}/delete`); afterwards it deletes
 everything on the device. The other side of each conversation isn't told.
 

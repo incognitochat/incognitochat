@@ -32,8 +32,8 @@ func TestDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.Delete(ctx, n.ID, n.TelegramHash); err != nil {
-		t.Fatal(err)
+	if done, err := s.Delete(ctx, n.ID, n.TelegramHash, 100); err != nil || !done {
+		t.Fatalf("delete: %v %v", done, err)
 	}
 
 	// Nothing of it is left: the table holds only the other account's items.
@@ -68,8 +68,67 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("set up again: %v", err)
 	}
 	// Deleting again finds nothing.
-	if err := s.Delete(ctx, n.ID, n.TelegramHash); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Delete(ctx, n.ID, n.TelegramHash, 100); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
+	}
+}
+
+func TestDeleteInSteps(t *testing.T) {
+	s, client := store(t)
+	ctx := context.Background()
+	n := registered(t, s)
+	l := testLink(t)
+	if err := s.CreateLink(ctx, n.ID, l, links.MaxActive); err != nil {
+		t.Fatal(err)
+	}
+	var pool []string
+	for range 4 {
+		batch := []string{ids.New(), ids.New(), ids.New(), ids.New(), ids.New()}
+		if err := s.CreateMailboxes(ctx, n.ID, batch, 100); err != nil {
+			t.Fatal(err)
+		}
+		pool = append(pool, batch...)
+	}
+
+	// The first step takes the link first, and the account stays.
+	done, err := s.Delete(ctx, n.ID, n.TelegramHash, 6)
+	if err != nil || done {
+		t.Fatalf("first step: %v %v", done, err)
+	}
+	if _, err := s.Link(ctx, l.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("link after the first step: %v", err)
+	}
+	if _, err := s.Device(ctx, n.ID, n.DeviceID, now); err != nil {
+		t.Fatalf("device after the first step: %v", err)
+	}
+
+	// 21 mailboxes (the link's intro mailbox too) and the link, 2 items
+	// each, and a few of the account's own, 6 a step.
+	steps := 1
+	for !done {
+		if done, err = s.Delete(ctx, n.ID, n.TelegramHash, 6); err != nil {
+			t.Fatal(err)
+		}
+		if steps++; steps > 20 {
+			t.Fatal("never finishes")
+		}
+	}
+	if steps < 8 {
+		t.Errorf("only %d steps", steps)
+	}
+	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range out.Items {
+		pk, _ := str(it, "pk")
+		sk, _ := str(it, "sk")
+		t.Errorf("left behind: %s %s", pk, sk)
+	}
+	for _, id := range append(pool, l.Mailbox) {
+		if _, err := s.Mailbox(ctx, id); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("mailbox %s: %v", id, err)
+		}
 	}
 }
 
@@ -83,7 +142,7 @@ func TestDeleteReplacedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A replaced account can't delete anything, least of all its successor's Telegram item.
-	if err := s.Delete(ctx, first.ID, first.TelegramHash); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Delete(ctx, first.ID, first.TelegramHash, 100); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete a replaced account: %v", err)
 	}
 	if got, err := s.ByTelegram(ctx, first.TelegramHash); err != nil || got.ID != second.ID {

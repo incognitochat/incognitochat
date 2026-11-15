@@ -34,6 +34,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -262,35 +263,74 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 // up again later. It returns ErrNotFound if the account is already gone or
 // replaced.
 //
-// The order lets a failed delete be retried by the same device: everything
-// but the account and its devices goes first, then the account and the
-// Telegram item together, then the devices (orphaned devices can't log in).
-func (s *Store) Delete(ctx context.Context, accountID, telegramHash string) error {
+// It works in steps of about max deletions, so an account with many
+// mailboxes neither outlasts a request nor takes the table's whole write
+// capacity: it reports whether it finished, and the caller asks again until
+// it has. Links go first, so first messages stop at once. Each step deletes
+// shared items (a mailbox's, a link's, a code's) before the account's own
+// record of them, so a step that fails halfway leaves the record, and the
+// next step finds and finishes it. Last come the account and the Telegram
+// item together, then the devices (orphaned devices can't log in).
+func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error) {
 	sks, err := s.sortKeys(ctx, accountID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	var owned, devices []types.WriteRequest
+	if !slices.Contains(sks, skAccount) {
+		return false, ErrNotFound
+	}
 	del := func(pk, sk string) types.WriteRequest {
 		return types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(pk, sk)}}
 	}
+	// What the account owns, in the order it goes: each with its shared
+	// item, if any, and the account's own record of it.
+	type owned struct {
+		shared *types.WriteRequest
+		own    types.WriteRequest
+	}
+	var first, rest []owned
+	var devices []types.WriteRequest
 	for _, sk := range sks {
+		own := del(accountPK(accountID), sk)
+		shared := func(pk, shared string) *types.WriteRequest {
+			r := del(pk, shared)
+			return &r
+		}
 		switch {
 		case sk == skAccount:
 		case strings.HasPrefix(sk, devicePrefix):
-			devices = append(devices, del(accountPK(accountID), sk))
-		case strings.HasPrefix(sk, mailboxPrefix):
-			owned = append(owned, del(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), del(accountPK(accountID), sk))
-		case strings.HasPrefix(sk, codePrefix):
-			owned = append(owned, del(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), del(accountPK(accountID), sk))
+			devices = append(devices, own)
 		case strings.HasPrefix(sk, linkPrefix):
-			owned = append(owned, del(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), del(accountPK(accountID), sk))
+			first = append(first, owned{shared(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), own})
+		case strings.HasPrefix(sk, mailboxPrefix):
+			rest = append(rest, owned{shared(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), own})
+		case strings.HasPrefix(sk, codePrefix):
+			rest = append(rest, owned{shared(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), own})
 		default:
-			owned = append(owned, del(accountPK(accountID), sk))
+			rest = append(rest, owned{nil, own})
 		}
 	}
-	if err := s.batchWrite(ctx, owned); err != nil {
-		return err
+	items := append(first, rest...)
+	var shared, own []types.WriteRequest
+	n := 0
+	for len(items) > 0 && (n == 0 || n+2 <= max) {
+		it := items[0]
+		items = items[1:]
+		if it.shared != nil {
+			shared = append(shared, *it.shared)
+			n++
+		}
+		own = append(own, it.own)
+		n++
+	}
+	if err := s.batchWrite(ctx, shared); err != nil {
+		return false, err
+	}
+	if err := s.batchWrite(ctx, own); err != nil {
+		return false, err
+	}
+	if len(items) > 0 {
+		return false, nil
 	}
 	writes := []types.TransactWriteItem{{Delete: &types.Delete{
 		TableName:           &s.Table,
@@ -307,11 +347,11 @@ func (s *Store) Delete(ctx context.Context, accountID, telegramHash string) erro
 	}
 	if err := s.transact(ctx, writes); err != nil {
 		if errors.Is(err, ErrConflict) {
-			return ErrNotFound
+			return false, ErrNotFound
 		}
-		return err
+		return false, err
 	}
-	return s.batchWrite(ctx, devices)
+	return true, s.batchWrite(ctx, devices)
 }
 
 // sortKeys lists every item in an account's partition.

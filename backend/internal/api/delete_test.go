@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestDeleteAccount(t *testing.T) {
@@ -59,5 +60,48 @@ func TestDeleteAccount(t *testing.T) {
 	again.user = userID
 	if status, out := h.register(t, again, false); status != http.StatusOK {
 		t.Fatalf("register again: %d %v", status, out)
+	}
+}
+
+func TestDeleteAccountInSteps(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	owner := h.account(t, userID)
+	l := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create link: %d %v", status, out)
+	}
+	// More mailboxes than one step deletes.
+	for range DeleteStep / MailboxBatch {
+		h.now = h.now.Add(time.Second)
+		if status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
+			t.Fatalf("mailboxes: %d %v", status, out)
+		}
+	}
+
+	// The first step takes the link and answers that more is left; the
+	// account still logs in.
+	status, out := h.as(t, owner, http.MethodDelete, "/account", nil, true)
+	wantError(t, status, out, http.StatusConflict, "in_progress")
+	if len(h.dir.links) != 0 || len(h.dir.accounts) != 1 {
+		t.Fatalf("after one step: links %d, accounts %d", len(h.dir.links), len(h.dir.accounts))
+	}
+	status, out = h.call(t, nil, "", http.MethodGet, "/links/"+l.id, nil, false)
+	wantError(t, status, out, http.StatusNotFound, "not_found")
+
+	// Repeating finishes it.
+	for steps := 1; ; steps++ {
+		if steps > 10 {
+			t.Fatal("never finishes")
+		}
+		h.now = h.now.Add(time.Second)
+		status, out := h.as(t, owner, http.MethodDelete, "/account", nil, true)
+		if status == http.StatusOK {
+			break
+		}
+		wantError(t, status, out, http.StatusConflict, "in_progress")
+	}
+	if len(h.dir.accounts) != 0 || len(h.dir.boxes) != 0 || len(h.dir.telegram) != 0 {
+		t.Fatalf("left behind: accounts %d, mailboxes %d, telegram %d", len(h.dir.accounts), len(h.dir.boxes), len(h.dir.telegram))
 	}
 }
