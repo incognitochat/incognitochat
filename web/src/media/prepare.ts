@@ -1,7 +1,7 @@
 // Turns a picked file into an attachment, before it's encrypted (phase 5).
 // "As photo" redraws the image at up to 1280 px as JPEG, as Telegram does:
 // smaller, and without the file's metadata (location, camera). "As video"
-// keeps the recording (no compression; at most 25 MB) minus its location
+// keeps the recording (no compression; at most 50 MB) minus its location
 // and time metadata (media/mp4.ts), with a frame as preview, its size and
 // length. "As GIF" sends the GIF as it is, animated. "As music" sends an
 // audio file as it is, with its length, for the in-chat player. "As file"
@@ -13,7 +13,7 @@ import type { Outgoing } from '../messaging/engine';
 import { MAX_FILE_BYTES } from '../protocol/message';
 import { stripVideoMetadata } from './mp4';
 
-/** The file is over the 25 MB limit. */
+/** The file is over the 50 MB limit. */
 export class TooBig extends Error {
   constructor() {
     super('file too big');

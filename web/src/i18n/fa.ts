@@ -152,7 +152,7 @@ export const fa = {
   seek: 'موقعیت',
   download: 'دریافت',
   mediaGone: 'دیگر در دسترس نیست',
-  errorTooBig: 'حجم فایل حداکثر ۲۵ مگابایت است.',
+  errorTooBig: 'حجم فایل حداکثر ۵۰ مگابایت است.',
   errorUnreadable: 'خواندن آن فایل ممکن نشد.',
   reply: 'پاسخ',
   replyingTo: 'پاسخ به {name}',

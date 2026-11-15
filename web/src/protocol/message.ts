@@ -40,7 +40,7 @@ export const MAX_WAVEFORM = 100;
 /** Longest video, voice or music length, in seconds. */
 const MAX_LENGTH = 24 * 60 * 60;
 /** Largest file that can be attached. */
-export const MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_PREVIEW = 3000;
 
 /**

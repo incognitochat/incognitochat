@@ -151,7 +151,7 @@ export const en = {
   seek: 'Position',
   download: 'Download',
   mediaGone: 'No longer available',
-  errorTooBig: 'Files can be up to 25 MB.',
+  errorTooBig: 'Files can be up to 50 MB.',
   errorUnreadable: "Couldn't read that file.",
   reply: 'Reply',
   replyingTo: 'Reply to {name}',
