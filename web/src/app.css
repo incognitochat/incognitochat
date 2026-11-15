@@ -79,7 +79,8 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif, 
 .tick { block-size: 0.75rem; inline-size: auto; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .tick.failed { stroke: var(--app-danger); }
 .head-actions { display: flex; gap: 1.25rem; }
-.muted-link { color: var(--app-muted); margin-block-start: 0.5rem; }
+/* Plain links (Blocked, Data and storage, Usage): grey; only destructive ones are red. */
+.link-button.muted-link { color: var(--app-muted); margin-block-start: 0.5rem; }
 .blocked-row { display: flex; align-items: center; gap: 0.5rem; }
 .blocked-row .chat { flex: 1; min-inline-size: 0; }
 .settings { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
