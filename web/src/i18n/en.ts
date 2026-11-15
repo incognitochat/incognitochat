@@ -175,6 +175,8 @@ export const en = {
   firstMessageHint: "Write the first message. They won't know who you are.",
   aboutOwnerConversation: "Writes to you through your link. You don't know who they are.",
   aboutSenderConversation: "You write through their link. They don't know who you are.",
+  startedByThem: 'Started by someone through your link',
+  startedByYou: 'You started this through their link',
   conversationEnded: 'This conversation has ended.',
   errorNoTokens: "You've sent a lot today. Try again tomorrow.",
   errorTooFast: 'Too many messages to this person right now. Try again in a minute.',
