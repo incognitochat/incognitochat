@@ -72,6 +72,10 @@ func (s *Server) account(_ context.Context, _ httpapi.Request, c caller) httpapi
 	})
 }
 
+// LinkChangesPerDay limits how often an account creates or replaces its link
+// per UTC day. Each new link is a new intro mailbox.
+const LinkChangesPerDay = 5
+
 // createLink stores a link's bundle. The client chooses the link ID, so it
 // can sign and keep the link's keys before asking. An account has one link;
 // replacing it gives a new address, and the client keeps the signing key, so
@@ -94,11 +98,19 @@ func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) 
 		return httpapi.Error(http.StatusBadRequest, "invalid_link")
 	}
 
+	if in.Replaces != "" && !links.ValidID(in.Replaces) {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	ok, err := s.Limits.Allow(ctx, "link#"+c.AccountID, LinkChangesPerDay, 24*time.Hour)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	if !ok {
+		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+	}
+
 	link := directory.Link{ID: in.ID, SigningKey: in.SigningKey, Keys: keys, Mailbox: ids.New()}
 	if in.Replaces != "" {
-		if !links.ValidID(in.Replaces) {
-			return httpapi.Error(http.StatusNotFound, "not_found")
-		}
 		err = s.Directory.ReplaceLink(ctx, c.AccountID, in.Replaces, link)
 	} else {
 		err = s.Directory.CreateLink(ctx, c.AccountID, link, links.MaxActive)

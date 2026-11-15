@@ -1113,6 +1113,7 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'invitation_required') notice = 'invitation';
       else if (err instanceof ApiError && err.code === 'link_limit') notice = 'limit';
+      else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
       else if (err instanceof NetworkError) notice = 'network';
       else notice = 'generic';
     }
