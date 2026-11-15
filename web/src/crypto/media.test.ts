@@ -10,7 +10,7 @@ describe('attachment encryption', () => {
     expect(uploadSize(300_000)).toBe(512 * 1024);
     expect(uploadSize(1024 * 1024 - 28)).toBe(1024 * 1024);
     expect(uploadSize(1024 * 1024)).toBe(2 * 1024 * 1024);
-    expect(uploadSize(MAX_FILE_BYTES)).toBe(26 * 1024 * 1024); // the server's limit
+    expect(uploadSize(MAX_FILE_BYTES)).toBe(51 * 1024 * 1024); // the server's limit
   });
 
   it('round-trips, and refuses a wrong key, size or a changed byte', async () => {

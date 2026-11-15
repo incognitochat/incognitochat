@@ -309,7 +309,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 
 - The app encrypts the file with a fresh key, pads it, and asks
   `POST /media {size, deleteHash, tokens}` for an upload URL. No login: it
-  pays with media tokens, one per started MiB (at most 26 MiB). `deleteHash`
+  pays with media tokens, one per started MiB (at most 51 MiB). `deleteHash`
   is the SHA-256 of a random delete secret. The answer is `{id, url}`, and the
   app PUTs exactly `size` bytes of ciphertext, typed
   `application/octet-stream`, to `url` (valid 15 minutes; the length and type
@@ -318,7 +318,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),
   AES-256-GCM key `k` (32 bytes), delete secret `d` (16 bytes), the file's
-  size `s` (at most 25 MiB), and optionally its name `n`, MIME type `m`,
+  size `s` (at most 50 MiB), and optionally its name `n`, MIME type `m`,
   pixel size `w`/`h`, length in seconds `l`, a voice message's waveform `v`
   (base64url of 1–100 bytes, one bar each, 0–255) and a tiny JPEG preview `p`
   (base64url, at most 3000 characters). The server never sees a key, name or type. A kind the
@@ -345,7 +345,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   "incognitochat/v2/media")`, padded to the next power of two from 16 KiB up
   to 1 MiB, then to the next whole MiB.
 - The recipient gets a download URL with `GET /media/{id}` (no login; the ID
-  is the permission; at most 10 a day), fetches and decrypts the file and
+  is the permission; at most 5 a day per file), fetches and decrypts the file and
   keeps it on the device. The upload stays, downloaded or saved, until the
   message or conversation is deleted on the recipient's device (then it's
   deleted with `POST /media/{id}/delete {secret}`) or it expires.
@@ -359,7 +359,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   doesn't delete the upload, and the link carries no delete secret. The
   link may stay in the browser's history; once the upload is gone it opens
   nothing.
-- Uploads expire after 31 days. The bucket keeps no
+- Uploads expire after 30 days. The bucket keeps no
   versions and no access logs.
 
 ## Stickers

@@ -151,7 +151,7 @@ export const en = {
   seek: 'Position',
   download: 'Download',
   mediaGone: 'No longer available',
-  errorTooBig: 'Files can be up to 25 MB.',
+  errorTooBig: 'Files can be up to 50 MB.',
   errorUnreadable: "Couldn't read that file.",
   reply: 'Reply',
   replyingTo: 'Reply to {name}',
@@ -212,7 +212,7 @@ export const en = {
   clearMediaConfirm: 'Clear this media from this device? The messages stay.',
   storageCleared: 'Cleared {size}.',
   storageNote:
-    "Cleared photos, videos and files stay in their chats with a download button. They can be downloaded again only while the server still keeps them: at most 31 days after they were sent, and not once the recipient has deleted them. After that they're gone for good, since nothing is kept anywhere else.",
+    "Cleared photos, videos and files stay in their chats with a download button. They can be downloaded again only while the server still keeps them: at most 30 days after they were sent, and not once the recipient has deleted them. After that they're gone for good, since nothing is kept anywhere else.",
   blockedConversation: "You blocked this conversation. Nothing they send arrives, and they aren't told.",
   noticeUnblocked: 'Unblocked. They can write to you again; anything they sent while blocked is lost.',
   block: 'Block',

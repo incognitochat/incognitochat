@@ -113,7 +113,7 @@ describe('checkMessage', () => {
     ['media waveform', { media: { ...media, t: 'voice', v: toBase64Url(new Uint8Array(101)) } }],
     ['empty waveform', { media: { ...media, t: 'voice', v: '' } }],
     ['media key', { media: { ...media, k: 'AAAA' } }],
-    ['media size', { media: { ...media, s: 26 * 1024 * 1024 } }],
+    ['media size', { media: { ...media, s: 50 * 1024 * 1024 + 1 } }],
     ['media type', { media: { ...media, m: 'not a type' } }],
     ['media preview', { media: { ...media, p: 'x'.repeat(3001) } }],
     ['media on seen', { kind: 'seen', text: undefined, seen: ['AAAAAAAAAAAAAAAAAAAAAA'], media }],

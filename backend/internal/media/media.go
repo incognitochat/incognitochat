@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	// MaxSize is the largest upload: a 25 MB file, padded, plus encryption overhead.
-	MaxSize = 26 << 20
+	// MaxSize is the largest upload: a 50 MiB file, padded, plus encryption
+	// overhead (the next whole MiB).
+	MaxSize = 51 << 20
 	// TokenBytes is how much one media token pays for: an upload costs one
 	// token per started MiB.
 	TokenBytes = 1 << 20
@@ -26,9 +27,10 @@ const (
 	// goes on after its URL expires.
 	UploadURLTTL   = 15 * time.Minute
 	DownloadURLTTL = time.Minute
-	// Retention is how long an upload waits to be fetched: undelivered
-	// messages wait 30 days.
-	Retention = 31 * 24 * time.Hour
+	// Retention is how long an upload waits to be fetched: as long as an
+	// undelivered message waits (30 days, rounded up to the hour), so in the
+	// last hour an attachment may be gone before its message.
+	Retention = 30 * 24 * time.Hour
 	// ContentType is the only type uploads carry: the server doesn't learn
 	// what a file is.
 	ContentType = "application/octet-stream"

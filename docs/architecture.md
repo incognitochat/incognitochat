@@ -175,7 +175,7 @@ Photos, videos, GIFs, files, music, voice messages and round video messages
 are encrypted on the device with a fresh key for each file, padded, and
 uploaded straight to an S3 bucket with a presigned URL whose exact size is
 part of its signature. The upload is paid with media tokens (one per started
-MiB, files up to 25 MB), not a login. The message carries the file's key;
+MiB, files up to 50 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
 - Photos are redrawn on the device (up to 1280 px), which drops their
@@ -194,7 +194,7 @@ the server never sees a key, name or type.
   in the device's own browser. The file's key travels after the `#` in that
   address, which is never sent to a server.
 - The upload is deleted when the recipient deletes the message or the
-  conversation, and in any case after 31 days. Deleting is done in the
+  conversation, and in any case after 30 days. Deleting is done in the
   background, a few at a time, so a chat with many attachments disappears at
   once; the app keeps a list (sealed under its storage key) and finishes it
   on the next start if it closed halfway. Downloading or saving it
@@ -243,7 +243,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 |---|---|---|
 | `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations | mailboxes expire |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
-| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size and the hash of a delete secret) | minutes to 31 days |
+| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size and the hash of a delete secret) | minutes to 30 days |
 
 - No precise timestamps: keys are random IDs, and times are rounded.
 - Point-in-time recovery stays off, so deleted data can't be restored.
