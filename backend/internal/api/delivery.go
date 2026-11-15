@@ -72,7 +72,7 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 	if in.Count < 1 || in.Count > MailboxBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
-	ok, err := s.Limits.AllowN(ctx, "mbx#"+c.AccountID, in.Count, MailboxesPerDay, 24*time.Hour)
+	ok, err := s.Limits.AllowN(ctx, "mbx#"+c.person(), in.Count, MailboxesPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -242,7 +242,7 @@ func (s *Server) checkMailboxes(ctx context.Context, req httpapi.Request, c call
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
 		}
 	}
-	ok, err := s.Limits.Allow(ctx, "mbxcheck#"+c.AccountID, MailboxChecksPerDay, 24*time.Hour)
+	ok, err := s.Limits.Allow(ctx, "mbxcheck#"+c.person(), MailboxChecksPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}

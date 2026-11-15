@@ -155,7 +155,7 @@ func (s *Server) redeem(ctx context.Context, req httpapi.Request, c caller) http
 		return httpapi.DecodeError(err)
 	}
 	// Bounds guessing codes; 31^8 codes make that hopeless anyway.
-	ok, err := s.Limits.Allow(ctx, "redeem#"+c.AccountID, invitations.RedeemsPerDay, 24*time.Hour)
+	ok, err := s.Limits.Allow(ctx, "redeem#"+c.person(), invitations.RedeemsPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}

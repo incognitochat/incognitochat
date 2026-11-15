@@ -106,3 +106,35 @@ func TestDeleteAccountInSteps(t *testing.T) {
 		t.Fatalf("left behind: accounts %d, mailboxes %d, telegram %d", len(h.dir.accounts), len(h.dir.boxes), len(h.dir.telegram))
 	}
 }
+
+func TestDailyLimitsSurviveDeletingTheAccount(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	first := h.account(t, userID)
+	for range MailboxesPerDay / MailboxBatch {
+		if status, out := h.as(t, first, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
+			t.Fatalf("mailboxes: %d %v", status, out)
+		}
+	}
+	for steps := 1; ; steps++ {
+		if steps > 10 {
+			t.Fatal("never finishes")
+		}
+		h.now = h.now.Add(time.Second)
+		status, out := h.as(t, first, http.MethodDelete, "/account", nil, true)
+		if status == http.StatusOK {
+			break
+		}
+		wantError(t, status, out, http.StatusConflict, "in_progress")
+	}
+
+	// A new account for the same Telegram user carries on with the day's limits.
+	again := h.account(t, userID)
+	status, out := h.as(t, again, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	// Someone else's are their own.
+	other := h.account(t, userID+1)
+	if status, out := h.as(t, other, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false); status != http.StatusCreated {
+		t.Fatalf("another user: %d %v", status, out)
+	}
+}

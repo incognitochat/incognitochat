@@ -32,7 +32,7 @@ cleared on their own (Data and storage), and their messages stay.
 
 | What | Why | How long |
 |---|---|---|
-| A random account ID, and a keyed hash of the user's Telegram ID (not the ID itself) | One account per Telegram account | While the account exists |
+| A random account ID, and a keyed hash of the user's Telegram ID (not the ID itself) | One account per Telegram account; daily limits | While the account exists |
 | The account's and its device's public keys | To check logins and requests | While the account exists |
 | The user's Telegram chat ID, encrypted so only the notice service can open it, and their language | To send "New message" notices, if the user allows them | While notices are on |
 | The account's link: its ID, its public keys, its first-contact mailbox | So people can write to the user | Until it's replaced, or the account ends |
@@ -40,12 +40,15 @@ cleared on their own (Data and storage), and their messages stay.
 | Messages waiting for the device, encrypted | Delivery | Until the device confirms them, at most 30 days |
 | Attachments, encrypted, with their padded size | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them |
 | Invitation codes the account created, and its invitation level | Invite-only access to links | While the account exists |
-| Short-lived counters, login nonces, spent send and media tokens, open-socket records | Rate limits, replay protection, live updates | Minutes, up to two weeks |
+| Short-lived counters (the daily ones under the keyed hash of the Telegram ID, so setting up again doesn't reset them), login nonces, spent send and media tokens, open-socket records | Rate limits, replay protection, live updates | Minutes, up to two weeks; daily counters until about 2 hours after the day ends (UTC) |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 
 When a user deletes their account, all of the above goes at once. Only
 short-lived rate-limit counters and open-socket records are left, and they
-expire on their own within a day. Setting up again instead replaces the old
+expire on their own within about a day. Until then, that day's counters
+still say, under the keyed hash of the Telegram ID, how much was used that
+day (for example how many send tokens were fetched), not what was sent or to
+whom. Setting up again instead replaces the old
 account: a marker and the old device's public key are kept for 90 days, so
 the old device can say it was replaced; everything else of the old account
 goes at once.

@@ -30,6 +30,17 @@ type caller struct {
 	device directory.Device
 }
 
+// person names the caller for daily limits: their Telegram user, by the
+// keyed hash the directory already keeps for one account per user, so
+// deleting the account and setting up again doesn't start a fresh day. The
+// account itself only for one without a Telegram user.
+func (c caller) person() string {
+	if c.device.TelegramHash != "" {
+		return "t." + c.device.TelegramHash
+	}
+	return "a." + c.AccountID
+}
+
 type callerHandler func(ctx context.Context, req httpapi.Request, c caller) httpapi.Response
 
 // withDevice requires a session token and reads the device and its account,
