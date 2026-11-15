@@ -68,8 +68,13 @@ func TestClear(t *testing.T) {
 	if err := s.Deliver(ctx, other, []string{phone}, mailbox, []byte{3}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Clear(ctx, account, phone); err != nil {
-		t.Fatal(err)
+	// In steps: at most 20 at a time.
+	n, more, err := s.Clear(ctx, account, phone, 20)
+	if err != nil || n != 20 || !more {
+		t.Fatalf("first step: %d %v %v", n, more, err)
+	}
+	if n, more, err = s.Clear(ctx, account, phone, 20); err != nil || n != 10 || more {
+		t.Fatalf("second step: %d %v %v", n, more, err)
 	}
 	if left, _, _ := s.List(ctx, account, phone, 50, now); len(left) != 0 {
 		t.Fatalf("%d items left", len(left))

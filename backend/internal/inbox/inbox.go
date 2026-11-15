@@ -110,10 +110,11 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 	return s.write(ctx, requests)
 }
 
-// Clear deletes all of a device's undelivered items (its account is being
-// deleted).
-func (s *Store) Clear(ctx context.Context, accountID, deviceID string) error {
-	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
+// Clear deletes up to max of a device's undelivered items (its account is
+// being deleted, in steps), and reports how many it deleted and whether
+// any may be left.
+func (s *Store) Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error) {
+	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.Table,
 		KeyConditionExpression: aws.String("pk = :pk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
@@ -121,21 +122,22 @@ func (s *Store) Clear(ctx context.Context, accountID, deviceID string) error {
 		},
 		ProjectionExpression: aws.String("pk, sk"),
 		ConsistentRead:       aws.Bool(true),
+		Limit:                aws.Int32(int32(max)),
 	})
-	var requests []types.WriteRequest
-	for pages.HasMorePages() {
-		page, err := pages.NextPage(ctx)
-		if err != nil {
-			return err
-		}
-		for _, it := range page.Items {
-			requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
-				"pk": it["pk"],
-				"sk": it["sk"],
-			}}})
-		}
+	if err != nil {
+		return 0, false, err
 	}
-	return s.write(ctx, requests)
+	requests := make([]types.WriteRequest, 0, len(out.Items))
+	for _, it := range out.Items {
+		requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
+			"pk": it["pk"],
+			"sk": it["sk"],
+		}}})
+	}
+	if err := s.write(ctx, requests); err != nil {
+		return 0, false, err
+	}
+	return len(requests), out.LastEvaluatedKey != nil, nil
 }
 
 func (s *Store) write(ctx context.Context, requests []types.WriteRequest) error {

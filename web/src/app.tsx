@@ -3060,6 +3060,11 @@ function ConfirmDelete({ app, language, busy, error }: { app: AppState; language
   return (
     <Page title={t(language, 'deleteTitle')} body={t(language, 'deleteBody')} busy={busy}>
       <p class="warning">{t(language, 'deleteWarning')}</p>
+      {busy && (
+        <p class="muted" role="status">
+          {t(language, 'deletingAccount')}
+        </p>
+      )}
       {error && (
         <p class="notice" role="alert">
           {t(language, ERROR_TEXT[error])}

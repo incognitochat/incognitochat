@@ -441,6 +441,18 @@ describe('deleting the account', () => {
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
+  it('repeats the request while the server deletes in steps', async () => {
+    const step = new ApiError(409, 'in_progress');
+    const server = fakeServer({ deleteAccount: [step, step] });
+    const owner = await registered(server.api);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(server.calls.filter((c) => c === 'DELETE /account')).toHaveLength(3);
+    expect(server.unsigned).toEqual([]);
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(await readAccount(owner.db)).toBeUndefined();
+  });
+
   it('cancels back to the link tab', async () => {
     const owner = await registered(fakeServer().api);
     owner.app.askDeleteAccount();

@@ -49,6 +49,9 @@ import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
 import type { SyncEvent } from '../sync/locks';
 
+/** Between the steps of deleting an account (DELETE /account answers in_progress until done). */
+const DELETE_STEP_PAUSE_MS = 1000;
+
 export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'logged-out' | 'generic';
 
 /** A short message on the home screen after an action. */
@@ -932,7 +935,18 @@ export function createApp(deps: Deps) {
         // Done before the device is wiped, which takes the list with it.
         await messaging.flushUploadDeletes();
       }
-      await session.call('DELETE', '/account', undefined, checkObject, { sign: true });
+      // In steps: the server answers in_progress until everything is gone
+      // (a big account takes a minute or two). A pause between steps leaves
+      // the database's capacity to everyone else.
+      for (;;) {
+        try {
+          await session.call('DELETE', '/account', undefined, checkObject, { sign: true });
+          break;
+        } catch (err) {
+          if (!(err instanceof ApiError && err.code === 'in_progress')) throw err;
+          await new Promise((resolve) => setTimeout(resolve, DELETE_STEP_PAUSE_MS));
+        }
+      }
     } catch (err) {
       // Already gone on the server (an earlier try got through): finish here.
       if (!(err instanceof ApiError && err.code === 'not_found')) {

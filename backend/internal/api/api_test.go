@@ -181,11 +181,13 @@ func (m *memInbox) List(_ context.Context, account, device string, limit int, _ 
 	return append([]inbox.Item(nil), items...), false, nil
 }
 
-func (m *memInbox) Clear(_ context.Context, account, device string) error {
+func (m *memInbox) Clear(_ context.Context, account, device string, max int) (int, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.items, account+"#"+device)
-	return nil
+	key := account + "#" + device
+	n := min(max, len(m.items[key]))
+	m.items[key] = m.items[key][n:]
+	return n, len(m.items[key]) > 0, nil
 }
 
 func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string) error {
@@ -370,33 +372,41 @@ func (m *memDirectory) ByTelegram(_ context.Context, th string) (directory.Accou
 	return directory.Account{ID: id, Key: a.key, Devices: devices}, nil
 }
 
-func (m *memDirectory) Delete(_ context.Context, account, th string) error {
+func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[account]
 	if !ok || a.replaced {
-		return directory.ErrNotFound
+		return false, directory.ErrNotFound
 	}
+	// Two items each, links first, as the store does.
+	left := max / 2
 	for id, l := range m.links {
-		if l.owner == account {
+		if l.owner == account && left > 0 {
 			delete(m.links, id)
+			left--
 		}
 	}
 	for id, b := range m.boxes {
-		if b.Owner == account {
+		if b.Owner == account && left > 0 {
 			delete(m.boxes, id)
+			left--
 		}
 	}
 	for code, c := range m.codes {
-		if c.owner == account {
+		if c.owner == account && left > 0 {
 			delete(m.codes, code)
+			left--
 		}
+	}
+	if left == 0 {
+		return false, nil
 	}
 	if th != "" && m.telegram[th] == account {
 		delete(m.telegram, th)
 	}
 	delete(m.accounts, account)
-	return nil
+	return true, nil
 }
 
 func (m *memDirectory) put(n directory.NewAccount) {
