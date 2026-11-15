@@ -334,3 +334,35 @@ func TestReplaceLink(t *testing.T) {
 		t.Fatalf("unsigned replace: %d %v", status, out)
 	}
 }
+
+func TestLinkChangesPerDay(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	owner := h.account(t, userID)
+	current := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", current.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	replace := func() (int, map[string]any) {
+		next := linkKeys{id: b64(randomBytes(t, 8)), lsk: current.lsk}
+		body := next.create(t, h.now)
+		body["replaces"] = current.id
+		status, out := h.as(t, owner, http.MethodPost, "/links", body, true)
+		if status == http.StatusCreated {
+			current = next
+		}
+		return status, out
+	}
+	// Creating counts, and so does each replacement.
+	for range LinkChangesPerDay - 1 {
+		if status, out := replace(); status != http.StatusCreated {
+			t.Fatalf("replace: %d %v", status, out)
+		}
+	}
+	status, out := replace()
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	// The link is untouched.
+	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+current.id, nil, false); status != http.StatusOK {
+		t.Fatalf("link after the limit: %d", status)
+	}
+}

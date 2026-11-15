@@ -107,6 +107,7 @@ link and every key's signature checks; it encrypts to the newest key valid now.
 An account has one link at a time (`POST /links`). Replacing it
 (`POST /links` with `replaces: <old ID>`) swaps the old link and its intro
 mailbox for the new one in one step: the old link stops working at once.
+Creating and replacing count together: at most 5 a day (UTC).
 The new link has a new ID and new encryption keys but the **same signing
 key**, so its fingerprint stays the same. Sender tags are made from that
 fingerprint, so the same people keep the same tags across replacements, which
