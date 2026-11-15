@@ -380,7 +380,7 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Seals and sends something in a conversation: a message, or a seen
    * receipt. One at a time per conversation, so the owner's first reply (or
-   * first receipt) creates one key and takes one mailbox.
+   * first receipt) creates one key, and the first reply takes one mailbox.
    */
   function transmit(conv: string, fields: Omit<Draft, 'conv' | 'reply' | 'last' | 'tag'>): Promise<void> {
     return withLock(`send:${conv}`, async () => {
@@ -398,12 +398,21 @@ export function createMessaging(deps: MessagingDeps) {
       if (c.role === 'sender' && c.lastReceived === null && now() - (c.linkCheckedAt ?? 0) >= LINK_KEY_RECHECK) {
         c = await refreshLinkKey(c);
       }
-      if (c.myMailbox === null) {
+      // A chat someone started through our link takes one of our mailboxes
+      // only when we answer it. Receipts and deletes go without one (they
+      // keep writing to the link meanwhile), so a flood of first messages we
+      // only read or delete uses none of our mailboxes.
+      if (c.myMailbox === null && fields.kind !== 'seen' && fields.kind !== 'delete') {
         c = { ...c, myMailbox: await takeMailbox(db, session) };
         await putConversation(db, c);
       }
       const myKey = await conversationKey(db, c.myKey!);
-      const draft: Draft = { ...fields, conv: c.id, reply: c.myMailbox!, ...(c.lastReceived ? { last: c.lastReceived } : {}) };
+      const draft: Draft = {
+        ...fields,
+        conv: c.id,
+        ...(c.myMailbox !== null ? { reply: c.myMailbox } : {}),
+        ...(c.lastReceived ? { last: c.lastReceived } : {}),
+      };
       if (c.role === 'sender') draft.tag = toBase64Url(await senderTag(await accountSecret(db), c.link.fingerprint));
       // Only messages trigger a Telegram notice for the other side, not
       // receipts or key updates.

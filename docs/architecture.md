@@ -110,7 +110,9 @@ never who writes to it. Mailbox IDs only travel inside encrypted messages.
    the conversation key, the reply mailbox, a **sender tag** and the text.
 4. The owner's app shows a new conversation. When the owner replies, their app
    takes a mailbox of its own for it; from then on each side writes to the
-   other's mailbox, and to the other's conversation key.
+   other's mailbox, and to the other's conversation key. Only reading or
+   deleting it takes no mailbox, so a flood of first messages can't use up
+   the owner's.
 
 Each side only ever sees the other as that conversation's key. Two people the
 same sender wrote to see unrelated keys and mailboxes, so they can't compare

@@ -225,7 +225,11 @@ kind.
 fresh conversation key of the sender and is written for the link's current
 encryption key. The owner's first reply comes from a fresh conversation key of
 the owner and carries its reply mailbox; from then on each side writes for the
-other's latest conversation key. Both sides rotate their own conversation key
+other's latest conversation key. Seen receipts and deletes the owner sends
+before replying come from that key too but carry no mailbox: the sender
+writes for the owner's key from then on, still to the link's intro mailbox,
+until the owner replies. So a conversation the owner only reads or deletes
+takes none of the owner's mailboxes. Both sides rotate their own conversation key
 about weekly, each conversation on its own schedule.
 
 ## Key rotation
