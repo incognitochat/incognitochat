@@ -45,6 +45,25 @@ export interface TokenIssuer {
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
+/** Where what the server last said is left today is kept, per kind. */
+const LEFT_META: Record<TokenKind, string> = { send: 'send-tokens-left', media: 'media-tokens-left' };
+const DAY_SECONDS = 24 * 60 * 60;
+
+/** Remembers how many more tokens of a kind the server will sign today (UTC). */
+export async function rememberLeft(db: Database, kind: TokenKind, left: number, now = nowSeconds()): Promise<void> {
+  await putMeta(db, LEFT_META[kind], { day: Math.floor(now / DAY_SECONDS), left });
+}
+
+/**
+ * How many tokens of a kind can still be spent today: those here plus what
+ * the server will still sign. Null until the server has said so today.
+ */
+export async function budgetLeft(db: Database, now = nowSeconds(), kind: TokenKind = 'send'): Promise<number | null> {
+  const value = await getMeta<{ day?: unknown; left?: unknown }>(db, LEFT_META[kind]);
+  if (!value || value.day !== Math.floor(now / DAY_SECONDS) || !Number.isSafeInteger(value.left)) return null;
+  return (value.left as number) + (await countTokens(db, now, kind));
+}
+
 async function stored(db: Database, kind: TokenKind): Promise<StoredToken[]> {
   const value = await getMeta<unknown>(db, KINDS[kind].meta);
   if (!Array.isArray(value)) return [];
@@ -83,11 +102,15 @@ export function refillTokens(
       states.push(b.state);
       blinded.push(toBase64Url(b.blinded));
     }
-    const { signatures } = await session.call('POST', path, { blinded }, (v) => {
-      const s = checkObject(v).signatures;
+    const { signatures, left } = await session.call('POST', path, { blinded }, (v) => {
+      const o = checkObject(v);
+      const s = o.signatures;
       if (!Array.isArray(s) || s.length !== count || !s.every((x) => typeof x === 'string')) throw new Error('bad signatures');
-      return { signatures: s as string[] };
+      // How many more it will sign today (servers before this didn't say).
+      const left = typeof o.left === 'number' && Number.isSafeInteger(o.left) && o.left >= 0 ? o.left : null;
+      return { signatures: s as string[], left };
     });
+    if (left !== null) await rememberLeft(db, kind, left, now);
     const fresh: StoredToken[] = [];
     for (let i = 0; i < count; i++) {
       const sig = await finalize(issuer.key, inputs[i]!, fromBase64Url(signatures[i]!), states[i]!);

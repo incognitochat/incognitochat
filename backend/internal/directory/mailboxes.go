@@ -79,6 +79,16 @@ func (s *Store) Mailbox(ctx context.Context, id string) (Mailbox, error) {
 	return Mailbox{ID: id, Owner: owner, Link: link}, nil
 }
 
+// MailboxCount is how many pool and conversation mailboxes an account owns
+// (not its link's intro mailbox), as counted against the most allowed.
+func (s *Store) MailboxCount(ctx context.Context, accountID string, now time.Time) (int, error) {
+	item, err := s.get(ctx, accountPK(accountID), skAccount, now)
+	if err != nil {
+		return 0, err
+	}
+	return int(num(item, "mc")), nil
+}
+
 // Mailboxes lists the mailboxes an account owns: pool, conversation and
 // intro mailboxes.
 func (s *Store) Mailboxes(ctx context.Context, accountID string) ([]string, error) {

@@ -71,6 +71,10 @@ function fakeServer(outcomes: { register?: Outcome[]; session?: Outcome[]; creat
       }
       const canCreateLinks = !state.inviteOnly || state.member || state.admin;
       if (path === '/account') return check({ canCreateLinks, admin: state.admin, links: bundles.size, maxLinks: 5 });
+      if (method === 'GET' && path === '/usage') {
+        const item = (used: number, limit: number) => ({ used, limit });
+        return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
+      }
       if (method === 'GET' && path === '/invitations') {
         const maxUses = state.admin ? 1000 : state.member ? 2 : 0;
         return check({
@@ -458,6 +462,27 @@ describe('deleting the account', () => {
     owner.app.askDeleteAccount();
     await owner.app.cancelDeleteAccount();
     expect(home(owner.app.screen.value).tab).toBe('links');
+  });
+});
+
+describe('usage', () => {
+  it("shows what's left today, and remembers it for the low-balance notice", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    expect(owner.app.messagesLeft.value).toBeNull();
+    await owner.app.usage();
+    const screen = owner.app.screen.value;
+    expect(screen.kind).toBe('usage');
+    if (screen.kind !== 'usage') return;
+    expect(screen.error).toBeNull();
+    expect(screen.usage).toMatchObject({
+      resetsAt: 1_800_028_800_000,
+      messages: { left: 20, limit: 1000 },
+      newChats: { left: 90, limit: 100 },
+      linkChanges: { left: 4, limit: 5 },
+      chats: { used: 10, limit: 2000 },
+    });
+    await vi.waitFor(() => expect(owner.app.messagesLeft.value).toBe(20));
   });
 });
 

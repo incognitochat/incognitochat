@@ -26,6 +26,7 @@ import (
 
 // DB is the part of the DynamoDB client this package uses.
 type DB interface {
+	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
@@ -174,6 +175,28 @@ func (l *Limiter) AllowN(ctx context.Context, key string, n, limit int, window t
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// Used reports how many uses of key the current window has counted.
+func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (int, error) {
+	start := l.Now().Truncate(window)
+	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: &l.Table,
+		Key: map[string]types.AttributeValue{
+			"pk": s("R#" + key),
+			"sk": s(strconv.FormatInt(start.Unix(), 10)),
+		},
+		ProjectionExpression: aws.String("c"),
+		ConsistentRead:       aws.Bool(true),
+	})
+	if err != nil {
+		return 0, err
+	}
+	c, ok := out.Item["c"].(*types.AttributeValueMemberN)
+	if !ok {
+		return 0, nil
+	}
+	return strconv.Atoi(c.Value)
 }
 
 // expiry rounds an expiry time up to the minute, as stored.

@@ -5,7 +5,7 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { openDatabase } from '../storage/db';
-import { countTokens, refillTokens, returnToken, takeToken, type TokenIssuer } from './wallet';
+import { budgetLeft, countTokens, refillTokens, returnToken, takeToken, type TokenIssuer } from './wallet';
 
 let n = 0;
 const NOW = 1_800_000_000;
@@ -31,7 +31,7 @@ async function issuerAndSession(route = '/tokens'): Promise<{ issuer: TokenIssue
       const blinded = (body as { blinded: string[] }).blinded;
       count += blinded.length;
       const d = big(jwk.d!);
-      return check({ signatures: blinded.map((b) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(b)), d, key.n), 256))) });
+      return check({ signatures: blinded.map((b) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(b)), d, key.n), 256))), left: 1000 - count });
     },
   };
   return { issuer: { key, keyId }, session, signed: () => count };
@@ -55,6 +55,18 @@ describe('token wallet', () => {
     expect(await verify(issuer.key, raw.slice(0, TOKEN_INPUT_LENGTH), raw.slice(TOKEN_INPUT_LENGTH))).toBe(true);
     await returnToken(db, t!.token, t!.epoch, 'media');
     expect(await countTokens(db, NOW, 'media')).toBe(3);
+  });
+
+  it("knows what's left today: unspent here plus what the server will still sign", async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    const { issuer, session } = await issuerAndSession();
+    expect(await budgetLeft(db, NOW)).toBeNull();
+    await refillTokens(db, session, issuer, 20, NOW);
+    expect(await budgetLeft(db, NOW)).toBe(1000);
+    await takeToken(db, NOW);
+    expect(await budgetLeft(db, NOW)).toBe(999);
+    // The server's count is for its day (UTC): unknown the next.
+    expect(await budgetLeft(db, NOW + 24 * 60 * 60)).toBeNull();
   });
 
   it('fills with valid tokens and hands out each once', async () => {

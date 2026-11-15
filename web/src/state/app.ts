@@ -30,7 +30,9 @@ import {
 } from '../account/invitations';
 import { checkAccountInfo, createLink, listLinks, replaceLink, revokeLink, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
-import type { TokenIssuer } from '../account/wallet';
+import { budgetLeft, countTokens, rememberLeft, type TokenIssuer } from '../account/wallet';
+import { checkUsage, usageView, type UsageView } from '../account/usage';
+import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
 import { createMessaging, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
@@ -155,6 +157,8 @@ export type Screen =
   | { kind: 'blocked'; conversations: ConversationView[]; busy: boolean; notice: HomeNotice | null }
   /** Data and storage: what stays on this device and what's fetched by itself. */
   | { kind: 'storage'; settings: MediaSettings; usage: StorageUsage | null; busy: boolean; cleared: number | null }
+  /** Today's usage of the limits a person can run into; null while loading. */
+  | { kind: 'usage'; usage: UsageView | null; error: ErrorKind | null }
   | {
       kind: 'invitations';
       info: Omit<InvitationsInfo, 'codes'> & { codes: InvitationView[] };
@@ -214,6 +218,8 @@ const AUTO_GIF_BYTES = 10 * 1024 * 1024;
 
 export function createApp(deps: Deps) {
   const screen = signal<Screen>({ kind: 'loading' });
+  /** Messages that can still be sent today (send tokens), or null while unknown: for the low-balance notice. */
+  const messagesLeft = signal<number | null>(null);
   // The screen now, read fresh (TypeScript would otherwise keep a type
   // narrowed by an earlier assignment, across awaits).
   const currentScreen = (): Screen => screen.value;
@@ -357,7 +363,14 @@ export function createApp(deps: Deps) {
         const issuer = deps.issuer ?? { key: await importIssuerKey(deps.config.issuer.spki), keyId: deps.config.issuer.keyId };
         const media = deps.config.issuer.media;
         const mediaIssuer = deps.mediaIssuer ?? (media ? { key: await importIssuerKey(media.spki), keyId: media.keyId } : undefined);
-        messaging = createMessaging({ db: deps.db, api: deps.api, session: session!, issuer, ...(mediaIssuer ? { mediaIssuer } : {}) });
+        messaging = createMessaging({
+          db: deps.db,
+          api: deps.api,
+          session: session!,
+          issuer,
+          ...(mediaIssuer ? { mediaIssuer } : {}),
+          onTokens: () => void refreshBudget(),
+        });
       } catch {
         // Without a usable issuer key the app still works, but can't send.
         return;
@@ -516,6 +529,7 @@ export function createApp(deps: Deps) {
   }
 
   async function openConversation(id: string): Promise<void> {
+    void refreshBudget();
     const list = await listConversations(deps.db);
     const c = list.find((x) => x.id === id);
     if (!c) return showHome();
@@ -748,6 +762,36 @@ export function createApp(deps: Deps) {
     const freed = await clearMedia(deps.db, { before });
     if (freed > 0) deps.broadcast({ type: 'data-changed' });
     return freed;
+  }
+
+  /** Updates how many messages can still be sent today. */
+  async function refreshBudget(): Promise<void> {
+    messagesLeft.value = await budgetLeft(deps.db);
+  }
+
+  /** Usage: today's limits, from the server's counts and what this device holds unused. */
+  async function showUsage(): Promise<void> {
+    backButton(true);
+    screen.value = { kind: 'usage', usage: null, error: null };
+    let info;
+    try {
+      info = await session!.call('GET', '/usage', undefined, checkUsage);
+    } catch (err) {
+      if (handleGone(err)) return;
+      if (currentScreen().kind === 'usage') screen.value = { kind: 'usage', usage: null, error: err instanceof NetworkError ? 'network' : 'generic' };
+      return;
+    }
+    // What the server will still sign today, for the low-balance notice too.
+    await rememberLeft(deps.db, 'send', info.send.limit - info.send.used);
+    await rememberLeft(deps.db, 'media', info.media.limit - info.media.used);
+    void refreshBudget();
+    const held = {
+      sendTokens: await countTokens(deps.db, undefined, 'send'),
+      mediaTokens: await countTokens(deps.db, undefined, 'media'),
+      spareMailboxes: await poolSize(deps.db),
+    };
+    if (currentScreen().kind !== 'usage') return;
+    screen.value = { kind: 'usage', usage: usageView(info, held), error: null };
   }
 
   /** Data and storage, with what was just cleared (bytes), if anything. */
@@ -1317,6 +1361,9 @@ export function createApp(deps: Deps) {
     },
     /** Data and storage. */
     storage: () => showStorage(),
+    /** Usage: today's limits. */
+    usage: () => showUsage(),
+    messagesLeft,
     setKeepMedia: (keep: KeepMedia) => changeMediaSettings((s) => ({ ...s, keep })),
     setAutoDownload: (kind: keyof MediaSettings['auto'], on: boolean) =>
       changeMediaSettings((s) => ({ ...s, auto: { ...s.auto, [kind]: on } })),

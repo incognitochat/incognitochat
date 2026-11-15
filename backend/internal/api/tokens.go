@@ -84,5 +84,10 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 		}
 		signatures[i] = base64.RawURLEncoding.EncodeToString(sig)
 	}
-	return httpapi.JSON(http.StatusOK, map[string][]string{"signatures": signatures})
+	// How many more it can have today, so the app can say when it runs low.
+	used, err := s.Limits.Used(ctx, limitKey, 24*time.Hour)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	return httpapi.JSON(http.StatusOK, map[string]any{"signatures": signatures, "left": max(perDay-used, 0)})
 }

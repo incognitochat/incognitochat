@@ -434,6 +434,14 @@ sees the tokens it signs:
 | Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes) |
 | Media tokens | `POST /tokens/media` | at most 50 | 1,024: 1 GiB of uploads |
 
+Each answer also says `left`: how many more of that kind the person may
+get today, so the app can say when messages run low. `GET /usage` (logged
+in) returns the day's counts for the Usage screen: `{resetsAt, send, media,
+mailboxes, linkChanges, owned}`, each `{used, limit}` (`owned`: the
+account's mailboxes against the most it may have). The app adds what it
+holds unused (tokens fetched ahead, spare mailboxes) to show what's left.
+Both only read the counters the limits keep anyway.
+
 The two kinds have different issuer keys. A blind signer can't see what it
 signs, so only a key of its own gives a kind its own daily budget; a token
 of one kind is refused where the other is asked for.
