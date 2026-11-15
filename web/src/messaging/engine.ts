@@ -58,6 +58,10 @@ const UPLOAD_DELETE_PARALLEL = 6;
 const MAX_INBOX_PAGES = 10;
 const MAX_SEEN = 100;
 const META_BLOCKED = 'blocked-tags';
+/** When the mailboxes were last checked (healMailboxes), Unix ms. */
+const META_MAILBOXES_CHECKED = 'mailboxes-checked';
+/** The most mailbox IDs one check sends: well within a request's size limit. */
+const CHECK_CHUNK = 1000;
 /** Our conversation keys are replaced every 6 to 9 days (design D11), each conversation on its own schedule. */
 const ROTATE_MIN = 6 * DAY;
 const ROTATE_SPREAD = 3 * DAY;
@@ -862,16 +866,22 @@ export function createMessaging(deps: MessagingDeps) {
    * discarded on purpose).
    */
   async function healMailboxes(): Promise<void> {
+    // Once a day is plenty: this only finds data left from an old account.
+    const checked = await getMeta<number>(db, META_MAILBOXES_CHECKED);
+    if (typeof checked === 'number' && now() - checked >= 0 && now() - checked < DAY) return;
     const convs = (await listConversations(db)).filter((c) => c.status === 'active' && c.myMailbox !== null);
     const ids = [...new Set([...(await pooled(db)), ...convs.map((c) => c.myMailbox!)])];
     if (ids.length === 0) return;
-    let missing: Set<string>;
-    try {
-      const out = await session.call('POST', '/mailboxes/check', { ids }, checkObject);
-      missing = new Set(Array.isArray(out.missing) ? out.missing.filter((m): m is string => typeof m === 'string') : []);
-    } catch {
-      return;
+    const missing = new Set<string>();
+    for (let i = 0; i < ids.length; i += CHECK_CHUNK) {
+      try {
+        const out = await session.call('POST', '/mailboxes/check', { ids: ids.slice(i, i + CHECK_CHUNK) }, checkObject);
+        if (Array.isArray(out.missing)) for (const m of out.missing) if (typeof m === 'string') missing.add(m);
+      } catch {
+        return;
+      }
     }
+    await putMeta(db, META_MAILBOXES_CHECKED, now());
     if (missing.size === 0) return;
     await dropFromPool(db, missing);
     for (const c of convs) {

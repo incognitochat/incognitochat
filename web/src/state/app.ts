@@ -981,7 +981,7 @@ export function createApp(deps: Deps) {
         await messaging.flushUploadDeletes();
       }
       // In steps: the server answers in_progress until everything is gone
-      // (a big account takes a minute or two). A pause between steps leaves
+      // (a big account takes a few minutes). A pause between steps leaves
       // the database's capacity to everyone else.
       for (;;) {
         try {

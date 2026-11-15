@@ -13,7 +13,7 @@ import (
 // table takes at most 100 writes a second (infra: table_max_write_units), so
 // a step of 150 takes it about a second and a half and leaves room for
 // everyone else; the app waits a second between steps. An account with
-// 2,000 mailboxes needs about 30 steps.
+// 4,000 mailboxes needs about 55 steps, a few minutes.
 const DeleteStep = 150
 
 // deleteAccount deletes what the server holds for the caller's account: its

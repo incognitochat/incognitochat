@@ -272,7 +272,7 @@ each mailbox's owner, to deliver, but not who writes to it.
 
 - Each link has an intro mailbox, listed in its bundle (`mailbox`); first
   messages go there. Clients keep a small pool of further mailboxes
-  (`POST /mailboxes`, up to 10 a request, 100 a day and 2,000 in all per
+  (`POST /mailboxes`, up to 10 a request, 100 a day and 4,000 in all per
   account) and take one when a conversation needs it, so creating one never
   happens right before a send.
 - `POST /send {mailbox, envelope, token, quiet?}` needs no login, only a send
@@ -297,7 +297,8 @@ each mailbox's owner, to deliver, but not who writes to it.
 - `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
   conversation); a link's intro mailbox ends with the link.
 - `POST /mailboxes/check {ids}` returns which of the given mailboxes aren't
-  the caller's (any more). At upkeep the app drops those from its pool and
+  the caller's (any more). At upkeep, at most once a day and 1,000 IDs a
+  request, the app drops those from its pool and
   gives conversations that used one as their reply address a new one, which
   their next message carries. Nothing is stored.
 - **Blocking** discards our mailbox for the conversation and, for someone who
@@ -432,7 +433,7 @@ sees the tokens it signs:
 | Kind | Route | A request | A day (UTC) |
 |---|---|---|---|
 | Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes) |
-| Media tokens | `POST /tokens/media` | at most 50 | 1,024: 1 GiB of uploads |
+| Media tokens | `POST /tokens/media` | at most 50 | 500: 500 MiB of uploads |
 
 Each answer also says `left`: how many more of that kind the person may
 get today, so the app can say when messages run low. `GET /usage` (logged
