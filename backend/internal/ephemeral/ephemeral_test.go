@@ -82,6 +82,13 @@ func TestAllowN(t *testing.T) {
 			t.Fatalf("AllowN(%d) = %v, %v; want %v", tc.n, ok, err, tc.want)
 		}
 	}
+	// Refused uses aren't counted.
+	if used, err := l.Used(ctx, "k", time.Hour); err != nil || used != 5 {
+		t.Fatalf("Used = %d, %v; want 5", used, err)
+	}
+	if used, err := l.Used(ctx, "unused", time.Hour); err != nil || used != 0 {
+		t.Fatalf("Used of an unused key = %d, %v", used, err)
+	}
 }
 
 func TestSpent(t *testing.T) {
@@ -136,6 +143,10 @@ func TestSpentRemembersReplays(t *testing.T) {
 
 // countingDB accepts every write and counts them.
 type countingDB struct{ puts int }
+
+func (c *countingDB) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return &dynamodb.GetItemOutput{}, nil
+}
 
 func (c *countingDB) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
 	c.puts++

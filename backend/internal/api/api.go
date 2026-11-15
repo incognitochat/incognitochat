@@ -68,6 +68,7 @@ type Directory interface {
 	DiscardMailbox(ctx context.Context, accountID, id string) error
 	Devices(ctx context.Context, accountID string, now time.Time) ([]string, error)
 	Mailboxes(ctx context.Context, accountID string) ([]string, error)
+	MailboxCount(ctx context.Context, accountID string, now time.Time) (int, error)
 	// Delete deletes about max items of an account per call, and reports
 	// whether it has finished (directory.Store.Delete).
 	Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error)
@@ -77,6 +78,8 @@ type Directory interface {
 type Limiter interface {
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
 	AllowN(ctx context.Context, key string, n, limit int, window time.Duration) (bool, error)
+	// Used reports how many uses of key the current window has counted.
+	Used(ctx context.Context, key string, window time.Duration) (int, error)
 }
 
 // Server holds what the handlers need.
@@ -130,6 +133,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodPost, "/register", s.register)
 	r.Handle(http.MethodPost, "/session", s.session)
 	r.Handle(http.MethodGet, "/account", s.withDevice("GET /account", s.account))
+	r.Handle(http.MethodGet, "/usage", s.withDevice("GET /usage", s.usage))
 	r.Handle(http.MethodDelete, "/account", s.withSignature("DELETE /account", s.deleteAccount))
 	r.Handle(http.MethodPost, "/links", s.withSignature("POST /links", s.createLink))
 	r.Handle(http.MethodPut, "/links/{id}/keys", s.withSignature("PUT /links/{id}/keys", s.setLinkKeys))

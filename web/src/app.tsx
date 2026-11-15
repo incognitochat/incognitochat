@@ -179,6 +179,8 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
       return <Storage app={app} language={language} screen={screen} />;
+    case 'usage':
+      return <Usage language={language} screen={screen} />;
     case 'home':
       return <Home app={app} language={language} screen={screen} />;
     case 'invitations':
@@ -343,6 +345,9 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
       {busy && <div class="spinner" aria-hidden="true" />}
       <button type="button" class="link-button muted-link" disabled={busy} onClick={() => void app.storage()}>
         {tr('storageTitle')}
+      </button>
+      <button type="button" class="link-button muted-link" disabled={busy || offline} onClick={() => void app.usage()}>
+        {tr('usageTitle')}
       </button>
       <button type="button" class="link-button delete-account" disabled={busy || offline} onClick={app.askDeleteAccount}>
         {tr('deleteAccount')}
@@ -606,6 +611,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
                 {tr(SEND_ERROR_TEXT[screen.error])}
               </p>
             )}
+            <LowBalance language={language} left={app.messagesLeft.value} />
             <Composer
               language={language}
               busy={screen.busy}
@@ -758,6 +764,95 @@ function Blocked({ app, language, screen }: { app: AppState; language: Language;
 
 const KEEP_TEXT: Record<KeepMedia, Key> = { forever: 'keepForever', month: 'keepMonth', week: 'keepWeek' };
 const AUTO_TEXT: Record<keyof MediaSettings['auto'], Key> = { photos: 'autoPhotos', voice: 'autoVoice', gifs: 'autoGifs' };
+
+/** Below this many messages left today, the chat says so. */
+const LOW_BALANCE = 50;
+
+/** When today's limits start over (00:00 UTC), in the reader's own time. */
+function resetClock(language: Language, at: number): string {
+  return new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' }).format(new Date(at));
+}
+
+/** Next 00:00 UTC, in Unix ms. */
+function nextUtcMidnight(now = Date.now()): number {
+  const day = 24 * 60 * 60 * 1000;
+  return Math.floor(now / day) * day + day;
+}
+
+/** A quiet line above the message box when few messages are left today. */
+function LowBalance({ language, left }: { language: Language; left: number | null }) {
+  if (left === null || left > LOW_BALANCE) return null;
+  return (
+    <p class="notice low-balance" role="status">
+      {t(language, 'messagesLeftToday', { count: left, time: resetClock(language, nextUtcMidnight()) })}
+    </p>
+  );
+}
+
+/** Usage: what's left of today's limits, and chats in total. */
+function Usage({ language, screen }: { language: Language; screen: Extract<Screen, { kind: 'usage' }> }) {
+  const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
+  const { usage, error } = screen;
+  const size = (bytes: number) => formatSize(language, bytes);
+  return (
+    <Page title={tr('usageToday')} busy={!usage && !error}>
+      {error && (
+        <p class="notice" role="alert">
+          {tr(ERROR_TEXT[error])}
+        </p>
+      )}
+      {usage && (
+        <>
+          <p class="muted">{tr('usageResets', { time: resetClock(language, usage.resetsAt), in: relativeTime(language, new Date(usage.resetsAt)) })}</p>
+          <ul class="usage">
+            <UsageRow label={tr('usageMessages')} left={usage.messages} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageMessagesNote')} language={language} />
+            <UsageRow label={tr('usageFiles')} left={usage.files} text={size} language={language} />
+            <UsageRow label={tr('usageNewChats')} left={usage.newChats} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageNewChatsNote')} language={language} />
+            <UsageRow label={tr('usageLinkChanges')} left={usage.linkChanges} text={(n) => t(language, 'usageCount', { count: n })} language={language} />
+          </ul>
+          <ul class="usage">
+            <li class="usage-row">
+              <span class="usage-top">
+                <span class="label">{tr('usageChats')}</span>
+                <span>{tr('usageOf', { used: usage.chats.used, limit: usage.chats.limit })}</span>
+              </span>
+              <span class="muted usage-note">{tr('usageChatsNote')}</span>
+            </li>
+          </ul>
+        </>
+      )}
+    </Page>
+  );
+}
+
+/** One limit: what's left of it, as text and as a bar. */
+function UsageRow({
+  label,
+  left,
+  text,
+  note,
+  language,
+}: {
+  label: string;
+  left: { left: number; limit: number };
+  text: (n: number) => string;
+  note?: string;
+  language: Language;
+}) {
+  const fraction = left.limit > 0 ? left.left / left.limit : 0;
+  return (
+    <li class="usage-row">
+      <span class="usage-top">
+        <span class="label">{label}</span>
+        <span>{t(language, 'usageLeftOf', { left: text(left.left), limit: text(left.limit) })}</span>
+      </span>
+      <span class={fraction < 0.1 ? 'usage-bar low' : 'usage-bar'} aria-hidden="true">
+        <span style={{ inlineSize: `${Math.round(fraction * 100)}%` }} />
+      </span>
+      {note && <span class="muted usage-note">{note}</span>}
+    </li>
+  );
+}
 
 /** Data and storage: what stays on this device, and what's fetched by itself. */
 function Storage({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }> }) {
@@ -1912,8 +2007,9 @@ function extension(name: string | undefined): string {
 }
 
 function formatSize(language: Language, bytes: number): string {
-  const unit = bytes < 1024 * 1024 ? 'kilobyte' : 'megabyte';
-  const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : bytes / 1024 / 1024;
+  // Nothing reads as 0 MB; anything else as at least 1 kB.
+  const unit = bytes === 0 ? 'megabyte' : bytes < 1024 * 1024 ? 'kilobyte' : bytes < 1024 * 1024 * 1024 ? 'megabyte' : 'gigabyte';
+  const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : unit === 'megabyte' ? bytes / 1024 / 1024 : bytes / 1024 / 1024 / 1024;
   // Persian spells the unit out (کیلوبایت), so it reads in the right direction.
   return new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: language === 'fa' ? 'long' : 'short', maximumFractionDigits: 1 }).format(n);
 }

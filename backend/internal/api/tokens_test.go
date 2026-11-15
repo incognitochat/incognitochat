@@ -84,7 +84,7 @@ func TestIssueTokens(t *testing.T) {
 		return out
 	}
 	status, out := h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded(3)}, false)
-	if status != http.StatusOK || len(out["signatures"].([]any)) != 3 {
+	if status != http.StatusOK || len(out["signatures"].([]any)) != 3 || out["left"] != float64(TokensPerDay-3) {
 		t.Fatalf("tokens: %d %v", status, out)
 	}
 

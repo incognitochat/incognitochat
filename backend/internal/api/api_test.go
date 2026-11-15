@@ -120,6 +120,18 @@ func (m *memDirectory) Mailbox(_ context.Context, id string) (directory.Mailbox,
 	return b, nil
 }
 
+func (m *memDirectory) MailboxCount(_ context.Context, account string, _ time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, b := range m.boxes {
+		if b.Owner == account && b.Link == "" {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *memDirectory) Mailboxes(_ context.Context, account string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -478,6 +490,12 @@ type memLimiter struct {
 
 func (l *memLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
+}
+
+func (l *memLimiter) Used(_ context.Context, key string, _ time.Duration) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key], nil
 }
 
 func (l *memLimiter) AllowN(_ context.Context, key string, n, limit int, _ time.Duration) (bool, error) {

@@ -92,6 +92,8 @@ export interface MessagingDeps {
   now?: () => number;
   /** Uploads and downloads attachments (tests use a fake). */
   transfer?: Transfer;
+  /** Called after send tokens were spent or fetched, so the app can say when they run low. */
+  onTokens?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -581,21 +583,25 @@ export function createMessaging(deps: MessagingDeps) {
 
   /** Sends an envelope to a mailbox with a token, without logging in. */
   async function deliver(mailbox: string, envelope: Uint8Array, quiet: boolean): Promise<void> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const token = await nextToken();
-      try {
-        const body = { mailbox, envelope: toBase64Url(envelope), token: token.token, ...(quiet ? { quiet: true } : {}) };
-        await api.post('/send', body, checkObject);
-        return;
-      } catch (err) {
-        // A token the server refuses (spent, or too old) is dropped; try another.
-        if (err instanceof ApiError && err.code === 'invalid_token' && attempt === 0) continue;
-        // Not spent: a capped send, or one that may never have arrived.
-        if ((err instanceof ApiError && err.code === 'rate_limited') || err instanceof NetworkError) {
-          await returnToken(db, token.token, token.epoch);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const token = await nextToken();
+        try {
+          const body = { mailbox, envelope: toBase64Url(envelope), token: token.token, ...(quiet ? { quiet: true } : {}) };
+          await api.post('/send', body, checkObject);
+          return;
+        } catch (err) {
+          // A token the server refuses (spent, or too old) is dropped; try another.
+          if (err instanceof ApiError && err.code === 'invalid_token' && attempt === 0) continue;
+          // Not spent: a capped send, or one that may never have arrived.
+          if ((err instanceof ApiError && err.code === 'rate_limited') || err instanceof NetworkError) {
+            await returnToken(db, token.token, token.epoch);
+          }
+          throw err;
         }
-        throw err;
       }
+    } finally {
+      deps.onTokens?.();
     }
   }
 
@@ -836,6 +842,7 @@ export function createMessaging(deps: MessagingDeps) {
     if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
     if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
       await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
+      deps.onTokens?.();
     }
     if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
       await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
