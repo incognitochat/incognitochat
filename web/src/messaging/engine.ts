@@ -71,6 +71,14 @@ export class NoTokens extends Error {
   }
 }
 
+/** The day's new mailboxes are used up: no new chat can be started or answered until tomorrow. */
+export class NoMailboxes extends Error {
+  constructor() {
+    super('no mailboxes');
+    this.name = 'NoMailboxes';
+  }
+}
+
 export interface MessagingDeps {
   db: Database;
   /** For calls without login: sending, reading link bundles. */
@@ -405,7 +413,14 @@ export function createMessaging(deps: MessagingDeps) {
       // keep writing to the link meanwhile), so a flood of first messages we
       // only read or delete uses none of our mailboxes.
       if (c.myMailbox === null && fields.kind !== 'seen' && fields.kind !== 'delete') {
-        c = { ...c, myMailbox: await takeMailbox(db, session) };
+        let mailbox: string;
+        try {
+          mailbox = await takeMailbox(db, session);
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'rate_limited') throw new NoMailboxes();
+          throw err;
+        }
+        c = { ...c, myMailbox: mailbox };
         await putConversation(db, c);
       }
       const myKey = await conversationKey(db, c.myKey!);

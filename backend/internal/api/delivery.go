@@ -21,8 +21,9 @@ const (
 	MaxMailboxes = 2000
 	// MailboxBatch is the most mailboxes one request creates.
 	MailboxBatch = 10
-	// MailboxesPerDay limits how many mailboxes an account creates per UTC day.
-	MailboxesPerDay = 50
+	// MailboxesPerDay limits how many mailboxes an account creates per UTC
+	// day: each new chat it starts or answers takes one.
+	MailboxesPerDay = 100
 	// SendsPerMailboxPerMinute caps messages to one mailbox.
 	SendsPerMailboxPerMinute = 30
 	// IntroSendsPerHour caps first messages through one link.
@@ -71,7 +72,7 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 	if in.Count < 1 || in.Count > MailboxBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
-	ok, err := s.Limits.Allow(ctx, "mbx#"+c.AccountID, MailboxesPerDay, 24*time.Hour)
+	ok, err := s.Limits.AllowN(ctx, "mbx#"+c.AccountID, in.Count, MailboxesPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}

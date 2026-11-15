@@ -82,6 +82,7 @@ const INVITATIONS_NOTICE_TEXT: Record<InvitationsNotice, Key> = {
 
 const SEND_ERROR_TEXT: Record<SendError, Key> = {
   'no-tokens': 'errorNoTokens',
+  'no-mailboxes': 'errorNoMailboxes',
   'rate-limited': 'errorTooFast',
   network: 'errorNetwork',
   'too-big': 'errorTooBig',

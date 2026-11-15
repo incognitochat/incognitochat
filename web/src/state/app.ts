@@ -33,7 +33,7 @@ import type { Config } from '../config';
 import type { TokenIssuer } from '../account/wallet';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
-import { createMessaging, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
+import { createMessaging, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
 import { clearMedia, deleteMessage, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
@@ -86,7 +86,7 @@ export interface StorageUsage {
 export type AdminNotice = 'saved' | 'granted' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
 
 /** Why a message couldn't be sent. */
-export type SendError = 'no-tokens' | 'rate-limited' | 'network' | 'too-big' | 'unreadable' | 'generic';
+export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'network' | 'too-big' | 'unreadable' | 'generic';
 
 /** A conversation in the list. */
 export interface ConversationView {
@@ -821,6 +821,7 @@ export function createApp(deps: Deps) {
 
   function sendError(err: unknown): SendError {
     if (err instanceof NoTokens) return 'no-tokens';
+    if (err instanceof NoMailboxes) return 'no-mailboxes';
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
     if (err instanceof NetworkError) return 'network';
     return 'generic';
