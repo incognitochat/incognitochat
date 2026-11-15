@@ -458,9 +458,12 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   return (
     <main class="page conversation">
       <header class="conversation-head">
-        <bdi dir="ltr" class="label">
-          {screen.label}
-        </bdi>
+        <span class="chat-name">
+          <Origin role={screen.role} language={language} />
+          <bdi dir="ltr" class="label">
+            {screen.label}
+          </bdi>
+        </span>
         <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
         {screen.blocked ? null : confirmingBlock.value ? (
           <div class="row">
@@ -838,6 +841,20 @@ async function confirmReplace(app: AppState, language: Language): Promise<void> 
 }
 
 /** Telegram-style delivery marks: a clock while sending, one check when sent, two once seen. */
+/**
+ * Who started a chat: an arrow in, like an incoming call, when someone wrote
+ * to our link (we don't know who they are); out when we wrote to theirs.
+ */
+function Origin({ role, language }: { role: 'owner' | 'sender'; language: Language }) {
+  const text = t(language, role === 'owner' ? 'startedByThem' : 'startedByYou');
+  return (
+    <svg class="icon-stroke origin" viewBox="0 0 24 24" role="img" aria-label={text}>
+      <title>{text}</title>
+      {role === 'owner' ? <path d="M17 7 7 17M7 9v8h8" /> : <path d="M7 17 17 7M9 7h8v8" />}
+    </svg>
+  );
+}
+
 function Ticks({ status, language }: { status: MessageView['status']; language: Language }) {
   switch (status) {
     case 'sending':
@@ -992,9 +1009,12 @@ function ChatRow({
         onClick={onClick}
       >
         <span class="chat-top">
-          <bdi dir="ltr" class="label">
-            {c.label}
-          </bdi>
+          <span class="chat-name">
+            <Origin role={c.role} language={language} />
+            <bdi dir="ltr" class="label">
+              {c.label}
+            </bdi>
+          </span>
           <span class="muted chat-time">
             {c.last?.out && <Ticks status={c.last.status} language={language} />}
             {relativeTime(language, new Date(c.lastAt))}
