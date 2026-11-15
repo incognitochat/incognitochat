@@ -17,8 +17,8 @@ const (
 	// reaction, edit and delete spends one.
 	TokensPerDay = 1000
 	// MediaTokensPerDay limits the media tokens a person gets per UTC day.
-	// One pays for a started MiB of upload, so this is 1 GiB a day.
-	MediaTokensPerDay = 1024
+	// One pays for a started MiB of upload, so this is 500 MiB a day.
+	MediaTokensPerDay = 500
 )
 
 // Issuer signs and checks anonymous send tokens (internal/tokens).

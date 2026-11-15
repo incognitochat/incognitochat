@@ -156,7 +156,7 @@ secret: one person keeps the same label through the same link.
   public key is published in [`web/issuer-keys.json`](../web/issuer-keys.json),
   and the app accepts no other, so the server can't tell users apart by key.
 - **Media tokens** pay for uploads the same way, one per started MiB, from a
-  budget of their own (at most 1,024 a day, so 1 GiB), signed by a second
+  budget of their own (at most 500 a day, so 500 MiB), signed by a second
   issuer key.
 - **Caps:** at most 30 messages a minute to one mailbox, and 60 first messages
   an hour through one link.

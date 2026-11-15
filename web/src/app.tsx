@@ -795,7 +795,7 @@ function Usage({ language, screen }: { language: Language; screen: Extract<Scree
   const { usage, error } = screen;
   const size = (bytes: number) => formatSize(language, bytes);
   return (
-    <Page title={tr('usageToday')} busy={!usage && !error}>
+    <Page title={tr('usageTitle')} busy={!usage && !error}>
       {error && (
         <p class="notice" role="alert">
           {tr(ERROR_TEXT[error])}
@@ -803,22 +803,28 @@ function Usage({ language, screen }: { language: Language; screen: Extract<Scree
       )}
       {usage && (
         <>
-          <p class="muted">{tr('usageResets', { time: resetClock(language, usage.resetsAt), in: relativeTime(language, new Date(usage.resetsAt)) })}</p>
-          <ul class="usage">
-            <UsageRow label={tr('usageMessages')} left={usage.messages} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageMessagesNote')} language={language} />
-            <UsageRow label={tr('usageFiles')} left={usage.files} text={size} language={language} />
-            <UsageRow label={tr('usageNewChats')} left={usage.newChats} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageNewChatsNote')} language={language} />
-            <UsageRow label={tr('usageLinkChanges')} left={usage.linkChanges} text={(n) => t(language, 'usageCount', { count: n })} language={language} />
-          </ul>
-          <ul class="usage">
-            <li class="usage-row">
-              <span class="usage-top">
-                <span class="label">{tr('usageChats')}</span>
-                <span>{tr('usageOf', { used: usage.chats.used, limit: usage.chats.limit })}</span>
-              </span>
-              <span class="muted usage-note">{tr('usageChatsNote')}</span>
-            </li>
-          </ul>
+          <section class="usage-section">
+            <h2>{tr('usageDaily')}</h2>
+            <p class="muted">{tr('usageResets', { time: resetClock(language, usage.resetsAt), in: relativeTime(language, new Date(usage.resetsAt)) })}</p>
+            <ul class="usage">
+              <UsageRow label={tr('usageMessages')} left={usage.messages} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageMessagesNote')} language={language} />
+              <UsageRow label={tr('usageFiles')} left={usage.files} text={size} note={tr('usageFilesNote')} language={language} />
+              <UsageRow label={tr('usageNewChats')} left={usage.newChats} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageNewChatsNote')} language={language} />
+              <UsageRow label={tr('usageLinkChanges')} left={usage.linkChanges} text={(n) => t(language, 'usageCount', { count: n })} language={language} />
+            </ul>
+          </section>
+          <section class="usage-section">
+            <h2>{tr('usageTotal')}</h2>
+            <ul class="usage">
+              <li class="usage-row">
+                <span class="usage-top">
+                  <span class="label">{tr('usageChats')}</span>
+                  <span>{tr('usageOf', { used: usage.chats.used, limit: usage.chats.limit })}</span>
+                </span>
+                <span class="muted usage-note">{tr('usageChatsNote')}</span>
+              </li>
+            </ul>
+          </section>
         </>
       )}
     </Page>

@@ -18,7 +18,7 @@ import (
 
 const (
 	// MaxMailboxes is how many pool and conversation mailboxes one account can own.
-	MaxMailboxes = 2000
+	MaxMailboxes = 4000
 	// MailboxBatch is the most mailboxes one request creates.
 	MailboxBatch = 10
 	// MailboxesPerDay limits how many mailboxes an account creates per UTC

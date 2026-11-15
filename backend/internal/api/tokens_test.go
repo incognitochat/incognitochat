@@ -109,15 +109,16 @@ func TestIssueTokens(t *testing.T) {
 	wantError(t, status, out, http.StatusUnauthorized, "session_expired")
 
 	// Media tokens have a budget of their own, untouched by the send tokens
-	// above: 1024 a day.
+	// above.
 	for range MediaTokensPerDay / TokenBatch {
 		if status, _ := h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded(TokenBatch)}, false); status != http.StatusOK {
 			t.Fatalf("media tokens: %d", status)
 		}
 	}
-	rest = MediaTokensPerDay % TokenBatch
-	if status, out := h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded(rest)}, false); status != http.StatusOK || len(out["signatures"].([]any)) != rest {
-		t.Fatalf("last %d media tokens of the day: %d", rest, status)
+	if rest = MediaTokensPerDay % TokenBatch; rest > 0 {
+		if status, out := h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded(rest)}, false); status != http.StatusOK || len(out["signatures"].([]any)) != rest {
+			t.Fatalf("last %d media tokens of the day: %d", rest, status)
+		}
 	}
 	status, out = h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded(1)}, false)
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
