@@ -21,7 +21,7 @@ const (
 	RegistrationPrefix = "reg"
 	// RegistrationsPerDay limits new accounts and replacements per Telegram
 	// user per UTC day.
-	RegistrationsPerDay = 5
+	RegistrationsPerDay = 3
 
 	maxInitData = 8 << 10
 	// A first device list may be issued this far from the server's clock.
