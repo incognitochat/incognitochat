@@ -117,7 +117,7 @@ it. This is how close it gets.
   token per started MiB. So the server sees a size class, not the type, name
   or content.
 - **Attachments wait on the server, encrypted.** An upload stays in the bucket
-  until the recipient deletes the message or the conversation, or 31 days
+  until the recipient deletes the message or the conversation, or 30 days
   pass, whether or not it was downloaded or saved, so the app can fetch it
   again meanwhile. It's ciphertext the server can't open, but it exists. The
   link used to save a file in the device's browser can stay in that

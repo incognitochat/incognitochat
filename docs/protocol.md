@@ -343,7 +343,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   "incognitochat/v2/media")`, padded to the next power of two from 16 KiB up
   to 1 MiB, then to the next whole MiB.
 - The recipient gets a download URL with `GET /media/{id}` (no login; the ID
-  is the permission; at most 10 a day), fetches and decrypts the file and
+  is the permission; at most 5 a day per file), fetches and decrypts the file and
   keeps it on the device. The upload stays, downloaded or saved, until the
   message or conversation is deleted on the recipient's device (then it's
   deleted with `POST /media/{id}/delete {secret}`) or it expires.
@@ -357,7 +357,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   doesn't delete the upload, and the link carries no delete secret. The
   link may stay in the browser's history; once the upload is gone it opens
   nothing.
-- Uploads expire after 31 days. The bucket keeps no
+- Uploads expire after 30 days. The bucket keeps no
   versions and no access logs.
 
 ## Stickers

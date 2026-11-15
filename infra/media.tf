@@ -36,7 +36,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "media" {
   }
 }
 
-# Undelivered messages wait 30 days; so do their attachments, plus a day.
+# Undelivered messages wait 30 days; so do their attachments (S3 deletes them
+# at the next midnight UTC after that; the API stops handing out links at 30).
 # No versioning, so a deleted attachment is gone.
 resource "aws_s3_bucket_lifecycle_configuration" "media" {
   bucket = aws_s3_bucket.media.id
@@ -45,7 +46,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "media" {
     status = "Enabled"
     filter {}
     expiration {
-      days = 31
+      days = 30
     }
     abort_incomplete_multipart_upload {
       days_after_initiation = 1

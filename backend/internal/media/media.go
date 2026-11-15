@@ -26,9 +26,10 @@ const (
 	// goes on after its URL expires.
 	UploadURLTTL   = 15 * time.Minute
 	DownloadURLTTL = time.Minute
-	// Retention is how long an upload waits to be fetched: undelivered
-	// messages wait 30 days.
-	Retention = 31 * 24 * time.Hour
+	// Retention is how long an upload waits to be fetched: as long as an
+	// undelivered message waits (30 days, rounded up to the hour), so in the
+	// last hour an attachment may be gone before its message.
+	Retention = 30 * 24 * time.Hour
 	// ContentType is the only type uploads carry: the server doesn't learn
 	// what a file is.
 	ContentType = "application/octet-stream"

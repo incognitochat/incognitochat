@@ -16,7 +16,7 @@ import (
 
 // DownloadsPerDay limits how often one upload can be fetched: the
 // recipient needs one or two; more would make it file hosting.
-const DownloadsPerDay = 10
+const DownloadsPerDay = 5
 
 // Media is the media bucket (media.Bucket).
 type Media interface {

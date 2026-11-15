@@ -162,7 +162,7 @@ variable "firewall" {
 variable "firewall_rate_limit" {
   description = "Requests one IP address may make in 5 minutes before the firewall blocks it. Many people can share an address (a carrier, a VPN)"
   type        = number
-  default     = 3000
+  default     = 2000
 
   validation {
     condition     = var.firewall_rate_limit >= 100
