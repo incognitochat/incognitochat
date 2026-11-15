@@ -179,6 +179,7 @@ export const en = {
   startedByYou: 'You started this through their link',
   conversationEnded: 'This conversation has ended.',
   errorNoTokens: "You've sent a lot today. Try again tomorrow.",
+  errorNoMailboxes: "You've started or answered a lot of new chats today. Try again tomorrow.",
   errorTooFast: 'Too many messages to this person right now. Try again in a minute.',
   seen: 'Seen',
   newMessages: '{count} new messages',

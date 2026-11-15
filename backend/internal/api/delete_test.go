@@ -71,8 +71,9 @@ func TestDeleteAccountInSteps(t *testing.T) {
 	if status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true); status != http.StatusCreated {
 		t.Fatalf("create link: %d %v", status, out)
 	}
-	// More mailboxes than one step deletes.
-	for range DeleteStep / MailboxBatch {
+	// More mailboxes than one step deletes (90, and the link's: 2 items each),
+	// within a day's limit.
+	for range MailboxesPerDay/MailboxBatch - 1 {
 		h.now = h.now.Add(time.Second)
 		if status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
 			t.Fatalf("mailboxes: %d %v", status, out)

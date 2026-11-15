@@ -268,8 +268,9 @@ each mailbox's owner, to deliver, but not who writes to it.
 
 - Each link has an intro mailbox, listed in its bundle (`mailbox`); first
   messages go there. Clients keep a small pool of further mailboxes
-  (`POST /mailboxes`) and take one when a conversation needs it, so creating
-  one never happens right before a send.
+  (`POST /mailboxes`, up to 10 a request, 100 a day and 2,000 in all per
+  account) and take one when a conversation needs it, so creating one never
+  happens right before a send.
 - `POST /send {mailbox, envelope, token, quiet?}` needs no login, only a send
   token. The server checks the envelope's layout and the caps, then stores the
   envelope once for each of the owner's devices. Unknown and discarded

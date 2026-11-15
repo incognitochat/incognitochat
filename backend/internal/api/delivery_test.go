@@ -147,8 +147,20 @@ func TestMailboxLimits(t *testing.T) {
 	wantError(t, status, out, http.StatusBadRequest, "bad_request")
 	status, out = h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 0}, false)
 	wantError(t, status, out, http.StatusBadRequest, "bad_request")
-	for range MailboxesPerDay {
-		h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	// The limit counts mailboxes, not requests.
+	for range MailboxesPerDay/MailboxBatch - 1 {
+		if status, out := h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
+			t.Fatalf("mailboxes: %d %v", status, out)
+		}
+	}
+	if status, out := h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch - 1}, false); status != http.StatusCreated {
+		t.Fatalf("mailboxes: %d %v", status, out)
+	}
+	// One left: two are refused, and nothing is created.
+	status, out = h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false)
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if status, out := h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false); status != http.StatusCreated {
+		t.Fatalf("the last one: %d %v", status, out)
 	}
 	status, out = h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
