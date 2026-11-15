@@ -944,6 +944,36 @@ describe('editing', () => {
     expect((await getConversation(owner.db, conv))!.edits).toEqual([]);
   });
 
+  it('only within a day of sending; their app drops a later edit, even from a modified app', async () => {
+    const HOUR = 60 * 60 * 1000;
+    let clock = Date.now();
+    const now = () => clock;
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner', now);
+    const sender = await person(backend, 'sender', now);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'helo');
+    await owner.messaging.sync();
+    const [mine] = await listMessages(sender.db, conv);
+
+    // Within the day: fine.
+    clock += 23 * HOUR;
+    await sender.messaging.edit(conv, mine!.id, 'hello');
+    await owner.messaging.sync();
+    expect((await listMessages(owner.db, conv))[0]!.text).toBe('hello');
+
+    // After it (and past the receiver's hour of grace): refused here.
+    clock += 3 * HOUR;
+    await expect(sender.messaging.edit(conv, mine!.id, 'hello again')).rejects.toThrow();
+
+    // A modified app that sends it anyway: dropped there.
+    const record = (await sender.db.get('messages', mine!.id))!;
+    await sender.db.put('messages', { ...record, at: clock });
+    await sender.messaging.edit(conv, mine!.id, 'hello again');
+    await owner.messaging.sync();
+    expect((await listMessages(owner.db, conv))[0]!.text).toBe('hello');
+  });
+
   it("can't edit the other side's messages, even from a modified app", async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');

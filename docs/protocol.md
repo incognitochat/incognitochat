@@ -211,8 +211,10 @@ relies on the recipient's app doing it.
 
 **Editing.** A sender can change the text of their own sent messages, or an
 attachment's caption, which may become empty; stickers, voice and video
-messages have none. The recipient applies an `edit` only to a message from
-that side in that conversation and keeps the latest by `at`, so a replayed
+messages have none, for 24 hours after sending. The recipient applies an
+`edit` only to a message from that side in that conversation, only if its
+`at` is at most 25 hours after the message's (an hour of grace for clocks
+and late arrivals), and keeps the latest by `at`, so a replayed
 or late older one changes nothing; the message shows as edited. An `edit`
 that arrives before its message is kept, sealed under the storage key like
 any text, for at most 31 days, and applied when the message comes. Like
