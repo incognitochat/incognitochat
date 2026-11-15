@@ -82,7 +82,11 @@ mailboxes (sends to them get the usual answer and are dropped), invitation
 codes, device list, devices and the account itself, and the item that keeps
 one account per Telegram user, so the same user can set up again. Unlike a
 replacement, it keeps no marker; only rate-limit counters and socket records
-remain until they expire (within a day). It works in steps of about 150
+remain until they expire (within about a day). The daily limits (send and
+media tokens, new mailboxes, link changes, notice setups, mailbox checks,
+invitation attempts) count per Telegram user, by the same keyed hash that
+keeps one account per user, so deleting an account and setting up again
+doesn't start a fresh day. It works in steps of about 150
 items, so a big account neither outlasts a request nor takes the table's whole
 write capacity: while more is left the server answers `409 in_progress`, and
 the app repeats the request a second later (links go in the first step, the
@@ -427,7 +431,7 @@ sees the tokens it signs:
 
 | Kind | Route | A request | A day (UTC) |
 |---|---|---|---|
-| Send tokens | `POST /tokens` | at most 50 | 1,000: everything an account sends (messages, receipts, reactions, edits, deletes) |
+| Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes) |
 | Media tokens | `POST /tokens/media` | at most 50 | 1,024: 1 GiB of uploads |
 
 The two kinds have different issuer keys. A blind signer can't see what it

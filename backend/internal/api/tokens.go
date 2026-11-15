@@ -12,11 +12,11 @@ import (
 const (
 	// TokenBatch is the most tokens one request signs.
 	TokenBatch = 50
-	// TokensPerDay limits the send tokens an account gets per UTC day, and
+	// TokensPerDay limits the send tokens a person (Telegram user) gets per UTC day, and
 	// with them what it can send to other people: every message, receipt,
 	// reaction, edit and delete spends one.
 	TokensPerDay = 1000
-	// MediaTokensPerDay limits the media tokens an account gets per UTC day.
+	// MediaTokensPerDay limits the media tokens a person gets per UTC day.
 	// One pays for a started MiB of upload, so this is 1 GiB a day.
 	MediaTokensPerDay = 1024
 )
@@ -39,7 +39,7 @@ type Spent interface {
 // The issuer can't see the tokens, so it can't link their later use to the
 // account.
 func (s *Server) issueTokens(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
-	return s.signTokens(ctx, req, "POST /tokens", s.Issuer, "tok#"+c.AccountID, TokensPerDay)
+	return s.signTokens(ctx, req, "POST /tokens", s.Issuer, "tok#"+c.person(), TokensPerDay)
 }
 
 // issueMediaTokens does the same for media tokens, which pay for uploads.
@@ -48,7 +48,7 @@ func (s *Server) issueMediaTokens(ctx context.Context, req httpapi.Request, c ca
 	if s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok#"+c.AccountID, MediaTokensPerDay)
+	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok#"+c.person(), MediaTokensPerDay)
 }
 
 func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, limitKey string, perDay int) httpapi.Response {

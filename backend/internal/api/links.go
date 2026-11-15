@@ -101,7 +101,7 @@ func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) 
 	if in.Replaces != "" && !links.ValidID(in.Replaces) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	ok, err := s.Limits.Allow(ctx, "link#"+c.AccountID, LinkChangesPerDay, 24*time.Hour)
+	ok, err := s.Limits.Allow(ctx, "link#"+c.person(), LinkChangesPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}

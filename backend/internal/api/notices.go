@@ -53,7 +53,7 @@ func (s *Server) setNotices(ctx context.Context, req httpapi.Request, c caller) 
 		directory.TelegramHash(s.Pepper, launch.UserID) != c.device.TelegramHash {
 		return httpapi.Error(http.StatusUnauthorized, "init_data_rejected")
 	}
-	ok, err := s.Limits.Allow(ctx, "ntc#"+c.AccountID, NoticeSetupsPerDay, 24*time.Hour)
+	ok, err := s.Limits.Allow(ctx, "ntc#"+c.person(), NoticeSetupsPerDay, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err)
 	}
