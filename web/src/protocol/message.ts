@@ -25,6 +25,10 @@ export type Kind = 'message' | 'seen' | 'reaction' | 'delete' | 'edit' | 'key_up
 const KINDS: readonly Kind[] = ['message', 'seen', 'reaction', 'delete', 'edit', 'key_update', 'end'];
 /** The most messages one "delete" names. */
 export const MAX_DELETE = 100;
+/** A message can be edited for this long after it was sent (by its own `at`). */
+export const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Receivers allow an edit this much later still: arrival times and clocks differ a little. */
+export const EDIT_GRACE_MS = 60 * 60 * 1000;
 /** The longest reaction, in UTF-16 units: one emoji, joined sequences included. */
 const MAX_REACTION = 32;
 
