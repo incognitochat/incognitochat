@@ -175,7 +175,7 @@ Photos, videos, GIFs, files, music, voice messages and round video messages
 are encrypted on the device with a fresh key for each file, padded, and
 uploaded straight to an S3 bucket with a presigned URL whose exact size is
 part of its signature. The upload is paid with media tokens (one per started
-MiB, files up to 25 MB), not a login. The message carries the file's key;
+MiB, files up to 50 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
 - Photos are redrawn on the device (up to 1280 px), which drops their

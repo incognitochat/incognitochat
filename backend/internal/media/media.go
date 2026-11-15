@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	// MaxSize is the largest upload: a 25 MB file, padded, plus encryption overhead.
-	MaxSize = 26 << 20
+	// MaxSize is the largest upload: a 50 MiB file, padded, plus encryption
+	// overhead (the next whole MiB).
+	MaxSize = 51 << 20
 	// TokenBytes is how much one media token pays for: an upload costs one
 	// token per started MiB.
 	TokenBytes = 1 << 20
