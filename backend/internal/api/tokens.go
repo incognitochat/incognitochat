@@ -13,8 +13,9 @@ const (
 	// TokenBatch is the most tokens one request signs.
 	TokenBatch = 50
 	// TokensPerDay limits the send tokens an account gets per UTC day, and
-	// with them the messages it can send to other people.
-	TokensPerDay = 200
+	// with them what it can send to other people: every message, receipt,
+	// reaction, edit and delete spends one.
+	TokensPerDay = 1000
 	// MediaTokensPerDay limits the media tokens an account gets per UTC day.
 	// One pays for a started MiB of upload, so this is 1 GiB a day.
 	MediaTokensPerDay = 1024
