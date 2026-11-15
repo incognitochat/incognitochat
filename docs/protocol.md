@@ -415,7 +415,7 @@ sees the tokens it signs:
 
 | Kind | Route | A request | A day (UTC) |
 |---|---|---|---|
-| Send tokens | `POST /tokens` | at most 50 | 200: the messages an account can send |
+| Send tokens | `POST /tokens` | at most 50 | 1,000: everything an account sends (messages, receipts, reactions, edits, deletes) |
 | Media tokens | `POST /tokens/media` | at most 50 | 1,024: 1 GiB of uploads |
 
 The two kinds have different issuer keys. A blind signer can't see what it

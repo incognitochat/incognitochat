@@ -15,7 +15,7 @@ import (
 )
 
 // NoticeSetupsPerDay limits how often an account sets up notices.
-const NoticeSetupsPerDay = 10
+const NoticeSetupsPerDay = 5
 
 // Notices reaches the notify function, which alone holds the bot token and
 // the key that seals chat IDs (design §12).
