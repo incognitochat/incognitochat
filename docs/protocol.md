@@ -67,11 +67,13 @@ next to the session token. Nonces are 16–64 base64url characters and are used
 once; timestamps must be within 60 seconds of the server's clock (otherwise
 `clock_skew`, below). A login that can't be valid whatever the device's key
 (its nonce or signature malformed) is refused with `login_refused` before
-the server reads anything. A login reads the device eventually consistent, at half the
-cost, so a device replaced or removed in about the last second may still get
-a token; each logged-in request reads the device and its account again, in
-one strongly consistent read, so a replaced or deleted account is refused at
-its first request.
+the server reads anything. A login reads the device eventually consistent,
+at half the cost. So a device replaced or removed in about the last second
+may still get a token, and one set up in about the last second may be
+refused: the app logs in once more a second later when that happens right
+after a setup, its own or another copy's. Each logged-in request reads the
+device and its account again, in one strongly consistent read, so a
+replaced or deleted account is refused at its first request.
 
 **Clocks.** A login or signed request whose timestamp is more than 60 seconds
 from the server's clock, and a new account's device list issued outside its
@@ -95,7 +97,7 @@ user to set the device's date and time.
 |---|---|
 | `401 session_expired` | The session token is missing or over; the app logs in again. |
 | `401 clock_skew` | The device's clock is off (above). |
-| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong. |
+| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
 
 The app doesn't take the last two on trust, since a server could send them to
@@ -116,10 +118,11 @@ there (keys, conversations, mailboxes, links). Per Telegram user and UTC day,
 `POST /register` makes at most 3 accounts or replacements, and takes at most
 20 attempts that get past the signature checks, retries and `account_exists`
 answers included: launch data stays valid for 10 minutes, so it can be
-replayed. An attempt reads only the Telegram user's account item and the
-registering device's; the old account's whole partition is listed only to
-replace it, once that has been counted. A
-device without an account may ask `POST /accounts/lookup {initData}` whether
+replayed. An attempt reads only three items: the Telegram user's (`T#`),
+its account item and the registering device's. The old account's whole
+partition is listed only to replace it, once that has been counted; a
+replacement whose reading of the old account then fails still counts
+against the 3. A device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
 launch, never one that names a link or an invitation, and stores nothing.

@@ -138,6 +138,9 @@ func (s *Server) createInvitation(ctx context.Context, req httpapi.Request, c ca
 			return httpapi.JSON(http.StatusCreated, map[string]string{"code": code})
 		case errors.Is(err, directory.ErrLimit):
 			return httpapi.Error(http.StatusConflict, "no_invitations_left")
+		case errors.Is(err, directory.ErrNotFound):
+			// An admin's account replaced or deleted a moment ago.
+			return httpapi.Error(http.StatusNotFound, "not_found")
 		case errors.Is(err, directory.ErrConflict):
 			continue // the code is taken: draw another
 		default:

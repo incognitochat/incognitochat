@@ -116,8 +116,9 @@ func (s *Store) SetLevel(ctx context.Context, level, allowance int) error {
 // CreateInvitation stores a code. ownerLevel is 0 for admins. For members,
 // maxAllocated is the most uses they may have put into codes after this one
 // (their allowance plus grants); admins pass -1 for no limit. It returns
-// ErrConflict if the code is taken, and ErrLimit if the member has too few
-// invitations left, or the account is gone or replaced.
+// ErrConflict if the code is taken, ErrLimit if the member has too few
+// invitations left (or isn't a member any more), and ErrNotFound if an
+// admin's account is gone or replaced.
 func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, uses, ownerLevel, maxAllocated int) error {
 	k := codeKey(code)
 	writes := []types.TransactWriteItem{
@@ -155,6 +156,9 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 	}
 	reasons, err := s.transactReasons(ctx, writes)
 	if errors.Is(err, ErrConflict) && len(reasons) == 3 && reasons[2] == "ConditionalCheckFailed" {
+		if maxAllocated < 0 {
+			return ErrNotFound
+		}
 		return ErrLimit
 	}
 	return err

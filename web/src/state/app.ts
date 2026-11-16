@@ -45,7 +45,7 @@ import { saveUrl } from '../media/save';
 import { fileName, type Media, type Sticker } from '../protocol/message';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
 import { createClock } from '../net/clock';
-import { createSession, type Session } from '../net/session';
+import { createSession, type AppSession, type Session } from '../net/session';
 import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import type { Launch } from '../platform/launch';
@@ -251,7 +251,7 @@ export function createApp(deps: Deps) {
   // The server's clock, learnt when it says this device's is off: logins,
   // signed requests and registration are timed by it.
   const clock = createClock();
-  const session: Session | null = deps.api ? createSession(deps.db, deps.api, clock) : null;
+  const session: AppSession | null = deps.api ? createSession(deps.db, deps.api, clock) : null;
   // Set while the server doesn't take this device (unverified, asked again).
   let signedOut: SignedOutReason | null = null;
   /** While signed out: the chats are only read (no downloads either). */
@@ -1401,6 +1401,11 @@ export function createApp(deps: Deps) {
   return {
     screen,
     start,
+    /** Another copy changed the account (finished setting up, say): catch up. A login refused in the next few seconds is tried once more. */
+    accountChanged(): Promise<void> {
+      session?.setUp();
+      return start();
+    },
     setUp: () => setUp(),
     /** Asks the server again whether it takes this device. */
     recheck,

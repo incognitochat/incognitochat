@@ -80,6 +80,9 @@ var (
 	ErrNotFound = errors.New("directory: not found")
 	// ErrConflict is returned when a concurrent change won.
 	ErrConflict = errors.New("directory: conflict")
+	// errCutShort is returned when a read meant to take one page didn't:
+	// something unexpected sorts in its range.
+	errCutShort = errors.New("directory: read cut short")
 )
 
 // DB is the part of the DynamoDB client the store uses.
@@ -160,7 +163,7 @@ func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, err
 // ByTelegram returns the account registered for a Telegram hash, with the
 // signing key of one of its devices, if it has that device. It reads only
 // those items, never the rest of the partition, which can hold thousands
-// (Replace lists it, once it has committed).
+// (only Replace lists it, after the caller's limit on replacements).
 func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (Account, error) {
 	id, err := s.AccountOf(ctx, telegramHash)
 	if err != nil {
@@ -179,9 +182,11 @@ func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (
 }
 
 // accountAndDevice reads an account's item and one device's item (either
-// nil if missing) in one strongly consistent query: the device's sort key
-// follows the account's ("A" < "D#…"), and only the account's other
-// devices, if any, sort between them.
+// nil if missing) in one query, strongly consistent if consistent: the
+// device's sort key follows the account's ("A" < "D#…"), and only the
+// account's other devices, if any, sort between them (accountSortKeys). A
+// result cut short (over 1 MB between them) is an error, never a device
+// taken for missing.
 func (s *Store) accountAndDevice(ctx context.Context, accountID, deviceID string, consistent bool) (map[string]types.AttributeValue, map[string]types.AttributeValue, error) {
 	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.Table,
@@ -195,6 +200,9 @@ func (s *Store) accountAndDevice(ctx context.Context, accountID, deviceID string
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(out.LastEvaluatedKey) > 0 {
+		return nil, nil, errCutShort
 	}
 	var acct, dev map[string]types.AttributeValue
 	for _, it := range out.Items {
@@ -225,12 +233,14 @@ func (s *Store) Create(ctx context.Context, n NewAccount) error {
 // ErrConflict if the Telegram user's account changed since old was read.
 //
 // The old partition is listed (it can hold thousands of mailboxes) only
-// here, so after the caller's limit on replacements: once before the swap,
-// so the cleanup can run even if the table refuses a read after it, and
-// once after, for anything made in between. Nothing joins it after the
-// swap: making anything in it needs the account item, then only a marker.
+// here, so after the caller's limit on replacements. Once before the swap,
+// eventually consistent (half the cost), so the cleanup can still run if
+// the table refuses reads after it; and once after, strongly consistent,
+// which is the listing that counts: it also finds what was made in
+// between. Nothing joins the partition after the swap: making anything in
+// it needs the account item, then only a marker.
 func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time.Time) error {
-	sks, devices, err := s.partition(ctx, old.ID)
+	sks, devices, err := s.partition(ctx, old.ID, false)
 	if err != nil {
 		return err
 	}
@@ -258,9 +268,10 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 	}
 
 	// Then the rest of its partition, with what was made since it was
-	// listed; if that read fails, what was listed before still goes. Device
-	// keys stay until the marker expires, everything else goes now.
-	if after, afterDevices, err := s.partition(ctx, old.ID); err == nil {
+	// listed. That read is tried a few times; if it still fails, what was
+	// listed before goes anyway. Device keys stay until the marker expires,
+	// everything else goes now.
+	if after, afterDevices, err := s.listAgain(ctx, old.ID); err == nil {
 		listed := make(map[string]bool, len(sks))
 		for _, sk := range sks {
 			listed[sk] = true
@@ -329,7 +340,7 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 // write to the account cancels that last step, it reports not finished, and
 // asking again finishes it: a conflict is never taken for "already gone".
 func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error) {
-	sks, _, err := s.partition(ctx, accountID)
+	sks, _, err := s.partition(ctx, accountID, true)
 	if err != nil {
 		return false, err
 	}
@@ -417,15 +428,40 @@ func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max 
 	return true, s.batchWrite(ctx, devices)
 }
 
+// listTries is how many times Replace lists the old partition after the
+// swap before falling back to its listing from before.
+const listTries = 3
+
+// listAgain is partition, strongly consistent, tried up to listTries times
+// with a short pause between (a throttled table often takes the next one).
+func (s *Store) listAgain(ctx context.Context, accountID string) ([]string, map[string][]byte, error) {
+	var err error
+	for try := range listTries {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(time.Duration(50<<try) * time.Millisecond):
+			}
+		}
+		var sks []string
+		var devices map[string][]byte
+		if sks, devices, err = s.partition(ctx, accountID, true); err == nil {
+			return sks, devices, nil
+		}
+	}
+	return nil, nil, err
+}
+
 // partition lists an account's whole partition: every sort key, and the
 // signing key of each device (by sort key).
-func (s *Store) partition(ctx context.Context, accountID string) ([]string, map[string][]byte, error) {
+func (s *Store) partition(ctx context.Context, accountID string, consistent bool) ([]string, map[string][]byte, error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
 		ExpressionAttributeValues: attrs{":pk": sv(accountPK(accountID))},
 		ProjectionExpression:      aws.String("sk, k"),
-		ConsistentRead:            aws.Bool(true),
+		ConsistentRead:            aws.Bool(consistent),
 	})
 	var sks []string
 	devices := map[string][]byte{}

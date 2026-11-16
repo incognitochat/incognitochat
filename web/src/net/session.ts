@@ -10,6 +10,8 @@ import { createClock, type Clock } from './clock';
 
 /** Renew this long before the server's expiry, to allow for clock skew. */
 const MARGIN_SECONDS = 60;
+/** For this long after a setup, a refused login is tried once more (logIn's justSetUp). */
+const JUST_SET_UP_MS = 10_000;
 
 export interface Session {
   /**
@@ -24,18 +26,32 @@ export interface Session {
   token(): Promise<string>;
 }
 
-export function createSession(db: Database, api: Api, clock: Clock = createClock()): Session {
+/** The app's own session, which also hears about setups in other copies. */
+export interface AppSession extends Session {
+  /** The account was just set up in another copy of the app: a login refused in the next few seconds is tried once more. */
+  setUp(): void;
+}
+
+export function createSession(db: Database, api: Api, clock: Clock = createClock(), now: () => number = Date.now): AppSession {
   let current: TokenResponse | null = null;
+  /** When the account was last set up, here or in another copy (Unix ms). */
+  let setUpAt = -Infinity;
 
   async function token(): Promise<string> {
     // The expiry is the server's time, so it's compared with the server's clock.
-    if (!current || current.expires - MARGIN_SECONDS <= clock.seconds()) current = await logIn(db, api, clock);
+    if (!current || current.expires - MARGIN_SECONDS <= clock.seconds()) {
+      current = await logIn(db, api, clock, now() - setUpAt < JUST_SET_UP_MS);
+    }
     return current.token;
   }
 
   return {
     use(t) {
       current = t;
+      setUpAt = now();
+    },
+    setUp() {
+      setUpAt = now();
     },
     token,
     async call(method, path, body, check, options = {}) {

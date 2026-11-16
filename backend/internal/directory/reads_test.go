@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -136,28 +137,61 @@ func TestDeviceIsOneRead(t *testing.T) {
 	}
 }
 
-// Replace lists the old partition only once the swap has committed, so it
-// also ends what was made between the read and the replacement.
+// afterFirstQuery is a table that runs hook once, right after the first
+// query made through it: what happens between Replace's first listing of
+// the old partition and its swap.
+type afterFirstQuery struct {
+	DB
+	hook    func()
+	queried bool
+}
+
+func (a *afterFirstQuery) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	out, err := a.DB.Query(ctx, in, opts...)
+	if !a.queried {
+		a.queried = true
+		a.hook()
+	}
+	return out, err
+}
+
+// Replace lists the old partition again once the swap has committed, so it
+// also ends what was made between its first listing and the swap: a new
+// mailbox, and a link replaced with a new one and its intro mailbox.
 func TestReplaceListsAfterSwap(t *testing.T) {
-	s, _, _ := metered(t)
+	s, _, client := metered(t)
 	ctx := context.Background()
 	first := newAccount(t, "th-1")
 	if err := s.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	l := testLink(t)
+	if err := s.CreateLink(ctx, first.ID, l, 1); err != nil {
 		t.Fatal(err)
 	}
 	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	late := ids.New()
-	if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
+	late, next := ids.New(), testLink(t)
+	hooked := &Store{DB: &afterFirstQuery{DB: client, hook: func() {
+		if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
+			t.Error(err)
+		}
+		if err := s.ReplaceLink(ctx, first.ID, l.ID, next); err != nil {
+			t.Error(err)
+		}
+	}}, Table: s.Table}
+	if err := hooked.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
-		t.Fatal(err)
+	for _, m := range []string{late, next.Mailbox} {
+		if _, err := s.Mailbox(ctx, m); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("mailbox %s, made after the first listing, outlived the replacement: %v", m, err)
+		}
 	}
-	if _, err := s.Mailbox(ctx, late); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a mailbox made after the read outlived the replacement: %v", err)
+	if _, err := s.Bundle(ctx, next.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a link made after the first listing is still served: %v", err)
 	}
 	// Nothing new joins the old partition after the swap.
 	if err := s.CreateMailboxes(ctx, first.ID, []string{ids.New()}, 10); err == nil {
@@ -210,10 +244,12 @@ func TestLoginDevice(t *testing.T) {
 }
 
 // failAfterSwap is a table that refuses reads once a transaction has
-// committed, as a throttled one would.
+// committed, as a throttled one would: all of them, or the first fails.
 type failAfterSwap struct {
 	DB
+	fails   int // 0: all
 	swapped bool
+	failed  int
 }
 
 func (f *failAfterSwap) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
@@ -223,10 +259,71 @@ func (f *failAfterSwap) TransactWriteItems(ctx context.Context, in *dynamodb.Tra
 }
 
 func (f *failAfterSwap) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	if f.swapped {
+	if f.swapped && (f.fails == 0 || f.failed < f.fails) {
+		f.failed++
 		return nil, errors.New("throttled")
 	}
 	return f.DB.Query(ctx, in, opts...)
+}
+
+// cutShort is a table whose queries say there's more after what they
+// return, as DynamoDB does past 1 MB.
+type cutShort struct{ DB }
+
+func (c cutShort) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	out, err := c.DB.Query(ctx, in, opts...)
+	if err == nil {
+		out.LastEvaluatedKey = map[string]types.AttributeValue{"pk": sv("x"), "sk": sv("y")}
+	}
+	return out, err
+}
+
+// If the one-read login were ever cut short, the device isn't taken for
+// missing (login_refused): it's an error.
+func TestDeviceReadCutShort(t *testing.T) {
+	s, _, client := metered(t)
+	ctx := context.Background()
+	n := newAccount(t, "th-1")
+	if err := s.Create(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	short := &Store{DB: cutShort{client}, Table: s.Table}
+	for _, read := range []func(context.Context, string, string, time.Time) (Device, error){short.Device, short.LoginDevice} {
+		if _, err := read(ctx, n.ID, n.DeviceID, now); err == nil || errors.Is(err, ErrNotFound) {
+			t.Fatalf("a cut-short read: %v", err)
+		}
+	}
+}
+
+// The listing after the swap is tried again when it fails, so what was
+// made since the first listing still goes.
+func TestReplaceRetriesTheLaterListing(t *testing.T) {
+	s, _, client := metered(t)
+	ctx := context.Background()
+	first := newAccount(t, "th-1")
+	if err := s.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := ids.New()
+	flaky := &failAfterSwap{DB: client, fails: listTries - 1}
+	hooked := &Store{DB: &afterFirstQuery{DB: flaky, hook: func() {
+		if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
+			t.Error(err)
+		}
+	}}, Table: s.Table}
+	if err := hooked.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
+		t.Fatal(err)
+	}
+	if flaky.failed != listTries-1 {
+		t.Fatalf("%d listings refused, want %d", flaky.failed, listTries-1)
+	}
+	if _, err := s.Mailbox(ctx, late); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a mailbox made after the first listing outlived the replacement: %v", err)
+	}
 }
 
 // A replacement still cleans up the old account when the table refuses
@@ -293,7 +390,7 @@ func TestReplacedAccountMakesNothing(t *testing.T) {
 	if _, err := s.Bundle(ctx, next.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("its new link is served: %v", err)
 	}
-	if err := s.CreateInvitation(ctx, n.ID, "abcd-efgh", 1, 0, -1); !errors.Is(err, ErrLimit) {
+	if err := s.CreateInvitation(ctx, n.ID, "abcd-efgh", 1, 0, -1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an admin code on a replaced account: %v", err)
 	}
 	if err := s.CreateLink(ctx, n.ID, testLink(t), 2); err == nil {

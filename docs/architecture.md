@@ -87,10 +87,10 @@ flowchart LR
   is off, the server says so with its time, and the app corrects for it and
   asks again, without the user seeing an error. Only within two days, though:
   further off, the app asks the user to set the device's date and time. Each
-  request reads the device and its account once, so a
-  replaced or deleted account is refused at once; logins and registrations
-  check what they can before reading anything, and registrations count every
-  attempt that gets past the signature checks, per Telegram user.
+  request reads the device and its account once, so a replaced or deleted
+  account is refused at once; logins and registrations check what they can
+  before reading anything, and registrations count every attempt that gets
+  past the signature checks, per Telegram user.
 
 ## Links
 

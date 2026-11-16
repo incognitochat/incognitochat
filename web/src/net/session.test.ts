@@ -12,7 +12,7 @@ const NOW = 1_800_000_000;
 const deviceClock = (skew = 0) => createClock(() => (NOW + skew) * 1000);
 
 /** A server that answers logins and records what each call carried; it checks times as the backend does. */
-function server(options: { expireFirst?: boolean; replaced?: boolean } = {}) {
+function server(options: { expireFirst?: boolean; replaced?: boolean; refuseFirstLogins?: number } = {}) {
   const seen: { method: string; path: string; auth: string | undefined; signature: string | undefined }[] = [];
   let logins = 0;
   let expired = options.expireFirst ?? false;
@@ -24,6 +24,8 @@ function server(options: { expireFirst?: boolean; replaced?: boolean } = {}) {
         if (path === '/session') {
           logins++;
           if (skewed((JSON.parse(init.body!) as { timestamp: number }).timestamp)) throw new ApiError(401, 'clock_skew', NOW);
+          // The server's login read not seeing a device set up a moment ago.
+          if (logins <= (options.refuseFirstLogins ?? 0)) throw new ApiError(401, 'login_refused');
         }
         return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: `v1.t${logins}.m`, expires: NOW + 900 });
       }
@@ -49,6 +51,38 @@ async function registeredDb(api: Api) {
 }
 
 describe('session', () => {
+  it('right after a setup in another copy, tries a refused login once more', async () => {
+    const s = server({ refuseFirstLogins: 1 });
+    const db = await registeredDb(s.api);
+    let clockMs = 0;
+    const session = createSession(db, s.api, deviceClock(), () => clockMs);
+    session.setUp();
+    clockMs = 2_000;
+    await session.call('GET', '/account', undefined, checkObject);
+    expect(s.logins()).toBe(2);
+    expect((await readAccount(db))?.state).toBe('registered');
+  });
+
+  it('records a refused login at once otherwise, and after one retry', async () => {
+    const late = server({ refuseFirstLogins: 1 });
+    const db = await registeredDb(late.api);
+    let clockMs = 0;
+    const session = createSession(db, late.api, deviceClock(), () => clockMs);
+    session.setUp();
+    clockMs = 60_000; // long after the setup
+    await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
+    expect(late.logins()).toBe(1);
+    expect((await readAccount(db))?.state).toBe('refused');
+
+    const gone = server({ refuseFirstLogins: 5 });
+    const db2 = await registeredDb(gone.api);
+    const fresh = createSession(db2, gone.api, deviceClock(), () => 0);
+    fresh.setUp();
+    await expect(fresh.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
+    expect(gone.logins()).toBe(2);
+    expect((await readAccount(db2))?.state).toBe('refused');
+  });
+
   it('logs in once and reuses the token', async () => {
     const s = server();
     const session = createSession(await registeredDb(s.api), s.api, deviceClock());
