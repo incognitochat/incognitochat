@@ -28,9 +28,14 @@ const SwitchesTTL = 30 * time.Second
 
 // switchesRetry is how soon an instance reads the switches again after a
 // failed read. Meanwhile it keeps what it knew, so a directory that can't be
-// read neither pauses nor resumes anything, and isn't asked on every
-// request.
+// read resumes nothing, and isn't asked on every request.
 const switchesRetry = 5 * time.Second
+
+// allPaused is what an instance that has never read the switches goes by:
+// it fails closed, so making the directory's reads fail (while forcing new
+// instances) can't get past a pause. The app takes a refusal of a few
+// seconds in its stride.
+var allPaused = directory.Switches{UploadsPaused: true, DownloadsPaused: true}
 
 // SwitchStore holds the emergency switches (directory.Store).
 type SwitchStore interface {
@@ -38,19 +43,28 @@ type SwitchStore interface {
 	SetSwitch(ctx context.Context, sw directory.Switch, paused bool) (directory.Switches, error)
 }
 
-// switchCache is one instance's copy of the switches. Before its first read
-// succeeds, nothing is paused.
+// switchCache is one instance's copy of the switches. Until its first read
+// succeeds, everything counts as paused (allPaused).
 type switchCache struct {
 	mu      sync.Mutex
 	known   directory.Switches
+	read    bool      // known was read (or set) at least once
 	next    time.Time // when to read again; zero until read
 	reading bool      // a read is under way: others use what's known
 }
 
+// current is what's known, or allPaused before the first read: c.mu held.
+func (c *switchCache) current() directory.Switches {
+	if !c.read {
+		return allPaused
+	}
+	return c.known
+}
+
 // switches returns the switches as this instance knows them, reading them
 // again once they are SwitchesTTL old. If the read fails, it returns the
-// last known ones (not paused, if none) and tries again after
-// switchesRetry.
+// last known ones (everything paused, if it never read them) and tries
+// again after switchesRetry.
 func (s *Server) switches(ctx context.Context, route string) directory.Switches {
 	if s.Switches == nil {
 		return directory.Switches{}
@@ -59,9 +73,9 @@ func (s *Server) switches(ctx context.Context, route string) directory.Switches 
 	now := s.Now()
 	c.mu.Lock()
 	if c.reading || now.Before(c.next) {
-		known := c.known
+		current := c.current()
 		c.mu.Unlock()
-		return known
+		return current
 	}
 	c.reading = true
 	c.mu.Unlock()
@@ -74,7 +88,7 @@ func (s *Server) switches(ctx context.Context, route string) directory.Switches 
 	if err != nil {
 		c.next = now.Add(switchesRetry)
 		s.Log.Warn("reading the switches failed", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
-		return c.known
+		return c.current()
 	}
 	s.rememberSwitchesLocked(sw, now)
 	return sw
@@ -105,7 +119,16 @@ func (s *Server) rememberSwitchesLocked(sw directory.Switches, now time.Time) {
 			s.Log.Warn("downloads resumed")
 		}
 	}
-	c.known, c.next = sw, now.Add(SwitchesTTL)
+	// An operator's typing mistake (say {"S": "true"}) pauses nothing:
+	// said once, until it's put right.
+	if sw.Malformed && !c.known.Malformed {
+		s.Log.Warn("a switch isn't a BOOL: taken as not paused")
+	}
+	c.known, c.read, c.next = sw, true, now.Add(SwitchesTTL)
+}
+
+func switchesJSON(sw directory.Switches) switchesResponse {
+	return switchesResponse{UploadsPaused: sw.UploadsPaused, DownloadsPaused: sw.DownloadsPaused}
 }
 
 // switchesResponse is how the admin routes show the switches.
@@ -131,7 +154,7 @@ func (s *Server) adminSwitches(ctx context.Context, _ httpapi.Request, _ caller)
 		return s.internal(route, err)
 	}
 	s.rememberSwitches(sw)
-	return httpapi.JSON(http.StatusOK, switchesResponse(sw))
+	return httpapi.JSON(http.StatusOK, switchesJSON(sw))
 }
 
 // adminSetSwitch pauses or resumes uploads or downloads for everyone. This
@@ -156,5 +179,5 @@ func (s *Server) adminSetSwitch(ctx context.Context, req httpapi.Request, _ call
 		return s.internal(route, err)
 	}
 	s.rememberSwitches(sw)
-	return httpapi.JSON(http.StatusOK, switchesResponse(sw))
+	return httpapi.JSON(http.StatusOK, switchesJSON(sw))
 }

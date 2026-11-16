@@ -541,11 +541,14 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   versions and no access logs.
 - **Paused.** The operator can pause uploads or downloads for everyone
   (the emergency switches; [deployment.md](deployment.md#emergency-switches)).
-  While uploads are paused, `POST /media` and `POST /media/{id}/upload`
-  answer `503 uploads_paused` before looking at any token or the upload, so
-  no token is spent and the upload keeps its fresh URLs. While downloads are
+  While uploads are paused, `POST /media` answers `503 uploads_paused`
+  before looking at any token, so none is spent. `POST /media/{id}/upload`
+  checks the secret and the bucket as usual, so a stored upload is still
+  answered `{uploaded: true}`, and answers `503 uploads_paused` only instead
+  of a fresh URL (the try counts as one of its 3). While downloads are
   paused, `GET /media/{id}` answers `503 downloads_paused` before counting
-  the download. A change reaches every server within about 30 seconds. The
+  the download. A change reaches every server within about 30 seconds, and
+  a server that hasn't yet read the switches counts both as paused. The
   app doesn't try again by itself: it puts the tokens back in its wallet and
   marks the message not sent, saying why; Try again in its menu sends it,
   as a new attachment, if it was never uploaded. A paused download stays to

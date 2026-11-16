@@ -81,12 +81,19 @@ func TestPausedUploads(t *testing.T) {
 	h, store, uploads, switches := mediaHarness(t)
 	spent := h.server.Spent.(*memSpent)
 
-	// Paid for before the pause; it still needs a fresh URL.
+	// Paid for before the pause: one still needs a fresh URL, the other was
+	// written but the answer to its PUT was lost.
 	status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now))
 	if status != http.StatusCreated {
 		t.Fatalf("upload: %d %v", status, out)
 	}
 	id := out["id"].(string)
+	status, out = h.pay(t, 16<<10, mintMediaToken(t, h.now))
+	if status != http.StatusCreated {
+		t.Fatalf("upload: %d %v", status, out)
+	}
+	written := out["id"].(string)
+	store.stored[written] = true
 
 	switches.set(directory.Switches{UploadsPaused: true})
 	h.now = h.now.Add(SwitchesTTL)
@@ -100,26 +107,37 @@ func TestPausedUploads(t *testing.T) {
 	// Even tokens that would be refused: nothing about them is looked at.
 	status, out = h.pay(t, 2<<20, "not a token")
 	wantError(t, status, out, http.StatusServiceUnavailable, "uploads_paused")
-	// No fresh URL either, and none of the upload's three is used up.
+	if len(spent.spent) != spends || store.presigned != presigned || len(uploads.ups) != records {
+		t.Fatalf("spent %d -> %d, presigned %d -> %d, records %d -> %d", spends, len(spent.spent), presigned, store.presigned, records, len(uploads.ups))
+	}
+	// No fresh URL either (that try counts as one of the upload's three).
 	status, out = h.post(t, "/media/"+id+"/upload", map[string]any{"secret": b64(deleteSecret)})
 	wantError(t, status, out, http.StatusServiceUnavailable, "uploads_paused")
-	if len(spent.spent) != spends || store.presigned != presigned || len(uploads.ups) != records || uploads.writes != 0 || store.lookups != 0 {
-		t.Fatalf("spent %d -> %d, presigned %d -> %d, records %d -> %d, renewal writes %d, lookups %d",
-			spends, len(spent.spent), presigned, store.presigned, records, len(uploads.ups), uploads.writes, store.lookups)
+	if store.presigned != presigned || uploads.renewals[id] != 1 {
+		t.Fatalf("presigned %d -> %d, renewals %d", presigned, store.presigned, uploads.renewals[id])
 	}
+	// But one that is stored is still done: not paid for twice.
+	status, out = h.post(t, "/media/"+written+"/upload", map[string]any{"secret": b64(deleteSecret)})
+	if status != http.StatusOK || out["uploaded"] != true || store.presigned != presigned {
+		t.Fatalf("stored while paused: %d %v, presigned %d -> %d", status, out, presigned, store.presigned)
+	}
+	// Refusals that don't depend on the pause stay the same.
+	status, out = h.post(t, "/media/"+id+"/upload", map[string]any{"secret": b64([]byte("wrong"))})
+	wantError(t, status, out, http.StatusNotFound, "not_found")
 
 	// Downloads, deletes and everything else go on.
 	if status, out := h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false); status != http.StatusOK {
 		t.Fatalf("download while uploads are paused: %d %v", status, out)
 	}
 
-	// Resumed: the same tokens pay, and the upload gets all its fresh URLs.
+	// Resumed: the same tokens pay, and the upload gets the rest of its
+	// fresh URLs.
 	switches.set(directory.Switches{})
 	h.now = h.now.Add(SwitchesTTL)
 	if status, out := h.pay(t, 2<<20, tokens...); status != http.StatusCreated {
 		t.Fatalf("upload after resuming: %d %v", status, out)
 	}
-	for range UploadRenewals {
+	for range UploadRenewals - 1 {
 		if status, out := h.post(t, "/media/"+id+"/upload", map[string]any{"secret": b64(deleteSecret)}); status != http.StatusOK || out["url"] == nil {
 			t.Fatalf("renew after resuming: %d %v", status, out)
 		}
@@ -216,15 +234,54 @@ func TestSwitchesCache(t *testing.T) {
 	if !strings.Contains(h.logs.String(), `"msg":"reading the switches failed"`) {
 		t.Fatalf("logs = %s", h.logs)
 	}
+
+	// A switch of the wrong type (an operator's typing mistake) pauses
+	// nothing, and is said once, until it's put right.
+	malformed := `"msg":"a switch isn't a BOOL: taken as not paused"`
+	switches.set(directory.Switches{Malformed: true})
+	for range 3 {
+		h.now = h.now.Add(SwitchesTTL)
+		if status := download(); status != http.StatusNotFound {
+			t.Fatalf("malformed: %d", status)
+		}
+	}
+	if n := strings.Count(h.logs.String(), malformed); n != 1 {
+		t.Fatalf("said %d times: %s", n, h.logs)
+	}
+	switches.set(directory.Switches{})
+	h.now = h.now.Add(SwitchesTTL)
+	download()
+	switches.set(directory.Switches{Malformed: true})
+	h.now = h.now.Add(SwitchesTTL)
+	download()
+	if n := strings.Count(h.logs.String(), malformed); n != 2 {
+		t.Fatalf("said %d times: %s", n, h.logs)
+	}
 }
 
 func TestSwitchesNeverRead(t *testing.T) {
-	// A fresh instance that can't read the switches pauses nothing.
+	// A fresh instance that can't read the switches fails closed: it gives
+	// out no URLs until a read works, and asks again only after a pause.
 	h, _, _, switches := mediaHarness(t)
-	switches.set(directory.Switches{UploadsPaused: true, DownloadsPaused: true})
 	switches.fail = errors.New("throttled")
 	status, out := h.call(t, nil, "", http.MethodGet, "/media/AAAAAAAAAAAAAAAAAAAAAA", nil, false)
-	wantError(t, status, out, http.StatusNotFound, "not_found")
+	wantError(t, status, out, http.StatusServiceUnavailable, "downloads_paused")
+	status, out = h.pay(t, 16<<10, mintMediaToken(t, h.now))
+	wantError(t, status, out, http.StatusServiceUnavailable, "uploads_paused")
+	if switches.reads != 1 {
+		t.Fatalf("reads = %d", switches.reads)
+	}
+	h.now = h.now.Add(switchesRetry)
+	switches.fail = nil
+	if status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusCreated {
+		t.Fatalf("upload once read: %d %v", status, out)
+	}
+	// Once it has read them, a failed read keeps what it read.
+	switches.fail = errors.New("throttled")
+	h.now = h.now.Add(SwitchesTTL)
+	if status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusCreated {
+		t.Fatalf("upload after a failed read: %d %v", status, out)
+	}
 
 	// Without switches at all (as before they existed), nothing is paused.
 	h.server.Switches = nil
@@ -307,37 +364,48 @@ func (s *slowSwitches) Switches(ctx context.Context, consistent bool) (directory
 
 func TestSwitchesOneReadAtATime(t *testing.T) {
 	// While one request reads the switches, the others go on with what the
-	// instance knew, rather than reading too or waiting.
+	// instance knew (everything paused, before its first read), rather than
+	// reading too or waiting.
 	h := newHarness(t)
 	slow := &slowSwitches{release: make(chan struct{})}
-	slow.sw = directory.Switches{UploadsPaused: true}
 	h.server.Switches = slow
-	first := make(chan directory.Switches)
-	go func() { first <- h.server.switches(context.Background(), "test") }()
-	// Wait until the first is reading.
-	for {
-		h.server.switchCache.mu.Lock()
-		reading := h.server.switchCache.reading
-		h.server.switchCache.mu.Unlock()
-		if reading {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Go(func() {
-			if sw := h.server.switches(context.Background(), "test"); sw.UploadsPaused {
-				t.Error("not read yet, but paused")
+	ctx := context.Background()
+	// read runs one read, checking what others get meanwhile.
+	read := func(meanwhile directory.Switches) directory.Switches {
+		t.Helper()
+		first := make(chan directory.Switches)
+		go func() { first <- h.server.switches(ctx, "test") }()
+		for {
+			h.server.switchCache.mu.Lock()
+			reading := h.server.switchCache.reading
+			h.server.switchCache.mu.Unlock()
+			if reading {
+				break
 			}
-		})
+			time.Sleep(time.Millisecond)
+		}
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Go(func() {
+				if sw := h.server.switches(ctx, "test"); sw != meanwhile {
+					t.Errorf("meanwhile %+v, want %+v", sw, meanwhile)
+				}
+			})
+		}
+		wg.Wait()
+		slow.release <- struct{}{}
+		return <-first
 	}
-	wg.Wait()
-	close(slow.release)
-	if sw := <-first; !sw.UploadsPaused {
-		t.Fatal("the read didn't pause uploads")
+
+	if sw := read(allPaused); sw != (directory.Switches{}) {
+		t.Fatalf("first read: %+v", sw)
 	}
-	if sw := h.server.switches(context.Background(), "test"); !sw.UploadsPaused || slow.reads != 1 {
-		t.Fatalf("after the read: %+v, reads %d", sw, slow.reads)
+	slow.set(directory.Switches{UploadsPaused: true})
+	h.now = h.now.Add(SwitchesTTL)
+	if sw := read(directory.Switches{}); sw != (directory.Switches{UploadsPaused: true}) {
+		t.Fatalf("second read: %+v", sw)
+	}
+	if sw := h.server.switches(ctx, "test"); !sw.UploadsPaused || slow.reads != 2 {
+		t.Fatalf("after the reads: %+v, reads %d", sw, slow.reads)
 	}
 }

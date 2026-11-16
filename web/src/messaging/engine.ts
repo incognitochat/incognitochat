@@ -353,7 +353,8 @@ export function createMessaging(deps: MessagingDeps) {
    * it goes like a new one, now, at the end of the conversation. One that
    * was uploaded is left alone: its message may have arrived. Under the
    * message's lock, so two copies of the app don't both send (and pay for)
-   * it.
+   * it; one that another copy sent meanwhile (or deleted) is quietly left
+   * as it is.
    */
   function resendMedia(
     conv: string,
@@ -362,15 +363,16 @@ export function createMessaging(deps: MessagingDeps) {
     onProgress?: (fraction: number) => void,
   ): Promise<void> {
     return withLock(mediaLock(conv, id), async () => {
-      const conversation = await getConversation(db, conv);
       const message = await getMessage(db, conv, id);
-      if (!conversation || !message || !canResend(message)) throw new Error('nothing to send again');
+      if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
       const file = await getMedia(db, conv, id);
-      if (!file) throw new Error('nothing to send again');
+      if (!file) throw new Error('attachment missing');
       const at = now();
       const { text, replyTo, media } = message;
       await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(text, replyTo, media!));
       await onStored?.();
+      // Only these two change, on the chat as it is then (under the send
+      // lock), so a message that arrived meanwhile isn't undone.
       await update(conv, (c) => ({ ...c, lastAt: at, hidden: false }));
       await deliverMedia(conv, id, at, { file, media: media! }, text, replyTo, onProgress);
     });

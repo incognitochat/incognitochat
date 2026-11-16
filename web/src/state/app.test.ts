@@ -1122,18 +1122,41 @@ describe('attachments paused by the operator', () => {
     expect(downloads()).toEqual(['GET /media/upload-p1', 'GET /media/upload-p2']);
     expect(app.screen.value).toMatchObject({ kind: 'conversation', error: 'media-paused' });
 
-    // Resumed: a tap asks at once, and the notice goes (here the upload has expired).
+    // Resumed: a tap asks at once, the notice goes (here the upload has
+    // expired), and fetching by itself starts again at once too.
     server.state.switches.downloadsPaused = false;
     await app.fetchMedia({ conv: 'c1', id: 'p2' });
     expect(downloads()).toHaveLength(3);
     expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
-    // Some minutes later, by itself again.
+    await app.home();
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(4));
+    expect(downloads().at(-1)).toBe('GET /media/upload-p1');
+  });
+
+  it('fetches by itself again some minutes after downloads were paused', async () => {
+    const server = fakeServer();
+    server.state.switches.downloadsPaused = true;
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    await addMessage(
+      db,
+      { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
+      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+    server.state.switches.downloadsPaused = false;
+    await app.home();
+    await app.openConversation('c1');
+    await tick();
+    expect(downloads()).toHaveLength(1);
     await withDeviceClockOff(3 * 60_000, async () => {
       await app.home();
       await app.openConversation('c1');
-      await vi.waitFor(() => expect(downloads()).toHaveLength(4));
+      await vi.waitFor(() => expect(downloads()).toHaveLength(2));
     });
-    expect(downloads().at(-1)).toBe('GET /media/upload-p1');
   });
 
   it('lets admins pause and resume uploads and downloads for everyone, with signed requests', async () => {

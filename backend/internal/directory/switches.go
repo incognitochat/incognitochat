@@ -14,7 +14,7 @@ import (
 //	S#switches   S   uploadsPaused (BOOL), downloadsPaused (BOOL)
 //
 // Only a BOOL true pauses; a missing item or attribute, or any other value,
-// means not paused. The attribute names are spelled out, unlike the rest of
+// means not paused (and a value of another type is reported as Malformed). The attribute names are spelled out, unlike the rest of
 // the table, because an operator may type them into the AWS CLI during an
 // incident (docs/deployment.md, "Emergency switches"). The item is runtime
 // data: the app and the operator write it, never Terraform or CI, and it
@@ -44,6 +44,9 @@ var ErrUnknownSwitch = errors.New("directory: unknown switch")
 type Switches struct {
 	UploadsPaused   bool
 	DownloadsPaused bool
+	// Malformed: an attribute holds something other than a BOOL, taken as
+	// not paused.
+	Malformed bool
 }
 
 // Switches reads the emergency switches. The api function reads them
@@ -83,9 +86,15 @@ func (s *Store) SetSwitch(ctx context.Context, sw Switch, paused bool) (Switches
 }
 
 func switchesOf(item map[string]types.AttributeValue) Switches {
+	var out Switches
 	paused := func(sw Switch) bool {
-		v, ok := item[switchAttrs[sw]].(*types.AttributeValueMemberBOOL)
-		return ok && v.Value
+		v, present := item[switchAttrs[sw]]
+		b, ok := v.(*types.AttributeValueMemberBOOL)
+		if present && !ok {
+			out.Malformed = true
+		}
+		return ok && b.Value
 	}
-	return Switches{UploadsPaused: paused(SwitchUploads), DownloadsPaused: paused(SwitchDownloads)}
+	out.UploadsPaused, out.DownloadsPaused = paused(SwitchUploads), paused(SwitchDownloads)
+	return out
 }

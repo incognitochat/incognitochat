@@ -55,7 +55,8 @@ func TestSwitches(t *testing.T) {
 	if sw := read(); sw != (Switches{UploadsPaused: true, DownloadsPaused: true}) {
 		t.Fatalf("after update-item: %+v", sw)
 	}
-	// Only a BOOL true pauses: a value of another type is not paused.
+	// Only a BOOL true pauses: a value of another type is not paused, and
+	// is reported.
 	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &s.Table,
 		Item: map[string]types.AttributeValue{
@@ -65,7 +66,7 @@ func TestSwitches(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if sw := read(); sw != (Switches{}) {
+	if sw := read(); sw != (Switches{Malformed: true}) {
 		t.Fatalf("not BOOL true: %+v", sw)
 	}
 }

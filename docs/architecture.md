@@ -225,9 +225,10 @@ the server never sees a key, name or type.
   uploads or downloads for everyone, with the AWS CLI or from the app's
   admin screen, and no release. They are one settings item in the directory
   table, which each `api` instance reads at most every 30 seconds (keeping
-  the last value if a read fails). While paused, the API gives out no new
-  upload or download URLs, answering before any token is spent or download
-  counted; messages keep working. The app says attachments are paused,
+  the last value if a read fails, and counting both as paused until its
+  first read). While paused, the API gives out no new upload or download
+  URLs, answering before any token is spent or download counted; messages
+  keep working. The app says attachments are paused,
   keeps an unsent one to send again, and stops fetching by itself for two
   minutes at a time ([deployment.md](deployment.md#emergency-switches)).
 - **Downloads.** A download URL also starts within a minute, and S3 answers

@@ -834,6 +834,8 @@ export function createApp(deps: Deps) {
     let paused = false;
     try {
       await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f));
+      // Answered: downloads aren't paused (any more).
+      downloadsPausedUntil = 0;
     } catch (err) {
       // Otherwise tried again on the next tap or opening.
       if (isPaused(err)) {

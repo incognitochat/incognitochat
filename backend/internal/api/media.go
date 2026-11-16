@@ -129,7 +129,8 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 // nothing is stored, at most UploadRenewals times and within
 // UploadRenewalWindow of payment. Once the upload is stored the answer says
 // so ({"uploaded": true}), and the app counts its upload as done. Every
-// refusal is the same not_found.
+// refusal is the same not_found, except uploads_paused while the operator
+// has paused uploads (switches.go).
 func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/{id}/upload"
 	id := httpapi.Param(ctx, "id")
@@ -141,11 +142,6 @@ func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.R
 	}
 	if s.Media == nil || !ids.Valid(id) || len(in.Secret) == 0 {
 		return httpapi.Error(http.StatusNotFound, "not_found")
-	}
-	// Before the upload is read or one of its fresh URLs used up: a fresh
-	// URL is another minute of PUTs, and the upload keeps them for later.
-	if s.switches(ctx, route).UploadsPaused {
-		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
 	}
 	// Read and check before writing anything: anyone can call this, as often
 	// as the firewall lets them, and a refused conditional write still costs
@@ -176,6 +172,12 @@ func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.R
 	}
 	if stored {
 		return httpapi.JSON(http.StatusOK, map[string]bool{"uploaded": true})
+	}
+	// Only the fresh URL waits for uploads to resume (another minute of
+	// PUTs); one stored already, whose answer was lost, is still done, so
+	// it isn't paid for twice. The try counts as one of its fresh URLs.
+	if s.switches(ctx, route).UploadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
 	}
 	url, err := s.Media.UploadURL(ctx, id, up.Size)
 	if err != nil {

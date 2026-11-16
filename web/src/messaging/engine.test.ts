@@ -2535,14 +2535,14 @@ describe('attachments paused by the operator', () => {
     expect(await mine()).toMatchObject({ id: failed.id, status: 'failed' });
 
     // Resumed: sent as the same message, at the end, paid once, even when
-    // tried twice at once (two copies of the app).
+    // tried twice at once (two copies of the app): the second finds it sent
+    // and quietly does nothing.
     backend.down.uploads = false;
     const shown: string[] = [];
-    const tries = await Promise.allSettled([
+    await Promise.all([
       sender.messaging.resendMedia(conv, failed.id, async () => void shown.push((await mine()).status)),
-      sender.messaging.resendMedia(conv, failed.id),
+      sender.messaging.resendMedia(conv, failed.id, async () => void shown.push('again')),
     ]);
-    expect(tries.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
     expect(backend.mediaCalls).toEqual(['POST /media', 'POST /media', 'POST /media']);
     expect(shown).toEqual(['sending']);
     const sent = await mine();
@@ -2551,7 +2551,8 @@ describe('attachments paused by the operator', () => {
     expect(canResend(sent)).toBe(false);
     expect(await tokensLeft()).toBe(1);
     // Nothing more to send again.
-    await expect(sender.messaging.resendMedia(conv, failed.id)).rejects.toThrow();
+    await sender.messaging.resendMedia(conv, failed.id);
+    expect(backend.mediaCalls).toHaveLength(3);
 
     await owner.messaging.sync();
     const local = await across(sender.db, conv, owner.db);

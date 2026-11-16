@@ -122,9 +122,11 @@ AWS_PROFILE=<profile> aws sns subscribe --region <aws-region> --protocol email \
   --notification-endpoint <address>
 ```
 
-CI can't change these alerts: they belong to the bootstrap stack. Nor can
-it write table items, so a deploy never overwrites runtime data such as the
-[emergency switches](#emergency-switches).
+CI can't change these alerts: they belong to the bootstrap stack. Once the
+bootstrap stack is applied with the deny on table items (added with the
+[emergency switches](#emergency-switches); apply it in each environment), CI
+can't write table items either, so a deploy can't overwrite runtime data
+such as the switches.
 
 Then set the rest:
 
@@ -207,10 +209,14 @@ own share of concurrency (`RESERVE_CONCURRENCY`), both above.
 Two switches pause attachments for everyone without a release: **uploads**
 (no new upload URLs: `POST /media` and `POST /media/{id}/upload` answer
 `503 uploads_paused`) and **downloads** (no new download URLs: `GET
-/media/{id}` answers `503 downloads_paused`). Both answer before any media
-token is looked at, any fresh upload URL is used up or any download is
-counted, so users lose nothing. Messages, reactions and everything else keep
-working. The app says "Attachments are paused for now; try again later",
+/media/{id}` answers `503 downloads_paused`). `POST /media` answers before
+any media token is looked at, and `GET /media/{id}` before the download is
+counted. `POST /media/{id}/upload` still checks the bucket first, so an
+upload that was written (only its answer lost) is still done, and refuses
+only the fresh URL, which counts as one of the upload's three. The one loss:
+a pause that lands between paying for an upload and a PUT that fails costs
+those tokens, since the app's Try again pays again. Messages, reactions and
+everything else keep working. The app says "Attachments are paused for now; try again later",
 keeps an unsent attachment as Not sent with Try again in its menu, and stops
 fetching attachments by itself for two minutes at a time.
 
@@ -218,8 +224,12 @@ They are one item in the directory table, pk `S#switches`, sk `S`, with BOOL
 attributes `uploadsPaused` and `downloadsPaused`. No item, a missing
 attribute, or anything but BOOL true means not paused. Each `api` instance
 reads it at most every 30 seconds, and only when a media route is called. If
-a read fails, the instance keeps what it last read (not paused, if nothing
-yet) and reads again 5 seconds later. Terraform doesn't manage the item, and
+a read fails, the instance keeps what it last read and reads again 5 seconds
+later. An instance that has never read it counts both as paused, so failing
+the directory's reads can't get past a pause; the app takes the few seconds
+of refusals in its stride. A value of the wrong type (say `{"S":"true"}`)
+pauses nothing, and each instance logs "a switch isn't a BOOL" once.
+Terraform doesn't manage the item, and once the bootstrap stack is applied
 the deploy role is denied writing table items, so deploys never reset it.
 
 **When a media alarm fires** (`media-uploads`, `media-downloads`,
