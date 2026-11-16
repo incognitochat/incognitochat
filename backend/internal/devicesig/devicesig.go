@@ -34,9 +34,12 @@ const (
 // of every fingerprint, so a later suite can never produce the same one.
 const Suite = 0x01
 
+// SignatureLen is the length of a signature: r ‖ s, 32 bytes each.
+const SignatureLen = 64
+
 const (
 	publicKeyLen = 65
-	signatureLen = 64
+	signatureLen = SignatureLen
 )
 
 var (

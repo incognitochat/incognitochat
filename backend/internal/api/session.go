@@ -21,7 +21,9 @@ type sessionRequest struct {
 }
 
 // session logs a device in (design §7). A device of a replaced account learns
-// so only after its signature checks out.
+// so only after its signature checks out. Whatever can be refused without
+// the device's key (a timestamp out of range, a malformed nonce or
+// signature) is refused before the directory is read.
 func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /session"
 	var in sessionRequest
@@ -32,9 +34,19 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	now := s.Now()
-	// Before the directory is read, so the answer says nothing about the device.
-	if session.CheckTime(in.Timestamp, now) != nil {
+	login := session.Login{
+		AccountID: in.Account,
+		DeviceID:  in.Device,
+		Timestamp: in.Timestamp,
+		Nonce:     in.Nonce,
+		Signature: in.Signature,
+	}
+	// Before the directory is read, so the answer says nothing about the
+	// device: first the clock, then the rest that needs no key.
+	if err := session.Precheck(login, now); errors.Is(err, session.ErrClockSkew) {
 		return clockSkew(now)
+	} else if err != nil {
+		return httpapi.Error(http.StatusUnauthorized, "login_refused")
 	}
 
 	device, err := s.Directory.Device(ctx, in.Account, in.Device, now)
@@ -49,13 +61,6 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 		return s.internal(route, err)
 	}
 
-	login := session.Login{
-		AccountID: in.Account,
-		DeviceID:  in.Device,
-		Timestamp: in.Timestamp,
-		Nonce:     in.Nonce,
-		Signature: in.Signature,
-	}
 	err = session.Check(ctx, login, key, s.Nonces, now)
 	if errors.Is(err, session.ErrLogin) {
 		return httpapi.Error(http.StatusUnauthorized, "login_refused")

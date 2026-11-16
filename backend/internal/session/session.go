@@ -166,6 +166,22 @@ func Check(ctx context.Context, login Login, pub *ecdsa.PublicKey, nonces NonceS
 	return checkFresh(ctx, pub, login.Signature, devicesig.LabelSession, LoginParts(login), login.Timestamp, login.Nonce, nonces, now)
 }
 
+// Precheck refuses a login that can't be valid whatever the device's key,
+// without the database, so the server checks it before reading the device:
+// first a timestamp too far from the server's clock (CheckTime's
+// ErrClockSkew), then malformed IDs, nonce or signature (ErrLogin). Check
+// repeats it.
+func Precheck(login Login, now time.Time) error {
+	if err := CheckTime(login.Timestamp, now); err != nil {
+		return err
+	}
+	if !ids.Valid(login.AccountID) || !ids.Valid(login.DeviceID) || !validNonce(login.Nonce) ||
+		len(login.Signature) != devicesig.SignatureLen {
+		return ErrLogin
+	}
+	return nil
+}
+
 // SignedRequest is a device's signature on one API request, required on top
 // of a session token for sensitive actions: a stolen token alone can't make
 // them.

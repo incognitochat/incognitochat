@@ -64,7 +64,12 @@ with a body carries the body's SHA-256, in hex, in `X-Amz-Content-Sha256`,
 which that signature covers.
 Signed requests carry `X-Device-Signature: <timestamp>.<nonce>.<signature>`
 next to the session token. Nonces are 16–64 base64url characters and are used
-once; timestamps must be within 60 seconds of the server's clock.
+once; timestamps must be within 60 seconds of the server's clock. A login that
+can't be valid whatever the device's key (its timestamp, nonce or signature
+malformed or out of range) is refused with `login_refused` before the server
+reads anything. Each logged-in request reads the device and its account in
+one strongly consistent read, so a replaced or deleted account is refused at
+once.
 
 **Clocks.** A login or signed request whose timestamp is more than 60 seconds
 from the server's clock, and a new account's device list issued outside its
@@ -105,7 +110,13 @@ does, after the user types a confirmation.
 account (after a typed confirmation); there is no device linking or sync.
 Replacing deletes the old account's links and mailboxes on the server, and a
 new setup on a device first deletes everything the previous account left
-there (keys, conversations, mailboxes, links). A
+there (keys, conversations, mailboxes, links). Per Telegram user and UTC day,
+`POST /register` makes at most 3 accounts or replacements, and takes at most
+20 attempts that get past the signature checks, retries and `account_exists`
+answers included: launch data stays valid for 10 minutes, so it can be
+replayed. An attempt reads only the Telegram user's account item and the
+registering device's; the old account's whole partition is listed only to
+replace it, once that has been counted. A
 device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
@@ -154,6 +165,9 @@ keys, each `{key, from, until, signature}` with the signature over
 `Message("incognitochat/v2/link-key", [0x01], key, u64(from), u64(until))`.
 A client trusts a bundle only if the signing key's fingerprint is the one in the
 link and every key's signature checks; it encrypts to the newest key valid now.
+Anyone can ask for a bundle, so the server reads it eventually consistent, at
+half the cost: a link made, changed or revoked in about the last second may
+not show so yet. Sends always go by a fresh read of the mailbox.
 
 An account has one link at a time (`POST /links`). Replacing it
 (`POST /links` with `replaces: <old ID>`) swaps the old link and its intro

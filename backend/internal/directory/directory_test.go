@@ -63,7 +63,7 @@ func TestCreateAndRead(t *testing.T) {
 	s, _ := store(t)
 	ctx := context.Background()
 
-	if _, err := s.ByTelegram(ctx, "th-1"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ByTelegram(ctx, "th-1", ids.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("empty table: %v", err)
 	}
 	n := newAccount(t, "th-1")
@@ -74,11 +74,11 @@ func TestCreateAndRead(t *testing.T) {
 		t.Fatalf("second account for one Telegram user: %v", err)
 	}
 
-	got, err := s.ByTelegram(ctx, "th-1")
+	got, err := s.ByTelegram(ctx, "th-1", n.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != n.ID || !bytes.Equal(got.Key, n.AccountKey) || !bytes.Equal(got.Devices[n.DeviceID], n.DeviceKey) {
+	if got.ID != n.ID || !bytes.Equal(got.Key, n.AccountKey) || !bytes.Equal(got.DeviceKey, n.DeviceKey) {
 		t.Fatalf("ByTelegram = %+v", got)
 	}
 
@@ -102,7 +102,7 @@ func TestReplace(t *testing.T) {
 	if err := s.Create(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	old, err := s.ByTelegram(ctx, "th-1")
+	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestReplace(t *testing.T) {
 		t.Fatalf("stale replace: %v", err)
 	}
 
-	got, err := s.ByTelegram(ctx, "th-1")
+	got, err := s.ByTelegram(ctx, "th-1", second.DeviceID)
 	if err != nil || got.ID != second.ID {
 		t.Fatalf("ByTelegram after replace = %+v, %v", got, err)
 	}

@@ -48,7 +48,7 @@ func (s *Server) lookupAccount(ctx context.Context, req httpapi.Request) httpapi
 	if !ok {
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
-	_, err = s.Directory.ByTelegram(ctx, telegramHash)
+	_, err = s.Directory.AccountOf(ctx, telegramHash)
 	if err != nil && !errors.Is(err, directory.ErrNotFound) {
 		return s.internal(route, err)
 	}

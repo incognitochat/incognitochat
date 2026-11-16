@@ -141,6 +141,36 @@ func signLogin(t *testing.T, key *ecdsa.PrivateKey, login Login) Login {
 	return login
 }
 
+// Precheck refuses what no key could make valid, without a key or nonces.
+func TestPrecheck(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-0123456789abc"})
+	if err := Precheck(login, now); err != nil {
+		t.Fatalf("valid login: %v", err)
+	}
+	// A wrong signature of the right shape is for Check to find.
+	forged := login
+	forged.Signature = make([]byte, devicesig.SignatureLen)
+	if err := Precheck(forged, now); err != nil {
+		t.Fatalf("well-formed signature: %v", err)
+	}
+	for name, change := range map[string]func(*Login){
+		"stale":           func(l *Login) { l.Timestamp = now.Add(-MaxSkew - time.Second).Unix() },
+		"future":          func(l *Login) { l.Timestamp = now.Add(MaxSkew + time.Second).Unix() },
+		"short nonce":     func(l *Login) { l.Nonce = "short" },
+		"nonce charset":   func(l *Login) { l.Nonce = "nonce with spaces!!" },
+		"short signature": func(l *Login) { l.Signature = l.Signature[:10] },
+		"bad account ID":  func(l *Login) { l.AccountID = "x" },
+		"bad device ID":   func(l *Login) { l.DeviceID = "x" },
+	} {
+		bad := login
+		change(&bad)
+		if err := Precheck(bad, now); !errors.Is(err, ErrLogin) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
 func TestCheck(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

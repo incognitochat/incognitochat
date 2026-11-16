@@ -115,7 +115,7 @@ func TestReplaceRevokesLinks(t *testing.T) {
 	if err := s.CreateLink(ctx, first.ID, l, links.MaxActive); err != nil {
 		t.Fatal(err)
 	}
-	old, err := s.ByTelegram(ctx, first.TelegramHash)
+	old, err := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}

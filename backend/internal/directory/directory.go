@@ -97,10 +97,9 @@ func TelegramHash(pepper []byte, userID int64) string {
 
 // Account is an existing account, as registration needs it.
 type Account struct {
-	ID      string
-	Key     []byte            // account key; nil if the account item is missing
-	Devices map[string][]byte // device ID -> signing key
-	items   []string          // every sort key in the partition
+	ID        string
+	Key       []byte // account key; nil if the account item is missing
+	DeviceKey []byte // the signing key of the device asked about; nil if the account has no such device
 }
 
 // NewAccount is a registration to store.
@@ -129,51 +128,73 @@ type Device struct {
 	Notices      bool   // Telegram notices are set up and not turned off
 }
 
-// ByTelegram returns the account registered for a Telegram hash.
-func (s *Store) ByTelegram(ctx context.Context, telegramHash string) (Account, error) {
+// AccountOf returns the ID of the account registered for a Telegram hash,
+// reading only the item that keeps one account per Telegram user.
+func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, error) {
 	out, err := s.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &s.Table,
 		Key:            key("T#"+telegramHash, skTelegram),
 		ConsistentRead: aws.Bool(true),
 	})
 	if err != nil {
-		return Account{}, err
+		return "", err
 	}
 	id, ok := str(out.Item, "a")
 	if !ok {
-		return Account{}, ErrNotFound
+		return "", ErrNotFound
 	}
+	return id, nil
+}
 
-	acct := Account{ID: id, Devices: map[string][]byte{}}
-	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
+// ByTelegram returns the account registered for a Telegram hash, with the
+// signing key of one of its devices, if it has that device. It reads only
+// those items, never the rest of the partition, which can hold thousands
+// (Replace lists it, once it has committed).
+func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (Account, error) {
+	id, err := s.AccountOf(ctx, telegramHash)
+	if err != nil {
+		return Account{}, err
+	}
+	acct, dev, err := s.accountAndDevice(ctx, id, deviceID)
+	if err != nil {
+		return Account{}, err
+	}
+	out := Account{ID: id}
+	if _, gone := str(acct, "g"); !gone {
+		out.Key, _ = bin(acct, "ak")
+	}
+	out.DeviceKey, _ = bin(dev, "k")
+	return out, nil
+}
+
+// accountAndDevice reads an account's item and one device's item (either
+// nil if missing) in one strongly consistent query: the device's sort key
+// follows the account's ("A" < "D#…"), and only the account's other
+// devices, if any, sort between them.
+func (s *Store) accountAndDevice(ctx context.Context, accountID, deviceID string) (map[string]types.AttributeValue, map[string]types.AttributeValue, error) {
+	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.Table,
-		KeyConditionExpression: aws.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": &types.AttributeValueMemberS{Value: accountPK(id)},
+		KeyConditionExpression: aws.String("pk = :pk AND sk BETWEEN :a AND :d"),
+		ExpressionAttributeValues: attrs{
+			":pk": sv(accountPK(accountID)),
+			":a":  sv(skAccount),
+			":d":  sv(devicePrefix + deviceID),
 		},
 		ConsistentRead: aws.Bool(true),
 	})
-	for pages.HasMorePages() {
-		page, err := pages.NextPage(ctx)
-		if err != nil {
-			return Account{}, err
-		}
-		for _, it := range page.Items {
-			sk, _ := str(it, "sk")
-			acct.items = append(acct.items, sk)
-			switch {
-			case sk == skAccount:
-				if _, gone := str(it, "g"); !gone {
-					acct.Key, _ = bin(it, "ak")
-				}
-			case strings.HasPrefix(sk, devicePrefix):
-				if k, ok := bin(it, "k"); ok {
-					acct.Devices[strings.TrimPrefix(sk, devicePrefix)] = k
-				}
-			}
+	if err != nil {
+		return nil, nil, err
+	}
+	var acct, dev map[string]types.AttributeValue
+	for _, it := range out.Items {
+		switch sk, _ := str(it, "sk"); sk {
+		case skAccount:
+			acct = it
+		case devicePrefix + deviceID:
+			dev = it
 		}
 	}
-	return acct, nil
+	return acct, dev, nil
 }
 
 // Create stores a new account. It returns ErrConflict if the Telegram user
@@ -215,10 +236,16 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 		return err
 	}
 
-	// Then the rest of its partition: device keys stay until the marker
-	// expires, everything else goes now.
+	// Then the rest of its partition, listed only now: once the limit has
+	// counted this replacement, and once nothing can join it (creating
+	// anything needs the account item, now only a marker). Device keys
+	// stay until the marker expires, everything else goes now.
+	sks, devices, err := s.partition(ctx, old.ID)
+	if err != nil {
+		return err
+	}
 	var requests []types.WriteRequest
-	for _, sk := range old.items {
+	for _, sk := range sks {
 		switch {
 		case sk == skAccount:
 		case strings.HasPrefix(sk, mailboxPrefix):
@@ -240,7 +267,7 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink)}},
 			)
 		case strings.HasPrefix(sk, devicePrefix):
-			k, ok := old.Devices[strings.TrimPrefix(sk, devicePrefix)]
+			k, ok := devices[sk]
 			if !ok {
 				continue
 			}
@@ -386,16 +413,48 @@ func (s *Store) sortKeys(ctx context.Context, accountID string) ([]string, error
 	return sks, nil
 }
 
+// partition lists an account's whole partition: every sort key, and the
+// signing key of each device (by sort key).
+func (s *Store) partition(ctx context.Context, accountID string) ([]string, map[string][]byte, error) {
+	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
+		TableName:                 &s.Table,
+		KeyConditionExpression:    aws.String("pk = :pk"),
+		ExpressionAttributeValues: attrs{":pk": sv(accountPK(accountID))},
+		ProjectionExpression:      aws.String("sk, k"),
+		ConsistentRead:            aws.Bool(true),
+	})
+	var sks []string
+	devices := map[string][]byte{}
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, it := range page.Items {
+			sk, ok := str(it, "sk")
+			if !ok {
+				continue
+			}
+			sks = append(sks, sk)
+			if k, ok := bin(it, "k"); ok && strings.HasPrefix(sk, devicePrefix) {
+				devices[sk] = k
+			}
+		}
+	}
+	return sks, devices, nil
+}
+
 // Device returns a device's signing key, and whether its account was
 // replaced. It returns ErrNotFound if the device or its account is gone.
+// Every logged-in request asks, so it is one strongly consistent read of
+// both items (a replaced or deleted account is refused at once), not two.
 func (s *Store) Device(ctx context.Context, accountID, deviceID string, now time.Time) (Device, error) {
-	dev, err := s.get(ctx, accountPK(accountID), devicePrefix+deviceID, now)
+	acct, dev, err := s.accountAndDevice(ctx, accountID, deviceID)
 	if err != nil {
 		return Device{}, err
 	}
-	acct, err := s.get(ctx, accountPK(accountID), skAccount, now)
-	if err != nil {
-		return Device{}, err
+	if acct == nil || dev == nil || expired(acct, now) || expired(dev, now) {
+		return Device{}, ErrNotFound
 	}
 	k, ok := bin(dev, "k")
 	if !ok {
@@ -440,13 +499,19 @@ func (s *Store) newAccountItems(n NewAccount) []types.TransactWriteItem {
 	}
 }
 
-// get reads one item, treating an expired item as missing: TTL deletion can
-// lag by days.
+// get reads one item, strongly consistent, treating an expired item as
+// missing: TTL deletion can lag by days.
 func (s *Store) get(ctx context.Context, pk, sk string, now time.Time) (map[string]types.AttributeValue, error) {
+	return s.read(ctx, pk, sk, now, true)
+}
+
+// read is get, eventually consistent unless consistent: at half the cost,
+// it may miss a write made in about the last second.
+func (s *Store) read(ctx context.Context, pk, sk string, now time.Time, consistent bool) (map[string]types.AttributeValue, error) {
 	out, err := s.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &s.Table,
 		Key:            key(pk, sk),
-		ConsistentRead: aws.Bool(true),
+		ConsistentRead: aws.Bool(consistent),
 	})
 	if err != nil {
 		return nil, err

@@ -113,7 +113,19 @@ func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link
 
 // Link returns a link's bundle. Revoked and unknown links are both ErrNotFound.
 func (s *Store) Link(ctx context.Context, id string) (Link, error) {
-	it, err := s.get(ctx, linkPK(id), skLink, time.Time{})
+	return s.link(ctx, id, true)
+}
+
+// Bundle is Link for anyone who opens the link, eventually consistent at
+// half the cost: a link made or revoked in about the last second may not
+// show yet. Sends through it still go by its intro mailbox, which is read
+// afresh.
+func (s *Store) Bundle(ctx context.Context, id string) (Link, error) {
+	return s.link(ctx, id, false)
+}
+
+func (s *Store) link(ctx context.Context, id string, consistent bool) (Link, error) {
+	it, err := s.read(ctx, linkPK(id), skLink, time.Time{}, consistent)
 	if err != nil {
 		return Link{}, err
 	}

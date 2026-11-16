@@ -47,12 +47,15 @@ import (
 
 // Directory is the account store.
 type Directory interface {
-	ByTelegram(ctx context.Context, telegramHash string) (directory.Account, error)
+	AccountOf(ctx context.Context, telegramHash string) (string, error)
+	ByTelegram(ctx context.Context, telegramHash, deviceID string) (directory.Account, error)
 	Create(ctx context.Context, n directory.NewAccount) error
 	Replace(ctx context.Context, old directory.Account, n directory.NewAccount, now time.Time) error
 	Device(ctx context.Context, accountID, deviceID string, now time.Time) (directory.Device, error)
 	CreateLink(ctx context.Context, accountID string, l directory.Link, max int) error
 	Link(ctx context.Context, id string) (directory.Link, error)
+	// Bundle is Link for anyone, eventually consistent.
+	Bundle(ctx context.Context, id string) (directory.Link, error)
 	ReplaceLink(ctx context.Context, accountID, oldID string, l directory.Link) error
 	SetLinkKeys(ctx context.Context, accountID, id string, keys []links.Key) error
 	SetNotices(ctx context.Context, accountID string, sealedChat []byte, language string) error

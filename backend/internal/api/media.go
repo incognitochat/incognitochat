@@ -29,6 +29,8 @@ type Media interface {
 type Uploads interface {
 	Put(ctx context.Context, id string, up ephemeral.Upload, expires time.Time) error
 	Get(ctx context.Context, id string) (ephemeral.Upload, bool, error)
+	// Exists is Get for downloads: eventually consistent.
+	Exists(ctx context.Context, id string) (bool, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -109,7 +111,7 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	if s.Media == nil || !ids.Valid(id) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	if _, ok, err := s.Uploads.Get(ctx, id); err != nil {
+	if ok, err := s.Uploads.Exists(ctx, id); err != nil {
 		return s.internal(route, err)
 	} else if !ok {
 		return httpapi.Error(http.StatusNotFound, "not_found")
