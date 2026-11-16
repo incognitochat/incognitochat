@@ -64,10 +64,10 @@ with a body carries the body's SHA-256, in hex, in `X-Amz-Content-Sha256`,
 which that signature covers.
 Signed requests carry `X-Device-Signature: <timestamp>.<nonce>.<signature>`
 next to the session token. Nonces are 16–64 base64url characters and are used
-once; timestamps must be within 60 seconds of the server's clock. A login that
-can't be valid whatever the device's key (its timestamp, nonce or signature
-malformed or out of range) is refused with `login_refused` before the server
-reads anything. A login reads the device eventually consistent, at half the
+once; timestamps must be within 60 seconds of the server's clock (otherwise
+`clock_skew`, below). A login that can't be valid whatever the device's key
+(its nonce or signature malformed) is refused with `login_refused` before
+the server reads anything. A login reads the device eventually consistent, at half the
 cost, so a device replaced or removed in about the last second may still get
 a token; each logged-in request reads the device and its account again, in
 one strongly consistent read, so a replaced or deleted account is refused at

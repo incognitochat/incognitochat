@@ -165,9 +165,18 @@ func TestPrecheck(t *testing.T) {
 	} {
 		bad := login
 		change(&bad)
-		if err := Precheck(bad, now); !errors.Is(err, ErrLogin) {
+		err := Precheck(bad, now)
+		// The clock first, told apart; the rest is a plain refusal.
+		clock := name == "stale" || name == "future"
+		if !errors.Is(err, ErrLogin) || errors.Is(err, ErrClockSkew) != clock {
 			t.Errorf("%s: err = %v", name, err)
 		}
+	}
+	// Both wrong: the clock is what it says.
+	both := login
+	both.Timestamp, both.Nonce = now.Add(-time.Hour).Unix(), "short"
+	if err := Precheck(both, now); !errors.Is(err, ErrClockSkew) {
+		t.Errorf("stale and a bad nonce: err = %v", err)
 	}
 }
 

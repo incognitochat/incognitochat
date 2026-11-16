@@ -169,9 +169,16 @@ func TestDirectoryCapacity(t *testing.T) {
 	badNonce["nonce"] = "short"
 	shortSig := m.d.login(t, h.now)
 	shortSig["signature"] = b64(make([]byte, 10))
-	for name, body := range map[string]map[string]any{"stale time": stale, "bad nonce": badNonce, "short signature": shortSig} {
-		status, out := h.post(t, "/session", body)
-		wantError(t, status, out, http.StatusUnauthorized, "login_refused")
+	for name, c := range map[string]struct {
+		body map[string]any
+		code string
+	}{
+		"stale time":      {stale, "clock_skew"},
+		"bad nonce":       {badNonce, "login_refused"},
+		"short signature": {shortSig, "login_refused"},
+	} {
+		status, out := h.post(t, "/session", c.body)
+		wantError(t, status, out, http.StatusUnauthorized, c.code)
 		if d, _ := tb.cost(t, "POST /session, "+name); d.Read != 0 {
 			t.Fatalf("%s: read %.1f units", name, d.Read)
 		}
