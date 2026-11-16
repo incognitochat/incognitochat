@@ -121,16 +121,18 @@ it. This is how close it gets.
   and key updates are marked so they don't trigger a notice. The server sees the mark, not
   which of these it is or who sent it.
 - **Attachment sizes, roughly.** Files are padded before upload (to the next
-  power of two up to 1 MiB, then the next whole MiB), and paid with one media
-  token per started MiB. So the server sees a size class, not the type, name
-  or content.
+  power of two from 16 KiB up to 1 MiB, then the next whole MiB; the server
+  takes no other size), and paid with one media token per started MiB. So
+  the server sees a size class, not the type, name or content.
 - **Attachments wait on the server, encrypted.** An upload stays in the bucket
   until the recipient deletes the message or the conversation, or 30 days
   pass, whether or not it was downloaded or saved, so the app can fetch it
-  again meanwhile. It's ciphertext the server can't open, but it exists. The
-  link used to save a file in the device's browser can stay in that
-  browser's history; it carries no delete secret, and once the upload is
-  gone it opens nothing.
+  again meanwhile. It's ciphertext the server can't open, but it exists. It
+  can be written only once, from a link that must start the upload within a
+  minute: the sender can't swap it after sending, or put it back after the
+  recipient deleted it. The link used to save a file in the device's
+  browser can stay in that browser's history; it carries no delete secret,
+  and once the upload is gone it opens nothing.
 - **"Seen" right after a link.** Opening a link from Telegram never opens a
   chat or sends "seen" by itself, so a link's owner can't send someone their
   link and watch for a "seen" to learn whether that person writes to them.

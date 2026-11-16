@@ -55,7 +55,7 @@ var (
 	ErrTidy = errors.New("ephemeral: socket records not tidied")
 )
 
-// SocketDB is the part of the DynamoDB client Sockets (and Uploads) use.
+// SocketDB is the part of the DynamoDB client Sockets uses.
 type SocketDB interface {
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)

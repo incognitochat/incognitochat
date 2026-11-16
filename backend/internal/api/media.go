@@ -18,6 +18,12 @@ import (
 // recipient needs one or two; more would make it file hosting.
 const DownloadsPerDay = 5
 
+// UploadRenewals is how many fresh upload URLs an upload gets after its
+// first, for the app to try again when a PUT fails: an upload URL only works
+// if the PUT starts within a minute. Each one is another minute in which the
+// URL can be tried (and billed), so there are few.
+const UploadRenewals = 3
+
 // Media is the media bucket (media.Bucket).
 type Media interface {
 	UploadURL(ctx context.Context, id string, size int64) (string, error)
@@ -31,6 +37,7 @@ type Uploads interface {
 	Get(ctx context.Context, id string) (ephemeral.Upload, bool, error)
 	// Exists is Get for downloads: eventually consistent.
 	Exists(ctx context.Context, id string) (bool, error)
+	Renew(ctx context.Context, id string, deleteHash []byte, most int) (ephemeral.Upload, bool, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -42,8 +49,9 @@ type uploadRequest struct {
 
 // upload takes payment for an upload and returns where to put it. Like a
 // send, it needs no login: anonymous media tokens pay for it (one per started
-// MiB), so an upload can't be tied to an account. The app then PUTs
-// exactly size bytes of ciphertext to the URL.
+// MiB), so an upload can't be tied to an account. Only the padded sizes the
+// app makes are accepted. The app then PUTs exactly size bytes of
+// ciphertext to the URL, once, starting within a minute (media.UploadURL).
 func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media"
 	var in uploadRequest
@@ -53,7 +61,7 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 	if s.Media == nil || s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	if in.Size < 1 || in.Size > media.MaxSize || len(in.DeleteHash) != sha256.Size {
+	if !media.PaddedSize(in.Size) || len(in.DeleteHash) != sha256.Size {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	if len(in.Tokens) != media.TokensFor(in.Size) {
@@ -100,6 +108,39 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 		return s.internal(route, err)
 	}
 	return httpapi.JSON(http.StatusCreated, map[string]string{"id": id, "url": url})
+}
+
+// renewUpload gives a paid upload a fresh upload URL, for whoever holds its
+// delete secret: the app trying again after a failed PUT, once the first
+// URL can no longer start one. It costs no tokens. A URL can't overwrite
+// what an earlier PUT wrote (media.UploadURL), so a fresh one only helps
+// while nothing is stored; there are at most UploadRenewals.
+func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
+	const route = "POST /media/{id}/upload"
+	id := httpapi.Param(ctx, "id")
+	var in struct {
+		Secret bytes64 `json:"secret"`
+	}
+	if err := httpapi.DecodeJSON(req, &in); err != nil {
+		return httpapi.DecodeError(err)
+	}
+	if s.Media == nil || !ids.Valid(id) || len(in.Secret) == 0 {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	hash := sha256.Sum256(in.Secret)
+	up, ok, err := s.Uploads.Renew(ctx, id, hash[:], UploadRenewals)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	if !ok {
+		// No such upload, the wrong secret, or no fresh URLs left.
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	url, err := s.Media.UploadURL(ctx, id, up.Size)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	return httpapi.JSON(http.StatusOK, map[string]string{"url": url})
 }
 
 // download returns where to fetch an upload. The ID is in the encrypted

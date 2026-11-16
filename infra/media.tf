@@ -54,13 +54,15 @@ resource "aws_s3_bucket_lifecycle_configuration" "media" {
   }
 }
 
-# Browsers upload and download from the app's origin only.
+# Browsers upload and download from the app's origin only. An upload sends
+# If-None-Match: *, which its URL's signature requires, so it writes only
+# once.
 resource "aws_s3_bucket_cors_configuration" "media" {
   bucket = aws_s3_bucket.media.id
   cors_rule {
     allowed_origins = var.client_origins
     allowed_methods = ["PUT", "GET"]
-    allowed_headers = ["content-type"]
+    allowed_headers = ["content-type", "if-none-match"]
     max_age_seconds = 3600
   }
 }
@@ -81,10 +83,41 @@ data "aws_iam_policy_document" "media" {
       values   = ["false"]
     }
   }
+
+  # Presigned URLs only start a transfer within a minute of being signed
+  # (backend/internal/media), since every request on one is billed. This
+  # refuses any signature older than two minutes, should a longer URL ever
+  # be signed. s3:signatureAge is in milliseconds and is set only for
+  # presigned URLs.
+  statement {
+    sid       = "FreshPresignedUrlsOnly"
+    effect    = "Deny"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${aws_s3_bucket.media.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "NumericGreaterThan"
+      variable = "s3:signatureAge"
+      values   = ["120000"]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "media" {
   bucket     = aws_s3_bucket.media.id
   policy     = data.aws_iam_policy_document.media.json
   depends_on = [aws_s3_bucket_public_access_block.media]
+}
+
+# Request counts each minute (PutRequests, GetRequests and the rest) for the
+# whole bucket. Uploads and downloads go straight here, past the API and its
+# alarms; the alarms in infra/init/alerts.tf watch these, and find them by
+# this name, since the bucket's own name is random. Billed as CloudWatch
+# custom metrics, only for hours with requests.
+resource "aws_s3_bucket_metric" "media" {
+  bucket = aws_s3_bucket.media.id
+  name   = "${local.prefix}-media"
 }

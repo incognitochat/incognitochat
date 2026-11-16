@@ -75,6 +75,9 @@ data "aws_iam_policy_document" "deploy" {
       "s3:GetLifecycleConfiguration",
       "s3:PutLifecycleConfiguration",
       "s3:GetReplicationConfiguration",
+      # Request metrics (also needed to delete them).
+      "s3:GetMetricsConfiguration",
+      "s3:PutMetricsConfiguration",
     ]
     resources = [local.arns.media_buckets]
   }

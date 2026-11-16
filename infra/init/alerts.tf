@@ -154,3 +154,30 @@ resource "aws_cloudwatch_metric_alarm" "table_throttles" {
     }
   }
 }
+
+# Uploads and downloads go from the app straight to the media bucket with
+# presigned URLs, past the API, its firewall and the alarms above, and S3
+# bills every request, refused ones included. Each needs a URL from the api
+# function first, so far more than real use is a URL being replayed. The
+# bucket's name is random (infra/media.tf), so the query finds its request
+# metrics by their configuration's name.
+resource "aws_cloudwatch_metric_alarm" "media_requests" {
+  for_each = { uploads = "PutRequests", downloads = "GetRequests" }
+
+  alarm_name          = "${local.prefix}-media-${each.key}"
+  alarm_description   = "The media bucket had more than ${var.media_requests_alarm} ${each.value} in 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.media_requests_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "requests"
+    expression  = "SELECT SUM(${each.value}) FROM SCHEMA(\"AWS/S3\", BucketName, FilterId) WHERE FilterId = '${local.prefix}-media'"
+    label       = each.value
+    period      = local.alarm_period
+    return_data = true
+  }
+}

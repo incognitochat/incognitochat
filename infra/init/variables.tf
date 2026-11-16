@@ -50,3 +50,9 @@ variable "api_invocations_alarm" {
   type        = number
   default     = 30000
 }
+
+variable "media_requests_alarm" {
+  description = "Uploads (PUT) or downloads (GET) straight to the media bucket in 5 minutes above which an alarm is raised (3000 is 10 a second)"
+  type        = number
+  default     = 3000
+}

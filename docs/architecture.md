@@ -198,6 +198,19 @@ part of its signature. The upload is paid with media tokens (one per started
 MiB, files up to 50 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
+- **Cost guards.** S3 bills every request, and these go past the API. The
+  server accepts only the padded sizes the app makes (16 KiB at least). An
+  upload URL must start its upload within a minute and writes only once, so
+  it can't be replayed for long, overwrite an upload, or recreate a deleted
+  one; the bucket also refuses any presigned request signed over two
+  minutes before. A failed upload is tried again (four tries in all) without
+  new tokens: on the same URL while it can still start, or on one of three
+  fresh URLs the server gives for the upload's delete secret. Request
+  metrics on the bucket feed two alarms, on uploads and on downloads.
+- **Downloads.** A download URL also starts within a minute, and S3 answers
+  it uncompressed whatever the upload claimed. The app reads only the padded
+  size the message says and stops at once otherwise, so an upload can't
+  unpack into something huge on the recipient's device.
 - Photos are redrawn on the device (up to 1280 px), which drops their
   metadata; videos keep their pictures but lose location and time metadata;
   voice and video messages are recorded in the app and carry none. Files are

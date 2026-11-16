@@ -13,11 +13,12 @@ import (
 // Uploads records media uploads until they're fetched and deleted, or
 // expire:
 //
-//	U#<id>  U  the SHA-256 of its delete secret (d), its size (s)
+//	U#<id>  U  the SHA-256 of its delete secret (d), its size (s), how many
+//	           fresh upload URLs it was given after the first (r)
 //
 // Nothing says who uploaded it or who it's for.
 type Uploads struct {
-	DB    SocketDB
+	DB    DB
 	Table string
 	Now   func() time.Time
 }
@@ -70,6 +71,38 @@ func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, 
 	size, ok2 := intAttr(out.Item, "s")
 	d, ok3 := out.Item["d"].(*types.AttributeValueMemberB)
 	if !ok1 || !ok2 || !ok3 || expires <= u.Now().Unix() {
+		return Upload{}, false, nil
+	}
+	return Upload{DeleteHash: d.Value, Size: size}, true, nil
+}
+
+// Renew counts one more fresh upload URL for an upload, for whoever holds its
+// delete secret (deleteHash is its SHA-256), and returns the upload. It
+// reports false if there is no such upload (or it expired), the hash is
+// wrong, or the upload already had most.
+func (u *Uploads) Renew(ctx context.Context, id string, deleteHash []byte, most int) (Upload, bool, error) {
+	out, err := u.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           &u.Table,
+		Key:                 map[string]types.AttributeValue{"pk": sv("U#" + id), "sk": sv("U")},
+		UpdateExpression:    aws.String("ADD r :one"),
+		ConditionExpression: aws.String("attribute_exists(pk) AND d = :d AND e > :now AND (attribute_not_exists(r) OR r < :most)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":one":  num(1),
+			":d":    &types.AttributeValueMemberB{Value: deleteHash},
+			":now":  num(u.Now().Unix()),
+			":most": num(int64(most)),
+		},
+		ReturnValues: types.ReturnValueAllNew,
+	})
+	if conditionFailed(err) {
+		return Upload{}, false, nil
+	}
+	if err != nil {
+		return Upload{}, false, err
+	}
+	size, ok1 := intAttr(out.Attributes, "s")
+	d, ok2 := out.Attributes["d"].(*types.AttributeValueMemberB)
+	if !ok1 || !ok2 {
 		return Upload{}, false, nil
 	}
 	return Upload{DeleteHash: d.Value, Size: size}, true, nil
