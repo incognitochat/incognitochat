@@ -89,7 +89,8 @@ key (signed by it), and the link's intro mailbox.
 
 - Opening a link, the app fetches the bundle without logging in and checks
   the fingerprint and signatures before encrypting anything. A server that
-  swaps keys is caught.
+  swaps keys is caught. It does so for every link, your own and ones you
+  already write to included, so the server can't tell them apart.
 - A link opened from Telegram never acts by itself, since anyone can send
   one. If you already write to that person, the app says so and opens the
   chat only when you tap Open. An invitation link asks first and joins only

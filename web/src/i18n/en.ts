@@ -39,7 +39,7 @@ export const en = {
   haveInvitation: 'Have an invitation code?',
   join: 'Join',
   joinTitle: 'You have an invitation',
-  joinBody: 'This invitation lets you create your own link. Whoever made it will see that it was used.',
+  joinBody: 'This is an invitation to get your own link. If you join with it, whoever made it will see that it was used.',
   notNow: 'Not now',
   noticeJoined: "You're in. You can now create your own link.",
   noticeInvalidInvitation: "That invitation code doesn't exist or is used up.",
@@ -78,7 +78,7 @@ export const en = {
   linkVerified: 'This link is genuine: its keys match it.',
   linkOwn: 'This is your own link.',
   linkExisting: 'You already write to this person anonymously.',
-  linkExistingHint: "Opening the chat marks their messages as seen. If they just sent you this link, opening it now could tell them it's you.",
+  linkExistingHint: "Opening the chat marks their messages as seen. If they just sent you this link, opening the chat now could tell them it's you.",
   openChat: 'Open chat',
   linkNotFound: "This link doesn't exist, or its owner replaced or deleted it.",
   linkMismatch:

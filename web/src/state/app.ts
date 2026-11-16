@@ -168,10 +168,11 @@ export type Screen =
       created: string | null;
     }
   | { kind: 'admin'; levels: LevelAllowance[]; busy: boolean; notice: AdminNotice | null }
-  /** chat: the conversation already written through this link (status 'existing'). */
-  | { kind: 'link'; status: LinkStatus; canWrite: boolean; busy: boolean; error: SendError | null; chat?: string }
-  /** An invitation link: joins only on a tap. */
-  | { kind: 'invitation'; code: string; busy: boolean }
+  | { kind: 'link'; status: Exclude<LinkStatus, 'existing'>; canWrite: boolean; busy: boolean; error: SendError | null }
+  /** chat: the conversation already written through this link. */
+  | { kind: 'link'; status: 'existing'; canWrite: false; busy: boolean; error: null; chat: string }
+  /** An invitation link: joins only on a tap. error: Join failed, and can be tried again. */
+  | { kind: 'invitation'; code: string; busy: boolean; error: 'network' | 'generic' | null }
   | {
       kind: 'conversation';
       id: string;
@@ -253,12 +254,19 @@ export function createApp(deps: Deps) {
   // touch it. Opening a link, or bringing the app back, can be someone
   // else's doing, and must not tell them who has which chat open.
   let attending = false;
+  // How many times the app was hidden, so a tap that first waits (on the
+  // network, or storage) can tell whether it still counts.
+  let hides = 0;
+  const hidden = () => {
+    attending = false;
+    hides++;
+  };
   deps.bridge?.on('visibility_changed', ({ is_visible }) => {
-    if (!is_visible) attending = false;
+    if (!is_visible) hidden();
   });
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState !== 'visible') attending = false;
+      if (document.visibilityState !== 'visible') hidden();
     });
   }
 
@@ -544,8 +552,13 @@ export function createApp(deps: Deps) {
     return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
   }
 
-  /** Opens a conversation: only ever on a tap in the app, so it's read now, and "seen" goes out. */
-  async function openConversation(id: string): Promise<void> {
+  /**
+   * Opens a conversation: only ever on a tap in the app, so it's read now,
+   * and "seen" goes out. tapped is the hide count when the tap came: if the
+   * app was hidden since (even while this runs), "seen" waits for a touch.
+   */
+  async function openConversation(id: string, tapped = hides): Promise<void> {
+    if (tapped === hides) attending = true;
     void refreshBudget();
     const list = await listConversations(deps.db);
     const c = list.find((x) => x.id === id);
@@ -563,8 +576,7 @@ export function createApp(deps: Deps) {
       busy: false,
       error: null,
     };
-    attending = true;
-    seen(id);
+    if (attending) seen(id);
     autoFetch(id);
   }
 
@@ -866,6 +878,7 @@ export function createApp(deps: Deps) {
     const current = screen.value;
     if (!messaging || ((current.kind === 'blocked' || current.kind === 'conversation') && current.busy)) return;
     if (current.kind === 'blocked' || current.kind === 'conversation') screen.value = { ...current, busy: true };
+    const tapped = hides;
     try {
       await messaging.unblock(id);
     } catch (err) {
@@ -877,7 +890,7 @@ export function createApp(deps: Deps) {
       return showBlocked(err instanceof NetworkError ? 'network' : 'generic');
     }
     deps.broadcast({ type: 'data-changed' });
-    if (current.kind === 'conversation') return openConversation(id);
+    if (current.kind === 'conversation') return openConversation(id, tapped);
     return showBlocked('unblocked');
   }
 
@@ -941,14 +954,15 @@ export function createApp(deps: Deps) {
   /** Writes the first message to the link just checked, starting a conversation. */
   async function writeToLink(text: string): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'link' || current.busy || !messaging || !openedLink || text.trim() === '') return;
+    if (current.kind !== 'link' || current.status !== 'verified' || current.busy || !messaging || !openedLink || text.trim() === '') return;
     screen.value = { ...current, busy: true, error: null };
     let opened: string | null = null;
+    const tapped = hides;
     try {
       // The conversation opens as soon as the message is stored, shown as sending.
       await messaging.startConversation(openedLink.ref, openedLink.bundle, text.trim(), async (id) => {
         opened = id;
-        await openConversation(id);
+        await openConversation(id, tapped);
       });
       deps.broadcast({ type: 'data-changed' });
       await refresh();
@@ -975,9 +989,10 @@ export function createApp(deps: Deps) {
     const ref = parsePayload(param);
     if (ref) return openLink(ref);
     const code = parseInvitationPayload(param);
-    if (code && !offline) {
+    if (code) {
       // Joining tells whoever made the invitation that it was used, and when.
-      screen.value = { kind: 'invitation', code, busy: false };
+      // Offline too: Join then says it couldn't reach the server.
+      screen.value = { kind: 'invitation', code, busy: false, error: null };
       return;
     }
     return showHome({ offline });
@@ -1102,7 +1117,7 @@ export function createApp(deps: Deps) {
     const current = screen.value;
     if (current.kind === 'invitation' && current.busy) return;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
-    if (current.kind === 'invitation') screen.value = { ...current, busy: true };
+    if (current.kind === 'invitation') screen.value = { ...current, busy: true, error: null };
     let notice: HomeNotice = 'joined';
     try {
       await session!.call('POST', '/invitations/redeem', { code }, checkRedeemed);
@@ -1114,6 +1129,11 @@ export function createApp(deps: Deps) {
       else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
       else if (err instanceof NetworkError) notice = 'network';
       else notice = 'generic';
+    }
+    // From an invitation link, what can be tried again keeps its Join button.
+    if (current.kind === 'invitation' && (notice === 'network' || notice === 'generic')) {
+      screen.value = { ...current, busy: false, error: notice };
+      return;
     }
     return showHome({ notice });
   }
@@ -1210,12 +1230,11 @@ export function createApp(deps: Deps) {
 
   /** Checks someone's link: its bundle must match the fingerprint in the link. */
   async function openLink(ref: LinkRef): Promise<void> {
-    const linkScreen = (status: LinkStatus) => ({ kind: 'link' as const, status, canWrite: false, busy: false, error: null });
+    const linkScreen = (status: Exclude<LinkStatus, 'existing'>) => ({ kind: 'link' as const, status, canWrite: false, busy: false, error: null });
+    screen.value = linkScreen('checking');
+    openedLink = null;
     // Our link, or one it replaced (the same fingerprint).
-    if ((await listLinks(deps.db)).some((l) => l.id === ref.id || l.fingerprint === ref.fingerprint)) {
-      screen.value = linkScreen('own');
-      return;
-    }
+    const own = (await listLinks(deps.db)).some((l) => l.id === ref.id || l.fingerprint === ref.fingerprint);
     // Already writing to this person: offer that conversation. A new one
     // would gain nothing, since the owner sees the same sender tag and label.
     // Through a replaced link, only once they've answered: before that, it
@@ -1229,24 +1248,35 @@ export function createApp(deps: Deps) {
         c.link.fingerprint === ref.fingerprint &&
         (c.link.id === ref.id || c.lastReceived !== null),
     );
-    if (existing) {
-      screen.value = { ...linkScreen('existing'), chat: existing.id };
-      return;
-    }
-    screen.value = linkScreen('checking');
-    openedLink = null;
+    // Checked the same way whatever the link turns out to be, so the server
+    // can't tell our own link, or one we already write to, from a new one.
+    let status: Exclude<LinkStatus, 'existing'> = 'verified';
+    let bundle: Bundle | null = null;
     try {
-      const bundle = await deps.api!.request('GET', `/links/${ref.id}`, {}, checkBundle);
+      bundle = await deps.api!.request('GET', `/links/${ref.id}`, {}, checkBundle);
       await verifyBundle(ref, bundle, Math.floor(Date.now() / 1000));
-      openedLink = { ref, bundle };
-      screen.value = { ...linkScreen('verified'), canWrite: messaging !== null };
     } catch (err) {
-      let status: LinkStatus = 'network';
+      status = 'network';
       if (err instanceof ApiError && err.code === 'not_found') status = 'not-found';
       else if (err instanceof BundleMismatch) status = 'mismatch';
-      screen.value = linkScreen(status);
-      if (status === 'network') retry = () => openLink(ref);
     }
+    if (own) {
+      screen.value = linkScreen('own');
+      return;
+    }
+    // The chat goes on without the link (replaced, or out of reach just
+    // now), but keys that don't match it are worth a warning.
+    if (existing && status !== 'mismatch') {
+      screen.value = { kind: 'link', status: 'existing', canWrite: false, busy: false, error: null, chat: existing.id };
+      return;
+    }
+    if (status === 'verified' && bundle) {
+      openedLink = { ref, bundle };
+      screen.value = { ...linkScreen('verified'), canWrite: messaging !== null };
+      return;
+    }
+    screen.value = linkScreen(status);
+    if (status === 'network') retry = () => openLink(ref);
   }
 
   /** Creates the keys (or reuses a pending setup) and asks Telegram to reopen as the registration launch. */
@@ -1417,7 +1447,8 @@ export function createApp(deps: Deps) {
     showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
     sync,
     refresh,
-    openConversation,
+    /** A tap on a chat. */
+    openConversation: (id: string) => openConversation(id),
     sendMessage,
     react,
     block,

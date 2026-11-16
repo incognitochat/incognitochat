@@ -205,10 +205,10 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               <Composer language={language} busy={screen.busy} onSend={app.writeToLink} />
             </>
           )}
-          {screen.status === 'existing' && screen.chat && (
+          {screen.status === 'existing' && (
             <>
               <p class="muted">{tr('linkExistingHint')}</p>
-              <Button onClick={() => screen.chat && app.openConversation(screen.chat)}>{tr('openChat')}</Button>
+              <Button onClick={() => app.openConversation(screen.chat)}>{tr('openChat')}</Button>
             </>
           )}
           {screen.status === 'network' && <Button onClick={app.retry}>{tr('tryAgain')}</Button>}
@@ -222,6 +222,11 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
     case 'invitation':
       return (
         <Page title={tr('joinTitle')} body={tr('joinBody')} busy={screen.busy}>
+          {screen.error && (
+            <p class="notice" role="alert">
+              {tr(NOTICE_TEXT[screen.error])}
+            </p>
+          )}
           <Button disabled={screen.busy} onClick={() => app.redeem(screen.code)}>
             {tr('join')}
           </Button>
@@ -411,9 +416,10 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
     // The keyboard opening shrinks the view: stay at the end if we were.
     const onResize = () => atEnd.current && scrollToEnd();
     // Coming back into view isn't enough (it can be someone else's doing);
-    // the first touch after it marks what's in view.
-    const onTouch = () => app.attend() && visible() && atEnd.current && app.markSeen();
-    const touches = ['pointerdown', 'keydown', 'wheel'] as const;
+    // the first touch after it marks what's in view. Clicks count too: a
+    // screen reader or switch control may send only those.
+    const onTouch = (e: Event) => e.isTrusted && app.attend() && visible() && atEnd.current && app.markSeen();
+    const touches = ['pointerdown', 'keydown', 'wheel', 'click'] as const;
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
     for (const type of touches) window.addEventListener(type, onTouch, { capture: true, passive: true });

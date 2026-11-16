@@ -8,6 +8,7 @@ import { ApiError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { listConversations } from '../messaging/store';
+import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
 import { createApp, type Screen } from './app';
 
@@ -154,6 +155,13 @@ async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', t
 function screenOf<K extends Screen['kind']>(screen: Screen, kind: K): Extract<Screen, { kind: K }> {
   if (screen.kind !== kind) throw new Error(`expected ${kind}, got ${screen.kind}`);
   return screen as Extract<Screen, { kind: K }>;
+}
+
+/** The chat a link screen offers to open (a link of someone we already write to). */
+function existingChat(screen: Screen): string {
+  const link = screenOf(screen, 'link');
+  if (link.status !== 'existing') throw new Error(`expected existing, got ${link.status}`);
+  return link.chat;
 }
 
 describe('conversations in the app', () => {
@@ -394,7 +402,7 @@ describe('conversations in the app', () => {
     expect(await replies()).toEqual(['sent']);
 
     // A tap on Open opens it, and "seen" goes out as for any chat opened in the app.
-    await launched.openConversation(screenOf(launched.screen.value, 'link').chat!);
+    await launched.openConversation(existingChat(launched.screen.value));
     expect(screenOf(launched.screen.value, 'conversation').id).toBe(conv);
     await settle(before + 1);
     expect(await replies()).toEqual(['seen']);
@@ -435,6 +443,103 @@ describe('conversations in the app', () => {
     await settle(2);
     await owner.sync();
     expect(screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status)).toEqual(['seen']);
+  });
+
+  it("doesn't count a tap when the app was hidden before the chat finished opening", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.home();
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+    await owner.sendMessage('one');
+    await sender.sync();
+
+    // A tap opens the chat, and the app is hidden while it opens.
+    const opening = sender.openConversation(conv);
+    tg.fire('visibility_changed', { is_visible: false });
+    await opening;
+    tg.fire('visibility_changed', { is_visible: true });
+    await owner.sendMessage('two');
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'one', 'two']);
+    sender.markSeen();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(1);
+
+    // Only a touch after it marks both seen.
+    expect(sender.attend()).toBe(true);
+    sender.markSeen();
+    await settle(2);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status)).toEqual(['seen', 'seen']);
+  });
+
+  it("doesn't count an Unblock tap when the app was hidden while it was sent", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.block();
+    await sender.openConversation(conv);
+    expect(screenOf(sender.screen.value, 'conversation').blocked).toBe(true);
+
+    const unblocking = sender.unblock(conv);
+    tg.fire('visibility_changed', { is_visible: false });
+    await unblocking;
+    tg.fire('visibility_changed', { is_visible: true });
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ id: conv, blocked: false });
+    // Not in use until touched: "seen" waits.
+    expect(sender.attend()).toBe(true);
+  });
+
+  it('checks the link on every launch, also of a chat that exists already', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const other = await person(b);
+    await other.createLink();
+    const otherPayload = new URL(screenOf(other.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    const fetched: string[] = [];
+    let swap = false;
+    const request = b.api.request.bind(b.api);
+    b.api.request = ((method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/')) {
+        fetched.push(path);
+        if (swap) path = `/links/${parsePayload(otherPayload)!.id}`;
+      }
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const linkPath = `/links/${parsePayload(payload)!.id}`;
+
+    // The server sees the same request as for a new link: from the writer...
+    expect(existingChat((await sender.reopen(payload)).screen.value)).toBe(conv);
+    expect(fetched).toEqual([linkPath]);
+    // ...and from the link's owner.
+    expect(screenOf((await owner.reopen(payload)).screen.value, 'link').status).toBe('own');
+    expect(fetched).toEqual([linkPath, linkPath]);
+    // Keys swapped by the server are caught here too.
+    swap = true;
+    expect(screenOf((await sender.reopen(payload)).screen.value, 'link').status).toBe('mismatch');
   });
 
   it('lists blocked conversations, opens them read-only, and unblocks from either place', async () => {
