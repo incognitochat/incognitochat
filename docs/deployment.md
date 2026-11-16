@@ -107,6 +107,8 @@ alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 | `api-invocations` | The `api` function was called more than 30,000 times in 5 minutes (100 a second). |
 | `api-errors` | The `api` function failed more than 10 times in 5 minutes. |
 | `<table>-table-throttles` | A table refused requests because its per-second cap was reached. |
+| `media-uploads`, `media-downloads` | The media bucket had more than 3,000 PUT or GET requests in 5 minutes (10 a second; `media_requests_alarm`). These go straight to S3, past the API and its alarms, and each is billed. They read the bucket's request metrics, which the app stack turns on. Those are billed like custom metrics, $0.30 a month each for up to 16, counted only in hours with requests: at most about $5 a month per environment. |
+| `media-download-bytes` | More than 2 GiB was downloaded from the media bucket in 5 minutes (about 7 MB a second; `media_download_gib_alarm`). Downloads cost by the data sent: one 51 MiB download costs as much as about 11,000 GET requests. Same request metrics. |
 
 The topic starts without subscribers, so no address is stored in the
 repository or in Terraform state. Subscribe one, and confirm the email AWS

@@ -169,6 +169,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodPost, "/notices", s.withDevice("POST /notices", s.setNotices))
 	r.Handle(http.MethodPost, "/accounts/lookup", s.lookupAccount)
 	r.Handle(http.MethodPost, "/media", s.upload)
+	r.Handle(http.MethodPost, "/media/{id}/upload", s.renewUpload)
 	r.Handle(http.MethodGet, "/media/{id}", s.download)
 	r.Handle(http.MethodPost, "/media/{id}/delete", s.deleteUpload)
 }

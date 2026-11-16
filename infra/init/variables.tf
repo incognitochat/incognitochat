@@ -50,3 +50,20 @@ variable "api_invocations_alarm" {
   type        = number
   default     = 30000
 }
+
+variable "media_requests_alarm" {
+  description = "Uploads (PUT) or downloads (GET) straight to the media bucket in 5 minutes above which an alarm is raised (3000 is 10 a second)"
+  type        = number
+  default     = 3000
+}
+
+variable "media_download_gib_alarm" {
+  description = "GiB downloaded from the media bucket in 5 minutes above which an alarm is raised (2 GiB is about 7 MB a second, about $0.19 of data transfer at $0.09 per GB)"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.media_download_gib_alarm > 0
+    error_message = "media_download_gib_alarm must be positive."
+  }
+}

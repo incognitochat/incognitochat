@@ -198,6 +198,22 @@ part of its signature. The upload is paid with media tokens (one per started
 MiB, files up to 50 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
+- **Cost guards.** S3 bills every request, and these go past the API. The
+  server accepts only the padded sizes the app makes (16 KiB at least). An
+  upload URL must start its upload within a minute and writes only once, so
+  it can't be replayed for long or overwrite an upload; the bucket refuses
+  any PUT that could overwrite, and any presigned request signed over two
+  minutes before. A failed upload is tried again (four tries in all, over
+  about 40 seconds) without new tokens: each try asks the server, with the
+  upload's delete secret, for a fresh URL, which it gives only while nothing
+  is stored, three times at most and only in the first three hours after
+  payment; once the upload is stored it says so. The app runs two uploads at
+  a time and asks for a URL only when one can start. Request metrics on the
+  bucket feed alarms on uploads, downloads and the data downloaded.
+- **Downloads.** A download URL also starts within a minute, and S3 answers
+  it uncompressed whatever the upload claimed. The app reads only the padded
+  size the message says and stops at once otherwise, so an upload can't
+  unpack into something huge on the recipient's device.
 - Photos are redrawn on the device (up to 1280 px), which drops their
   metadata; videos keep their pictures but lose location and time metadata;
   voice and video messages are recorded in the app and carry none. Files are
@@ -263,7 +279,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 |---|---|---|
 | `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations | mailboxes expire |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
-| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size and the hash of a delete secret) | minutes to 30 days |
+| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 
 - No precise timestamps: keys are random IDs, and times are rounded.
 - Point-in-time recovery stays off, so deleted data can't be restored.

@@ -14,10 +14,10 @@
 // fetch what its holder could already open.
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
-import { decryptFile } from '../crypto/media';
+import { decryptFile, uploadSize } from '../crypto/media';
 import { checkObject, type Api } from '../net/api';
 import type { Transfer } from '../net/transfer';
-import { fileName, type Media } from '../protocol/message';
+import { fileName, MAX_FILE_BYTES, type Media } from '../protocol/message';
 
 export const SAVE_PREFIX = '#save=';
 
@@ -42,6 +42,8 @@ export function readTicket(hash: string): SaveTicket | null {
       fromBase64Url(t.k).length === 32 &&
       Number.isSafeInteger(t.s) &&
       (t.s as number) > 0 &&
+      // As in a message: the page reads at most this much.
+      (t.s as number) <= MAX_FILE_BYTES &&
       (t.n === undefined || typeof t.n === 'string') &&
       (t.m === undefined || (typeof t.m === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(t.m)));
     // Older links also carry a delete secret, which is left out.
@@ -72,6 +74,6 @@ export async function fetchForSaving(api: Api, transfer: Transfer, ticket: SaveT
     if ((err as { code?: string }).code === 'not_found') throw new Gone();
     throw err;
   }
-  const bytes = await decryptFile(await transfer.get(url, onProgress), fromBase64Url(ticket.k), ticket.s);
+  const bytes = await decryptFile(await transfer.get(url, uploadSize(ticket.s), onProgress), fromBase64Url(ticket.k), ticket.s);
   return new File([bytes], ticket.n ?? 'file', ticket.m ? { type: ticket.m } : {});
 }

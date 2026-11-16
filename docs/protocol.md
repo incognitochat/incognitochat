@@ -417,11 +417,40 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 
 - The app encrypts the file with a fresh key, pads it, and asks
   `POST /media {size, deleteHash, tokens}` for an upload URL. No login: it
-  pays with media tokens, one per started MiB (at most 51 MiB). `deleteHash`
-  is the SHA-256 of a random delete secret. The answer is `{id, url}`, and the
-  app PUTs exactly `size` bytes of ciphertext, typed
-  `application/octet-stream`, to `url` (valid 15 minutes; the length and type
-  are part of its signature).
+  pays with media tokens, one per started MiB. `size` must be a padded size
+  (below): 16, 32, 64, 128, 256 or 512 KiB, or 1 to 51 whole MiB; any other
+  is refused with `bad_request` before a token is spent. `deleteHash` is the
+  SHA-256 of a random delete secret. The answer is `{id, url}`, and the app
+  PUTs exactly `size` bytes of ciphertext to `url` with the headers
+  `Content-Type: application/octet-stream` and `If-None-Match: *`. The
+  length and both headers are part of the URL's signature.
+- An upload URL writes once and starts within a minute. S3 refuses a PUT
+  once the upload exists (412), and a PUT that starts more than a minute
+  after the URL was signed (S3 checks when a request starts, so a long
+  upload that started in time finishes). The bucket also refuses any PUT
+  that creates an object without `If-None-Match`, and any presigned request
+  whose signature is over two minutes old. So an upload can't be replaced
+  after it was sent.
+- **Trying again.** If a PUT fails, the app tries again, up to four tries in
+  all, waiting 2, 10 and 30 seconds, with no new tokens. Before each later
+  try it asks `POST /media/{id}/upload {secret}` (the delete secret; no
+  login); if that request can't get through, or the server fails, that try
+  counts as failed too. The
+  server checks the secret, then looks in the bucket: if the upload is
+  stored (an earlier try wrote it and only its answer was lost), it answers
+  `{uploaded: true}` and the app counts the upload as done; otherwise it
+  answers a fresh `{url}` for the same upload and size. It answers at most
+  3 times per upload, and only in the 3 hours after `POST /media`; past
+  that, and for an unknown upload or a wrong secret, it answers
+  `not_found`, and the app marks the message failed. A 412 to any try also
+  means the upload is stored. The recipient's message carries the delete
+  secret too, so the recipient can ask as well; with the upload stored, it
+  only ever learns that. Once the upload is deleted, no URL is given for it
+  again; only one given less than a minute before could write it back
+  (where the bucket's 30-day expiry still removes it).
+- The app runs two uploads at a time and asks for an upload's URL only when
+  its turn comes, so a URL doesn't age out while it waits behind other
+  transfers to the bucket.
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),
@@ -454,7 +483,13 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   to 1 MiB, then to the next whole MiB.
 - The recipient gets a download URL with `GET /media/{id}` (no login; the ID
   is the permission; at most 5 a day per file), fetches and decrypts the file and
-  keeps it on the device. The upload stays, downloaded or saved, until the
+  keeps it on the device. The URL starts a download within a minute, and S3
+  answers it with `Content-Encoding: identity` and type
+  `application/octet-stream` whatever the upload claimed (both are in its
+  signed query), so no browser unpacks a compressed upload. The app reads
+  at most the padded size of `s`: it stops at once if `Content-Length` says
+  otherwise or more bytes arrive, and refuses a shorter answer. The upload
+  stays, downloaded or saved, until the
   message or conversation is deleted on the recipient's device (then it's
   deleted with `POST /media/{id}/delete {secret}`) or it expires.
 - **Saving outside Telegram.** A Mini App can't hand a file to the device

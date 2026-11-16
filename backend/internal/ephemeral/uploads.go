@@ -13,19 +13,24 @@ import (
 // Uploads records media uploads until they're fetched and deleted, or
 // expire:
 //
-//	U#<id>  U  the SHA-256 of its delete secret (d), its size (s)
+//	U#<id>  U  the SHA-256 of its delete secret (d), its size (s), how many
+//	           fresh upload URLs it was given after the first (r)
 //
 // Nothing says who uploaded it or who it's for.
 type Uploads struct {
-	DB    SocketDB
+	DB    DB
 	Table string
 	Now   func() time.Time
 }
 
-// Upload is a recorded upload.
+// Upload is a recorded upload. Get also fills in when it expires and how
+// many fresh upload URLs it was given; Put takes those as they are (expires,
+// and none).
 type Upload struct {
 	DeleteHash []byte
 	Size       int64
+	Expires    time.Time
+	Renewals   int
 }
 
 // Put records an upload until expires. It fails if the ID is taken.
@@ -72,7 +77,31 @@ func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, 
 	if !ok1 || !ok2 || !ok3 || expires <= u.Now().Unix() {
 		return Upload{}, false, nil
 	}
-	return Upload{DeleteHash: d.Value, Size: size}, true, nil
+	renewals, _ := intAttr(out.Item, "r") // none yet if missing
+	return Upload{DeleteHash: d.Value, Size: size, Expires: time.Unix(expires, 0), Renewals: int(renewals)}, true, nil
+}
+
+// Renew counts one more fresh upload URL for an upload. It reports false if
+// there is no such upload, the upload expires at or before expiresAfter
+// (so it was paid for too long ago, or it expired), or it already had most.
+// It writes, so the caller checks the delete secret first (Get).
+func (u *Uploads) Renew(ctx context.Context, id string, most int, expiresAfter time.Time) (bool, error) {
+	_, err := u.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           &u.Table,
+		Key:                 map[string]types.AttributeValue{"pk": sv("U#" + id), "sk": sv("U")},
+		UpdateExpression:    aws.String("ADD r :one"),
+		ConditionExpression: aws.String("attribute_exists(pk) AND e > :after AND e > :now AND (attribute_not_exists(r) OR r < :most)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":one":   num(1),
+			":after": num(expiresAfter.Unix()),
+			":now":   num(u.Now().Unix()),
+			":most":  num(int64(most)),
+		},
+	})
+	if conditionFailed(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func intAttr(item map[string]types.AttributeValue, name string) (int64, bool) {

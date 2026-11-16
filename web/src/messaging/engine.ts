@@ -71,7 +71,7 @@ import {
   type LocalMedia,
 } from './store';
 import { decryptFile, encryptFile, newFileKey, uploadSize } from '../crypto/media';
-import { xhrTransfer, type Transfer } from '../net/transfer';
+import { httpTransfer, TransferError, type Transfer } from '../net/transfer';
 
 const DAY = 24 * 3600 * 1000;
 /** Messages sent longer ago than this, or later than now plus a day, are dropped (design §10). */
@@ -121,6 +121,8 @@ export interface MessagingDeps {
   now?: () => number;
   /** Uploads and downloads attachments (tests use a fake). */
   transfer?: Transfer;
+  /** Waits ms before an upload is tried again (tests don't wait). */
+  wait?: (ms: number) => Promise<void>;
   /** Called after send tokens were spent or fetched, so the app can say when they run low. */
   onTokens?: () => void;
 }
@@ -133,11 +135,36 @@ export interface Outgoing {
 
 /** One media token pays for this much of an upload (as the server counts). */
 const TOKEN_BYTES = 1024 * 1024;
+/**
+ * How many times an upload is tried in all. Tries after the first cost no
+ * tokens: the server gives an upload three fresh URLs for them, in the first
+ * hours after paying. (An upload URL only starts a PUT within a minute.)
+ */
+const PUT_TRIES = 4;
+/**
+ * How long to wait before each try after the first: long enough for a poor
+ * connection to come back, well within the server's 3 hours.
+ */
+const PUT_RETRY_MS = [2_000, 10_000, 30_000];
+/**
+ * How many uploads run at once. Browsers open about 6 connections to one
+ * host, and an upload URL only starts a PUT within a minute, so the rest
+ * wait here and ask for their URL once it's their turn.
+ */
+const UPLOADS_AT_ONCE = 2;
 
 function checkUpload(value: unknown): { id: string; url: string } {
   const { id, url } = checkObject(value);
   if (typeof id !== 'string' || typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
   return { id, url };
+}
+
+/** A fresh upload URL, or word that the upload is stored already. */
+function checkRenewal(value: unknown): string | 'uploaded' {
+  const { url, uploaded } = checkObject(value);
+  if (uploaded === true) return 'uploaded';
+  if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
+  return url;
 }
 
 function checkUrl(value: unknown): string {
@@ -169,7 +196,8 @@ export function createMessaging(deps: MessagingDeps) {
   const { db, api, session, issuer, mediaIssuer } = deps;
   const now = deps.now ?? Date.now;
   const findKey = keyFinder(db);
-  const transfer = deps.transfer ?? xhrTransfer;
+  const transfer = deps.transfer ?? httpTransfer;
+  const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
 
   /**
@@ -247,7 +275,7 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Sends an attachment, with an optional caption. Like a message, it's
    * stored and shown first (as sending); then the file is encrypted and
-   * uploaded, paid with send tokens, and the message carries its key.
+   * uploaded, paid with media tokens, and the message carries its key.
    */
   async function sendMedia(
     conv: string,
@@ -277,23 +305,76 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  /** Encrypts and uploads a file; returns the attachment with its upload ID, key and delete secret. */
-  async function upload(out: Outgoing, onProgress?: (fraction: number) => void): Promise<Media> {
-    const key = newFileKey();
-    const secret = crypto.getRandomValues(new Uint8Array(16));
-    const size = uploadSize(out.file.length);
-    const tokens = await takeMediaTokens(Math.ceil(size / TOKEN_BYTES));
-    const deleteHash = new Uint8Array(await crypto.subtle.digest('SHA-256', secret));
-    let created: { id: string; url: string };
+  let uploading = 0;
+  const waitingToUpload: (() => void)[] = [];
+  /** Runs an upload once fewer than UPLOADS_AT_ONCE are running. */
+  async function uploadSlot<T>(run: () => Promise<T>): Promise<T> {
+    while (uploading >= UPLOADS_AT_ONCE) await new Promise<void>((resolve) => waitingToUpload.push(resolve));
+    uploading++;
     try {
-      created = await api.post('/media', { size, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
-    } catch (err) {
-      // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
-      if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
-      throw err;
+      return await run();
+    } finally {
+      uploading--;
+      waitingToUpload.shift()?.();
     }
-    await transfer.put(created.url, await encryptFile(out.file, key), onProgress);
-    return { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+  }
+
+  /** Encrypts and uploads a file; returns the attachment with its upload ID, key and delete secret. */
+  function upload(out: Outgoing, onProgress?: (fraction: number) => void): Promise<Media> {
+    // Its URL is asked for only when it can be used at once: it only starts
+    // a PUT within a minute.
+    return uploadSlot(async () => {
+      const key = newFileKey();
+      const secret = crypto.getRandomValues(new Uint8Array(16));
+      // Encrypted before asking where to put it, for the same reason.
+      const body = await encryptFile(out.file, key);
+      const tokens = await takeMediaTokens(Math.ceil(body.length / TOKEN_BYTES));
+      const deleteHash = new Uint8Array(await crypto.subtle.digest('SHA-256', secret));
+      let created: { id: string; url: string };
+      try {
+        created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
+      } catch (err) {
+        // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
+        if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
+        throw err;
+      }
+      await put(created.id, created.url, body, secret, onProgress);
+      return { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+    });
+  }
+
+  /**
+   * PUTs a paid upload, trying again a few times if that fails. Tries again
+   * cost no tokens: each asks the server, with the upload's delete secret,
+   * for a fresh URL, or learns that the upload is stored already (an earlier
+   * try wrote it and only its answer was lost). A URL writes only once, so a
+   * 412 means the same.
+   */
+  async function put(id: string, first: string, body: Uint8Array<ArrayBuffer>, secret: Uint8Array, onProgress?: (fraction: number) => void): Promise<void> {
+    let url: string | null = first;
+    for (let tries = 1; ; tries++) {
+      try {
+        if (url === null) {
+          // The server knows whether a try that seemed to fail wrote it
+          // after all; if not, it gives a fresh URL.
+          const next = await api.post(`/media/${id}/upload`, { secret: toBase64Url(secret) }, checkRenewal);
+          if (next === 'uploaded') return;
+          url = next;
+        }
+        await transfer.put(url, body, onProgress);
+        return;
+      } catch (err) {
+        // It's there already: an earlier try wrote it.
+        if (err instanceof TransferError && err.status === 412) return;
+        // The bucket or the server out of reach (a TransferError is a
+        // NetworkError too), or the server failing, uses up a try; a
+        // refusal (no fresh URL) ends it.
+        const again = err instanceof NetworkError || (err instanceof ApiError && err.status >= 500);
+        if (!again || tries >= PUT_TRIES) throw err;
+      }
+      url = null;
+      await wait(PUT_RETRY_MS[tries - 1] ?? 0);
+    }
   }
 
   /**
@@ -318,7 +399,7 @@ export function createMessaging(deps: MessagingDeps) {
         }
         throw err;
       }
-      const file = await decryptFile(await transfer.get(url, onProgress), fromBase64Url(m.k), m.s);
+      const file = await decryptFile(await transfer.get(url, uploadSize(m.s), onProgress), fromBase64Url(m.k), m.s);
       await putMedia(db, conv, id, file);
       await setFile(db, conv, id, 'local');
       return 'local';

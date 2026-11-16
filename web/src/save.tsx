@@ -7,7 +7,7 @@ import { config } from './config';
 import { locale, t, type Language } from './i18n';
 import { fetchForSaving, Gone, type SaveTicket } from './media/save';
 import { createApi } from './net/api';
-import { xhrTransfer } from './net/transfer';
+import { httpTransfer } from './net/transfer';
 
 type State = 'fetching' | 'ready' | 'done' | 'gone' | 'failed' | 'broken';
 
@@ -22,7 +22,7 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
     if (!ticket || !api) return;
     state.value = 'fetching';
     try {
-      const f = await fetchForSaving(api, xhrTransfer, ticket, (p) => (progress.value = p));
+      const f = await fetchForSaving(api, httpTransfer, ticket, (p) => (progress.value = p));
       file.value = { file: f, url: URL.createObjectURL(f) };
       state.value = 'ready';
     } catch (err) {
