@@ -113,15 +113,30 @@ async function backend() {
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
 
+/** A Telegram bridge whose events a test plays with fire(). */
+function telegram() {
+  const handlers = new Map<string, Set<(data: unknown) => void>>();
+  const tg = {
+    transport: 'webview-proxy',
+    post: () => {},
+    on: (type: string, handler: (data: unknown) => void) => {
+      if (!handlers.has(type)) handlers.set(type, new Set());
+      handlers.get(type)!.add(handler);
+      return () => handlers.get(type)!.delete(handler);
+    },
+  } as unknown as Bridge;
+  return { bridge: tg, fire: (type: string, data: unknown) => handlers.get(type)?.forEach((h) => h(data)) };
+}
+
 function launchWith(startParam: string, allowsWrite = true): Launch {
   const initData = `auth_date=1&start_param=${startParam}&user=${encodeURIComponent(`{"id":1,"allows_write_to_pm":${allowsWrite}}`)}`;
   return parseLaunch('tgWebAppData=' + encodeURIComponent(initData));
 }
 
 /** Sets up an account (two launches) and returns the app of the registration launch. */
-async function person(b: Awaited<ReturnType<typeof backend>>, startParam = ''): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
+async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', tg: Bridge = bridge()): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
   const db = await openDatabase(`conv-test-${n++}`);
-  const deps = { config, api: b.api, db, bridge: bridge(), broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -199,9 +214,9 @@ describe('conversations in the app', () => {
       [false, 'hi! who is this?'],
     ]);
 
-    // Opening the link again continues the conversation instead of starting another.
+    // Opening the link again offers that conversation instead of starting another.
     const reopened = await sender.reopen(payload);
-    expect(screenOf(reopened.screen.value, 'conversation').id).toBe(conv.id);
+    expect(screenOf(reopened.screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv.id });
     expect(await listConversations(sender.db)).toHaveLength(1);
   });
 
@@ -326,7 +341,7 @@ describe('conversations in the app', () => {
     expect(screenOf(stranger.screen.value, 'link').status).toBe('not-found');
     // The sender, already answered, opens the new link: the same conversation.
     const conv = (await listConversations(sender.db))[0]!.id;
-    expect(screenOf((await sender.reopen(newPayload)).screen.value, 'conversation').id).toBe(conv);
+    expect(screenOf((await sender.reopen(newPayload)).screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv });
   });
 
   it("updates the writer's open chat when the other side reads it", async () => {
@@ -344,6 +359,82 @@ describe('conversations in the app', () => {
     for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
     await sender.sync();
     expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.status)).toEqual(['seen']);
+  });
+
+  it('never opens a chat or sends "seen" because a link was opened, only on a tap', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.home();
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    // The owner answers while the sender is away (their "seen" for hello goes first)...
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+    await owner.sendMessage('is it you?');
+    const before = quiet();
+    const replies = async () => {
+      await owner.sync();
+      return screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status);
+    };
+
+    // ...then sends a suspect their link. Opening it only says there's a chat already.
+    const launched = await sender.reopen(payload);
+    expect(screenOf(launched.screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(before);
+    expect(await replies()).toEqual(['sent']);
+
+    // A tap on Open opens it, and "seen" goes out as for any chat opened in the app.
+    await launched.openConversation(screenOf(launched.screen.value, 'link').chat!);
+    expect(screenOf(launched.screen.value, 'conversation').id).toBe(conv);
+    await settle(before + 1);
+    expect(await replies()).toEqual(['seen']);
+  });
+
+  it('after the app was minimised, sends "seen" only once it is touched again', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+
+    // The sender's chat is open in a minimised app; the reply shows once it's back.
+    tg.fire('visibility_changed', { is_visible: false });
+    await owner.sendMessage('still there?');
+    tg.fire('visibility_changed', { is_visible: true });
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'still there?']);
+    // In view, but coming back may not have been their doing: nothing yet.
+    sender.markSeen();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(1);
+
+    // Their first touch marks it seen.
+    expect(sender.attend()).toBe(true);
+    expect(sender.attend()).toBe(false);
+    sender.markSeen();
+    await settle(2);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status)).toEqual(['seen']);
   });
 
   it('lists blocked conversations, opens them read-only, and unblocks from either place', async () => {

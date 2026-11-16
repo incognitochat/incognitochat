@@ -124,8 +124,8 @@ export interface InvitationView extends InvitationCode {
   url: string;
 }
 
-/** What opening someone's link found. */
-export type LinkStatus = 'checking' | 'verified' | 'own' | 'not-found' | 'mismatch' | 'network';
+/** What opening someone's link found ('existing': a conversation through it already, opened only on a tap). */
+export type LinkStatus = 'checking' | 'verified' | 'own' | 'existing' | 'not-found' | 'mismatch' | 'network';
 
 export type Screen =
   | { kind: 'loading' }
@@ -168,7 +168,10 @@ export type Screen =
       created: string | null;
     }
   | { kind: 'admin'; levels: LevelAllowance[]; busy: boolean; notice: AdminNotice | null }
-  | { kind: 'link'; status: LinkStatus; canWrite: boolean; busy: boolean; error: SendError | null }
+  /** chat: the conversation already written through this link (status 'existing'). */
+  | { kind: 'link'; status: LinkStatus; canWrite: boolean; busy: boolean; error: SendError | null; chat?: string }
+  /** An invitation link: joins only on a tap. */
+  | { kind: 'invitation'; code: string; busy: boolean }
   | {
       kind: 'conversation';
       id: string;
@@ -245,6 +248,19 @@ export function createApp(deps: Deps) {
   let stopBackground = (): void => {};
   // The link last checked and found genuine, to write to.
   let openedLink: { ref: LinkRef; bundle: Bundle } | null = null;
+  // "Seen" goes out only while the user is using the app: from a tap that
+  // opens a chat until the app is hidden or minimised, then again once they
+  // touch it. Opening a link, or bringing the app back, can be someone
+  // else's doing, and must not tell them who has which chat open.
+  let attending = false;
+  deps.bridge?.on('visibility_changed', ({ is_visible }) => {
+    if (!is_visible) attending = false;
+  });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') attending = false;
+    });
+  }
 
   // Telegram notices (design §12) are set up with this launch's signed data,
   // and only from a plain or registration launch: never one that names a
@@ -528,6 +544,7 @@ export function createApp(deps: Deps) {
     return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
   }
 
+  /** Opens a conversation: only ever on a tap in the app, so it's read now, and "seen" goes out. */
   async function openConversation(id: string): Promise<void> {
     void refreshBudget();
     const list = await listConversations(deps.db);
@@ -546,6 +563,7 @@ export function createApp(deps: Deps) {
       busy: false,
       error: null,
     };
+    attending = true;
     seen(id);
     autoFetch(id);
   }
@@ -946,14 +964,22 @@ export function createApp(deps: Deps) {
     }
   }
 
-  /** After logging in or registering: go where the launch (or a launch before setup) pointed. */
+  /**
+   * After logging in or registering: go where the launch (or a launch before
+   * setup) pointed. Only to a screen: a launch can come from anyone's link,
+   * so nothing is opened, sent or redeemed until the user taps.
+   */
   async function continueLaunch(offline: boolean): Promise<void> {
     const param = launchParam ?? (await takePendingLink(deps.db)) ?? '';
     launchParam = null;
     const ref = parsePayload(param);
     if (ref) return openLink(ref);
     const code = parseInvitationPayload(param);
-    if (code && !offline) return redeem(code);
+    if (code && !offline) {
+      // Joining tells whoever made the invitation that it was used, and when.
+      screen.value = { kind: 'invitation', code, busy: false };
+      return;
+    }
     return showHome({ offline });
   }
 
@@ -1074,7 +1100,9 @@ export function createApp(deps: Deps) {
     const code = normalizeCode(input);
     if (!code) return showHome({ notice: 'invalid-invitation' });
     const current = screen.value;
+    if (current.kind === 'invitation' && current.busy) return;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
+    if (current.kind === 'invitation') screen.value = { ...current, busy: true };
     let notice: HomeNotice = 'joined';
     try {
       await session!.call('POST', '/invitations/redeem', { code }, checkRedeemed);
@@ -1188,10 +1216,12 @@ export function createApp(deps: Deps) {
       screen.value = linkScreen('own');
       return;
     }
-    // Already writing to this person: continue that conversation. A new one
+    // Already writing to this person: offer that conversation. A new one
     // would gain nothing, since the owner sees the same sender tag and label.
     // Through a replaced link, only once they've answered: before that, it
     // still writes to the old link's mailbox, which is gone.
+    // Not opened by itself: opening sends "seen", so the link's owner could
+    // send someone their link and watch whether their messages turn seen.
     const existing = (await listConversations(deps.db)).find(
       (c) =>
         c.role === 'sender' &&
@@ -1199,7 +1229,10 @@ export function createApp(deps: Deps) {
         c.link.fingerprint === ref.fingerprint &&
         (c.link.id === ref.id || c.lastReceived !== null),
     );
-    if (existing) return openConversation(existing.id);
+    if (existing) {
+      screen.value = { ...linkScreen('existing'), chat: existing.id };
+      return;
+    }
     screen.value = linkScreen('checking');
     openedLink = null;
     try {
@@ -1274,10 +1307,19 @@ export function createApp(deps: Deps) {
     close: () => deps.bridge?.post('web_app_close'),
     retry: () => retry(),
     home: () => showHome(),
-    /** The open conversation's newest messages are in view: tell the other side. */
+    /** The open conversation's newest messages are in view: tell the other side, while the user is using the app. */
     markSeen: () => {
       const current = currentScreen();
-      if (current.kind === 'conversation') seen(current.id);
+      if (current.kind === 'conversation' && attending) seen(current.id);
+    },
+    /**
+     * The user touched the app. Returns whether it's the first touch since
+     * the app was hidden or minimised (the screen then marks what's in view).
+     */
+    attend: () => {
+      const first = !attending;
+      attending = true;
+      return first;
     },
     /** Asks Telegram to let the bot write; notices are set up once it may. */
     allowNotices: () => deps.bridge?.post('web_app_request_write_access'),

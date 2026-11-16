@@ -604,8 +604,25 @@ describe('invitations', () => {
     // Someone opens the invitation link (the fake has one account, so stop being admin).
     server.state.admin = false;
     const invitee = await registered(server.api, { launch: launchWith('invaaaaaaaa') });
+    // It only asks: joining tells the inviter, so it waits for a tap on Join.
+    expect(invitee.app.screen.value).toEqual({ kind: 'invitation', code: 'aaaa-aaaa', busy: false });
+    expect(server.calls).not.toContain('POST /invitations/redeem');
+    expect(server.state.codes.get('aaaa-aaaa')!.left).toBe(3);
+    await invitee.app.redeem('aaaa-aaaa');
     expect(home(invitee.app.screen.value)).toMatchObject({ notice: 'joined', account: { canCreateLinks: true } });
     expect(server.state.codes.get('aaaa-aaaa')!.left).toBe(2);
+  });
+
+  it('goes home without joining on "not now"', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const user = await registered(server.api, { launch: launchWith('invabcdefgh') });
+    expect(user.app.screen.value).toMatchObject({ kind: 'invitation', code: 'abcd-efgh' });
+    await user.app.home();
+    expect(home(user.app.screen.value).notice).toBeNull();
+    expect(server.calls).not.toContain('POST /invitations/redeem');
+    expect(server.state.codes.get('abcd-efgh')!.left).toBe(1);
   });
 
   it('joins with a typed code, and explains a bad one', async () => {
@@ -642,6 +659,9 @@ describe('invitations', () => {
     const code = 'reg' + (await readAccount(db))!.fingerprint;
     const second = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(code), db });
     await second.app.start();
+    expect(second.app.screen.value).toEqual({ kind: 'invitation', code: 'abcd-efgh', busy: false });
+    expect(server.calls).not.toContain('POST /invitations/redeem');
+    await second.app.redeem('abcd-efgh');
     expect(home(second.app.screen.value).notice).toBe('joined');
   });
 
