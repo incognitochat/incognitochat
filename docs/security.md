@@ -123,7 +123,14 @@ it. This is how close it gets.
   link used to save a file in the device's browser can stay in that
   browser's history; it carries no delete secret, and once the upload is
   gone it opens nothing.
+- **"Seen" right after a link.** Opening a link from Telegram never opens a
+  chat or sends "seen" by itself, so a link's owner can't send someone their
+  link and watch for a "seen" to learn whether that person writes to them.
+  If the person already does, the app says so and waits for a tap on Open,
+  and warns that opening the chat right away could give them away. Someone
+  who opens it at once anyway can still be recognised by the timing.
 - **Who invited whom** can be guessed from when an invitation code is used.
+  An invitation link only asks; it's used when the person taps Join.
 - **Activity and volume:** roughly how many mailboxes and messages an account
   has.
 - **A brand-new user's first message** follows their registration closely in

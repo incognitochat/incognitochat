@@ -50,6 +50,7 @@ const LINK_TEXT: Record<LinkStatus, Key> = {
   checking: 'linkChecking',
   verified: 'linkVerified',
   own: 'linkOwn',
+  existing: 'linkExisting',
   'not-found': 'linkNotFound',
   mismatch: 'linkMismatch',
   network: 'errorNetwork',
@@ -204,12 +205,34 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               <Composer language={language} busy={screen.busy} onSend={app.writeToLink} />
             </>
           )}
+          {screen.status === 'existing' && (
+            <>
+              <p class="muted">{tr('linkExistingHint')}</p>
+              <Button onClick={() => app.openConversation(screen.chat)}>{tr('openChat')}</Button>
+            </>
+          )}
           {screen.status === 'network' && <Button onClick={app.retry}>{tr('tryAgain')}</Button>}
           {screen.status !== 'checking' && (
             <Button kind="secondary" onClick={app.home}>
               {tr('goHome')}
             </Button>
           )}
+        </Page>
+      );
+    case 'invitation':
+      return (
+        <Page title={tr('joinTitle')} body={tr('joinBody')} busy={screen.busy}>
+          {screen.error && (
+            <p class="notice" role="alert">
+              {tr(NOTICE_TEXT[screen.error])}
+            </p>
+          )}
+          <Button disabled={screen.busy} onClick={() => app.redeem(screen.code)}>
+            {tr('join')}
+          </Button>
+          <Button kind="secondary" disabled={screen.busy} onClick={app.home}>
+            {tr('notNow')}
+          </Button>
         </Page>
       );
     case 'conversation':
@@ -366,7 +389,8 @@ const visible = () => document.visibilityState === 'visible';
  * Keeps a chat where Telegram would: it opens at the newest message, and
  * jumps there when you send. New messages scroll into view only if you were
  * already at the end; otherwise you stay where you are and a button shows
- * how many came in. Messages count as seen only once they're in view.
+ * how many came in. Messages count as seen only once they're in view, and
+ * after the app was hidden or minimised, only once it's touched again.
  */
 function useChatScroll(app: AppState, id: string, messages: { id: string; out: boolean }[]) {
   const atEnd = useRef(true);
@@ -391,14 +415,18 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
     };
     // The keyboard opening shrinks the view: stay at the end if we were.
     const onResize = () => atEnd.current && scrollToEnd();
-    const onVisible = () => visible() && atEnd.current && app.markSeen();
+    // Coming back into view isn't enough (it can be someone else's doing);
+    // the first touch after it marks what's in view. Clicks count too: a
+    // screen reader or switch control may send only those.
+    const onTouch = (e: Event) => e.isTrusted && app.attend() && visible() && atEnd.current && app.markSeen();
+    const touches = ['pointerdown', 'keydown', 'wheel', 'click'] as const;
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
-    document.addEventListener('visibilitychange', onVisible);
+    for (const type of touches) window.addEventListener(type, onTouch, { capture: true, passive: true });
     return () => {
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);
-      document.removeEventListener('visibilitychange', onVisible);
+      for (const type of touches) window.removeEventListener(type, onTouch, { capture: true });
     };
   }, []);
 

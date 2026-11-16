@@ -89,7 +89,12 @@ key (signed by it), and the link's intro mailbox.
 
 - Opening a link, the app fetches the bundle without logging in and checks
   the fingerprint and signatures before encrypting anything. A server that
-  swaps keys is caught.
+  swaps keys is caught. It does so for every link, your own and ones you
+  already write to included, so the server can't tell them apart.
+- A link opened from Telegram never acts by itself, since anyone can send
+  one. If you already write to that person, the app says so and opens the
+  chat only when you tap Open. An invitation link asks first and joins only
+  when you tap Join.
 - An account has one link at a time, and can replace it: the old link stops
   working at once, the new one keeps the same fingerprint, so blocks and labels
   carry over.
@@ -134,7 +139,10 @@ secret: one person keeps the same label through the same link.
 - **Padding:** inner messages are padded to a few fixed sizes.
 - **Replies, reactions, edits, "seen", deletes and blocks** are encrypted
   messages too. "Seen"
-  is sent the moment a message is read. A reaction is one emoji per side per
+  is sent the moment a message is read: in a chat opened with a tap in the
+  app, while it's in view. After the app was hidden or minimised, "seen"
+  waits for the next touch, since bringing it back can be someone else's
+  doing (a link). A reaction is one emoji per side per
   message, from a quick row in the long-press menu or the full emoji picker;
   a double-tap reacts with ❤️, as in Telegram.
   Deleting one of your own messages deletes it on both sides by default (the
