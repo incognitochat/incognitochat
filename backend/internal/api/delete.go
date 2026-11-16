@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 // DeleteStep is about how many items one DELETE /account call deletes. A
@@ -62,6 +64,14 @@ func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller)
 	}
 	if !done {
 		return inProgress()
+	}
+	// The app's sockets don't say when they close (there's no $disconnect
+	// route), so their records go here. If that fails, they expire within
+	// the hour; the account is gone either way.
+	if s.Sockets != nil {
+		if err := s.Sockets.ForgetAll(ctx, c.AccountID); err != nil {
+			s.Log.Warn("socket records not deleted", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
+		}
 	}
 	return httpapi.JSON(http.StatusOK, map[string]string{})
 }

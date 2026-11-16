@@ -49,7 +49,7 @@ locals {
         APP_URL = "${var.client_origins[0]}/"
       }
     }
-    # WebSocket $connect / $disconnect.
+    # WebSocket $connect and the heartbeat ($disconnect isn't routed).
     # The WebSocket stage's throttle bounds how often it runs.
     ws = {
       timeout     = 5

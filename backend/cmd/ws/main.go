@@ -96,7 +96,10 @@ func (h *handler) handle(ctx context.Context, req events.APIGatewayWebsocketProx
 		err = h.sockets.Open(ctx, claims.AccountID, conn)
 		switch {
 		case errors.Is(err, ephemeral.ErrTooManyConnects):
-			// The app tries again later, and polls meanwhile.
+			// The app tries again later, and polls meanwhile. Logged with
+			// nothing about the account or connection, to count how often
+			// the limit is met.
+			h.log.Warn("connect refused: too many")
 			return status(http.StatusTooManyRequests), nil
 		case errors.Is(err, ephemeral.ErrTidy):
 			// Recorded; only old records are left over. Refusing would make

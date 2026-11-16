@@ -40,22 +40,33 @@ type Pusher struct {
 	API     Poster
 }
 
-// Push sends the hint to an account's open connections, newest first, until
-// Fanout have taken it, and reports whether any did. Records of sockets
-// that have closed (their $disconnect isn't recorded) answer gone and are
-// forgotten, and the next ones are tried, so an open copy of the app isn't
-// crowded out by others that closed. Each round posts at once, so a push
-// takes about as long with closed sockets on record as without. An empty
-// account looks up nothing, at about the same cost.
+// Push sends the hint to an account's open connections, newest first, and
+// reports whether any took it. It posts to Fanout records at once, round
+// after round, until at least Fanout have taken it (a few more may, which
+// is harmless) or none are left. Records of sockets that have closed
+// (their $disconnect isn't recorded) answer gone and are forgotten, so an
+// open copy of the app isn't crowded out by others that closed. A round
+// takes as long as its slowest post, so closed sockets on record add a
+// round per Fanout of them, about MaxRecords/Fanout rounds at most. An
+// empty account looks up nothing, at about the same cost.
 func (p *Pusher) Push(ctx context.Context, account string) (bool, error) {
+	delivered, _, err := p.push(ctx, account)
+	return delivered > 0, err
+}
+
+// push is Push, reporting how many took the hint and in how many rounds.
+func (p *Pusher) push(ctx context.Context, account string) (delivered, rounds int, _ error) {
 	conns, err := p.Sockets.Connections(ctx, account)
-	if err != nil {
-		return false, err
-	}
-	delivered := 0
 	var errs []error
+	switch {
+	case errors.Is(err, ephemeral.ErrTidy):
+		errs = append(errs, err) // only old records left over: push anyway
+	case err != nil:
+		return 0, 0, err
+	}
 	for len(conns) > 0 && delivered < Fanout {
-		round := conns[:min(Fanout-delivered, len(conns))]
+		rounds++
+		round := conns[:min(Fanout, len(conns))]
 		conns = conns[len(round):]
 		var mu sync.Mutex
 		var wg sync.WaitGroup
@@ -76,7 +87,7 @@ func (p *Pusher) Push(ctx context.Context, account string) (bool, error) {
 		}
 		wg.Wait()
 	}
-	return delivered > 0, errors.Join(errs...)
+	return delivered, rounds, errors.Join(errs...)
 }
 
 // post sends the hint to one connection; one that's gone is forgotten, and

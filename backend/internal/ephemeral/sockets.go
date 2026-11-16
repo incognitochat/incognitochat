@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"time"
@@ -14,28 +15,43 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// SocketTTL is how long a connection record lives: API Gateway closes every
-// socket after 2 hours, plus margin.
-const SocketTTL = 2*time.Hour + 10*time.Minute
+// SocketTTL is how long a connection record lives. The app replaces its
+// socket about every half hour (27 to 33 minutes), so an open socket always
+// has a live record; one an older app keeps open longer gets no pushes
+// after this, and its app polls instead.
+const SocketTTL = 40 * time.Minute
 
 // MaxSockets is how many of an account's sockets a delivery is pushed to,
 // and how many it may open in a minute. An account has one device, with a
 // socket for each visible copy of the app, so a few are plenty.
 const MaxSockets = 5
 
-// MaxRecords is how many socket records one account may have: the open
-// ones, and closed ones not yet tidied away. A connect is refused at it,
-// and the oldest are forgotten before it is reached, so a closed socket's
-// record never locks an account out and the partition stays small.
+// MaxRecords is how many socket records one account may have, about: the
+// open ones, and closed ones not yet tidied away. A connect is refused at
+// it, and the oldest go before it is reached (KeepRecords), so a closed
+// socket's record doesn't lock an account out and the partition stays
+// small.
+//
+// Both limits are checked against what a connect reads before it writes,
+// so connects at the same moment all pass them: the bounds are as exact as
+// the ws function's concurrency (10) allows, a few over at worst.
 const MaxRecords = 2 * MaxSockets
+
+// KeepRecords is how many records a connect leaves, its own included. It is
+// three below MaxRecords, so two connects at the same moment on an account
+// at it still leave room for the next one.
+const KeepRecords = MaxRecords - 3
+
+// maxTidy is how many expired records one connect or push deletes, at most.
+const maxTidy = 2
 
 var (
 	// ErrTooManyConnects is returned by Open, which writes nothing then,
 	// for an account that opened MaxSockets sockets this minute or has
 	// MaxRecords on record.
 	ErrTooManyConnects = errors.New("ephemeral: too many connects")
-	// ErrTidy is returned by Open when the connection was recorded but old
-	// records couldn't be deleted: the connect stands.
+	// ErrTidy is returned when what was asked for was done but old records
+	// couldn't be deleted: a connect stands, a push goes ahead.
 	ErrTidy = errors.New("ephemeral: socket records not tidied")
 )
 
@@ -57,8 +73,9 @@ type SocketDB interface {
 // A record isn't deleted when its socket closes: $disconnect knows only the
 // connection, so it would need a second record per connect, and it isn't
 // routed at all. A closed socket's record goes when a push finds it gone,
-// when a connect needs its place (MaxRecords), or when a connect finds it
-// expired (TTL deletion can lag by days; expired records are never used).
+// when a connect needs its place (KeepRecords), when a connect or push
+// finds it expired (TTL deletion can lag by days; expired records are
+// never used), or with the account (ForgetAll).
 type Sockets struct {
 	DB    SocketDB
 	Table string
@@ -72,7 +89,7 @@ type socketRecord struct {
 }
 
 // expiryAt is the expiry of a socket opened at t: SocketTTL after the start
-// of the next minute, so it outlives the socket and says only its minute.
+// of the next minute, so it says only the minute.
 func expiryAt(t time.Time) int64 {
 	return t.Truncate(time.Minute).Add(SocketTTL + time.Minute).Unix()
 }
@@ -81,19 +98,19 @@ func expiryAt(t time.Time) int64 {
 func oldestFirst(a, b socketRecord) int { return cmp.Compare(a.expires, b.expires) }
 
 // records reads an account's socket records, eventually consistent: a
-// record written in about the last second may be missing.
-func (s *Sockets) records(ctx context.Context, account string) ([]socketRecord, error) {
+// record written in about the last second may be missing. It splits them
+// into those still live and those expired, at now.
+func (s *Sockets) records(ctx context.Context, account string, now time.Time) (live, expired []socketRecord, err error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account)},
 		ProjectionExpression:      aws.String("sk, e"),
 	})
-	var records []socketRecord
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, it := range page.Items {
 			c, ok := it["sk"].(*types.AttributeValueMemberS)
@@ -104,14 +121,28 @@ func (s *Sockets) records(ctx context.Context, account string) ([]socketRecord, 
 			if e, ok := it["e"].(*types.AttributeValueMemberN); ok {
 				expires, _ = strconv.ParseInt(e.Value, 10, 64)
 			}
-			records = append(records, socketRecord{c.Value, expires})
+			if r := (socketRecord{c.Value, expires}); expires > now.Unix() {
+				live = append(live, r)
+			} else {
+				expired = append(expired, r)
+			}
 		}
 	}
-	return records, nil
+	return live, expired, nil
 }
 
-// maxTidy is how many expired records one connect deletes, at most.
-const maxTidy = 2
+// tidy deletes up to maxTidy of an account's expired records, picked at
+// random: connects and pushes at the same moment see the same ones, and if
+// they all picked the oldest, each delete costing a write whether or not
+// it's done, the rest would pile up until TTL.
+func (s *Sockets) tidy(ctx context.Context, account string, expired []socketRecord) error {
+	rand.Shuffle(len(expired), func(i, j int) { expired[i], expired[j] = expired[j], expired[i] })
+	var errs []error
+	for _, r := range expired[:min(maxTidy, len(expired))] {
+		errs = append(errs, s.Forget(ctx, account, r.connection))
+	}
+	return errors.Join(errs...)
+}
 
 // Open records a connection for an account: one write.
 //
@@ -121,30 +152,22 @@ const maxTidy = 2
 // at the same moment can reach.
 //
 // Once recorded, it tidies: up to maxTidy records it finds expired go, and
-// the oldest one goes once the account would have MaxRecords, so a connect
-// writes 4 times at most. A record forgotten this way may be of a socket
-// still open, which then gets no pushes until the app reopens it (it does
-// every half hour). If tidying fails, Open returns ErrTidy, and the connect
-// stands.
+// the oldest go so that KeepRecords are left, so a connect writes 4 times
+// at most. A record forgotten this way may be of a socket still open,
+// which then gets no pushes until the app replaces it (every half hour). If
+// tidying fails, Open returns ErrTidy, and the connect stands.
 func (s *Sockets) Open(ctx context.Context, account, connection string) error {
 	now := s.Now()
-	records, err := s.records(ctx, account)
+	live, expired, err := s.records(ctx, account, now)
 	if err != nil {
 		return err
 	}
+	live = slices.DeleteFunc(live, func(r socketRecord) bool { return r.connection == connection })
 	expires := expiryAt(now)
-	var live, expired []socketRecord
 	thisMinute := 0
-	for _, r := range records {
-		switch {
-		case r.connection == connection:
-		case r.expires <= now.Unix():
-			expired = append(expired, r)
-		default:
-			live = append(live, r)
-			if r.expires >= expires {
-				thisMinute++
-			}
+	for _, r := range live {
+		if r.expires >= expires {
+			thisMinute++
 		}
 	}
 	if thisMinute >= MaxSockets || len(live) >= MaxRecords {
@@ -157,16 +180,8 @@ func (s *Sockets) Open(ctx context.Context, account, connection string) error {
 		return err
 	}
 
-	// A few expired ones at a time: connects at the same moment see the
-	// same ones, and each delete costs a write whether or not it's done.
-	var errs []error
-	slices.SortFunc(expired, oldestFirst)
-	for _, r := range expired[:min(maxTidy, len(expired))] {
-		errs = append(errs, s.Forget(ctx, account, r.connection))
-	}
-	// With the new one, at most MaxRecords-1 are kept, so the next connect
-	// fits.
-	if extra := len(live) + 1 - (MaxRecords - 1); extra > 0 {
+	errs := []error{s.tidy(ctx, account, expired)}
+	if extra := len(live) + 1 - KeepRecords; extra > 0 {
 		slices.SortFunc(live, oldestFirst)
 		for _, r := range live[:min(extra, len(live))] {
 			errs = append(errs, s.Forget(ctx, account, r.connection))
@@ -187,21 +202,38 @@ func (s *Sockets) Forget(ctx context.Context, account, connection string) error 
 	return err
 }
 
+// ForgetAll deletes all of an account's socket records (the account is
+// deleted): one read, and a delete for each, about MaxRecords at most.
+func (s *Sockets) ForgetAll(ctx context.Context, account string) error {
+	live, expired, err := s.records(ctx, account, s.Now())
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, r := range append(live, expired...) {
+		errs = append(errs, s.Forget(ctx, account, r.connection))
+	}
+	return errors.Join(errs...)
+}
+
 // Connections lists an account's recorded connections that haven't
-// expired, newest first: at most MaxRecords or so, some of them of sockets
-// that have closed (a push finds out, and forgets those). An empty account
-// has none, at the same cost (a send to an unknown mailbox asks for it).
+// expired, newest first: about MaxRecords at most, some of them of sockets
+// that have closed (a push finds out, and forgets those). It also deletes
+// up to maxTidy expired records it reads; if that fails, it returns the
+// connections with ErrTidy. An empty account has none, at the same cost (a
+// send to an unknown mailbox asks for it).
 func (s *Sockets) Connections(ctx context.Context, account string) ([]string, error) {
-	records, err := s.records(ctx, account)
+	live, expired, err := s.records(ctx, account, s.Now())
 	if err != nil {
 		return nil, err
 	}
-	now := s.Now().Unix()
-	records = slices.DeleteFunc(records, func(r socketRecord) bool { return r.expires <= now })
-	slices.SortStableFunc(records, func(a, b socketRecord) int { return oldestFirst(b, a) })
-	conns := make([]string, len(records))
-	for i, r := range records {
+	slices.SortStableFunc(live, func(a, b socketRecord) int { return oldestFirst(b, a) })
+	conns := make([]string, len(live))
+	for i, r := range live {
 		conns[i] = r.connection
+	}
+	if err := s.tidy(ctx, account, expired); err != nil {
+		return conns, fmt.Errorf("%w: %w", ErrTidy, err)
 	}
 	return conns, nil
 }

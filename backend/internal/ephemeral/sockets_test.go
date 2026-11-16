@@ -118,7 +118,7 @@ func TestSocketRecordsHoldNoExactTime(t *testing.T) {
 }
 
 // A connect writes one record; at most one older record goes with it, once
-// the account is near MaxRecords. There's no second record for $disconnect.
+// the account has KeepRecords. There's no second record for $disconnect.
 func TestSocketWrites(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
 	s, meter, client := socketsAt(t, &clock)
@@ -131,7 +131,7 @@ func TestSocketWrites(t *testing.T) {
 	if u := meter.Units(s.Table); u.Write != 1 || u.Read > 0.5 {
 		t.Fatalf("a first connect cost %+v", u)
 	}
-	for range MaxRecords - 2 {
+	for range KeepRecords - 1 {
 		clock = clock.Add(time.Minute)
 		if err := s.Open(ctx, "acct", connID()); err != nil {
 			t.Fatal(err)
@@ -143,13 +143,13 @@ func TestSocketWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := meter.Units(s.Table)
-	t.Logf("connect with %d on record: %.1f read, %.1f write units", MaxRecords-1, u.Read, u.Write)
+	t.Logf("connect with %d on record: %.1f read, %.1f write units", KeepRecords, u.Read, u.Write)
 	if u.Write != 2 || u.Read > 0.5 {
 		t.Fatalf("a connect near the limit cost %+v", u)
 	}
 	items := stored(t, client, s.Table, "acct")
-	if len(items) != MaxRecords-1 {
-		t.Fatalf("%d records, want %d", len(items), MaxRecords-1)
+	if len(items) != KeepRecords {
+		t.Fatalf("%d records, want %d", len(items), KeepRecords)
 	}
 	for _, it := range items {
 		if !strings.HasPrefix(it["pk"].(*types.AttributeValueMemberS).Value, "C#") {
@@ -219,9 +219,59 @@ func TestOpenDeletesExpired(t *testing.T) {
 	}
 }
 
-// Bursts of connects at once, again and again, keep the account's records
-// bounded (they used to grow by about the burst's size each time, to over
-// a thousand), and connects refused at the bound write nothing.
+// A push's read deletes expired records too, not only a connect's.
+func TestConnectionsDeleteExpired(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, _, client := socketsAt(t, &clock)
+	ctx := context.Background()
+	for range maxTidy {
+		if err := s.Open(ctx, "acct", connID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = clock.Add(SocketTTL + 2*time.Minute)
+	if conns, err := s.Connections(ctx, "acct"); err != nil || len(conns) != 0 {
+		t.Fatalf("connections = %v, %v", conns, err)
+	}
+	if items := stored(t, client, s.Table, "acct"); len(items) != 0 {
+		t.Fatalf("%d expired records left", len(items))
+	}
+}
+
+// Deleting an account deletes its socket records, live or expired, and no
+// one else's.
+func TestForgetAll(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, _, client := socketsAt(t, &clock)
+	ctx := context.Background()
+	for range 3 {
+		if err := s.Open(ctx, "acct", connID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Open(ctx, "other", "theirs"); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(SocketTTL + 2*time.Minute)
+	if err := s.Open(ctx, "acct", "fresh"); err != nil && !errors.Is(err, ErrTidy) {
+		t.Fatal(err)
+	}
+	if err := s.ForgetAll(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	if items := stored(t, client, s.Table, "acct"); len(items) != 0 {
+		t.Fatalf("%d records left", len(items))
+	}
+	if items := stored(t, client, s.Table, "other"); len(items) != 1 {
+		t.Fatalf("another account's records: %d", len(items))
+	}
+}
+
+// Bursts of connects at once, again and again over many record lifetimes,
+// keep the account's records bounded, expired ones included (they used to
+// grow by about the burst's size each time, to over a thousand, and then,
+// when connects at once all deleted the same expired ones, slowly), and
+// connects refused at the bound write nothing.
 func TestSocketBurstsStayBounded(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
 	s, meter, client := socketsAt(t, &clock)
@@ -229,8 +279,9 @@ func TestSocketBurstsStayBounded(t *testing.T) {
 	const burst = 10
 	most, refused := 0, 0
 	mostWrites := 0.0
-	// Longer than SocketTTL, so records expire along the way.
-	for i := range 150 {
+	// About ten times SocketTTL, so records expire again and again.
+	bursts := int(10 * SocketTTL / (61 * time.Second))
+	for i := range bursts {
 		meter.Reset()
 		var wg sync.WaitGroup
 		var refusedNow atomic.Int32
@@ -259,7 +310,7 @@ func TestSocketBurstsStayBounded(t *testing.T) {
 		}
 		clock = clock.Add(61 * time.Second)
 	}
-	t.Logf("150 bursts of %d: at most %d records, at most %.0f write units a burst, %d connects refused", burst, most, mostWrites, refused)
+	t.Logf("%d bursts of %d: at most %d records, at most %.0f write units a burst, %d connects refused", bursts, burst, most, mostWrites, refused)
 	if refused == 0 {
 		t.Fatal("nothing refused")
 	}

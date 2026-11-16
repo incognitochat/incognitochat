@@ -80,15 +80,22 @@ func TestHandle(t *testing.T) {
 		t.Fatalf("refused connections recorded: %v", sockets.open)
 	}
 
-	// Too many connects: refused, and not logged.
+	// Too many connects: refused, and counted in the logs with nothing about
+	// the account, connection or token.
 	h.now = func() time.Time { return now }
 	sockets.fail = ephemeral.ErrTooManyConnects
 	if resp, _ := h.handle(ctx, request("$connect", "c5", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token})); resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("too many connects: %d", resp.StatusCode)
 	}
-	if logs.Len() != 0 {
-		t.Fatalf("logged: %s", logs.String())
+	if !bytes.Contains(logs.Bytes(), []byte("connect refused")) {
+		t.Fatalf("not logged: %s", logs.String())
 	}
+	for _, secret := range []string{"c5", token, account, device} {
+		if bytes.Contains(logs.Bytes(), []byte(secret)) {
+			t.Fatalf("logs leak %q: %s", secret, logs.String())
+		}
+	}
+	logs.Reset()
 
 	// Recorded, but old records couldn't be deleted: the connect stands
 	// (refusing would make the app retry and record another), and it's

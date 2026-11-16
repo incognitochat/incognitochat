@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"sync"
@@ -20,12 +21,13 @@ type memSockets struct {
 	mu        sync.Mutex
 	conns     map[string][]string
 	forgotten []string
+	tidyErr   error
 }
 
 func (m *memSockets) Connections(_ context.Context, account string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return slices.Clone(m.conns[account]), nil
+	return slices.Clone(m.conns[account]), m.tidyErr
 }
 
 func (m *memSockets) Forget(_ context.Context, account, c string) error {
@@ -120,6 +122,42 @@ func TestPushFanout(t *testing.T) {
 	}
 }
 
+// Each round posts to Fanout records, however many took the last one: with
+// 4 open sockets and 14 closed records behind them, a push takes 4 rounds,
+// not 14 (each one inside POST /send).
+func TestPushRoundsStayFull(t *testing.T) {
+	var conns []string
+	fail := map[string]error{}
+	for i := range 4 {
+		conns = append(conns, "open"+strconv.Itoa(i))
+	}
+	for i := range 14 {
+		c := "closed" + strconv.Itoa(i)
+		conns = append(conns, c)
+		fail[c] = &types.GoneException{}
+	}
+	sockets := &memSockets{conns: map[string][]string{"a": conns}}
+	p := &Pusher{Sockets: sockets, API: &memAPI{fail: fail}}
+	delivered, rounds, err := p.push(context.Background(), "a")
+	if delivered != 4 || rounds != 4 || err != nil {
+		t.Fatalf("delivered %d in %d rounds, %v", delivered, rounds, err)
+	}
+	if len(sockets.forgotten) != 14 {
+		t.Fatalf("forgot %d", len(sockets.forgotten))
+	}
+}
+
+// Expired records left over don't stop a push: it reaches the open ones.
+func TestPushDespiteTidyFailure(t *testing.T) {
+	sockets := &memSockets{conns: map[string][]string{"a": {"c1"}}, tidyErr: fmt.Errorf("%w: throttled", ephemeral.ErrTidy)}
+	api := &memAPI{}
+	p := &Pusher{Sockets: sockets, API: api}
+	ok, err := p.Push(context.Background(), "a")
+	if !ok || !errors.Is(err, ephemeral.ErrTidy) || !slices.Equal(api.sent, []string{"c1"}) {
+		t.Fatalf("push: %v %v, sent %v", ok, err, api.sent)
+	}
+}
+
 // liveAPI answers like API Gateway: gone for sockets that have closed.
 type liveAPI struct {
 	mu   sync.Mutex
@@ -188,13 +226,14 @@ func TestOpenCopyKeepsGettingPushes(t *testing.T) {
 	for i := range 40 {
 		churn(i, true)
 	}
-	// None for a while: up to MaxRecords-2 closed sockets on record still
-	// leave room for the open one.
+	// None for a while: up to KeepRecords-1 closed sockets on record still
+	// leave room for the open one (its app replaces its socket every half
+	// hour, to stay among them for longer).
 	if _, err := p.Push(ctx, "acct"); err != nil {
 		t.Fatal(err)
 	}
 	api.took()
-	for i := range ephemeral.MaxRecords - 2 {
+	for i := range ephemeral.KeepRecords - 1 {
 		churn(100+i, false)
 	}
 	if ok, err := p.Push(ctx, "acct"); !ok || err != nil {

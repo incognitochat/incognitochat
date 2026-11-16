@@ -8,11 +8,12 @@
 //	R#<key>    <window start> a rate counter (c)
 //	C#<account> <connection>  a socket (sockets.go)
 //
-// Only socket records hold an account ID, and no exact time: from a connect
-// until a push finds the socket closed, a later connect needs the place, or
-// a connect finds it expired (2 h 10 min after the minute it opened, rounded
-// up to the minute; TTL itself can take days, and an expired record is never
-// used).
+// Socket records and notice quiet periods (Q#notice#<account>) hold an
+// account ID, neither with an exact time. A socket's record lasts from a
+// connect until a push finds the socket closed, a later connect needs the
+// place, the account is deleted, or a connect or push finds it expired (40
+// minutes after the minute it opened, rounded up to the minute; TTL itself
+// can take days, and an expired record is never used).
 package ephemeral
 
 import (

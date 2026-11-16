@@ -115,10 +115,18 @@ type Server struct {
 	// Push, if set, tells open apps that something arrived; a Telegram
 	// notice goes out only if none took it.
 	Push Pusher
+	// Sockets, if set, holds the records of open apps' sockets; an account's
+	// go when it is deleted.
+	Sockets SocketRecords
 
 	// Media and Uploads, if set, hold encrypted attachments.
 	Media   Media
 	Uploads Uploads
+}
+
+// SocketRecords are the records of open apps' sockets (ephemeral.Sockets).
+type SocketRecords interface {
+	ForgetAll(ctx context.Context, account string) error
 }
 
 // Pusher reaches an account's open apps (push.Pusher).
