@@ -61,19 +61,20 @@ async function fakeBackend() {
    * Parts of the server that can't be reached. puts: how the next PUTs go
    * wrong: the bucket can't be reached; the upload is written but the answer
    * is lost; the URL can no longer start one; a delete races the write (409);
-   * or the upload is there already (412). renewals: whether the next fresh
-   * URLs asked for are refused.
+   * or the upload is there already (412). renewals: how the next requests
+   * for a fresh URL go: refused, out of reach, or failing on the server.
    */
   const down = {
     deletes: false,
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
-    renewals: [] as ('ok' | 'refused')[],
+    renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing')[],
   };
   const quietSends: boolean[] = [];
   const uploads = new Map<string, { size: number; deleteHash: string; body: Uint8Array<ArrayBuffer> | null; renewals: number }>();
-  /** Every upload URL handed out, and every PUT tried. */
+  /** Every upload URL handed out, every PUT tried, and every wait before trying again. */
   const uploadUrls: string[] = [];
   const puts: string[] = [];
+  const waits: number[] = [];
   const uploadId = (url: string) => new URL(url).pathname.split('/').pop()!;
   // The bucket: presigned PUTs must carry exactly the paid-for size, and
   // write only once.
@@ -133,7 +134,10 @@ async function fakeBackend() {
         const { secret } = JSON.parse(init.body!) as { secret: string };
         const hash = toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(secret))));
         const up = uploads.get(id);
-        if (!up || up.deleteHash !== hash || up.renewals >= 3 || down.renewals.shift() === 'refused') throw new ApiError(404, 'not_found');
+        const how = down.renewals.shift();
+        if (how === 'unreachable') throw new NetworkError('unreachable');
+        if (how === 'failing') throw new ApiError(500, 'internal');
+        if (!up || up.deleteHash !== hash || up.renewals >= 3 || how === 'refused') throw new ApiError(404, 'not_found');
         up.renewals++;
         if (up.body) return check({ uploaded: true });
         uploadUrls.push(`https://bucket.example/m/${id}?n=${up.renewals}`);
@@ -218,7 +222,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, uploads, uploadUrls, puts, transfer, down, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, uploads, uploadUrls, puts, waits, transfer, down, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -228,7 +232,16 @@ async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account:
   return {
     db,
     session,
-    messaging: createMessaging({ db, api: backend.api, session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, ...(now ? { now } : {}) }),
+    messaging: createMessaging({
+      db,
+      api: backend.api,
+      session,
+      issuer: backend.issuer,
+      mediaIssuer: backend.issuer,
+      transfer: backend.transfer,
+      wait: async (ms) => void backend.waits.push(ms),
+      ...(now ? { now } : {}),
+    }),
   };
 }
 
@@ -1597,8 +1610,50 @@ describe('uploading and downloading attachments', () => {
     await expect(send()).rejects.toBeInstanceOf(TransferError);
     expect(backend.puts).toHaveLength(4);
     expect(backend.uploadUrls).toHaveLength(4);
+    // Waiting longer each time.
+    expect(backend.waits).toEqual([2_000, 10_000, 30_000]);
     expect(await paidOnce()).toBe(true);
     expect(await mine()).toMatchObject({ status: 'failed' });
+  });
+
+  it('counts a fresh-URL request that fails on the way as a failed try, and goes on', async () => {
+    const { backend, send, mine, paidOnce } = await photoChat();
+    backend.down.puts.push('unreachable');
+    // Out of reach, then failing on the server, then a fresh URL.
+    backend.down.renewals.push('unreachable', 'failing');
+    await send();
+    expect(backend.puts).toHaveLength(2);
+    expect(backend.uploadUrls).toHaveLength(2);
+    expect(backend.waits).toEqual([2_000, 10_000, 30_000]);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'sent' });
+  });
+
+  it('runs two uploads at a time, and asks for the next URL only when one is done', async () => {
+    const { backend, sender, conv, send } = await photoChat();
+    // PUTs that hold until released.
+    const held: (() => void)[] = [];
+    const put = backend.transfer.put.bind(backend.transfer);
+    backend.transfer.put = (url, body, onProgress) =>
+      new Promise((resolve, reject) => {
+        held.push(() => void put(url, body, onProgress).then(resolve, reject));
+      });
+    const sends = [send(), send(), send(), send()];
+    await vi.waitFor(() => expect(held).toHaveLength(2));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Two URLs asked for, not four: the others would age while waiting.
+    expect(backend.uploadUrls).toHaveLength(2);
+    held.shift()!();
+    await vi.waitFor(() => expect(backend.uploadUrls).toHaveLength(3));
+    expect(held).toHaveLength(2);
+    // The rest, as each starts.
+    for (let done = 0; done < 3; done++) {
+      await vi.waitFor(() => expect(held.length).toBeGreaterThan(0));
+      held.shift()!();
+    }
+    await Promise.all(sends);
+    expect(backend.uploadUrls).toHaveLength(4);
+    expect((await listMessages(sender.db, conv)).filter((m) => m.media).map((m) => m.status)).toEqual(['sent', 'sent', 'sent', 'sent']);
   });
 
   it('downloads only the padded size the message says', async () => {

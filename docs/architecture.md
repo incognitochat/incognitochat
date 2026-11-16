@@ -203,12 +203,13 @@ the server never sees a key, name or type.
   upload URL must start its upload within a minute and writes only once, so
   it can't be replayed for long or overwrite an upload; the bucket refuses
   any PUT that could overwrite, and any presigned request signed over two
-  minutes before. A failed upload is tried again (four tries in all) without
-  new tokens: each try asks the server, with the upload's delete secret, for
-  a fresh URL, which it gives only while nothing is stored, three times at
-  most and only in the first three hours after payment; once the upload is
-  stored it says so. Request metrics on the bucket feed alarms on uploads,
-  downloads and the data downloaded.
+  minutes before. A failed upload is tried again (four tries in all, over
+  about 40 seconds) without new tokens: each try asks the server, with the
+  upload's delete secret, for a fresh URL, which it gives only while nothing
+  is stored, three times at most and only in the first three hours after
+  payment; once the upload is stored it says so. The app runs two uploads at
+  a time and asks for a URL only when one can start. Request metrics on the
+  bucket feed alarms on uploads, downloads and the data downloaded.
 - **Downloads.** A download URL also starts within a minute, and S3 answers
   it uncompressed whatever the upload claimed. The app reads only the padded
   size the message says and stops at once otherwise, so an upload can't

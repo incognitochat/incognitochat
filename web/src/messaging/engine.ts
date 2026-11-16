@@ -141,8 +141,17 @@ const TOKEN_BYTES = 1024 * 1024;
  * hours after paying. (An upload URL only starts a PUT within a minute.)
  */
 const PUT_TRIES = 4;
-/** How long to wait before each try after the first. */
-const PUT_RETRY_MS = [1_000, 3_000, 6_000];
+/**
+ * How long to wait before each try after the first: long enough for a poor
+ * connection to come back, well within the server's 3 hours.
+ */
+const PUT_RETRY_MS = [2_000, 10_000, 30_000];
+/**
+ * How many uploads run at once. Browsers open about 6 connections to one
+ * host, and an upload URL only starts a PUT within a minute, so the rest
+ * wait here and ask for their URL once it's their turn.
+ */
+const UPLOADS_AT_ONCE = 2;
 
 function checkUpload(value: unknown): { id: string; url: string } {
   const { id, url } = checkObject(value);
@@ -296,25 +305,42 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  /** Encrypts and uploads a file; returns the attachment with its upload ID, key and delete secret. */
-  async function upload(out: Outgoing, onProgress?: (fraction: number) => void): Promise<Media> {
-    const key = newFileKey();
-    const secret = crypto.getRandomValues(new Uint8Array(16));
-    // Encrypted before asking where to put it: the URL only works for a
-    // minute.
-    const body = await encryptFile(out.file, key);
-    const tokens = await takeMediaTokens(Math.ceil(body.length / TOKEN_BYTES));
-    const deleteHash = new Uint8Array(await crypto.subtle.digest('SHA-256', secret));
-    let created: { id: string; url: string };
+  let uploading = 0;
+  const waitingToUpload: (() => void)[] = [];
+  /** Runs an upload once fewer than UPLOADS_AT_ONCE are running. */
+  async function uploadSlot<T>(run: () => Promise<T>): Promise<T> {
+    while (uploading >= UPLOADS_AT_ONCE) await new Promise<void>((resolve) => waitingToUpload.push(resolve));
+    uploading++;
     try {
-      created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
-    } catch (err) {
-      // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
-      if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
-      throw err;
+      return await run();
+    } finally {
+      uploading--;
+      waitingToUpload.shift()?.();
     }
-    await put(created.id, created.url, body, secret, onProgress);
-    return { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+  }
+
+  /** Encrypts and uploads a file; returns the attachment with its upload ID, key and delete secret. */
+  function upload(out: Outgoing, onProgress?: (fraction: number) => void): Promise<Media> {
+    // Its URL is asked for only when it can be used at once: it only starts
+    // a PUT within a minute.
+    return uploadSlot(async () => {
+      const key = newFileKey();
+      const secret = crypto.getRandomValues(new Uint8Array(16));
+      // Encrypted before asking where to put it, for the same reason.
+      const body = await encryptFile(out.file, key);
+      const tokens = await takeMediaTokens(Math.ceil(body.length / TOKEN_BYTES));
+      const deleteHash = new Uint8Array(await crypto.subtle.digest('SHA-256', secret));
+      let created: { id: string; url: string };
+      try {
+        created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
+      } catch (err) {
+        // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
+        if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
+        throw err;
+      }
+      await put(created.id, created.url, body, secret, onProgress);
+      return { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+    });
   }
 
   /**
@@ -325,22 +351,29 @@ export function createMessaging(deps: MessagingDeps) {
    * 412 means the same.
    */
   async function put(id: string, first: string, body: Uint8Array<ArrayBuffer>, secret: Uint8Array, onProgress?: (fraction: number) => void): Promise<void> {
-    let url = first;
+    let url: string | null = first;
     for (let tries = 1; ; tries++) {
       try {
+        if (url === null) {
+          // The server knows whether a try that seemed to fail wrote it
+          // after all; if not, it gives a fresh URL.
+          const next = await api.post(`/media/${id}/upload`, { secret: toBase64Url(secret) }, checkRenewal);
+          if (next === 'uploaded') return;
+          url = next;
+        }
         await transfer.put(url, body, onProgress);
         return;
       } catch (err) {
         // It's there already: an earlier try wrote it.
         if (err instanceof TransferError && err.status === 412) return;
-        if (!(err instanceof TransferError) || tries >= PUT_TRIES) throw err;
+        // The bucket or the server out of reach (a TransferError is a
+        // NetworkError too), or the server failing, uses up a try; a
+        // refusal (no fresh URL) ends it.
+        const again = err instanceof NetworkError || (err instanceof ApiError && err.status >= 500);
+        if (!again || tries >= PUT_TRIES) throw err;
       }
+      url = null;
       await wait(PUT_RETRY_MS[tries - 1] ?? 0);
-      // The server knows whether a try that seemed to fail wrote it after
-      // all (its answer lost); if not, it gives a fresh URL.
-      const next = await api.post(`/media/${id}/upload`, { secret: toBase64Url(secret) }, checkRenewal);
-      if (next === 'uploaded') return;
-      url = next;
     }
   }
 

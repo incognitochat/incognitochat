@@ -23,10 +23,14 @@ type Uploads struct {
 	Now   func() time.Time
 }
 
-// Upload is a recorded upload.
+// Upload is a recorded upload. Get also fills in when it expires and how
+// many fresh upload URLs it was given; Put takes those as they are (expires,
+// and none).
 type Upload struct {
 	DeleteHash []byte
 	Size       int64
+	Expires    time.Time
+	Renewals   int
 }
 
 // Put records an upload until expires. It fails if the ID is taken.
@@ -73,7 +77,8 @@ func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, 
 	if !ok1 || !ok2 || !ok3 || expires <= u.Now().Unix() {
 		return Upload{}, false, nil
 	}
-	return Upload{DeleteHash: d.Value, Size: size}, true, nil
+	renewals, _ := intAttr(out.Item, "r") // none yet if missing
+	return Upload{DeleteHash: d.Value, Size: size, Expires: time.Unix(expires, 0), Renewals: int(renewals)}, true, nil
 }
 
 // Renew counts one more fresh upload URL for an upload. It reports false if

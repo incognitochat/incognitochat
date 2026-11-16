@@ -109,7 +109,7 @@ func TestDownloadURLFixesTheAnswersEncodingAndType(t *testing.T) {
 	}
 }
 
-func TestExists(t *testing.T) {
+func TestStored(t *testing.T) {
 	// What S3 answers a HEAD for each key: without s3:ListBucket, a missing
 	// key is 403, not 404.
 	answers := map[string]int{"/b/m/there": 200, "/b/m/missing": 403, "/b/m/listed": 404, "/b/m/broken": 400}
@@ -128,11 +128,11 @@ func TestExists(t *testing.T) {
 	})
 	bucket := &Bucket{S3: client, Name: "b"}
 	for id, want := range map[string]bool{"there": true, "missing": false, "listed": false} {
-		if got, err := bucket.Exists(context.Background(), id); err != nil || got != want {
-			t.Errorf("Exists(%s) = %v, %v", id, got, err)
+		if got, err := bucket.Stored(context.Background(), id); err != nil || got != want {
+			t.Errorf("Stored(%s) = %v, %v", id, got, err)
 		}
 	}
-	if _, err := bucket.Exists(context.Background(), "broken"); err == nil {
+	if _, err := bucket.Stored(context.Background(), "broken"); err == nil {
 		t.Error("an error answer counted as an answer")
 	}
 }

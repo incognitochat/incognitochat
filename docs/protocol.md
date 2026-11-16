@@ -432,8 +432,10 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   whose signature is over two minutes old. So an upload can't be replaced
   after it was sent.
 - **Trying again.** If a PUT fails, the app tries again, up to four tries in
-  all, with no new tokens. Before each later try it asks
-  `POST /media/{id}/upload {secret}` (the delete secret; no login). The
+  all, waiting 2, 10 and 30 seconds, with no new tokens. Before each later
+  try it asks `POST /media/{id}/upload {secret}` (the delete secret; no
+  login); if that request can't get through, or the server fails, that try
+  counts as failed too. The
   server checks the secret, then looks in the bucket: if the upload is
   stored (an earlier try wrote it and only its answer was lost), it answers
   `{uploaded: true}` and the app counts the upload as done; otherwise it
@@ -446,6 +448,9 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   only ever learns that. Once the upload is deleted, no URL is given for it
   again; only one given less than a minute before could write it back
   (where the bucket's 30-day expiry still removes it).
+- The app runs two uploads at a time and asks for an upload's URL only when
+  its turn comes, so a URL doesn't age out while it waits behind other
+  transfers to the bucket.
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),

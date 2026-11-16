@@ -116,10 +116,10 @@ func (b *Bucket) DownloadURL(ctx context.Context, id string) (string, error) {
 	return req.URL, nil
 }
 
-// Exists reports whether id's ciphertext has been uploaded. The api role may
+// Stored reports whether id's ciphertext has been uploaded. The api role may
 // read objects but not list the bucket, so S3 answers 403 rather than 404
 // for one that isn't there; both mean no.
-func (b *Bucket) Exists(ctx context.Context, id string) (bool, error) {
+func (b *Bucket) Stored(ctx context.Context, id string) (bool, error) {
 	_, err := b.S3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &b.Name, Key: key(id)})
 	var answer interface{ HTTPStatusCode() int }
 	if errors.As(err, &answer) && (answer.HTTPStatusCode() == http.StatusNotFound || answer.HTTPStatusCode() == http.StatusForbidden) {

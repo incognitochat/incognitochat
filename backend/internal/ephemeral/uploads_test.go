@@ -3,6 +3,8 @@ package ephemeral
 import (
 	"bytes"
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,8 +70,11 @@ func TestUploadRenewals(t *testing.T) {
 	if _, ok, _ := u.Get(ctx, "up1"); ok {
 		t.Fatal("renewing created an upload")
 	}
-	// At most twice.
+	// At most twice; Get says how many so far, and when it expires.
 	put("up1", clock.Add(-time.Hour))
+	if got, _, _ := u.Get(ctx, "up1"); got.Renewals != 0 || !got.Expires.Equal(clock.Add(keep-time.Hour)) {
+		t.Fatalf("Get = %+v", got)
+	}
 	if !renew("up1") || !renew("up1") {
 		t.Fatal("renewal refused")
 	}
@@ -77,17 +82,50 @@ func TestUploadRenewals(t *testing.T) {
 		t.Fatal("a third renewal")
 	}
 	// The record is unchanged otherwise.
-	if got, ok, err := u.Get(ctx, "up1"); err != nil || !ok || got.Size != 2<<20 || !bytes.Equal(got.DeleteHash, hash) {
+	if got, ok, err := u.Get(ctx, "up1"); err != nil || !ok || got.Size != 2<<20 || !bytes.Equal(got.DeleteHash, hash) || got.Renewals != 2 {
 		t.Fatalf("Get = %+v %v %v", got, ok, err)
 	}
-	// Not for an upload paid for too long ago, or expired.
-	put("up2", clock.Add(-4*time.Hour))
-	if renew("up2") {
-		t.Fatal("renewed an old upload")
+	// Paid for a second under 3 hours ago, yes; exactly 3 hours ago, no.
+	put("up2", clock.Add(-3*time.Hour+time.Second))
+	if !renew("up2") {
+		t.Fatal("refused within the window")
 	}
-	put("up3", clock.Add(-time.Hour))
+	put("up3", clock.Add(-3*time.Hour))
+	if renew("up3") {
+		t.Fatal("renewed an upload paid for 3 hours ago")
+	}
+	// Not once it expired.
+	put("up4", clock.Add(-time.Hour))
 	clock = clock.Add(keep)
-	if ok, err := u.Renew(ctx, "up3", 2, clock.Add(-2*time.Hour)); ok || err != nil {
+	if ok, err := u.Renew(ctx, "up4", 2, clock.Add(-2*time.Hour)); ok || err != nil {
 		t.Fatalf("renewed an expired upload: %v", err)
+	}
+}
+
+func TestUploadRenewalsRace(t *testing.T) {
+	client := dynamotest.Client(t)
+	clock := time.Unix(1_800_000_000, 0)
+	u := &Uploads{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	if err := u.Put(ctx, "up", Upload{DeleteHash: bytes.Repeat([]byte{7}, 32), Size: 16 << 10}, clock.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// 40 at once, as many as a script could send: exactly 3 get through.
+	var wg sync.WaitGroup
+	var granted atomic.Int32
+	for range 40 {
+		wg.Go(func() {
+			ok, err := u.Renew(ctx, "up", 3, clock)
+			if err != nil {
+				t.Error(err)
+			}
+			if ok {
+				granted.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if granted.Load() != 3 {
+		t.Fatalf("%d renewals granted", granted.Load())
 	}
 }

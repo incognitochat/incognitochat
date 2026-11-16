@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"strconv"
 	"sync"
@@ -16,14 +17,15 @@ import (
 )
 
 type memMedia struct {
-	deleted []string
-	stored  map[string]bool // uploads written to the bucket
-	lookups int
+	deleted   []string
+	stored    map[string]bool // uploads written to the bucket
+	lookups   int
+	lookupErr error // what looking in the bucket fails with
 }
 
-func (m *memMedia) Exists(_ context.Context, id string) (bool, error) {
+func (m *memMedia) Stored(_ context.Context, id string) (bool, error) {
 	m.lookups++
-	return m.stored[id], nil
+	return m.stored[id], m.lookupErr
 }
 
 func (m *memMedia) UploadURL(_ context.Context, id string, size int64) (string, error) {
@@ -76,6 +78,7 @@ func (m *memUploads) Get(_ context.Context, id string) (ephemeral.Upload, bool, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	up, ok := m.ups[id]
+	up.Expires, up.Renewals = m.expires[id], m.renewals[id]
 	return up, ok, nil
 }
 
@@ -165,6 +168,17 @@ func TestRenewUpload(t *testing.T) {
 		return h.post(t, "/media/"+id+"/upload", map[string]any{"secret": b64(secret)})
 	}
 
+	// refused checks a refusal that neither writes nor looks in the bucket.
+	refused := func(id string, secret []byte) {
+		t.Helper()
+		writes, lookups := uploads.writes, store.lookups
+		status, out := renew(id, secret)
+		wantError(t, status, out, http.StatusNotFound, "not_found")
+		if uploads.writes != writes || store.lookups != lookups {
+			t.Fatalf("writes %d -> %d, lookups %d -> %d", writes, uploads.writes, lookups, store.lookups)
+		}
+	}
+
 	// A fresh URL for the same upload and size, for its delete secret only,
 	// and without tokens; a few times, then no more.
 	id := pay(2 << 20)
@@ -174,45 +188,39 @@ func TestRenewUpload(t *testing.T) {
 			t.Fatalf("renew: %d %v", status, out)
 		}
 	}
-	status, out := renew(id, secret)
-	wantError(t, status, out, http.StatusNotFound, "not_found")
-
-	// A wrong secret or an unknown upload is refused before anything is
-	// written or looked up.
-	writes, lookups := uploads.writes, store.lookups
-	status, out = renew(pay(16<<10), []byte("wrong"))
-	wantError(t, status, out, http.StatusNotFound, "not_found")
-	status, out = renew(ids.New(), secret)
-	wantError(t, status, out, http.StatusNotFound, "not_found")
-	if uploads.writes != writes || store.lookups != lookups {
-		t.Fatalf("writes %d -> %d, lookups %d -> %d", writes, uploads.writes, lookups, store.lookups)
-	}
+	refused(id, secret)
+	// A wrong secret, or an unknown upload.
+	refused(pay(16<<10), []byte("wrong"))
+	refused(ids.New(), secret)
 
 	// Once it's stored, no URL: the app counts its upload as done.
 	stored := pay(16 << 10)
 	store.stored[stored] = true
-	status, out = renew(stored, secret)
+	status, out := renew(stored, secret)
 	if status != http.StatusOK || out["uploaded"] != true || out["url"] != nil {
 		t.Fatalf("renew stored: %d %v", status, out)
 	}
+	// If the bucket can't be asked, no URL either.
+	store.lookupErr = errors.New("bucket unreachable")
+	status, out = renew(pay(16<<10), secret)
+	wantError(t, status, out, http.StatusInternalServerError, "internal")
+	store.lookupErr = nil
 
 	// Deleted: refused.
 	deleted := pay(16 << 10)
 	if status, out := h.post(t, "/media/"+deleted+"/delete", map[string]any{"secret": b64(secret)}); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, out)
 	}
-	status, out = renew(deleted, secret)
-	wantError(t, status, out, http.StatusNotFound, "not_found")
+	refused(deleted, secret)
 
-	// Only for a few hours after payment.
-	late := pay(16 << 10)
-	h.now = h.now.Add(UploadRenewalWindow - time.Minute)
+	// Only within 3 hours of payment: a second before, yes; at 3 hours, no.
+	late, later := pay(16<<10), pay(16<<10)
+	h.now = h.now.Add(UploadRenewalWindow - time.Second)
 	if status, out := renew(late, secret); status != http.StatusOK || out["url"] == nil {
 		t.Fatalf("renew within the window: %d %v", status, out)
 	}
-	h.now = h.now.Add(2 * time.Minute)
-	status, out = renew(late, secret)
-	wantError(t, status, out, http.StatusNotFound, "not_found")
+	h.now = h.now.Add(time.Second)
+	refused(later, secret)
 }
 
 func TestUploadRejects(t *testing.T) {
