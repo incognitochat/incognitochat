@@ -85,7 +85,8 @@ flowchart LR
   15-minute token. Sensitive actions (links, invitations, admin) also carry a
   fresh signature. Both are timed by the server's clock: if the device's own
   is off, the server says so with its time, and the app corrects for it and
-  asks again, without the user seeing an error.
+  asks again, without the user seeing an error. Only within two days, though:
+  further off, the app asks the user to set the device's date and time.
 
 ## Links
 

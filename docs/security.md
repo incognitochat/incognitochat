@@ -61,6 +61,11 @@ it. This is how close it gets.
 - Forge messages or slip them into a conversation.
 - Swap someone's keys unnoticed: every link carries its key's fingerprint, and
   the app checks it.
+- Collect logins and signed requests dated far ahead, to replay them later:
+  the app corrects for a server whose clock differs from the device's only
+  within two days, and further off it signs nothing and asks the user to set
+  the device's clock. Within those two days such a request could still be
+  replayed once, when its time comes.
 
 **What the operator could do, but would be caught**
 

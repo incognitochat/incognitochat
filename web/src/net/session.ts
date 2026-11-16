@@ -3,7 +3,7 @@
 // key on top of the token. Times the server checks come from the server's
 // clock as this device knows it (clock.ts), not the device's own.
 
-import { logIn, markReplaced, readAccount, signRequest } from '../account/account';
+import { isSetUp, logIn, readAccount, recordRefusal, signRequest } from '../account/account';
 import type { Database } from '../storage/db';
 import { ApiError, type Api, type Method, type TokenResponse } from './api';
 import { createClock, type Clock } from './clock';
@@ -58,9 +58,10 @@ export function createSession(db: Database, api: Api, clock: Clock = createClock
             retimed = true;
             continue;
           }
-          if (err instanceof ApiError && err.code === 'account_replaced') {
+          // Replaced, or no longer accepted: recorded, and asked again at the next launch.
+          if (err instanceof ApiError && (err.code === 'account_replaced' || err.code === 'login_refused')) {
             const account = await readAccount(db);
-            if (account?.state === 'registered') await markReplaced(db, account.accountId);
+            if (isSetUp(account)) await recordRefusal(db, account.accountId, err);
           }
           throw err;
         }

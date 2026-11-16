@@ -64,9 +64,12 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 // for sensitive actions: a stolen session token alone can't make them.
 func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFunc {
 	return func(ctx context.Context, req httpapi.Request) httpapi.Response {
+		// One reading of the clock for both checks of the timestamp, so one
+		// at the edge of the window can't pass this and fail the other.
+		now := s.Now()
 		signed, signedOK := parseSignature(httpapi.Header(req, SignatureHeader))
 		// Before the device is read, as for a login.
-		if now := s.Now(); signedOK && session.CheckTime(signed.Timestamp, now) != nil {
+		if signedOK && session.CheckTime(signed.Timestamp, now) != nil {
 			return clockSkew(now)
 		}
 		c, resp, ok := s.authenticate(ctx, route, req)
@@ -90,7 +93,7 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 		if err != nil {
 			return s.internal(route, err)
 		}
-		err = session.CheckRequest(ctx, signed, key, s.Nonces, s.Now())
+		err = session.CheckRequest(ctx, signed, key, s.Nonces, now)
 		if errors.Is(err, session.ErrLogin) {
 			return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 		}

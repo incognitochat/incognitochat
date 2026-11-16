@@ -72,11 +72,15 @@ window (below), get `401 {"error": "clock_skew", "now": <the server's Unix
 seconds>}`. The server decides this from the timestamp alone, before it reads
 anything about the account or device, so the answer says nothing about whether
 they exist. The app keeps, in memory, how far its clock is from `now`, and
-takes every time the server checks from the corrected clock: login and
-signature timestamps, the device list, and the session token's expiry. It
-signs again with a fresh nonce and retries once, so a device whose clock is
-off (a wrong time zone set by hand, say) works without the user seeing an
-error.
+uses the corrected clock for exactly these: login and signature timestamps,
+a new account's first device list, and checking the session token's expiry.
+It signs again with a fresh nonce and retries once, so a device whose clock
+is off (a wrong time zone set by hand, say) works without the user seeing an
+error. Other times still come from the device's own clock: a link's key times
+(`from`, `until`, checked only to the hour and valid for weeks), the week of
+send and media tokens, and a message's `at`. The app believes `now` only
+within two days of its own clock; further off, it signs nothing and asks the
+user to set the device's date and time.
 
 **Refusals.** These answers about the device itself:
 
@@ -89,10 +93,13 @@ error.
 
 The app doesn't take the last two on trust, since a server could send them to
 anyone. It says so on a screen of its own, keeps the device's chats there and
-readable (nothing can be sent), asks again when the user taps Try again and
-at every launch, and goes on as before if the server lets the device in
-again. It deletes nothing on such an answer: only setting up again does,
-after the user types a confirmation.
+readable (nothing is sent or downloaded), asks again when the user taps Try
+again and at every launch, and goes on as before if the server lets the
+device in again. It remembers the answer, so a launch that can't reach the
+server opens read-only too. A replaced account stays shown as replaced if the
+server later only refuses it (the server keeps its marker of a replacement
+for 90 days). It deletes nothing on such an answer: only setting up again
+does, after the user types a confirmation.
 
 **One device per account.** Setting up on a second device replaces the
 account (after a typed confirmation); there is no device linking or sync.

@@ -285,6 +285,8 @@ export const en = {
   errorNetwork: "Couldn't reach the server. Check your connection and try again.",
   errorExpired: 'This setup step took too long. Continue to try again.',
   errorRateLimited: 'Too many setups today. Try again tomorrow.',
+  errorClock:
+    "This device's date or time is wrong, by more than two days, so the app can't talk to the server safely. Set the right date and time in the device's settings, then try again.",
   errorGeneric: 'Something went wrong. Try again.',
   tryAgain: 'Try again',
   continue: 'Continue',

@@ -49,7 +49,7 @@ function listIssued(list: Uint8Array): number {
 }
 
 /** A fake server that checks requests the way the backend does, by its clock (Unix seconds). */
-function fakeServer(options: { exists?: boolean; replaced?: boolean; now?: number } = {}) {
+function fakeServer(options: { exists?: boolean; replaced?: boolean; refused?: boolean; now?: number } = {}) {
   const calls: { path: string; body: Record<string, unknown> }[] = [];
   const serverNow = options.now ?? NOW;
   let deviceKey: Uint8Array<ArrayBuffer> | undefined;
@@ -79,6 +79,7 @@ function fakeServer(options: { exists?: boolean; replaced?: boolean; now?: numbe
         const dk = await importSigningPublicKey(deviceKey!);
         const parts = loginParts(b.account!, b.device!, Number(b.timestamp), b.nonce!);
         if (!(await verify(dk, fromBase64Url(b.signature!), LABEL_SESSION, ...parts))) throw new ApiError(401, 'login_refused');
+        if (options.refused) throw new ApiError(401, 'login_refused');
         if (options.replaced) throw new ApiError(410, 'account_replaced');
         return check({ account: b.account, token: 'v1.payload.mac', expires: NOW + 900 });
       }
@@ -201,6 +202,18 @@ describe('register', () => {
     expect(calls.map((c) => c.path)).toEqual(['/register', '/register', '/session']);
   });
 
+  it("doesn't sign by a server clock that's days away, and doesn't register", async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api, calls } = fakeServer();
+    const clock = createClock(() => (NOW + 3 * 86_400) * 1000);
+    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'clock_skew' });
+    expect(clock.tooFar(err)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(await readAccount(db)).toMatchObject({ state: 'pending' });
+  });
+
   it("refuses a launch that isn't for this setup, without calling the server", async () => {
     const db = await fresh();
     await prepareSetup(db);
@@ -217,10 +230,10 @@ describe('register', () => {
     const db = await fresh();
     const code = await prepareSetup(db);
     const { api } = fakeServer({ exists: true });
-    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false }).catch((e: unknown) => e);
+    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() }).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'account_exists' });
     expect(await readAccount(db)).toMatchObject({ state: 'pending' });
-    await register(db, api, { initData: 'd', startParam: code }, { replace: true });
+    await register(db, api, { initData: 'd', startParam: code }, { replace: true, clock: atNow() });
     expect(await readAccount(db)).toMatchObject({ state: 'registered' });
   });
 });
@@ -289,6 +302,29 @@ describe('replaced accounts', () => {
     expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
 
     server.replaced = false;
+    await logIn(db, api, atNow());
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+  });
+
+  it('records a refused login, keeps a replacement over it, and clears both when let in', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const server: { replaced?: boolean; refused?: boolean } = { refused: true };
+    const { api } = fakeServer(server);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'login_refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'refused' });
+    // Setting up again over it still takes the typed confirmation (restart).
+    await expect(prepareSetup(db)).rejects.toThrow();
+
+    // Replaced: that's recorded; a later refusal (the server forgot the replacement) doesn't undo it.
+    Object.assign(server, { refused: false, replaced: true });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'account_replaced' });
+    Object.assign(server, { refused: true, replaced: false });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'login_refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+
+    server.refused = false;
     await logIn(db, api, atNow());
     expect(await readAccount(db)).toMatchObject({ state: 'registered' });
   });

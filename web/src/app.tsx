@@ -42,6 +42,7 @@ const ERROR_TEXT: Record<ErrorKind, Key> = {
   network: 'errorNetwork',
   expired: 'errorExpired',
   'rate-limited': 'errorRateLimited',
+  clock: 'errorClock',
   generic: 'errorGeneric',
 };
 
@@ -2088,7 +2089,7 @@ function useMediaUrl(app: AppState, m: MessageView) {
 }
 
 /** Whether an attachment waits for a tap to download: one received, or one cleared from this device. */
-const fetchable = (m: MessageView) => (m.file === 'remote' && !m.out) || m.file === 'cleared';
+const fetchable = (app: AppState, m: MessageView) => !app.readOnly.value && ((m.file === 'remote' && !m.out) || m.file === 'cleared');
 
 /** The tiny preview carried in the message, as an image URL. */
 function tinyPreview(p: string | undefined): string | null {
@@ -2104,7 +2105,7 @@ function MediaState({ app, message: m, language, progress }: { app: AppState; me
           <Ring fraction={progress} />
         </span>
       )}
-      {fetchable(m) && progress === undefined && (
+      {fetchable(app, m) && progress === undefined && (
         <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
           ↓
         </button>
@@ -2146,7 +2147,7 @@ function VideoView({ app, message: m, language, progress }: { app: AppState; mes
   const { w = 16, h = 9, p, l, s } = m.media!;
   const tiny = tinyPreview(p);
   const length = l !== undefined ? formatLength(language, l) : null;
-  const size = fetchable(m) ? formatSize(language, s) : null;
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   return (
     <div class="photo" style={{ aspectRatio: `${w} / ${h}` }}>
       {tiny && <img class="tiny" src={tiny} alt="" />}
@@ -2259,7 +2260,7 @@ function PlayButton({ app, message: m, language, progress, playing, onPlay }: { 
       </span>
     );
   }
-  if (fetchable(m)) {
+  if (fetchable(app, m)) {
     return (
       <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
         ↓
@@ -2527,12 +2528,12 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
   const busy = progress !== undefined;
   const onClick = () => {
     if (busy) return;
-    if (fetchable(m)) void app.fetchMedia(m.id);
+    if (fetchable(app, m)) void app.fetchMedia(m.id);
     else if (m.file === 'local') void save(app, m, language);
   };
   return (
     <button type="button" class="file" onClick={onClick} disabled={m.file === 'gone'}>
-      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(m) ? '↓' : extension(media.n) || '📄'}</span>
+      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(app, m) ? '↓' : extension(media.n) || '📄'}</span>
       <span class="file-info">
         <span class="file-name" dir="auto">
           {media.n ?? t(language, 'file')}

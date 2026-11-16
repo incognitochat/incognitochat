@@ -84,6 +84,32 @@ describe('session', () => {
     await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'account_replaced' });
     expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
   });
+
+  it("signs for an account recorded as replaced, so the server's answer says so", async () => {
+    const s = server({ replaced: true });
+    const db = await registeredDb(s.api);
+    const session = createSession(db, s.api, deviceClock());
+    session.use({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.t.m', expires: NOW + 900 });
+    await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'account_replaced' });
+    // Not a "not registered" error from the device: the server's own answer.
+    await expect(session.call('POST', '/links', { id: 'x' }, checkObject, { sign: true })).rejects.toMatchObject({ code: 'account_replaced' });
+    expect(s.seen.at(-1)!.signature).toBeDefined();
+  });
+
+  it('records a device the server no longer accepts', async () => {
+    const s = server();
+    const db = await registeredDb(s.api);
+    const refusing: typeof s.api = {
+      ...s.api,
+      request: async () => {
+        throw new ApiError(401, 'login_refused');
+      },
+    };
+    const session = createSession(db, refusing, deviceClock());
+    session.use({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.t.m', expires: NOW + 900 });
+    await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'refused' });
+  });
 });
 
 describe('a device clock that is off', () => {

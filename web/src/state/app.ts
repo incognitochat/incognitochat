@@ -5,6 +5,7 @@
 import { signal } from '@preact/signals';
 import {
   isRegistrationLaunch,
+  isSetUp,
   logIn,
   prepareSetup,
   readAccount,
@@ -55,7 +56,8 @@ import type { SyncEvent } from '../sync/locks';
 /** Between the steps of deleting an account (DELETE /account answers in_progress until done). */
 const DELETE_STEP_PAUSE_MS = 1000;
 
-export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'generic';
+/** clock: the device's clock is too far off (more than two days) for the server's to be believed. */
+export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'generic';
 
 /**
  * Why the server no longer takes this device: it refused the login (the
@@ -248,6 +250,8 @@ export function createApp(deps: Deps) {
   const session: Session | null = deps.api ? createSession(deps.db, deps.api, clock) : null;
   // Set while the server doesn't take this device (unverified, asked again).
   let signedOut: SignedOutReason | null = null;
+  /** While signed out: the chats are only read (no downloads either). */
+  const readOnly = signal(false);
   // What this launch was opened with (a link or an invitation) is handled
   // once, not on every restart.
   let launchParam: string | null = isRegistrationLaunch(deps.launch.startParam) ? null : deps.launch.startParam || null;
@@ -303,8 +307,8 @@ export function createApp(deps: Deps) {
       return;
     }
     const account = await readAccount(db);
-    // A replaced account too: the server is asked again each time.
-    if (account?.state === 'registered' || account?.state === 'replaced') return enter();
+    // A replaced or refused one too: the server is asked again each time.
+    if (isSetUp(account)) return enter();
     if (!bridge) {
       screen.value = { kind: 'outside-telegram' };
       return;
@@ -367,10 +371,15 @@ export function createApp(deps: Deps) {
     try {
       session!.use(await logIn(deps.db, deps.api!, clock));
       signedOut = null;
+      readOnly.value = false;
     } catch (err) {
+      // Replaced once, still replaced: the server forgets a replacement
+      // (its marker expires) and then only refuses the device, but the
+      // warning stays.
+      if (recorded?.state === 'replaced' && err instanceof ApiError && err.code === 'login_refused') return showSignedOut('replaced');
       if (handleGone(err)) return;
       // Couldn't ask: as the server last said, until it can be asked again.
-      const last = signedOut ?? (recorded?.state === 'replaced' ? 'replaced' : null);
+      const last = signedOut ?? (recorded?.state === 'replaced' || recorded?.state === 'refused' ? recorded.state : null);
       if (last) return showSignedOut(last, true);
       // Offline or the server is down: the device still works on what it has.
       offline = true;
@@ -382,10 +391,23 @@ export function createApp(deps: Deps) {
   /** The server no longer takes this device: say so, and keep its chats readable. */
   function showSignedOut(reason: SignedOutReason, offline = false): void {
     signedOut = reason;
+    readOnly.value = true;
     stopBackground();
     messaging = null;
     backButton(false);
     screen.value = { kind: 'signed-out', reason, busy: false, offline };
+  }
+
+  /**
+   * The device's clock is more than two days off: the server's isn't
+   * believed that far (a hostile one could collect requests dated ahead), so
+   * nothing is signed until the user sets the clock.
+   */
+  function showClockOff(again: () => Promise<void>): void {
+    stopBackground();
+    messaging = null;
+    backButton(false);
+    fail('clock', again);
   }
 
   /** Asks the server again whether it takes this device (Try again). */
@@ -447,19 +469,24 @@ export function createApp(deps: Deps) {
       if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) void sync();
     }, POLL_MS);
     document.addEventListener('visibilitychange', visibility);
-    stopBackground = () => {
-      clearInterval(poll);
-      socket?.stop();
-      document.removeEventListener('visibilitychange', visibility);
-      backgroundStarted = false;
-    };
-    deps.bridge?.on('visibility_changed', ({ is_visible }) => {
+    const offVisible = deps.bridge?.on('visibility_changed', ({ is_visible }) => {
       telegramVisible = is_visible;
       visibility();
     });
     // Upkeep at a random moment soon after opening, unrelated to anything
     // the user does, so the first send rarely has to fetch tokens itself.
-    setTimeout(() => void messaging?.maintain().catch(() => {}), 2_000 + Math.random() * 8_000);
+    const upkeep = setTimeout(() => void messaging?.maintain().catch(() => {}), 2_000 + Math.random() * 8_000);
+    // Everything started here stops here, so starting again (after a
+    // sign-out that Try again undid) runs one of each, not two.
+    stopBackground = () => {
+      clearInterval(poll);
+      clearTimeout(upkeep);
+      socket?.stop();
+      document.removeEventListener('visibilitychange', visibility);
+      offVisible?.();
+      backgroundStarted = false;
+      stopBackground = () => {};
+    };
   }
 
   /** Fetches new messages; refreshes the screen if any arrived. */
@@ -1061,7 +1088,8 @@ export function createApp(deps: Deps) {
   function handleGone(err: unknown): boolean {
     if (!(err instanceof ApiError)) return false;
     if (err.code === 'account_replaced') showSignedOut('replaced');
-    else if (err.code === 'login_refused') showSignedOut('refused');
+    else if (err.code === 'login_refused') showSignedOut(signedOut === 'replaced' ? 'replaced' : 'refused');
+    else if (clock.tooFar(err)) showClockOff(() => start());
     else return false;
     return true;
   }
@@ -1294,6 +1322,7 @@ export function createApp(deps: Deps) {
       // The launch data is only accepted for 10 minutes: reopen for a fresh one.
       else if (err instanceof ApiError && err.code === 'init_data_rejected') fail('expired', () => setUp());
       else if (err instanceof ApiError && err.code === 'rate_limited') fail('rate-limited', () => runRegister(replace));
+      else if (clock.tooFar(err)) showClockOff(() => runRegister(replace));
       else if (err instanceof NetworkError) fail('network', () => runRegister(replace));
       else fail('generic', () => runRegister(replace));
       return;
@@ -1312,6 +1341,8 @@ export function createApp(deps: Deps) {
     setUp: () => setUp(),
     /** Asks the server again whether it takes this device. */
     recheck,
+    /** Whether the chats are read-only (signed out): nothing is sent or downloaded. */
+    readOnly,
     /** While signed out: the chats, read-only. */
     readChats: () => showHome({ tab: 'chats' }),
     /** Asks to set up again while signed out (a typed confirmation follows: it deletes everything here). */
@@ -1476,6 +1507,16 @@ function startParamOf(text: string): string {
 
 /** Whether the typed confirmation matches the phrase, ignoring case and spacing. */
 export function confirmationMatches(typed: string, phrase: string): boolean {
-  const norm = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  // Forgiving of how a keyboard types it: spaces anywhere or none, a
+  // zero-width non-joiner or a space or nothing between word parts, and the
+  // Arabic kaf and yeh (ك ي ى) that Arabic layouts type for the Persian ک ی.
+  // Direction marks (as around the phrase shown, if copied) don't count either.
+  const norm = (s: string) =>
+    s
+      .normalize('NFC')
+      .replace(/[\s‌-‏⁦-⁩]+/g, '')
+      .replace(/ك/g, 'ک')
+      .replace(/[يى]/g, 'ی')
+      .toLocaleLowerCase();
   return norm(typed) !== '' && norm(typed) === norm(phrase);
 }

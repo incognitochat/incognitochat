@@ -8,6 +8,10 @@ import { getMeta, openDatabase, putMeta } from '../storage/db';
 import { addMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import type { SyncEvent } from '../sync/locks';
+import type { TokenIssuer } from '../account/wallet';
+import type { IssuerKey } from '../crypto/blindrsa';
+import { en } from '../i18n/en';
+import { fa } from '../i18n/fa';
 import { confirmationMatches, createApp, type Deps, type Screen } from './app';
 
 let n = 0;
@@ -56,6 +60,8 @@ function fakeServer(
   const calls: string[] = [];
   const bundles = new Map<string, { signingKey: string; keys: unknown[]; mailbox: string }>();
   const unsigned: string[] = [];
+  // The timestamps logins were signed with.
+  const loginTimes: number[] = [];
   const state = {
     inviteOnly: false,
     member: false,
@@ -89,6 +95,7 @@ function fakeServer(
         return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: serverSeconds() + 900 });
       }
       if (path === '/session') {
+        loginTimes.push(Number(body.timestamp));
         const skew = clockSkew(body.timestamp);
         if (skew) throw skew;
         take(outcomes.session);
@@ -166,7 +173,7 @@ function fakeServer(
       throw new ApiError(404, 'not_found');
     },
   };
-  return { api, calls, bundles, unsigned, state };
+  return { api, calls, bundles, unsigned, state, loginTimes };
 }
 
 function fakeBridge() {
@@ -416,6 +423,36 @@ describe('a device clock that is off', () => {
       expect(home(owner.app.screen.value)).toMatchObject({ offline: false });
     });
   });
+
+  it('asks to set the clock when the device is days off, signing nothing by the server clock', async () => {
+    const server = fakeServer();
+    const owner = await withDeviceClockOff(3 * 86_400_000, () => registered(server.api));
+    expect(owner.app.screen.value).toEqual({ kind: 'error', error: 'clock' });
+    // Every login was signed by the device's own clock and refused: the
+    // server's, two days and more away, was never taken.
+    expect(server.loginTimes.length).toBeGreaterThan(0);
+    for (const at of server.loginTimes) expect(Math.abs(at - (serverSeconds() + 3 * 86_400))).toBeLessThan(60);
+    // Once the clock is set, Try again goes through.
+    await owner.app.retry();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: false });
+  });
+
+  it("doesn't believe a server that says it's ten years later", async () => {
+    // A hostile server collecting logins dated ahead, to replay them on the honest one later.
+    const later = () => new ApiError(401, 'clock_skew', serverSeconds() + 10 * 365 * 86_400);
+    const server = fakeServer({ session: ['ok', later()] });
+    const { db } = await registered(server.api);
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    const logins = () => server.calls.filter((c) => c === 'POST /session').length;
+    const before = logins();
+    await app.start();
+    expect(app.screen.value).toEqual({ kind: 'error', error: 'clock' });
+    expect(logins() - before).toBe(1);
+    // No login was ever signed with a time ahead of the real one.
+    for (const at of server.loginTimes) expect(Math.abs(at - serverSeconds())).toBeLessThan(60);
+    // Nothing deleted, and the device is still set up.
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+  });
 });
 
 describe('when the server stops taking this device', () => {
@@ -452,7 +489,8 @@ describe('when the server stops taking this device', () => {
     expect(app.screen.value).toEqual({ kind: 'confirm-reset', reason: 'refused' });
     app.cancelReset();
     expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
-    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+    // Recorded as refused (asked again at the next launch); nothing deleted.
+    expect(await readAccount(db)).toMatchObject({ state: 'refused' });
     expect(await listMessages(db, 'c1')).toHaveLength(1);
 
     // Only confirming deletes, and sets up anew.
@@ -471,8 +509,110 @@ describe('when the server stops taking this device', () => {
     await chatOnDevice(owner.db);
     await owner.app.home();
     expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
-    expect(await readAccount(owner.db)).toMatchObject({ state: 'registered' });
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'refused' });
     expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+  });
+
+  it('keeps the replaced warning when the server later only refuses the device', async () => {
+    // Once the server's marker of the replacement expires, it answers login_refused.
+    const server = fakeServer({ session: ['ok', new ApiError(410, 'account_replaced'), refused(), refused()] });
+    const { db } = await registered(server.api);
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
+    await app.recheck();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
+    // And at a later launch.
+    const later = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await later.app.start();
+    expect(later.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+  });
+
+  it('opens read-only after a refusal even offline, until the server lets the device in', async () => {
+    const server = fakeServer({ session: ['ok', refused(), new NetworkError('down'), 'ok'] });
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+    const launch = async () => {
+      const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+      await app.start();
+      return app;
+    };
+    expect((await launch()).screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
+    const offline = await launch();
+    expect(offline.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: true });
+    await offline.readChats();
+    expect(home(offline.screen.value)).toMatchObject({ signedOut: 'refused', conversations: [{ id: 'c1' }] });
+    // Accepted again: writable, and no longer recorded as refused.
+    const back = await launch();
+    expect(home(back.screen.value)).toMatchObject({ signedOut: null, offline: false });
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+  });
+
+  it('makes no server calls while read-only: reading chats, opening one, seen receipts, downloads', async () => {
+    const server = fakeServer({ session: ['ok', refused()] });
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+    // A photo not on the device yet, which would download as the chat opens.
+    await addMessage(
+      db,
+      { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
+      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out' });
+    expect(app.readOnly.value).toBe(true);
+    const before = server.calls.length;
+
+    await app.readChats();
+    await app.openConversation('c1');
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', readOnly: true, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
+    app.markSeen();
+    await app.fetchMedia('p1');
+    await app.home();
+    await tick();
+    expect(server.calls.slice(before)).toEqual([]);
+    expect(await getMedia(db, 'p1')).toBeUndefined();
+  });
+
+  it('starts messaging again when Try again works, with one of each background listener', async () => {
+    // registered() reads the account twice; then refused while open, accepted after Try again, refused again.
+    const server = fakeServer({ account: ['ok', 'ok', refused(), 'ok', refused()] });
+    const listeners = new Map<string, number>();
+    const bridge: Bridge = {
+      transport: 'webview-proxy',
+      post: () => {},
+      on: (type) => {
+        listeners.set(type, (listeners.get(type) ?? 0) + 1);
+        return () => void listeners.set(type, listeners.get(type)! - 1);
+      },
+    };
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    try {
+      const owner = await registered(server.api, { bridge, issuer, background: true });
+      const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+      expect(listeners.get('visibility_changed')).toBe(1);
+      expect(inbox()).toBe(1);
+
+      await owner.app.home();
+      expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
+      expect(listeners.get('visibility_changed')).toBe(0);
+
+      await owner.app.recheck();
+      expect(home(owner.app.screen.value)).toMatchObject({ signedOut: null, offline: false });
+      expect(owner.app.readOnly.value).toBe(false);
+      // Messaging runs again (it fetched the inbox), its background started once.
+      expect(inbox()).toBe(2);
+      expect(listeners.get('visibility_changed')).toBe(1);
+
+      // Stops it again (and so ends this test's timers).
+      await owner.app.home();
+      expect(listeners.get('visibility_changed')).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('keeps a replaced account readable too, and its chats on the device', async () => {
@@ -861,5 +1001,29 @@ describe('typed confirmation', () => {
     expect(confirmationMatches('شروع  دوباره', 'شروع دوباره')).toBe(true);
     expect(confirmationMatches('start', 'start over')).toBe(false);
     expect(confirmationMatches('', '')).toBe(false);
+  });
+
+  it('takes the phrase however a keyboard types it', () => {
+    // A zero-width non-joiner typed as a space, or as nothing.
+    const zwnj = 'گفت‌وگو';
+    expect(confirmationMatches('گفت وگو', zwnj)).toBe(true);
+    expect(confirmationMatches('گفتوگو', zwnj)).toBe(true);
+    expect(confirmationMatches(zwnj, 'گفت وگو')).toBe(true);
+    // Arabic layouts type kaf and yeh (ك ي ى) for the Persian ک and ی.
+    expect(confirmationMatches('پاك كردن', 'پاک کردن')).toBe(true);
+    expect(confirmationMatches('گفت‌وگوهايم', 'گفت‌وگوهایم')).toBe(true);
+    expect(confirmationMatches('ى', 'ی')).toBe(true);
+    // No spaces at all, or direction marks from a copied phrase.
+    expect(confirmationMatches('deletemychats', 'delete my chats')).toBe(true);
+    expect(confirmationMatches('⁨حذف همه⁩', 'حذف همه')).toBe(true);
+    // Still the phrase, though.
+    expect(confirmationMatches('حذف', 'حذف همه')).toBe(false);
+    expect(confirmationMatches('‌ ⁨', '‌')).toBe(false);
+  });
+
+  it("uses phrases any keyboard can type: no zero-width non-joiner, ک or ی", () => {
+    for (const key of ['replacePhrase', 'deletePhrase', 'resetPhrase'] as const) {
+      for (const phrase of [en[key], fa[key]]) expect(phrase).not.toMatch(/[‌کیكي]/);
+    }
   });
 });
