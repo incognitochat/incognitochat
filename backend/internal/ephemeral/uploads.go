@@ -45,10 +45,22 @@ func (u *Uploads) Put(ctx context.Context, id string, up Upload, expires time.Ti
 
 // Get returns an upload, or false if there is none (or it expired).
 func (u *Uploads) Get(ctx context.Context, id string) (Upload, bool, error) {
+	return u.get(ctx, id, true)
+}
+
+// Exists reports whether there is an upload, for anyone who asks to
+// download it: eventually consistent, at half the cost, so one recorded or
+// deleted in about the last second may not show yet.
+func (u *Uploads) Exists(ctx context.Context, id string) (bool, error) {
+	_, ok, err := u.get(ctx, id, false)
+	return ok, err
+}
+
+func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, bool, error) {
 	out, err := u.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &u.Table,
 		Key:            map[string]types.AttributeValue{"pk": sv("U#" + id), "sk": sv("U")},
-		ConsistentRead: aws.Bool(true),
+		ConsistentRead: aws.Bool(consistent),
 	})
 	if err != nil || out.Item == nil {
 		return Upload{}, false, err

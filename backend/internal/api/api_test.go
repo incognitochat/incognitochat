@@ -337,6 +337,10 @@ func (m *memDirectory) ReplaceLink(_ context.Context, account, oldID string, l d
 	return nil
 }
 
+func (m *memDirectory) Bundle(ctx context.Context, id string) (directory.Link, error) {
+	return m.Link(ctx, id)
+}
+
 func (m *memDirectory) Link(_ context.Context, id string) (directory.Link, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -371,22 +375,28 @@ func (m *memDirectory) DeleteLink(_ context.Context, account, id string) error {
 	return nil
 }
 
-func (m *memDirectory) ByTelegram(_ context.Context, th string) (directory.Account, error) {
+func (m *memDirectory) AccountOf(_ context.Context, th string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fail != nil {
-		return directory.Account{}, m.fail
+		return "", m.fail
 	}
 	id, ok := m.telegram[th]
 	if !ok {
-		return directory.Account{}, directory.ErrNotFound
+		return "", directory.ErrNotFound
 	}
+	return id, nil
+}
+
+func (m *memDirectory) ByTelegram(ctx context.Context, th, device string) (directory.Account, error) {
+	id, err := m.AccountOf(ctx, th)
+	if err != nil {
+		return directory.Account{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	a := m.accounts[id]
-	devices := map[string][]byte{}
-	for k, v := range a.devices {
-		devices[k] = v
-	}
-	return directory.Account{ID: id, Key: a.key, Devices: devices}, nil
+	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device]}, nil
 }
 
 func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (bool, error) {
@@ -462,6 +472,10 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	}
 	m.put(n)
 	return nil
+}
+
+func (m *memDirectory) LoginDevice(ctx context.Context, account, device string, now time.Time) (directory.Device, error) {
+	return m.Device(ctx, account, device, now)
 }
 
 func (m *memDirectory) Device(_ context.Context, account, device string, _ time.Time) (directory.Device, error) {

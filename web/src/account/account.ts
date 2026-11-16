@@ -33,6 +33,8 @@ const KEY_ACCOUNT = 'account-key';
 const KEY_DEVICE = 'device-signing-key';
 const KEY_VAULT = 'vault-key';
 const LOCK = 'account';
+/** How long logIn waits before trying a login refused right after a setup again. */
+export const REFUSED_RETRY_MS = 1_000;
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
@@ -201,13 +203,17 @@ export function loginParts(accountId: string, deviceId: string, timestamp: numbe
  * replaced account or a refused login is recorded (see SetUpState) and the
  * ApiError rethrown. An account recorded as either is asked about again: the
  * server's word isn't checked, so a login it accepts takes it back.
+ *
+ * justSetUp: the account was set up a moment ago, here or in another copy of
+ * the app. The server's login read can miss a device for about a second, so
+ * a refusal then is tried once more, a second later, before it's recorded.
  */
-export async function logIn(db: Database, api: Api, clock: Clock = createClock()): Promise<TokenResponse> {
+export async function logIn(db: Database, api: Api, clock: Clock = createClock(), justSetUp = false): Promise<TokenResponse> {
   const current = await readAccount(db);
   if (!isSetUp(current)) throw new Error('not registered');
   const device = await requirePair(db, KEY_DEVICE);
-  try {
-    const result = await withServerTime(clock, async () => {
+  const attempt = () =>
+    withServerTime(clock, async () => {
       const timestamp = clock.seconds();
       const nonce = toBase64Url(randomBytes(16));
       const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
@@ -217,6 +223,15 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
         checkTokenResponse,
       );
     });
+  try {
+    let result: TokenResponse;
+    try {
+      result = await attempt();
+    } catch (err) {
+      if (!(justSetUp && err instanceof ApiError && err.code === 'login_refused')) throw err;
+      await new Promise((resolve) => setTimeout(resolve, REFUSED_RETRY_MS));
+      result = await attempt();
+    }
     await setState(db, current.accountId, ['replaced', 'refused'], 'registered');
     return result;
   } catch (err) {

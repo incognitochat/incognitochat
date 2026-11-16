@@ -64,7 +64,16 @@ with a body carries the body's SHA-256, in hex, in `X-Amz-Content-Sha256`,
 which that signature covers.
 Signed requests carry `X-Device-Signature: <timestamp>.<nonce>.<signature>`
 next to the session token. Nonces are 16–64 base64url characters and are used
-once; timestamps must be within 60 seconds of the server's clock.
+once; timestamps must be within 60 seconds of the server's clock (otherwise
+`clock_skew`, below). A login that can't be valid whatever the device's key
+(its nonce or signature malformed) is refused with `login_refused` before
+the server reads anything. A login reads the device eventually consistent,
+at half the cost. So a device replaced or removed in about the last second
+may still get a token, and one set up in about the last second may be
+refused: the app logs in once more a second later when that happens right
+after a setup, its own or another copy's. Each logged-in request reads the
+device and its account again, in one strongly consistent read, so a
+replaced or deleted account is refused at its first request.
 
 **Clocks.** A login or signed request whose timestamp is more than 60 seconds
 from the server's clock, and a new account's device list issued outside its
@@ -88,7 +97,7 @@ user to set the device's date and time.
 |---|---|
 | `401 session_expired` | The session token is missing or over; the app logs in again. |
 | `401 clock_skew` | The device's clock is off (above). |
-| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong. |
+| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
 
 The app doesn't take the last two on trust, since a server could send them to
@@ -105,8 +114,15 @@ does, after the user types a confirmation.
 account (after a typed confirmation); there is no device linking or sync.
 Replacing deletes the old account's links and mailboxes on the server, and a
 new setup on a device first deletes everything the previous account left
-there (keys, conversations, mailboxes, links). A
-device without an account may ask `POST /accounts/lookup {initData}` whether
+there (keys, conversations, mailboxes, links). Per Telegram user and UTC day,
+`POST /register` makes at most 3 accounts or replacements, and takes at most
+20 attempts that get past the signature checks, retries and `account_exists`
+answers included: launch data stays valid for 10 minutes, so it can be
+replayed. An attempt reads only three items: the Telegram user's (`T#`),
+its account item and the registering device's. The old account's whole
+partition is listed only to replace it, once that has been counted; a
+replacement whose reading of the old account then fails still counts
+against the 3. A device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
 launch, never one that names a link or an invitation, and stores nothing.
@@ -155,6 +171,9 @@ keys, each `{key, from, until, signature}` with the signature over
 `Message("incognitochat/v2/link-key", [0x01], key, u64(from), u64(until))`.
 A client trusts a bundle only if the signing key's fingerprint is the one in the
 link and every key's signature checks; it encrypts to the newest key valid now.
+Anyone can ask for a bundle, so the server reads it eventually consistent, at
+half the cost: a link made, changed or revoked in about the last second may
+not show so yet. Sends always go by a fresh read of the mailbox.
 
 An account has one link at a time (`POST /links`). Replacing it
 (`POST /links` with `replaces: <old ID>`) swaps the old link and its intro
@@ -241,6 +260,30 @@ text, an attachment or a sticker; `seen` needs `seen` and no text;
 `reaction` needs `reaction`, `edit` needs `edit`, and `delete` needs
 `delete` or `all` (one of them), and nothing else;
 `key_update` and `end` carry none of these.
+
+**IDs count only within their conversation.** `conv` and `id` are the
+sender's choice, so the recipient never takes them as unique on its device,
+and never uses them to pick the conversation. That comes from how the
+envelope reached it, which today means the key it was written for (later
+checks, such as the mailbox it came through, only narrow it): one of its
+conversation keys belongs to one conversation, whose `conv` the message must
+carry; a link's key means a first message (or more from a sender who has had
+nothing back yet), which belongs to the conversation started through that
+link with that `conv` from that `from` key, or else starts a new one.
+Within the conversation, an `id` it already has is a replay and is dropped,
+and the IDs in `seen`, `reaction`, `edit`, `delete` and `replyTo` name that
+conversation's messages only. So an ID that another conversation on the
+device also uses changes nothing the sender could notice. Each app keeps a
+conversation under an ID of its own, which never goes out.
+
+One exception, on devices upgraded from before this rule: a conversation
+someone started through our link that we had already answered doesn't know
+the sender's first key (it may have changed since). A first message through
+that link with its `conv` goes to it whatever its `from`, and is dropped
+unless `from` is the sender's current key, as before. Only someone who knows
+that `conv` (its sender, or whoever they told) can tell this from a fresh
+ID, and all it tells them is that our device still has that conversation,
+nothing about who its sender is.
 
 **Deleting for both sides.** A sender can delete their own messages on the
 recipient's device too, whether or not they were opened: the app sends a

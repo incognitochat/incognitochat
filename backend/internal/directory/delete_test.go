@@ -137,7 +137,7 @@ func TestDeleteReplacedAccount(t *testing.T) {
 	s, _ := store(t)
 	ctx := context.Background()
 	first := registered(t, s)
-	old, _ := s.ByTelegram(ctx, first.TelegramHash)
+	old, _ := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
 	second := newAccount(t, first.TelegramHash)
 	if err := s.Replace(ctx, old, second, now); err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestDeleteReplacedAccount(t *testing.T) {
 	if _, err := s.Delete(ctx, first.ID, first.TelegramHash, 100); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete a replaced account: %v", err)
 	}
-	if got, err := s.ByTelegram(ctx, first.TelegramHash); err != nil || got.ID != second.ID {
+	if got, err := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID); err != nil || got.ID != second.ID {
 		t.Fatalf("successor = %+v, %v", got, err)
 	}
 }
@@ -195,7 +195,7 @@ func TestDeleteAfterAConflictIsNotDone(t *testing.T) {
 	if _, err := s.Device(ctx, n.ID, n.DeviceID, now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("device after delete: %v", err)
 	}
-	if _, err := s.ByTelegram(ctx, n.TelegramHash); !errors.Is(err, ErrNotFound) {
+	if _, err := s.AccountOf(ctx, n.TelegramHash); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("telegram item after delete: %v", err)
 	}
 }
