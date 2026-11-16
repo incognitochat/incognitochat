@@ -5,7 +5,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { getMeta, openDatabase, putMeta } from '../storage/db';
-import { addMessage, getMedia, listMessages, putMedia } from '../messaging/store';
+import { addMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import type { SyncEvent } from '../sync/locks';
 import { confirmationMatches, createApp, type Deps, type Screen } from './app';
@@ -21,12 +21,38 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
 
 type Outcome = 'ok' | ApiError | NetworkError;
 
+/** The server's clock, whatever the device's says (tests move Date.now). */
+const realNow = Date.now;
+const serverSeconds = () => Math.floor(realNow() / 1000);
+/** Like the backend: a login or signed request more than 60 seconds off. */
+const clockSkew = (timestamp: unknown) =>
+  Math.abs(Number(timestamp) - serverSeconds()) > 60 ? new ApiError(401, 'clock_skew', serverSeconds()) : null;
+
+/** Runs with this device's clock off by ms; the server's stays right. */
+async function withDeviceClockOff<T>(ms: number, run: () => Promise<T>): Promise<T> {
+  const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ms);
+  try {
+    return await run();
+  } finally {
+    spy.mockRestore();
+  }
+}
+
 /**
  * A fake server: accepts registrations and logins (or fails them as told),
  * stores link bundles exactly as clients send them, like the real one, and
  * keeps invitations for its one account.
  */
-function fakeServer(outcomes: { register?: Outcome[]; session?: Outcome[]; createLink?: Outcome[]; deleteAccount?: Outcome[]; elsewhere?: boolean } = {}) {
+function fakeServer(
+  outcomes: {
+    register?: Outcome[];
+    session?: Outcome[];
+    account?: Outcome[];
+    createLink?: Outcome[];
+    deleteAccount?: Outcome[];
+    elsewhere?: boolean;
+  } = {},
+) {
   const calls: string[] = [];
   const bundles = new Map<string, { signingKey: string; keys: unknown[]; mailbox: string }>();
   const unsigned: string[] = [];
@@ -49,18 +75,24 @@ function fakeServer(outcomes: { register?: Outcome[]; session?: Outcome[]; creat
     async request(method, path, init, check) {
       const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
       calls.push(`${method} ${path}${body.replace ? '?replace' : ''}`);
-      const signed = !!init.headers?.['X-Device-Signature'] && !!init.headers?.['X-Session'];
+      const signature = init.headers?.['X-Device-Signature'];
+      const signed = !!signature && !!init.headers?.['X-Session'];
       const needsSignature = () => {
         if (!signed) unsigned.push(`${method} ${path}`);
       };
+      // Checked first, as the backend does.
+      const skew = signature ? clockSkew(signature.split('.')[0]) : null;
+      if (skew) throw skew;
       if (path === '/accounts/lookup') return check({ exists: outcomes.elsewhere === true });
       if (path === '/register') {
         take(outcomes.register);
-        return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: Math.floor(Date.now() / 1000) + 900 });
+        return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: serverSeconds() + 900 });
       }
       if (path === '/session') {
+        const skew = clockSkew(body.timestamp);
+        if (skew) throw skew;
         take(outcomes.session);
-        return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: Math.floor(Date.now() / 1000) + 900 });
+        return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: serverSeconds() + 900 });
       }
       if (method === 'DELETE' && path === '/account') {
         needsSignature();
@@ -70,7 +102,10 @@ function fakeServer(outcomes: { register?: Outcome[]; session?: Outcome[]; creat
         return check({});
       }
       const canCreateLinks = !state.inviteOnly || state.member || state.admin;
-      if (path === '/account') return check({ canCreateLinks, admin: state.admin, links: bundles.size, maxLinks: 5 });
+      if (path === '/account') {
+        take(outcomes.account);
+        return check({ canCreateLinks, admin: state.admin, links: bundles.size, maxLinks: 5 });
+      }
       if (method === 'GET' && path === '/usage') {
         const item = (used: number, limit: number) => ({ used, limit });
         return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
@@ -315,22 +350,142 @@ describe('setup', () => {
     expect(bridge.posted.find((p) => p.type === 'web_app_open_tg_link')?.data).toEqual({ path_full: `/test_bot/dev?startapp=${code}` });
   });
 
-  it('logs in when registered, and shows a replaced account loudly', async () => {
+  it('logs in when registered, and shows a replaced account loudly, asking again at each launch', async () => {
     // The first login is the one registered() makes.
-    const { api } = fakeServer({ session: ['ok', 'ok', new NetworkError('down'), new ApiError(410, 'account_replaced')] });
+    const down = new NetworkError('down');
+    const { api, calls } = fakeServer({ session: ['ok', 'ok', down, new ApiError(410, 'account_replaced'), down, 'ok'] });
     const { db } = await registered(api);
 
-    const { app, broadcasts } = await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    const { app } = await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
     await app.start();
     expect(home(app.screen.value).offline).toBe(false);
     await app.start();
     expect(home(app.screen.value).offline).toBe(true);
     await app.start();
-    expect(app.screen.value.kind).toBe('replaced');
-    expect(broadcasts).toContainEqual({ type: 'account-changed' });
-    // It stays replaced without asking the server again.
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'replaced', busy: false, offline: false });
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+    // Unverified: asked again at the next launch. Offline, it still says what the server last said.
     await app.start();
-    expect(app.screen.value.kind).toBe('replaced');
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'replaced', busy: false, offline: true });
+    // A server that lets the device in again is believed: nothing was lost.
+    await app.start();
+    expect(home(app.screen.value).offline).toBe(false);
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+    expect(calls.filter((c) => c === 'POST /session')).toHaveLength(6);
+  });
+});
+
+/** A conversation with one message on the device. */
+async function chatOnDevice(db: Awaited<ReturnType<typeof openDatabase>>) {
+  await putConversation(db, {
+    id: 'c1',
+    role: 'sender',
+    link: { id: 'E'.repeat(11), fingerprint: 'F'.repeat(43) },
+    label: 'x',
+    peerKey: 'k',
+    myKey: null,
+    sendTo: 'H'.repeat(22),
+    myMailbox: 'D'.repeat(22),
+    lastAt: 1,
+    unread: 0,
+    status: 'active',
+    lastReceived: null,
+  });
+  await addMessage(db, { id: 'm1', conv: 'c1', at: 1, out: false, status: 'read' }, { text: 'kept' });
+}
+
+describe('a device clock that is off', () => {
+  it('logs in after one automatic retry when 5 minutes fast, and the user sees no error', async () => {
+    const server = fakeServer();
+    await withDeviceClockOff(5 * 60_000, async () => {
+      const owner = await registered(server.api);
+      expect(home(owner.app.screen.value)).toMatchObject({ offline: false, signedOut: null });
+      // One refused login, then one with the server's time.
+      expect(server.calls.filter((c) => c === 'POST /session')).toHaveLength(2);
+      // Signed requests use the server's time from then on.
+      await owner.app.createLink();
+      expect(home(owner.app.screen.value).notice).toBe('created');
+      expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    });
+  });
+
+  it('logs in when hours behind, too', async () => {
+    const server = fakeServer();
+    await withDeviceClockOff(-3.5 * 3600_000, async () => {
+      const owner = await registered(server.api);
+      expect(home(owner.app.screen.value)).toMatchObject({ offline: false });
+    });
+  });
+});
+
+describe('when the server stops taking this device', () => {
+  const refused = () => new ApiError(401, 'login_refused');
+
+  it('keeps the chats, read-only, and nothing short of the typed confirmation deletes them', async () => {
+    // The first login is the one registered() makes.
+    const server = fakeServer({ session: ['ok', refused(), refused(), refused(), refused()] });
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: false });
+
+    // What used to be the only button (Continue, which wiped the device) now asks again.
+    await app.retry();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
+    await app.recheck();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused', busy: false });
+    expect(server.calls.filter((c) => c === 'POST /session')).toHaveLength(4);
+
+    // The chats can be read, not written.
+    await app.readChats();
+    expect(home(app.screen.value)).toMatchObject({ signedOut: 'refused', offline: true, conversations: [{ id: 'c1' }] });
+    await app.openConversation('c1');
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', readOnly: true, messages: [{ id: 'm1', text: 'kept' }] });
+    await app.home();
+    expect(home(app.screen.value).signedOut).toBe('refused');
+
+    // Setting up again asks for the typed confirmation; cancelling keeps everything.
+    await app.recheck();
+    app.askReset();
+    expect(app.screen.value).toEqual({ kind: 'confirm-reset', reason: 'refused' });
+    app.cancelReset();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+    expect(await listMessages(db, 'c1')).toHaveLength(1);
+
+    // Only confirming deletes, and sets up anew.
+    app.askReset();
+    await app.confirmReset();
+    await tick();
+    expect(app.screen.value.kind).toBe('reopening');
+    expect(await readAccount(db)).toMatchObject({ state: 'pending' });
+    expect(await listMessages(db, 'c1')).toHaveLength(0);
+  });
+
+  it('says so when the server refuses the device while the app is open, deleting nothing', async () => {
+    // registered() reads the account twice (the registration launch, then a plain one).
+    const server = fakeServer({ account: ['ok', 'ok', refused()] });
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    await owner.app.home();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'registered' });
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+  });
+
+  it('keeps a replaced account readable too, and its chats on the device', async () => {
+    const server = fakeServer({ session: ['ok', new ApiError(410, 'account_replaced'), new ApiError(410, 'account_replaced')] });
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
+    await app.retry();
+    await app.readChats();
+    expect(home(app.screen.value)).toMatchObject({ signedOut: 'replaced', conversations: [{ id: 'c1' }] });
+    expect(await listMessages(db, 'c1')).toHaveLength(1);
   });
 });
 
@@ -455,6 +610,34 @@ describe('deleting the account', () => {
     expect(server.unsigned).toEqual([]);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
     expect(await readAccount(owner.db)).toBeUndefined();
+  });
+
+  it('finishes when a repeat is refused as a device that no longer exists (an earlier answer was lost)', async () => {
+    const server = fakeServer({ deleteAccount: [new NetworkError('lost'), new ApiError(401, 'login_refused')] });
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'confirm-delete', error: 'network' });
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'welcome', mismatch: false, deleted: true });
+    expect(await readAccount(owner.db)).toBeUndefined();
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(0);
+  });
+
+  it("doesn't take a not_found for done, and keeps everything", async () => {
+    // Older servers answered a conflict in the last step with 404 while the account stayed.
+    const server = fakeServer({ deleteAccount: [new ApiError(404, 'not_found')] });
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'confirm-delete', busy: false, error: 'generic' });
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'registered' });
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+    // Trying again finishes it.
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
   it('cancels back to the link tab', async () => {

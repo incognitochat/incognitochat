@@ -267,13 +267,24 @@ export const en = {
 
   replacedTitle: 'Your account was replaced',
   replacedBody:
-    "Your account was replaced by a new setup using your Telegram account. If this wasn't you, your Telegram account was accessed or the app was tampered with. Setting up again here clears this device's old chats.",
+    "The server says your account was replaced by a new setup using your Telegram account. If this wasn't you, your Telegram account was accessed or the app was tampered with.",
+  signedOutTitle: 'This device is signed out',
+  signedOutBody: "The server didn't accept this device. That happens if its account was deleted, or if something is wrong on the server.",
+  signedOutKept: 'Your chats are still on this device, and you can read them. The app asks the server again each time it opens.',
+  readChats: 'Read my chats',
+  readOnlyNotice: 'This device is signed out, so your chats are read-only.',
+  readOnlyConversation: "This device is signed out: you can read this chat, but you can't write in it.",
   setUpAgain: 'Set up again',
+  resetTitle: 'Set up again?',
+  resetBody:
+    'Setting up again deletes everything Incognito Chat keeps on this device, for good: your chats, your keys and your link. Then you set up a new account.',
+  resetWarning: 'If you think the server is wrong, stop here: keep your chats and try again later.',
+  resetPhrase: 'delete my chats',
+  resetConfirm: 'Delete and set up again',
 
   errorNetwork: "Couldn't reach the server. Check your connection and try again.",
   errorExpired: 'This setup step took too long. Continue to try again.',
   errorRateLimited: 'Too many setups today. Try again tomorrow.',
-  errorLoggedOut: 'This device is no longer signed in.',
   errorGeneric: 'Something went wrong. Try again.',
   tryAgain: 'Try again',
   continue: 'Continue',

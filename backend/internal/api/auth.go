@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
@@ -63,12 +64,16 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 // for sensitive actions: a stolen session token alone can't make them.
 func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFunc {
 	return func(ctx context.Context, req httpapi.Request) httpapi.Response {
+		signed, signedOK := parseSignature(httpapi.Header(req, SignatureHeader))
+		// Before the device is read, as for a login.
+		if now := s.Now(); signedOK && session.CheckTime(signed.Timestamp, now) != nil {
+			return clockSkew(now)
+		}
 		c, resp, ok := s.authenticate(ctx, route, req)
 		if !ok {
 			return resp
 		}
-		signed, ok := parseSignature(httpapi.Header(req, SignatureHeader))
-		if !ok {
+		if !signedOK {
 			return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 		}
 		body, err := httpapi.Body(req)
@@ -120,6 +125,14 @@ func (s *Server) authenticate(ctx context.Context, route string, req httpapi.Req
 		return caller{}, s.internal(route, err), false
 	}
 	return caller{Claims: claims, device: device}, httpapi.Response{}, true
+}
+
+// clockSkew answers a login, signed request or new device list whose time is
+// too far from the server's: the device's clock is off. It carries the
+// server's clock (Unix seconds), so the app can correct its own and ask
+// again. Nothing about the device has been read.
+func clockSkew(now time.Time) httpapi.Response {
+	return httpapi.JSON(http.StatusUnauthorized, map[string]any{"error": "clock_skew", "now": now.Unix()})
 }
 
 // parseSignature reads "<timestamp>.<nonce>.<signature>".

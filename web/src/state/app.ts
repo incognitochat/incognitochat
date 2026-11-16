@@ -43,6 +43,7 @@ import type { Recording, RoundRecording } from '../media/record';
 import { saveUrl } from '../media/save';
 import { fileName, type Media, type Sticker } from '../protocol/message';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
+import { createClock } from '../net/clock';
 import { createSession, type Session } from '../net/session';
 import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
@@ -54,7 +55,14 @@ import type { SyncEvent } from '../sync/locks';
 /** Between the steps of deleting an account (DELETE /account answers in_progress until done). */
 const DELETE_STEP_PAUSE_MS = 1000;
 
-export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'logged-out' | 'generic';
+export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'generic';
+
+/**
+ * Why the server no longer takes this device: it refused the login (the
+ * device or its account is gone), or says the account was replaced. Never
+ * checked, so asked again at every launch; nothing is deleted for it.
+ */
+export type SignedOutReason = 'refused' | 'replaced';
 
 /** A short message on the home screen after an action. */
 export type HomeNotice =
@@ -153,6 +161,8 @@ export type Screen =
       askNotices: boolean;
       /** How many conversations are blocked (the Blocked list). */
       blockedCount: number;
+      /** The server no longer takes this device: chats are read-only. */
+      signedOut: SignedOutReason | null;
     }
   | { kind: 'blocked'; conversations: ConversationView[]; busy: boolean; notice: HomeNotice | null }
   /** Data and storage: what stays on this device and what's fetched by itself. */
@@ -177,11 +187,20 @@ export type Screen =
       ended: boolean;
       /** Blocked: shown read-only, with Unblock. */
       blocked: boolean;
+      /** The server no longer takes this device: shown read-only. */
+      readOnly: boolean;
       messages: MessageView[];
       busy: boolean;
       error: SendError | null;
     }
-  | { kind: 'replaced' }
+  /**
+   * The server no longer takes this device. Its chats stay, readable; the
+   * app asks again (Try again, and at every launch). offline: it couldn't
+   * be asked just now.
+   */
+  | { kind: 'signed-out'; reason: SignedOutReason; busy: boolean; offline: boolean }
+  /** Setting up again from there, which deletes everything on this device: a typed confirmation first. */
+  | { kind: 'confirm-reset'; reason: SignedOutReason }
   | { kind: 'error'; error: ErrorKind };
 
 export interface Deps {
@@ -223,7 +242,12 @@ export function createApp(deps: Deps) {
   // The screen now, read fresh (TypeScript would otherwise keep a type
   // narrowed by an earlier assignment, across awaits).
   const currentScreen = (): Screen => screen.value;
-  const session: Session | null = deps.api ? createSession(deps.db, deps.api) : null;
+  // The server's clock, learnt when it says this device's is off: logins,
+  // signed requests and registration are timed by it.
+  const clock = createClock();
+  const session: Session | null = deps.api ? createSession(deps.db, deps.api, clock) : null;
+  // Set while the server doesn't take this device (unverified, asked again).
+  let signedOut: SignedOutReason | null = null;
   // What this launch was opened with (a link or an invitation) is handled
   // once, not on every restart.
   let launchParam: string | null = isRegistrationLaunch(deps.launch.startParam) ? null : deps.launch.startParam || null;
@@ -279,11 +303,8 @@ export function createApp(deps: Deps) {
       return;
     }
     const account = await readAccount(db);
-    if (account?.state === 'registered') return enter();
-    if (account?.state === 'replaced') {
-      screen.value = { kind: 'replaced' };
-      return;
-    }
+    // A replaced account too: the server is asked again each time.
+    if (account?.state === 'registered' || account?.state === 'replaced') return enter();
     if (!bridge) {
       screen.value = { kind: 'outside-telegram' };
       return;
@@ -335,22 +356,44 @@ export function createApp(deps: Deps) {
     return setUp();
   }
 
-  /** A registered device: log in, then show the link it was opened with, or home. */
+  /**
+   * A registered device: log in, then show the link it was opened with, or
+   * home. If the server no longer takes the device, its chats stay, readable,
+   * and nothing is deleted: the server's word alone is never enough for that.
+   */
   async function enter(): Promise<void> {
+    const recorded = await readAccount(deps.db);
     let offline = false;
     try {
-      session!.use(await logIn(deps.db, deps.api!));
+      session!.use(await logIn(deps.db, deps.api!, clock));
+      signedOut = null;
     } catch (err) {
       if (handleGone(err)) return;
-      if (err instanceof ApiError && err.code === 'login_refused') {
-        fail('logged-out', () => setUp({ restart: true }));
-        return;
-      }
+      // Couldn't ask: as the server last said, until it can be asked again.
+      const last = signedOut ?? (recorded?.state === 'replaced' ? 'replaced' : null);
+      if (last) return showSignedOut(last, true);
       // Offline or the server is down: the device still works on what it has.
       offline = true;
     }
     await startMessaging(!offline);
     return continueLaunch(offline);
+  }
+
+  /** The server no longer takes this device: say so, and keep its chats readable. */
+  function showSignedOut(reason: SignedOutReason, offline = false): void {
+    signedOut = reason;
+    stopBackground();
+    messaging = null;
+    backButton(false);
+    screen.value = { kind: 'signed-out', reason, busy: false, offline };
+  }
+
+  /** Asks the server again whether it takes this device (Try again). */
+  async function recheck(): Promise<void> {
+    const current = screen.value;
+    if (!signedOut || (current.kind === 'signed-out' && current.busy)) return;
+    screen.value = { kind: 'signed-out', reason: signedOut, busy: true, offline: false };
+    return enter();
   }
 
   /** Creates the messaging engine and, outside tests, the inbox poll and upkeep. */
@@ -542,6 +585,7 @@ export function createApp(deps: Deps) {
       role: c.role,
       ended: c.status === 'ended',
       blocked: c.status === 'blocked',
+      readOnly: signedOut !== null,
       messages: await listMessages(deps.db, id),
       busy: false,
       error: null,
@@ -981,8 +1025,9 @@ export function createApp(deps: Deps) {
         await messaging.flushUploadDeletes();
       }
       // In steps: the server answers in_progress until everything is gone
-      // (a big account takes a few minutes). A pause between steps leaves
-      // the database's capacity to everyone else.
+      // (a big account takes a few minutes), and also when another change
+      // interrupted the last step. A pause between steps leaves the
+      // database's capacity to everyone else.
       for (;;) {
         try {
           await session.call('DELETE', '/account', undefined, checkObject, { sign: true });
@@ -993,8 +1038,9 @@ export function createApp(deps: Deps) {
         }
       }
     } catch (err) {
-      // Already gone on the server (an earlier try got through): finish here.
-      if (!(err instanceof ApiError && err.code === 'not_found')) {
+      // Refused as a device that no longer exists: an earlier step finished
+      // it, and its answer was lost. Done; the user asked for the rest.
+      if (!(err instanceof ApiError && err.code === 'login_refused')) {
         if (handleGone(err)) return;
         screen.value = { kind: 'confirm-delete', busy: false, error: err instanceof NetworkError ? 'network' : 'generic' };
         return;
@@ -1008,18 +1054,23 @@ export function createApp(deps: Deps) {
     screen.value = { kind: 'welcome', mismatch: false, deleted: true };
   }
 
-  /** Shows a replaced account loudly. Returns whether err was that. */
+  /**
+   * Shows that the server no longer takes this device (a replaced account
+   * loudly), keeping its chats. Returns whether err said so.
+   */
   function handleGone(err: unknown): boolean {
-    if (!(err instanceof ApiError && err.code === 'account_replaced')) return false;
-    screen.value = { kind: 'replaced' };
-    deps.broadcast({ type: 'account-changed' });
+    if (!(err instanceof ApiError)) return false;
+    if (err.code === 'account_replaced') showSignedOut('replaced');
+    else if (err.code === 'login_refused') showSignedOut('refused');
+    else return false;
     return true;
   }
 
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
     if (options.tab) tab = options.tab;
     const { config, db } = deps;
-    let offline = options.offline ?? false;
+    // Signed out, the chats are only read: the server isn't asked.
+    let offline = (options.offline ?? false) || signedOut !== null;
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
@@ -1047,6 +1098,7 @@ export function createApp(deps: Deps) {
       notice: options.notice ?? null,
       askNotices: noticeLaunch && !!account && !account.notices && !writeAllowed,
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
+      signedOut,
     };
     if (account && !account.notices && writeAllowed && !noticesTried) void setUpNotices();
   }
@@ -1230,7 +1282,7 @@ export function createApp(deps: Deps) {
   async function runRegister(replace: boolean): Promise<void> {
     screen.value = replace ? { kind: 'confirm-replace', busy: true } : { kind: 'registering' };
     try {
-      session!.use(await register(deps.db, deps.api!, deps.launch, { replace }));
+      session!.use(await register(deps.db, deps.api!, deps.launch, { replace, clock }));
     } catch (err) {
       if (err instanceof SetupMismatch) screen.value = { kind: 'welcome', mismatch: true };
       else if (err instanceof ApiError && err.code === 'account_exists') {
@@ -1258,7 +1310,21 @@ export function createApp(deps: Deps) {
     screen,
     start,
     setUp: () => setUp(),
-    setUpAgain: () => setUp({ restart: true }),
+    /** Asks the server again whether it takes this device. */
+    recheck,
+    /** While signed out: the chats, read-only. */
+    readChats: () => showHome({ tab: 'chats' }),
+    /** Asks to set up again while signed out (a typed confirmation follows: it deletes everything here). */
+    askReset: () => {
+      if (signedOut) screen.value = { kind: 'confirm-reset', reason: signedOut };
+    },
+    /** Sets up again, deleting everything on this device: from the typed confirmation only. */
+    confirmReset: async () => {
+      if (currentScreen().kind === 'confirm-reset') return setUp({ restart: true });
+    },
+    cancelReset: () => {
+      if (signedOut) screen.value = { kind: 'signed-out', reason: signedOut, busy: false, offline: false };
+    },
     confirmReplace: () => runRegister(true),
     cancelReplace: () => {
       screen.value = { kind: 'elsewhere' };

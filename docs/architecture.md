@@ -69,6 +69,11 @@ flowchart LR
   account's links and mailboxes end at once, and the old device says so, and
   that it may mean tampering. A second device that finds an account elsewhere
   says "your account is on another device" instead of offering setup.
+- **Nothing is deleted on the server's word.** A device the server says was
+  replaced, or no longer accepts, keeps its chats, readable (nothing can be
+  sent), and asks again at every launch and on Try again; if the server lets
+  it in, it carries on. Setting up again there deletes everything on the
+  device, so it takes a typed confirmation too.
 - **Deleting an account** (in the app, after a typed confirmation) removes
   everything the server holds for it at once, keeping no marker, and then
   everything on the device. Nobody is told; messages to its old link and
@@ -78,7 +83,9 @@ flowchart LR
   Telegram user ID.
 - **Sessions:** the device signs a login with its device key and gets a
   15-minute token. Sensitive actions (links, invitations, admin) also carry a
-  fresh signature.
+  fresh signature. Both are timed by the server's clock: if the device's own
+  is off, the server says so with its time, and the app corrects for it and
+  asks again, without the user seeing an error.
 
 ## Links
 

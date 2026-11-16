@@ -80,6 +80,9 @@ it. This is how close it gets.
    - keys are tied to the real app's address, so another page can't use them;
    - setting up again replaces the account loudly: the old device says at once
      that the account was replaced, and that this may mean tampering;
+   - the old device keeps its chats, readable. No answer from the server
+     ("replaced", "not signed in") deletes anything on a device: only the user
+     can, by typing a confirmation;
    - the person's link changes, which their contacts see.
 2. **Watching live traffic.** The operator, or AWS, can watch requests as they
    happen and link people by timing and IP address: a message arriving, then

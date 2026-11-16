@@ -17,6 +17,7 @@ import { exportPublicKey, fingerprint, generateCopyableSigningKey, generateSigni
 import { LABEL_REGISTER, LABEL_REQUEST, LABEL_SESSION, sign, signEncoded } from '../crypto/signing';
 import { generateVaultKey, seal, unseal } from '../crypto/vault';
 import { ApiError, checkTokenResponse, type Api, type TokenResponse } from '../net/api';
+import { createClock, withServerTime, type Clock } from '../net/clock';
 import { encodeDeviceList, firstList } from '../protocol/device-list';
 import { deleteMeta, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair, wipe } from '../storage/db';
 import { withLock } from '../sync/locks';
@@ -68,13 +69,15 @@ export async function readAccount(db: Database): Promise<AccountRecord | undefin
 /**
  * Prepares a setup and returns the start parameter the registration launch
  * must carry. A pending setup is reused, so asking again reopens with the same
- * code; otherwise (no account, a replaced one, or with restart a registered
- * one the server no longer knows) new keys are created.
+ * code; otherwise new keys are created, and everything of an account before
+ * is deleted from this device. Over a registered or replaced account that
+ * takes restart, which only the typed confirmation gives: no answer from the
+ * server alone ever deletes a device's chats.
  */
 export function prepareSetup(db: Database, options: { restart?: boolean } = {}): Promise<string> {
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
-    if (current?.state === 'registered' && !options.restart) throw new Error('already registered');
+    if ((current?.state === 'registered' || current?.state === 'replaced') && !options.restart) throw new Error('already set up');
     if (current?.state === 'pending' && (await getKeyPair(db, KEY_ACCOUNT)) && (await getKeyPair(db, KEY_DEVICE))) {
       return REGISTRATION_PREFIX + current.fingerprint;
     }
@@ -113,15 +116,17 @@ export function isRegistrationLaunch(startParam: string): boolean {
 /**
  * Registers the pending setup with this launch's initData. Throws
  * SetupMismatch if the launch isn't for this setup, and ApiError for the
- * server's refusals (account_exists means replace is needed).
+ * server's refusals (account_exists means replace is needed). The device
+ * list is dated by the server's clock (clock): one this device's clock put
+ * too far off is signed again with the server's.
  */
 export function register(
   db: Database,
   api: Api,
   launch: { initData: string; startParam: string },
-  options: { replace: boolean; now?: () => number },
+  options: { replace: boolean; clock?: Clock },
 ): Promise<TokenResponse> {
-  const now = options.now ?? (() => Math.floor(Date.now() / 1000));
+  const clock = options.clock ?? createClock();
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
     if (current?.state !== 'pending' || launch.startParam !== REGISTRATION_PREFIX + current.fingerprint) {
@@ -132,20 +137,24 @@ export function register(
     const accountKey = await exportPublicKey(account.publicKey);
     const deviceKey = await exportPublicKey(device.publicKey);
 
-    const list = encodeDeviceList(firstList(current.deviceId, deviceKey, now()));
     const parts = await registerParts(launch.initData, accountKey, current.deviceId, deviceKey);
-    const body = {
-      initData: launch.initData,
-      accountKey: toBase64Url(accountKey),
-      device: current.deviceId,
-      deviceKey: toBase64Url(deviceKey),
-      deviceList: toBase64Url(list),
-      deviceListSig: toBase64Url(await signEncoded(account.privateKey, list)),
-      accountSig: toBase64Url(await sign(account.privateKey, LABEL_REGISTER, ...parts)),
-      deviceSig: toBase64Url(await sign(device.privateKey, LABEL_REGISTER, ...parts)),
-      replace: options.replace,
-    };
-    const result = await api.post('/register', body, checkTokenResponse);
+    const accountSig = toBase64Url(await sign(account.privateKey, LABEL_REGISTER, ...parts));
+    const deviceSig = toBase64Url(await sign(device.privateKey, LABEL_REGISTER, ...parts));
+    const result = await withServerTime(clock, async () => {
+      const list = encodeDeviceList(firstList(current.deviceId, deviceKey, clock.seconds()));
+      const body = {
+        initData: launch.initData,
+        accountKey: toBase64Url(accountKey),
+        device: current.deviceId,
+        deviceKey: toBase64Url(deviceKey),
+        deviceList: toBase64Url(list),
+        deviceListSig: toBase64Url(await signEncoded(account.privateKey, list)),
+        accountSig,
+        deviceSig,
+        replace: options.replace,
+      };
+      return api.post('/register', body, checkTokenResponse);
+    });
     await putMeta(db, META_ACCOUNT, {
       state: 'registered',
       deviceId: current.deviceId,
@@ -173,34 +182,45 @@ export function loginParts(accountId: string, deviceId: string, timestamp: numbe
 }
 
 /**
- * Logs this device in. If the account was replaced, records that and
- * rethrows the ApiError (code account_replaced).
+ * Logs this device in, timed by the server's clock (clock): if this device's
+ * own is off, the server says so and the login is signed again once. If the
+ * account was replaced, records that and rethrows the ApiError (code
+ * account_replaced). An account recorded as replaced is asked about again:
+ * the server's word isn't checked, so a login it accepts takes it back.
  */
-export async function logIn(db: Database, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<TokenResponse> {
+export async function logIn(db: Database, api: Api, clock: Clock = createClock()): Promise<TokenResponse> {
   const current = await readAccount(db);
-  if (current?.state !== 'registered') throw new Error('not registered');
+  if (current?.state !== 'registered' && current?.state !== 'replaced') throw new Error('not registered');
   const device = await requirePair(db, KEY_DEVICE);
-  const timestamp = now();
-  const nonce = toBase64Url(randomBytes(16));
-  const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
   try {
-    return await api.post(
-      '/session',
-      { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) },
-      checkTokenResponse,
-    );
+    const result = await withServerTime(clock, async () => {
+      const timestamp = clock.seconds();
+      const nonce = toBase64Url(randomBytes(16));
+      const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
+      return api.post(
+        '/session',
+        { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) },
+        checkTokenResponse,
+      );
+    });
+    if (current.state === 'replaced') await setState(db, current.accountId, 'replaced', 'registered');
+    return result;
   } catch (err) {
     if (err instanceof ApiError && err.code === 'account_replaced') await markReplaced(db, current.accountId);
     throw err;
   }
 }
 
-/** Records that the server says this account was replaced. */
+/** Records that the server says this account was replaced (it's asked again at the next launch). */
 export function markReplaced(db: Database, accountId: string): Promise<void> {
+  return setState(db, accountId, 'registered', 'replaced');
+}
+
+function setState(db: Database, accountId: string, from: 'registered' | 'replaced', to: 'registered' | 'replaced'): Promise<void> {
   return withLock(LOCK, async () => {
     const latest = await readAccount(db);
-    if (latest?.state === 'registered' && latest.accountId === accountId) {
-      await putMeta(db, META_ACCOUNT, { ...latest, state: 'replaced' } satisfies AccountRecord);
+    if (latest?.state === from && latest.accountId === accountId) {
+      await putMeta(db, META_ACCOUNT, { ...latest, state: to } satisfies AccountRecord);
     }
   });
 }

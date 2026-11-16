@@ -14,6 +14,7 @@ export type ErrorCode =
   | 'conflict'
   | 'rate_limited'
   | 'login_refused'
+  | 'clock_skew'
   | 'account_replaced'
   | 'session_expired'
   | 'invitation_required'
@@ -43,6 +44,7 @@ const CODES = new Set<string>([
   'conflict',
   'rate_limited',
   'login_refused',
+  'clock_skew',
   'account_replaced',
   'session_expired',
   'invitation_required',
@@ -68,6 +70,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: ErrorCode | 'unknown',
+    /** With clock_skew: the server's clock, in Unix seconds. */
+    readonly serverTime?: number,
   ) {
     super(`API error ${status} ${code}`);
     this.name = 'ApiError';
@@ -125,8 +129,14 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
         throw new NetworkError(`unreadable response (${response.status})`);
       }
       if (!response.ok) {
-        const code = value && typeof value === 'object' ? (value as { error?: unknown }).error : undefined;
-        throw new ApiError(response.status, typeof code === 'string' && CODES.has(code) ? (code as ErrorCode) : 'unknown');
+        const { error: code, now } = value && typeof value === 'object' ? (value as { error?: unknown; now?: unknown }) : {};
+        const known = typeof code === 'string' && CODES.has(code) ? (code as ErrorCode) : 'unknown';
+        // A time outside the window: the server's clock comes with it.
+        if (known === 'clock_skew') {
+          const serverTime = typeof now === 'number' && Number.isSafeInteger(now) && now > 0 ? now : undefined;
+          throw new ApiError(response.status, known, serverTime);
+        }
+        throw new ApiError(response.status, known);
       }
       try {
         return check(value);

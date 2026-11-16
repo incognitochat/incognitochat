@@ -79,6 +79,11 @@ type memDirectory struct {
 	levels   map[int]int
 	boxes    map[string]directory.Mailbox
 	fail     error
+	// deviceReads counts reads of a device and its account.
+	deviceReads int
+	// goneOnDelete makes the next Delete find the account gone, as when
+	// another request finished it meanwhile.
+	goneOnDelete bool
 }
 
 func newMemDirectory() *memDirectory {
@@ -388,7 +393,8 @@ func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (b
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[account]
-	if !ok || a.replaced {
+	if !ok || a.replaced || m.goneOnDelete {
+		m.goneOnDelete = false
 		return false, directory.ErrNotFound
 	}
 	// Two items each, links first, as the store does.
@@ -461,6 +467,7 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 func (m *memDirectory) Device(_ context.Context, account, device string, _ time.Time) (directory.Device, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.deviceReads++
 	a, ok := m.accounts[account]
 	if !ok || a.devices[device] == nil {
 		return directory.Device{}, directory.ErrNotFound
@@ -922,8 +929,15 @@ func TestRegisterRejects(t *testing.T) {
 		{"list with a second device", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
 			list.Entries = append(list.Entries, devicelist.Entry{DeviceID: ids.New(), Key: raw(t, other), Added: list.Issued})
 		}, http.StatusBadRequest, "invalid_device_list"},
-		{"stale list", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+		{"stale list (the device's clock is off)", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
 			*list = d.firstList(t, start.Add(-3*time.Hour))
+		}, http.StatusUnauthorized, "clock_skew"},
+		{"list from the future", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+			*list = d.firstList(t, start.Add(3*time.Hour+30*time.Minute))
+		}, http.StatusUnauthorized, "clock_skew"},
+		{"list that has expired", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+			*list = d.firstList(t, start.Add(-2*time.Hour))
+			list.Expires = list.Issued.Add(time.Hour)
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"list signed by the device key", func(t *testing.T, d *device, r map[string]any, list *devicelist.List, _ *string) {
 			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelist.Encode(*list)))
@@ -970,7 +984,7 @@ func TestSessionRejects(t *testing.T) {
 
 	stale := d.login(t, h.now.Add(-2*time.Minute))
 	status, out = h.post(t, "/session", stale)
-	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
+	wantError(t, status, out, http.StatusUnauthorized, "clock_skew")
 
 	unknown := newDevice(t)
 	unknown.account = d.account

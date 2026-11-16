@@ -28,6 +28,11 @@ const DeleteStep = 150
 // step, so first messages stop at once, and the account and its devices
 // last, so every step can log in. Apps from before steps show an error
 // instead, and trying again carries on.
+//
+// A conflict with another write in the last step is answered in_progress
+// too, never as done. Once the account is gone, a repeat is refused like any
+// login of a removed device (401 login_refused), which the app takes as done
+// (its earlier answer was lost).
 func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
 	const route = "DELETE /account"
 	devices, err := s.Directory.Devices(ctx, c.AccountID, s.Now())
@@ -48,7 +53,9 @@ func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller)
 	}
 	done, err := s.Directory.Delete(ctx, c.AccountID, c.device.TelegramHash, budget)
 	if errors.Is(err, directory.ErrNotFound) {
-		return httpapi.Error(http.StatusNotFound, "not_found")
+		// Gone since this request logged in (another request finished it,
+		// or a replacement ended it): nothing of it is left to delete.
+		done, err = true, nil
 	}
 	if err != nil {
 		return s.internal(route, err)
