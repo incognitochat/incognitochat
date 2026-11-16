@@ -305,7 +305,8 @@ func TestSocketBurstsStayBounded(t *testing.T) {
 		}
 		w := meter.Units(s.Table).Write
 		mostWrites = max(mostWrites, w)
-		if w > float64(4*burst) {
+		// Each connect writes at most 1 + maxTidy + (MaxRecords - KeepRecords).
+		if w > float64((1+maxTidy+MaxRecords-KeepRecords)*burst) {
 			t.Fatalf("burst %d cost %.0f write units", i+1, w)
 		}
 		clock = clock.Add(61 * time.Second)

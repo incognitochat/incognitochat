@@ -152,8 +152,10 @@ func (s *Sockets) tidy(ctx context.Context, account string, expired []socketReco
 // at the same moment can reach.
 //
 // Once recorded, it tidies: up to maxTidy records it finds expired go, and
-// the oldest go so that KeepRecords are left, so a connect writes 4 times
-// at most. A record forgotten this way may be of a socket still open,
+// the oldest go so that KeepRecords are left. So a connect writes once or
+// twice as a rule, and at most 1 + maxTidy + (MaxRecords - KeepRecords) = 6
+// times, after connects at once left more than KeepRecords. A record
+// forgotten this way may be of a socket still open,
 // which then gets no pushes until the app replaces it (every half hour). If
 // tidying fails, Open returns ErrTidy, and the connect stands.
 func (s *Sockets) Open(ctx context.Context, account, connection string) error {
