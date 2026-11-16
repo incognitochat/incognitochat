@@ -26,7 +26,9 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   smoke tests: the API, the webhook and the socket refuse what they should.
 - Last, it asks the hosting repository to build and deploy the app from the
   same commit (production: the release tag), and waits until the site serves
-  it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)).
+  it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)). The
+  request names the commit too, and the hosting repository refuses to build
+  any other commit, or one that isn't on `main`.
 
 Both environments run the same steps
 ([`deploy-environment.yml`](../.github/workflows/deploy-environment.yml)).
@@ -47,8 +49,10 @@ them is done by hand:
    tags the merge commit and publishes a GitHub Release with the changelog.
 3. The published release runs CI on the tag: everything is built and tested
    again from the tag, and the production deploy waits for a required
-   reviewer's approval in GitHub. The hosting repository builds the same
-   tag.
+   reviewer's approval in GitHub. It checks that the tag points at the
+   commit it deploys and that the commit is on `main`. The hosting
+   repository builds the same tag, checked out as `refs/tags/vX.Y.Z`, after
+   checking both again.
 
 release-please acts through a GitHub App, because pull requests opened with
 the workflow's own token get no CI, and releases it publishes start no
@@ -60,7 +64,8 @@ workflows. One-time setup:
 - A GitHub environment `release` that accepts `main` only, holding the app's
   client ID (variable `RELEASE_APP_CLIENT_ID`) and private key (secret
   `RELEASE_APP_PRIVATE_KEY`).
-- A tag ruleset that stops `v*.*.*` tags from being moved or deleted.
+- A tag ruleset that lets only the release app create, move or delete
+  `v*.*.*` tags, and a branch ruleset that forbids branches named `v*.*.*`.
 
 ## Setting up an environment
 
