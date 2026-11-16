@@ -302,6 +302,13 @@ only if that's the mailbox its key belongs to:
   message tells them of the new, and what they wrote may wait in the inbox
   for 30 days.
 
+The recipient keeps the intro mailbox on the conversation from its first
+message, so it needs neither the link nor the network for it, even once the
+link is revoked or replaced. A link made before intro mailboxes were kept
+learns its own from its bundle, after checking the bundle is that link's
+(signed by its signing key, listing a key made for it); envelopes that need it
+while it can't be fetched wait in the inbox, unconfirmed, for the next sync.
+
 Anything else is dropped exactly like an envelope it can't open, and
 confirmed the same way. Otherwise whoever knows one of its keys (the other
 side of a conversation) could seal to it and leave copies in suspects'

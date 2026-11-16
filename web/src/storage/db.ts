@@ -69,6 +69,13 @@ export interface ConversationRecord {
    */
   myMailbox: string | null;
   /**
+   * For an owner: the intro mailbox of the link it came through, where their
+   * first message arrived. Kept here so it counts without asking the link,
+   * which may be revoked or replaced since. Missing in conversations from
+   * before it was kept, until upkeep copies it from the link.
+   */
+  intro?: string;
+  /**
    * For an owner: until when (Unix ms) the intro mailbox of the link it came
    * through counts for it. They write there until they hear of our mailbox,
    * and that may wait in the inbox: set to 31 days after something first came

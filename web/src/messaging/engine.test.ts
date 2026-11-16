@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLink, listLinks, replaceLink } from '../account/links';
+import { createLink, listLinks, replaceLink, revokeLink } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
@@ -25,6 +25,29 @@ vi.mock('../protocol/message', async (importOriginal) => {
   return { ...actual, newId: vi.fn(actual.newId) };
 });
 
+// Storing a message can be held up (pause.before), so a test can run
+// something else in the middle of taking a message in.
+const pause = vi.hoisted(() => ({ before: null as null | ((conv: string) => Promise<void>) }));
+vi.mock('./store', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./store')>();
+  return {
+    ...actual,
+    addMessage: async (...args: Parameters<typeof actual.addMessage>) => {
+      await pause.before?.(args[1].conv);
+      return actual.addMessage(...args);
+    },
+  };
+});
+
+/** Resolves once a request for a lock whose name ends with this is waiting. */
+async function waitingFor(lock: string): Promise<void> {
+  for (;;) {
+    const { pending = [] } = await navigator.locks.query();
+    if (pending.some((l) => l.name?.endsWith(lock))) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** The next IDs the app makes for the wire (conversation, then message, in the order it makes them) are these. */
 function nextIds(...ids: string[]): void {
   for (const id of ids) vi.mocked(newId).mockReturnValueOnce(id);
@@ -32,6 +55,7 @@ function nextIds(...ids: string[]): void {
 
 afterEach(() => {
   vi.mocked(newId).mockReset();
+  pause.before = null;
 });
 
 let n = 0;
@@ -54,6 +78,8 @@ async function fakeBackend() {
   const mailboxes = new Map<string, string>(); // mailbox -> owner account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
   const bundles = new Map<string, Record<string, unknown>>();
+  /** The link IDs whose bundles were asked for, in order. */
+  const bundleFetches: string[] = [];
   const spent = new Set<string>();
   const seenEnvelopes: string[] = [];
   const sendHeaders: (Record<string, string> | undefined)[] = [];
@@ -63,10 +89,12 @@ async function fakeBackend() {
    * is lost; the URL can no longer start one; a delete races the write (409);
    * or the upload is there already (412). renewals: how the next requests
    * for a fresh URL go: refused, out of reach, or failing on the server.
+   * bundles: link bundles are out of reach, refused (rate limited), or
+   * another link's comes back.
    */
   const down = {
     deletes: false,
-    bundles: false,
+    bundles: null as null | 'unreachable' | 'busy' | 'wrong',
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
     renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing')[],
   };
@@ -159,8 +187,11 @@ async function fakeBackend() {
         return check({});
       }
       if (method === 'GET' && path.startsWith('/links/')) {
-        if (down.bundles) throw new NetworkError('down');
-        const b = bundles.get(path.split('/')[2]!);
+        bundleFetches.push(path.split('/')[2]!);
+        if (down.bundles === 'unreachable') throw new NetworkError('down');
+        if (down.bundles === 'busy') throw new ApiError(429, 'rate_limited');
+        const id = path.split('/')[2]!;
+        const b = down.bundles === 'wrong' ? [...bundles].find(([other]) => other !== id)?.[1] : bundles.get(id);
         if (!b) throw new ApiError(404, 'not_found');
         return check(b);
       }
@@ -200,6 +231,14 @@ async function fakeBackend() {
           bundles.set(b.id as string, { signingKey: b.signingKey, keys: b.keys, mailbox: intro });
           return check({ id: b.id, mailbox: intro });
         }
+        if (method === 'DELETE' && path.startsWith('/links/')) {
+          // The link and its intro mailbox go.
+          const old = bundles.get(path.split('/')[2]!);
+          if (!old) throw new ApiError(404, 'not_found');
+          bundles.delete(path.split('/')[2]!);
+          mailboxes.delete(old.mailbox as string);
+          return check({});
+        }
         if (method === 'PUT' && path.startsWith('/links/') && path.endsWith('/keys')) {
           const bundle = bundles.get(path.split('/')[2]!);
           if (!bundle) throw new ApiError(404, 'not_found');
@@ -224,7 +263,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, uploads, uploadUrls, puts, waits, transfer, down, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -1495,6 +1534,59 @@ describe('envelopes through a mailbox they do not belong to', () => {
     expect(await s.v.messaging.sync()).toBe(1);
   });
 
+  it("a message for the owner's chat key, from the one who wrote to them, left in a suspect's reply mailbox, is dropped", async () => {
+    // S wrote to O's link, so S knows O's key for that chat once O has read
+    // it. O, X and W are all strangers to S; X and W wrote to S's own link
+    // anonymously. S suspects X is O, and leaves envelopes sealed to O's chat
+    // key where X's and W's chats with S get their answers. O is X: O's app
+    // must do what W's does, which can't open them.
+    const backend = await fakeBackend();
+    const s = await person(backend, 's');
+    const o = await person(backend, 'o');
+    const w = await person(backend, 'w');
+    const [linkO, linkS] = [await linkOf(backend, o), await linkOf(backend, s)];
+    const fromO = await o.messaging.startConversation(linkS.ref, linkS.bundle, 'hi S, guess who');
+    await w.messaging.startConversation(linkS.ref, linkS.bundle, 'hi S, from someone');
+    expect(await s.messaging.sync()).toBe(2);
+    const replyMailboxes = await Promise.all(
+      [
+        { who: o, name: 'o' },
+        { who: w, name: 'w' },
+      ].map(async (x) => ({ ...x, mailbox: (await listConversations(x.who.db))[0]!.myMailbox! })),
+    );
+    const toO = await s.messaging.startConversation(linkO.ref, linkO.bundle, 'hello O');
+    await o.messaging.sync();
+    const atO = await across(s.db, toO, o.db);
+    // O reads it: S now writes for O's chat key.
+    await o.messaging.markSeen(atO);
+    await s.messaging.sync();
+
+    const probe = async (text: string) => {
+      for (const { who, name, mailbox } of replyMailboxes) {
+        const before = await state(who.db);
+        await sendVia(s, toO, mailbox, `${text} (${name})`);
+        expect(await who.messaging.sync()).toBe(0);
+        expect(backend.inboxes.get(name)).toEqual([]);
+        expect(await state(who.db)).toEqual(before);
+        const sends = backend.seenEnvelopes.length;
+        for (const c of await listConversations(who.db)) await who.messaging.markSeen(c.id);
+        expect(backend.seenEnvelopes.length).toBe(sends);
+      }
+    };
+    // While O has read but not answered: the link's mailbox counts for this chat, nothing else.
+    await probe('are you X?');
+    // After O answered, before S used O's mailbox: the same.
+    await o.messaging.send(atO, 'hi S');
+    await probe('really?');
+
+    await s.messaging.sync();
+    expect((await listMessages(s.db, toO)).filter((m) => m.out).map((m) => m.status)).toEqual(['seen', 'sent', 'sent', 'sent', 'sent']);
+    // The chats themselves carry on.
+    await s.messaging.send(toO, 'ok');
+    expect(await o.messaging.sync()).toBe(1);
+    expect((await listMessages(o.db, fromO)).map((m) => m.text)).toEqual(['hi S, guess who']);
+  });
+
   it("two people one sender wrote to can't cross their chats to learn it's the same person", async () => {
     const backend = await fakeBackend();
     const a = await person(backend, 'a');
@@ -1647,6 +1739,31 @@ describe('envelopes through the mailbox they belong to', () => {
     expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three']);
   });
 
+  it('a chat read but not answered still takes what was on its way after the link is revoked', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [p, q] = [await person(backend, 'p'), await person(backend, 'q')];
+    const { ref, bundle } = await linkOf(backend, owner);
+    const fromP = await p.messaging.startConversation(ref, bundle, 'from p');
+    const fromQ = await q.messaging.startConversation(ref, bundle, 'from q');
+    await owner.messaging.sync();
+    const [atP, atQ] = [await across(p.db, fromP, owner.db), await across(q.db, fromQ, owner.db)];
+    // Q's chat as an older version kept it, until upkeep copies the link's intro mailbox to it.
+    const { intro: _, ...old } = (await getConversation(owner.db, atQ))!;
+    await putConversation(owner.db, old);
+    await owner.messaging.maintain();
+    // Read: they write for the owner's key, to the link.
+    await owner.messaging.markSeen(atP);
+    await owner.messaging.markSeen(atQ);
+    await p.messaging.sync();
+    await q.messaging.sync();
+    await p.messaging.send(fromP, 'more from p');
+    await q.messaging.send(fromQ, 'more from q');
+    await revokeLink(owner.db, owner.session, ref.id);
+    expect(await listLinks(owner.db)).toEqual([]);
+    expect(await owner.messaging.sync()).toBe(2);
+  });
+
   it('after the link is replaced, what was on its way through the old one still arrives, and chats carry on', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
@@ -1688,9 +1805,54 @@ describe('envelopes through the mailbox they belong to', () => {
   });
 });
 
+describe('our side changing a chat while something of theirs comes in', () => {
+  it('keeps the mailbox and key our first reply takes while a message is being taken in', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await sender.messaging.send(conv, 'two');
+
+    // Taking 'two' in stops just before storing it, and the owner's first
+    // reply goes out meanwhile, taking a mailbox and a key.
+    let reached!: () => void;
+    let go!: () => void;
+    const atStore = new Promise<void>((r) => (reached = r));
+    const resume = new Promise<void>((r) => (go = r));
+    pause.before = async (c) => {
+      if (c !== mine) return;
+      pause.before = null;
+      reached();
+      await resume;
+    };
+    const syncing = owner.messaging.sync();
+    await atStore;
+    const replying = owner.messaging.send(mine, 'hi');
+    // Until the reply is out, or waits for the chat.
+    await Promise.race([replying, waitingFor(`send:${mine}`)]);
+    go();
+    expect(await syncing).toBe(1);
+    await replying;
+    const after = (await getConversation(owner.db, mine))!;
+    expect(after.myMailbox).not.toBeNull();
+    expect(after.myKey).not.toBeNull();
+
+    // The sender moves to them; what they write there arrives.
+    expect(await sender.messaging.sync()).toBe(1);
+    expect((await getConversation(sender.db, conv))!.sendTo).toBe(after.myMailbox);
+    await sender.messaging.send(conv, 'three');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text).sort()).toEqual(['hi', 'one', 'three', 'two']);
+  });
+});
+
 describe('links from before their intro mailbox was kept', () => {
-  /** Forgets the intro mailbox on the links and their keys, as an older version kept them. */
+  /** Forgets the intro mailbox on the links, their keys and their chats, as an older version kept them. */
   async function asBefore(db: Database): Promise<void> {
+    for (const { intro: _, introUntil: __, formerMailboxes: ___, ...c } of await listConversations(db)) await putConversation(db, c);
     const links = (await getMeta<Record<string, unknown>[]>(db, 'links'))!;
     await putMeta(db, 'links', links.map(({ mailbox: _, ...l }) => l));
     const index = (await getMeta<Record<string, KeyEntry>>(db, 'recipient-keys'))!;
@@ -1739,27 +1901,81 @@ describe('links from before their intro mailbox was kept', () => {
     expect((await state(owner.db)).chats).toEqual(before.chats);
   });
 
-  it("confirm nothing while the bundle can't be fetched", async () => {
+  for (const trouble of ['unreachable', 'busy'] as const) {
+    it(`hold back only what needs the link while its bundle is ${trouble}, and take in the rest`, async () => {
+      const backend = await fakeBackend();
+      const owner = await person(backend, 'owner');
+      const [friend, p, q] = [await person(backend, 'friend'), await person(backend, 'p'), await person(backend, 'q')];
+      const { ref, bundle } = await linkOf(backend, owner);
+      const known = await friend.messaging.startConversation(ref, bundle, 'hi');
+      await owner.messaging.sync();
+      await owner.messaging.send(await across(friend.db, known, owner.db), 'hello friend');
+      await friend.messaging.sync();
+      await asBefore(owner.db);
+
+      await p.messaging.startConversation(ref, bundle, 'from p');
+      await friend.messaging.send(known, 'still here');
+      await q.messaging.startConversation(ref, bundle, 'from q');
+      backend.down.bundles = trouble;
+      backend.bundleFetches.length = 0;
+      // The friend's message is taken in and confirmed; the two through the
+      // link wait, unconfirmed, and the bundle is asked for once.
+      expect(await owner.messaging.sync()).toBe(1);
+      expect(backend.inboxes.get('owner')).toHaveLength(2);
+      expect(backend.bundleFetches).toEqual([ref.id]);
+      backend.down.bundles = null;
+      expect(await owner.messaging.sync()).toBe(2);
+      expect(backend.inboxes.get('owner')).toEqual([]);
+    });
+  }
+
+  it('ask once per sync for a link gone from the server, and take nothing through it', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    await asBefore(owner.db);
+    await (await person(backend, 'p')).messaging.startConversation(ref, bundle, 'from p');
+    await (await person(backend, 'q')).messaging.startConversation(ref, bundle, 'from q');
+    backend.bundles.delete(ref.id);
+    backend.bundleFetches.length = 0;
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(backend.inboxes.get('owner')).toEqual([]);
+    expect(backend.bundleFetches).toEqual([ref.id]);
+  });
+
+  it("keep nothing from a bundle that isn't the link's", async () => {
+    // Someone else's link, or another of ours (signed by the same key).
+    for (const whose of ['someone', 'ours'] as const) {
+      const backend = await fakeBackend();
+      const owner = await person(backend, 'owner');
+      const other = whose === 'ours' ? owner : await person(backend, 'someone');
+      await linkOf(backend, other);
+      const { ref, bundle } = await linkOf(backend, owner);
+      await asBefore(owner.db);
+      await (await person(backend, 'p')).messaging.startConversation(ref, bundle, 'from p');
+      backend.down.bundles = 'wrong';
+      expect(await owner.messaging.sync()).toBe(0);
+      await owner.messaging.maintain();
+      expect((await listLinks(owner.db)).find((l) => l.id === ref.id)!.mailbox).toBeUndefined();
+      expect(backend.inboxes.get('owner')).toHaveLength(1);
+      backend.down.bundles = null;
+      expect(await owner.messaging.sync()).toBe(1);
+      expect((await listLinks(owner.db)).find((l) => l.id === ref.id)!.mailbox).toBe(bundle.mailbox);
+    }
+  });
+
+  it('learn it at upkeep too, and keep it on chats through the link', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
     const sender = await person(backend, 'sender');
     const { ref, bundle } = await linkOf(backend, owner);
-    await asBefore(owner.db);
     await sender.messaging.startConversation(ref, bundle, 'hello');
-    backend.down.bundles = true;
-    await expect(owner.messaging.sync()).rejects.toThrow(NetworkError);
-    expect(backend.inboxes.get('owner')).toHaveLength(1);
-    backend.down.bundles = false;
-    expect(await owner.messaging.sync()).toBe(1);
-  });
-
-  it('learn it at upkeep too', async () => {
-    const backend = await fakeBackend();
-    const owner = await person(backend, 'owner');
-    const { bundle } = await linkOf(backend, owner);
+    await owner.messaging.sync();
     await asBefore(owner.db);
+    expect((await listConversations(owner.db))[0]!.intro).toBeUndefined();
     await owner.messaging.maintain();
     expect(await linkMailboxes(owner.db)).toEqual({ links: [bundle.mailbox], keys: [bundle.mailbox] });
+    expect((await listConversations(owner.db))[0]!.intro).toBe(bundle.mailbox);
   });
 });
 
