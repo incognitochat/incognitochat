@@ -42,7 +42,7 @@ const ERROR_TEXT: Record<ErrorKind, Key> = {
   network: 'errorNetwork',
   expired: 'errorExpired',
   'rate-limited': 'errorRateLimited',
-  'logged-out': 'errorLoggedOut',
+  clock: 'errorClock',
   generic: 'errorGeneric',
 };
 
@@ -237,24 +237,37 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
       );
     case 'conversation':
       return <Conversation app={app} language={language} screen={screen} />;
-    case 'replaced':
+    case 'signed-out': {
+      // The server's word, never checked: the chats stay, and nothing is deleted without a typed confirmation.
+      const replaced = screen.reason === 'replaced';
       return (
-        <Page title={tr('replacedTitle')}>
-          <p class="warning" role="alert">
-            {tr('replacedBody')}
+        <Page title={tr(replaced ? 'replacedTitle' : 'signedOutTitle')} busy={screen.busy}>
+          <p class={replaced ? 'warning' : 'notice'} role="alert">
+            {tr(replaced ? 'replacedBody' : 'signedOutBody')}
           </p>
-          <Button kind="secondary" onClick={app.setUpAgain}>
-            {tr('setUpAgain')}
+          <p>{tr('signedOutKept')}</p>
+          {screen.offline && <p class="notice">{tr('offline')}</p>}
+          <Button disabled={screen.busy} onClick={app.recheck}>
+            {tr('tryAgain')}
           </Button>
+          <Button kind="secondary" disabled={screen.busy} onClick={app.readChats}>
+            {tr('readChats')}
+          </Button>
+          <button type="button" class="link-button delete-account" disabled={screen.busy} onClick={app.askReset}>
+            {tr('setUpAgain')}
+          </button>
         </Page>
       );
+    }
+    case 'confirm-reset':
+      return <ConfirmReset app={app} language={language} />;
     case 'error':
       return (
         <Page title={tr('appName')}>
           <p class="notice" role="alert">
             {tr(ERROR_TEXT[screen.error])}
           </p>
-          <Button onClick={app.retry}>{screen.error === 'expired' || screen.error === 'logged-out' ? tr('continue') : tr('tryAgain')}</Button>
+          <Button onClick={app.retry}>{screen.error === 'expired' ? tr('continue') : tr('tryAgain')}</Button>
         </Page>
       );
   }
@@ -270,6 +283,17 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
+  // Signed out, the chats are read-only; Try again asks the server again.
+  const status = screen.signedOut ? (
+    <div class="card" role="status">
+      <p>{tr('readOnlyNotice')}</p>
+      <button type="button" class="button secondary" onClick={() => void app.recheck()}>
+        {tr('tryAgain')}
+      </button>
+    </div>
+  ) : (
+    offline && <p class="notice">{tr('offline')}</p>
+  );
   const tabs = (
     <div class="tabs" role="tablist">
       {(['chats', 'links'] as const).map((tabName) => (
@@ -290,7 +314,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
     return (
       <main class="page">
         {tabs}
-        {offline && <p class="notice">{tr('offline')}</p>}
+        {status}
         {notice && (
           <p class="notice" role="status">
             {tr(NOTICE_TEXT[notice])}
@@ -315,7 +339,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
                 language={language}
                 chat={c}
                 revealed={revealed.value === c.id}
-                onReveal={(id) => (revealed.value = id)}
+                onReveal={(id) => (revealed.value = screen.signedOut ? null : id)}
               />
             ))}
           </ul>
@@ -331,7 +355,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   return (
     <Page title={tr('homeTitle')} body={tr('homeIntro')}>
       {tabs}
-      {offline && <p class="notice">{tr('offline')}</p>}
+      {status}
       {notice && (
         <p class="notice" role="status">
           {tr(NOTICE_TEXT[notice])}
@@ -499,7 +523,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           </bdi>
         </span>
         <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
-        {screen.blocked ? null : confirmingBlock.value ? (
+        {screen.blocked || screen.readOnly ? null : confirmingBlock.value ? (
           <div class="row">
             <p class="warning">{tr(screen.role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender')}</p>
             <Button kind="danger" disabled={screen.busy} onClick={app.block}>
@@ -531,7 +555,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             language={language}
             time={time}
             highlighted={highlight.value === m.id}
-            canReply={!screen.blocked && !screen.ended}
+            canReply={!screen.blocked && !screen.ended && !screen.readOnly}
             canReact={canReact(screen, m)}
             onReact={(e) => void app.react(m.id, e)}
             onDoubleTap={() => {
@@ -586,7 +610,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         <MessageMenu
           message={menu.value}
           language={language}
-          canReply={!screen.blocked && !screen.ended}
+          canReply={!screen.blocked && !screen.ended && !screen.readOnly}
           canReact={canReact(screen, menu.value)}
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
@@ -618,7 +642,9 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             {scroll.fresh > 0 && <span class="badge">{t(language, 'unreadCount', { count: scroll.fresh })}</span>}
           </button>
         )}
-        {screen.blocked ? (
+        {screen.readOnly ? (
+          <p class="notice">{tr('readOnlyConversation')}</p>
+        ) : screen.blocked ? (
           <>
             <p class="notice">{tr('blockedConversation')}</p>
             {screen.error && (
@@ -2091,7 +2117,7 @@ function useMediaUrl(app: AppState, m: MessageView) {
 }
 
 /** Whether an attachment waits for a tap to download: one received, or one cleared from this device. */
-const fetchable = (m: MessageView) => (m.file === 'remote' && !m.out) || m.file === 'cleared';
+const fetchable = (app: AppState, m: MessageView) => !app.readOnly.value && ((m.file === 'remote' && !m.out) || m.file === 'cleared');
 
 /** The tiny preview carried in the message, as an image URL. */
 function tinyPreview(p: string | undefined): string | null {
@@ -2107,7 +2133,7 @@ function MediaState({ app, message: m, language, progress }: { app: AppState; me
           <Ring fraction={progress} />
         </span>
       )}
-      {fetchable(m) && progress === undefined && (
+      {fetchable(app, m) && progress === undefined && (
         <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
           ↓
         </button>
@@ -2149,7 +2175,7 @@ function VideoView({ app, message: m, language, progress }: { app: AppState; mes
   const { w = 16, h = 9, p, l, s } = m.media!;
   const tiny = tinyPreview(p);
   const length = l !== undefined ? formatLength(language, l) : null;
-  const size = fetchable(m) ? formatSize(language, s) : null;
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   return (
     <div class="photo" style={{ aspectRatio: `${w} / ${h}` }}>
       {tiny && <img class="tiny" src={tiny} alt="" />}
@@ -2262,7 +2288,7 @@ function PlayButton({ app, message: m, language, progress, playing, onPlay }: { 
       </span>
     );
   }
-  if (fetchable(m)) {
+  if (fetchable(app, m)) {
     return (
       <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
         ↓
@@ -2530,12 +2556,12 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
   const busy = progress !== undefined;
   const onClick = () => {
     if (busy) return;
-    if (fetchable(m)) void app.fetchMedia(m.id);
+    if (fetchable(app, m)) void app.fetchMedia(m.id);
     else if (m.file === 'local') void save(app, m, language);
   };
   return (
     <button type="button" class="file" onClick={onClick} disabled={m.file === 'gone'}>
-      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(m) ? '↓' : extension(media.n) || '📄'}</span>
+      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(app, m) ? '↓' : extension(media.n) || '📄'}</span>
       <span class="file-info">
         <span class="file-name" dir="auto">
           {media.n ?? t(language, 'file')}
@@ -2775,7 +2801,7 @@ const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥
 
 /** Whether one can react to a message: in an open conversation, and not to one of ours still on its way. */
 function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
-  return !screen.blocked && !screen.ended && !(m.out && (m.status === 'sending' || m.status === 'failed'));
+  return !screen.blocked && !screen.ended && !screen.readOnly && !(m.out && (m.status === 'sending' || m.status === 'failed'));
 }
 
 /** Whether one of ours can be edited: sent, in an open conversation, with text or a caption to edit (not a sticker, voice or video message). */
@@ -3177,6 +3203,39 @@ function ConfirmReplace({ app, language, busy }: { app: AppState; language: Lang
         {t(language, 'replaceConfirm')}
       </Button>
       <Button kind="secondary" disabled={busy} onClick={app.cancelReplace}>
+        {t(language, 'cancel')}
+      </Button>
+    </Page>
+  );
+}
+
+/**
+ * Setting up again while signed out: it deletes everything on this device,
+ * so a typed phrase first. The server's answer alone never leads here.
+ */
+function ConfirmReset({ app, language }: { app: AppState; language: Language }) {
+  const typed = useSignal('');
+  const phrase = t(language, 'resetPhrase');
+  const ok = confirmationMatches(typed.value, phrase);
+  return (
+    <Page title={t(language, 'resetTitle')} body={t(language, 'resetBody')}>
+      <p class="warning">{t(language, 'resetWarning')}</p>
+      <label class="field">
+        <span>{t(language, 'replaceType', { phrase: '⁨' + phrase + '⁩' })}</span>
+        <input
+          type="text"
+          dir="auto"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck={false}
+          value={typed.value}
+          onInput={(e) => (typed.value = e.currentTarget.value)}
+        />
+      </label>
+      <Button kind="danger" disabled={!ok} onClick={app.confirmReset}>
+        {t(language, 'resetConfirm')}
+      </Button>
+      <Button kind="secondary" onClick={app.cancelReset}>
         {t(language, 'cancel')}
       </Button>
     </Page>

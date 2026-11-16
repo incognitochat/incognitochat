@@ -270,7 +270,9 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 // shared items (a mailbox's, a link's, a code's) before the account's own
 // record of them, so a step that fails halfway leaves the record, and the
 // next step finds and finishes it. Last come the account and the Telegram
-// item together, then the devices (orphaned devices can't log in).
+// item together, then the devices (orphaned devices can't log in). If another
+// write to the account cancels that last step, it reports not finished, and
+// asking again finishes it: a conflict is never taken for "already gone".
 func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error) {
 	sks, err := s.sortKeys(ctx, accountID)
 	if err != nil {
@@ -345,11 +347,17 @@ func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max 
 			ExpressionAttributeValues: attrs{":id": sv(accountID)},
 		}})
 	}
-	if err := s.transact(ctx, writes); err != nil {
-		if errors.Is(err, ErrConflict) {
+	if reasons, err := s.transactReasons(ctx, writes); err != nil {
+		if !errors.Is(err, ErrConflict) {
+			return false, err
+		}
+		// A condition failed: the account is gone already, or was replaced.
+		if slices.Contains(reasons, "ConditionalCheckFailed") {
 			return false, ErrNotFound
 		}
-		return false, err
+		// Another write to the account got there first (a mailbox, a
+		// notice): nothing went, and asking again finishes it.
+		return false, nil
 	}
 	return true, s.batchWrite(ctx, devices)
 }

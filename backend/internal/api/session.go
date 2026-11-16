@@ -32,6 +32,10 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	now := s.Now()
+	// Before the directory is read, so the answer says nothing about the device.
+	if session.CheckTime(in.Timestamp, now) != nil {
+		return clockSkew(now)
+	}
 
 	device, err := s.Directory.Device(ctx, in.Account, in.Device, now)
 	if errors.Is(err, directory.ErrNotFound) {

@@ -158,11 +158,17 @@ func TestCheck(t *testing.T) {
 	}
 
 	later := func(d time.Duration) *MemoryNonces { return NewMemoryNonces(func() time.Time { return now.Add(d) }) }
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrLogin) {
-		t.Fatal("accepted a stale timestamp")
+	// A timestamp outside the window is told apart (the device's clock is
+	// off), and is still a refused login for callers that don't.
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrClockSkew) || !errors.Is(err, ErrLogin) {
+		t.Fatalf("stale timestamp: err = %v", err)
 	}
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second)); !errors.Is(err, ErrLogin) {
-		t.Fatal("accepted a timestamp from the future")
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second)); !errors.Is(err, ErrClockSkew) {
+		t.Fatalf("timestamp from the future: err = %v", err)
+	}
+	// Other refusals aren't clock skew.
+	if err := Check(ctx, login, &key.PublicKey, nonces, now); errors.Is(err, ErrClockSkew) {
+		t.Fatal("a replayed login was taken for clock skew")
 	}
 
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -186,6 +192,26 @@ func TestCheck(t *testing.T) {
 	} {
 		if err := Check(ctx, bad, &key.PublicKey, NewMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
+func TestCheckTime(t *testing.T) {
+	for _, tt := range []struct {
+		offset time.Duration
+		ok     bool
+	}{
+		{0, true},
+		{MaxSkew, true},
+		{-MaxSkew, true},
+		{MaxSkew + time.Second, false},
+		{-MaxSkew - time.Second, false},
+		{5 * time.Minute, false},
+		{-3*time.Hour - 30*time.Minute, false},
+	} {
+		err := CheckTime(now.Add(tt.offset).Unix(), now)
+		if (err == nil) != tt.ok || (err != nil && !errors.Is(err, ErrClockSkew)) {
+			t.Errorf("offset %v: err = %v", tt.offset, err)
 		}
 	}
 }

@@ -66,6 +66,41 @@ Signed requests carry `X-Device-Signature: <timestamp>.<nonce>.<signature>`
 next to the session token. Nonces are 16–64 base64url characters and are used
 once; timestamps must be within 60 seconds of the server's clock.
 
+**Clocks.** A login or signed request whose timestamp is more than 60 seconds
+from the server's clock, and a new account's device list issued outside its
+window (below), get `401 {"error": "clock_skew", "now": <the server's Unix
+seconds>}`. The server decides this from the timestamp alone, before it reads
+anything about the account or device, so the answer says nothing about whether
+they exist. The app keeps, in memory, how far its clock is from `now`, and
+uses the corrected clock for exactly these: login and signature timestamps,
+a new account's first device list, and checking the session token's expiry.
+It signs again with a fresh nonce and retries once, so a device whose clock
+is off (a wrong time zone set by hand, say) works without the user seeing an
+error. Other times still come from the device's own clock: a link's key times
+(`from`, `until`, checked only to the hour and valid for weeks), the week of
+send and media tokens, and a message's `at`. The app believes `now` only
+within two days of its own clock; further off, it signs nothing and asks the
+user to set the device's date and time.
+
+**Refusals.** These answers about the device itself:
+
+| Answer | Meaning |
+|---|---|
+| `401 session_expired` | The session token is missing or over; the app logs in again. |
+| `401 clock_skew` | The device's clock is off (above). |
+| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong. |
+| `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
+
+The app doesn't take the last two on trust, since a server could send them to
+anyone. It says so on a screen of its own, keeps the device's chats there and
+readable (nothing is sent or downloaded), asks again when the user taps Try
+again and at every launch, and goes on as before if the server lets the
+device in again. It remembers the answer, so a launch that can't reach the
+server opens read-only too. A replaced account stays shown as replaced if the
+server later only refuses it (the server keeps its marker of a replacement
+for 90 days). It deletes nothing on such an answer: only setting up again
+does, after the user types a confirmation.
+
 **One device per account.** Setting up on a second device replaces the
 account (after a typed confirmation); there is no device linking or sync.
 Replacing deletes the old account's links and mailboxes on the server, and a
@@ -90,14 +125,22 @@ doesn't start a fresh day. It works in steps of about 150
 items, so a big account neither outlasts a request nor takes the table's whole
 write capacity: while more is left the server answers `409 in_progress`, and
 the app repeats the request a second later (links go in the first step, the
-account and its devices in the last). Before asking, the app deletes the uploads
+account and its devices in the last). Another write to the account that
+cancels the last step (a new mailbox, a notice) is answered `in_progress`
+too, never as done. The last step answers `200 {}`. Once the devices are
+gone, a repeat (its answer was lost) is refused like any login of a device
+that no longer exists, `401 login_refused`, and the app takes that as done
+too; any other answer, `404` included, leaves everything on the device and
+says the deletion didn't finish. Before asking, the app deletes the uploads
 still waiting for it (`POST /media/{id}/delete`); afterwards it deletes
 everything on the device. The other side of each conversation isn't told.
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
 (1 byte), sequence number (8), SHA-256 of the previous list (32; zeros for the
 first), issued (8), expires (8, at most 30 days later), then per device: ID
-(16 raw bytes), signing key (65), added (8).
+(16 raw bytes), signing key (65), added (8). A new account's first list must
+be issued from 2 hours before to 1 hour after the server's clock (on the
+hour, as signed times are), or registration answers `clock_skew`.
 
 ## Links
 

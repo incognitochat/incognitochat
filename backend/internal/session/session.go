@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,9 @@ var (
 	ErrToken = errors.New("session: invalid token")
 	// ErrLogin is returned for a login that must be refused.
 	ErrLogin = errors.New("session: login refused")
+	// ErrClockSkew is returned for a timestamp more than MaxSkew from the
+	// server's clock: the device's clock is off. It is an ErrLogin too.
+	ErrClockSkew = fmt.Errorf("%w: timestamp outside the window", ErrLogin)
 	// ErrKeys is returned for an unusable key configuration.
 	ErrKeys = errors.New("session: invalid keys")
 )
@@ -198,13 +202,24 @@ func CheckRequest(ctx context.Context, r SignedRequest, pub *ecdsa.PublicKey, no
 	return checkFresh(ctx, pub, r.Signature, devicesig.LabelRequest, RequestParts(r), r.Timestamp, r.Nonce, nonces, now)
 }
 
+// CheckTime returns ErrClockSkew if a login's or signed request's timestamp
+// (Unix seconds) is more than MaxSkew from now. It needs nothing but the
+// timestamp, so callers check it before reading anything about the device:
+// the answer then says nothing about whether it exists.
+func CheckTime(timestamp int64, now time.Time) error {
+	at := time.Unix(timestamp, 0)
+	if at.Before(now.Add(-MaxSkew)) || at.After(now.Add(MaxSkew)) {
+		return ErrClockSkew
+	}
+	return nil
+}
+
 func checkFresh(ctx context.Context, pub *ecdsa.PublicKey, signature []byte, label string, parts [][]byte, timestamp int64, nonce string, nonces NonceStore, now time.Time) error {
 	if !validNonce(nonce) {
 		return ErrLogin
 	}
-	at := time.Unix(timestamp, 0)
-	if at.Before(now.Add(-MaxSkew)) || at.After(now.Add(MaxSkew)) {
-		return ErrLogin
+	if err := CheckTime(timestamp, now); err != nil {
+		return err
 	}
 	if devicesig.Verify(pub, signature, label, parts...) != nil {
 		return ErrLogin

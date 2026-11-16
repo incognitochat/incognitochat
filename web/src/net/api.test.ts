@@ -45,6 +45,24 @@ describe('api', () => {
     expect(await odd.post('/x', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ code: 'unknown' });
   });
 
+  it("reads the server's clock from a clock_skew answer, and nothing odd", async () => {
+    const skew = createApi('https://api.example', fake(401, '{"error":"clock_skew","now":1800000000}'));
+    expect(await skew.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({
+      status: 401,
+      code: 'clock_skew',
+      serverTime: 1_800_000_000,
+    });
+    for (const now of ['"1800000000"', '-5', '1.5', '1e300', 'null']) {
+      const odd = createApi('https://api.example', fake(401, `{"error":"clock_skew","now":${now}}`));
+      const err = (await odd.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError;
+      expect(err.code).toBe('clock_skew');
+      expect(err.serverTime).toBeUndefined();
+    }
+    // Only with clock_skew.
+    const other = createApi('https://api.example', fake(401, '{"error":"login_refused","now":1800000000}'));
+    expect(((await other.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError).serverTime).toBeUndefined();
+  });
+
   it('reports unreachable servers and unexpected bodies as NetworkError', async () => {
     const down = createApi('https://api.example', async () => {
       throw new TypeError('Failed to fetch');

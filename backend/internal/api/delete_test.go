@@ -54,12 +54,29 @@ func TestDeleteAccount(t *testing.T) {
 	// The device can't use its session any more.
 	status, out = h.as(t, owner, http.MethodGet, "/account", nil, false)
 	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
+	// Repeating the deletion (its answer was lost) is refused the same way,
+	// with its token or a new login: the app takes that as done.
+	status, out = h.as(t, owner, http.MethodDelete, "/account", nil, true)
+	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
+	status, out = h.post(t, "/session", owner.d.login(t, h.now))
+	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
 
 	// The same Telegram user can set up again, as new (no replacing needed).
 	again := newDevice(t)
 	again.user = userID
 	if status, out := h.register(t, again, false); status != http.StatusOK {
 		t.Fatalf("register again: %d %v", status, out)
+	}
+}
+
+// An account found gone in the last step (another request finished it) is
+// deleted: the answer is 200, never a 404 the app could mistake.
+func TestDeleteAccountFoundGone(t *testing.T) {
+	h := newHarness(t)
+	owner := h.account(t, userID)
+	h.dir.goneOnDelete = true
+	if status, out := h.as(t, owner, http.MethodDelete, "/account", nil, true); status != http.StatusOK || len(out) != 0 {
+		t.Fatalf("delete: %d %v", status, out)
 	}
 }
 

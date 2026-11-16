@@ -96,6 +96,18 @@ func TestReplacedAccountIsCutOffAtOnce(t *testing.T) {
 // call sends a request as a logged-in device; sign adds a device signature.
 func (h *harness) call(t *testing.T, d *device, token, method, path string, body any, sign bool) (int, map[string]any) {
 	t.Helper()
+	var at time.Time
+	if sign {
+		at = h.now
+	}
+	return h.callAt(t, d, token, method, path, body, at)
+}
+
+// callAt is call with a device signature made at signedAt by the device's
+// clock (none if zero).
+func (h *harness) callAt(t *testing.T, d *device, token, method, path string, body any, signedAt time.Time) (int, map[string]any) {
+	t.Helper()
+	sign := !signedAt.IsZero()
 	var raw []byte
 	if body != nil {
 		var err error
@@ -114,7 +126,7 @@ func (h *harness) call(t *testing.T, d *device, token, method, path string, body
 	if sign {
 		signed := session.SignedRequest{
 			AccountID: d.account, DeviceID: d.id, Method: method, Path: path, Body: raw,
-			Timestamp: h.now.Unix(), Nonce: b64(randomBytes(t, 16)),
+			Timestamp: signedAt.Unix(), Nonce: b64(randomBytes(t, 16)),
 		}
 		sig := signP1363(t, d.dsk, devicesig.Message(devicesig.LabelRequest, session.RequestParts(signed)...))
 		req.Headers["x-device-signature"] = strconv.FormatInt(signed.Timestamp, 10) + "." + signed.Nonce + "." + b64(sig)
