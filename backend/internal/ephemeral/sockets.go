@@ -54,8 +54,8 @@ type Sockets struct {
 }
 
 // Open records a connection for an account: one write, and a delete once
-// the account has MaxSockets on record. The oldest are forgotten then: they
-// stay open but get no more pushes. Forgetting, rather than refusing the
+// the account has MaxSockets on record. The oldest is forgotten then: it
+// stays open but gets no more pushes. Forgetting, rather than refusing the
 // new one, means records of sockets that have closed never lock anyone out.
 //
 // Its records also limit connects, for free: an account that opened
@@ -105,18 +105,15 @@ func (s *Sockets) Open(ctx context.Context, account, connection string) error {
 	}); err != nil {
 		return err
 	}
-	// The opened connection takes one place.
-	extra := len(live) - (MaxSockets - 1)
-	if extra <= 0 {
+	// The opened connection takes one place. One delete at most, so a
+	// connect never costs more than two writes, even when connects at the
+	// same moment see each other's records; Connections pushes to the
+	// newest MaxSockets anyway, and the next connects trim the rest.
+	if len(live) < MaxSockets {
 		return nil
 	}
-	slices.SortFunc(live, func(a, b record) int { return int(a.expires - b.expires) })
-	for _, r := range live[:extra] {
-		if err := s.Forget(ctx, account, r.connection); err != nil {
-			return err
-		}
-	}
-	return nil
+	oldest := slices.MinFunc(live, func(a, b record) int { return int(a.expires - b.expires) })
+	return s.Forget(ctx, account, oldest.connection)
 }
 
 // Forget deletes a connection's record (it is gone, or pushed out).
