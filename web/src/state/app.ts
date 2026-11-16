@@ -1463,11 +1463,6 @@ export function createApp(deps: Deps) {
     deleteConversation,
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,
-    /** A received or sent attachment as a file, for saving or sharing. */
-    mediaFile: async (m: MessageRef, name: string, type?: string) => {
-      const bytes = await getMedia(deps.db, m.conv, m.id);
-      return bytes ? new File([bytes], name, type ? { type } : {}) : null;
-    },
     sendMedia,
     sendVoice,
     sendRound,

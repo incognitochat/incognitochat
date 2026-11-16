@@ -1376,8 +1376,8 @@ async function asVersion3(db: Database, name: string): Promise<void> {
     await v3.put('meta', value, k);
   }
   for (const { wire: id, firstKey: _, ...c } of conversations) await v3.put('conversations', { ...c, id });
-  for (const m of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
-  for (const [conv, id] of await db.getAllKeys('media')) await v3.put('media', await db.get('media', [conv, id]), id);
+  for (const { legacyFile: _, ...m } of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
+  for (const key of await db.getAllKeys('media')) await v3.put('media', await db.get('media', key), typeof key === 'string' ? key : key[1]);
   v3.close();
 }
 
@@ -1417,6 +1417,8 @@ describe('a database from before conversations had IDs of their own', () => {
     const [answered, waiting] = [(await getConversation(sender.db, conv))!.wire, (await getConversation(other.db, unanswered))!.wire];
     expect((await listConversations(db)).map((c) => c.id).sort()).toEqual([answered, waiting].sort());
     expect((await listMessages(db, answered)).map((m) => m.text)).toEqual(['hello', 'hi', '']);
+    // The photo's file stayed where it was, under its message ID, and opens.
+    expect(await db.getAllKeys('media')).toEqual([pic.id]);
     expect(await getMedia(db, answered, pic.id)).toEqual(photo);
 
     // What was still on its way arrives: the edited message edited, the deleted one not at all.
@@ -1441,11 +1443,30 @@ describe('a database from before conversations had IDs of their own', () => {
     expect(await sender.messaging.sync()).toBe(1);
     expect((await listMessages(sender.db, conv)).at(-1)!.text).toBe('yes');
 
-    // Someone new through the link, reusing an old conversation's ID: a chat of their own.
+    // The old photo cleared and fetched again: it's kept the current way from then on.
+    expect(await clearMedia(db, { conv: answered })).toBe(photo.length);
+    expect(await db.getAllKeys('media')).toEqual([]);
+    expect(await after.fetchMedia(answered, pic.id)).toBe('local');
+    expect(await getMedia(db, answered, pic.id)).toEqual(photo);
+    expect(await db.getAllKeys('media')).toEqual([[answered, pic.id]]);
+
+    // Someone new through the link, reusing the ID of an old conversation
+    // never answered (its sender's first key is known): a chat of their own.
     const newcomer = await person(backend, 'newcomer');
     nextIds(waiting);
     await newcomer.messaging.startConversation(ref, bundle, 'me too');
     expect(await after.sync()).toBe(1);
     expect(await listConversations(db)).toHaveLength(3);
+
+    // Reusing the ID of an old conversation that was answered before the
+    // upgrade (its sender's first key may have changed, so it isn't kept):
+    // dropped, as before, so a replay of its first message can't open a
+    // second chat. Only who knows that ID (its sender) can try this.
+    const late = await person(backend, 'late');
+    nextIds(answered);
+    await late.messaging.startConversation(ref, bundle, 'me as well');
+    expect(await after.sync()).toBe(0);
+    expect(await listConversations(db)).toHaveLength(3);
+    expect((await listMessages(db, answered)).at(-1)!.text).toBe('yes');
   });
 });

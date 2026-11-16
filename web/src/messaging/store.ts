@@ -113,22 +113,46 @@ export async function setMessageStatus(db: Database, conv: string, id: string, s
   if (record && (from === undefined || record.status === from)) await db.put('messages', { ...record, status });
 }
 
+/**
+ * Where a message's file is in the media store: by conversation and message
+ * ID, or, for one kept since before version 4, by the message ID alone
+ * (MessageRecord.legacyFile). Never by the message ID for any other: an ID
+ * from another conversation must not reach that one's file.
+ */
+function fileKey(conv: string, id: string, record: MessageRecord | undefined): [string, string] | string {
+  return record?.legacyFile ? id : [conv, id];
+}
+
 /** Deletes one message from this device, and its attachment. */
 export async function deleteMessage(db: Database, conv: string, id: string): Promise<void> {
-  await db.delete('messages', [conv, id]);
-  await db.delete('media', [conv, id]);
+  const tx = db.transaction(['messages', 'media'], 'readwrite');
+  const record = await tx.objectStore('messages').get([conv, id]);
+  await tx.objectStore('messages').delete([conv, id]);
+  await tx.objectStore('media').delete(fileKey(conv, id, record));
+  await tx.done;
 }
 
 /** Keeps a message's attachment on this device, sealed under the storage key. */
 export async function putMedia(db: Database, conv: string, id: string, file: Uint8Array<ArrayBuffer>): Promise<void> {
   const iv = randomBytes(IV);
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(`media:${id}`) }, await storageKey(db), file);
-  await db.put('media', concat(iv, new Uint8Array(ct)), [conv, id]);
+  const tx = db.transaction(['messages', 'media'], 'readwrite');
+  const messages = tx.objectStore('messages');
+  const media = tx.objectStore('media');
+  // A file kept from before version 4 (cleared and fetched again, say) moves to the current key.
+  const record = await messages.get([conv, id]);
+  if (record?.legacyFile) {
+    await media.delete(id);
+    const { legacyFile: _, ...rest } = record;
+    await messages.put(rest);
+  }
+  await media.put(concat(iv, new Uint8Array(ct)), [conv, id]);
+  await tx.done;
 }
 
 /** A message's attachment, if it's on this device. */
 export async function getMedia(db: Database, conv: string, id: string): Promise<Uint8Array<ArrayBuffer> | undefined> {
-  const sealed = await db.get('media', [conv, id]);
+  const sealed = await db.get('media', fileKey(conv, id, await db.get('messages', [conv, id])));
   if (!sealed) return undefined;
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.slice(0, IV), additionalData: utf8(`media:${id}`) }, await storageKey(db), sealed.slice(IV));
   return new Uint8Array(pt);
@@ -173,17 +197,17 @@ export async function clearMedia(db: Database, which: { conv?: string; before?: 
     if (record.out && (record.status === 'sending' || record.status === 'failed')) continue;
     const { media } = await openBody(db, record.id, record.sealed);
     if (!media?.id || !media.k) continue;
-    const key: [string, string] = [record.conv, record.id];
     // The same lock as fetching, so a fetch can't put the file back halfway.
-    freed += await withLock(mediaLock(...key), async () => {
+    freed += await withLock(mediaLock(record.conv, record.id), async () => {
       const tx = db.transaction(['messages', 'media'], 'readwrite');
-      const now = await tx.objectStore('messages').get(key);
+      const now = await tx.objectStore('messages').get([record.conv, record.id]);
       if (now?.file !== 'local') {
         await tx.done;
         return 0;
       }
-      await tx.objectStore('media').delete(key);
-      await tx.objectStore('messages').put({ ...now, file: 'cleared' });
+      await tx.objectStore('media').delete(fileKey(now.conv, now.id, now));
+      const { legacyFile: _, ...rest } = now;
+      await tx.objectStore('messages').put({ ...rest, file: 'cleared' });
       await tx.done;
       return media.s;
     });
@@ -283,9 +307,9 @@ export async function deleteMessages(db: Database, conv: string): Promise<void> 
   const tx = db.transaction(['messages', 'media'], 'readwrite');
   const messages = tx.objectStore('messages');
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
-  for (const key of await messages.index('byConversation').getAllKeys(range)) {
-    await messages.delete(key);
-    await tx.objectStore('media').delete(key);
+  for (let cursor = await messages.index('byConversation').openCursor(range); cursor; cursor = await cursor.continue()) {
+    await tx.objectStore('media').delete(fileKey(conv, cursor.value.id, cursor.value));
+    await cursor.delete();
   }
   await tx.done;
 }

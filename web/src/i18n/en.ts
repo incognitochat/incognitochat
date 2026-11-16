@@ -296,6 +296,11 @@ export const en = {
   errorGeneric: 'Something went wrong. Try again.',
   tryAgain: 'Try again',
   continue: 'Continue',
+
+  storageFailed: "Couldn't update this app's storage. Free some space on the device and try again.",
+  storageNewer: 'A newer version of this app has been used on this device. Reload to continue.',
+  storageBlocked: 'Close other copies of this app that are open to continue.',
+  reload: 'Reload',
 } as const;
 
 export type Key = keyof typeof en;

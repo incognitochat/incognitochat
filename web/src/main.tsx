@@ -9,7 +9,8 @@ import { applyInsets, applyTheme } from './platform/theme';
 import { readTicket, SAVE_PREFIX } from './media/save';
 import { SavePage } from './save';
 import { createApp } from './state/app';
-import { openDatabase, requestPersistence } from './storage/db';
+import { openDatabase, requestPersistence, StorageError, type Database } from './storage/db';
+import { StorageScreen } from './storage-screen';
 import { databaseName, profileFor } from './storage/profile';
 import { openChannel, useProfile } from './sync/locks';
 import './app.css';
@@ -47,7 +48,16 @@ async function main(): Promise<void> {
   // Each Telegram account on this app gets its own local profile.
   const profile = await profileFor(launch.userId);
   useProfile(profile);
-  const db = await openDatabase(databaseName(profile));
+  let db: Database;
+  try {
+    db = await openDatabase(databaseName(profile), {
+      // Shown until the other copy closes; then the app starts over it.
+      onBlocked: () => render(<StorageScreen problem="blocked" language={language} />, root),
+    });
+  } catch (err) {
+    render(<StorageScreen problem={err instanceof StorageError ? err.kind : 'failed'} language={language} />, root);
+    return;
+  }
   void requestPersistence();
 
   let restart = (): void => {};

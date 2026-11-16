@@ -29,8 +29,12 @@ interface Schema extends DBSchema {
    * the device's storage key (messaging/store.ts).
    */
   messages: { key: [string, string]; value: MessageRecord; indexes: { byConversation: [string, number] } };
-  /** Attachments on this device, by conversation and message ID, encrypted under the storage key (messaging/store.ts). */
-  media: { key: [string, string]; value: Uint8Array<ArrayBuffer> };
+  /**
+   * Attachments on this device, by conversation and message ID, encrypted
+   * under the storage key (messaging/store.ts). Files from before version 4
+   * stay under their message ID alone (see MessageRecord.legacyFile).
+   */
+  media: { key: [string, string] | string; value: Uint8Array<ArrayBuffer> };
 }
 
 /**
@@ -116,9 +120,30 @@ export interface MessageRecord {
   file?: 'local' | 'remote' | 'cleared' | 'gone';
   /** AES-GCM under the storage key: nonce ‖ ciphertext of {text, replyTo}. */
   sealed: Uint8Array<ArrayBuffer>;
+  /**
+   * Its file is in the media store under its message ID alone, as version 3
+   * kept it (IDs were unique on the device then): the upgrade leaves files
+   * where they are, since moving them would need as much space again. Until
+   * the file goes; any file stored since is under (conversation, message ID).
+   */
+  legacyFile?: true;
 }
 
 export type Database = IDBPDatabase<Schema>;
+
+/** Why the database couldn't be opened. */
+export class StorageError extends Error {
+  /**
+   * failed: it couldn't be opened or upgraded (often, no space left), and is
+   * as it was; newer: a newer version of the app has upgraded it already.
+   */
+  readonly kind: 'failed' | 'newer';
+  constructor(kind: StorageError['kind'], cause: unknown) {
+    super(`storage: ${kind}`, { cause });
+    this.name = 'StorageError';
+    this.kind = kind;
+  }
+}
 
 type Upgrade = (db: IDBPDatabase<Schema>, tx: IDBPTransaction<Schema, StoreNames<Schema>[], 'versionchange'>) => void | Promise<void>;
 
@@ -149,9 +174,13 @@ const upgrades: Upgrade[] = [
 /**
  * Version 4. Message and conversation IDs are the other side's choice, so
  * whether one is already on this device must change nothing they could
- * notice. Messages and attachments are kept by (conversation, message ID),
- * and a conversation gets an ID of its own here, apart from the one on the
- * wire; those from before keep theirs, which was unique on the device.
+ * notice. Messages are kept by (conversation, message ID), and a
+ * conversation gets an ID of its own here, apart from the one on the wire;
+ * those from before keep theirs, which was unique on the device.
+ *
+ * Attachments' files stay as they are: copying them would need as much
+ * space again, all in this one transaction. Their messages are marked
+ * (legacyFile) instead, which reads only the media store's keys.
  * Untyped: it reads the stores as version 3 left them.
  */
 async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[], 'versionchange'>): Promise<void> {
@@ -163,52 +192,81 @@ async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[],
   messages.createIndex('byConversation', ['conv', 'at']);
   const media = tx.objectStore('media');
 
-  for (let cursor = await conversations.openCursor(); cursor; cursor = await cursor.continue()) {
-    const c = cursor.value as Omit<ConversationRecord, 'wire'>;
-    // Someone we never answered can't have changed keys: theirs is still
-    // their first. Once answered, it may have changed (firstKey stays unknown).
-    const firstKey = c.role === 'owner' && c.myKey === null ? { firstKey: c.peerKey } : {};
-    await cursor.update({ ...c, wire: c.id, ...firstKey });
+  // In batches, each one's writes sent together: waiting for every request in
+  // turn takes seconds for a long history on some engines.
+  const all = (await conversations.getAll()) as Omit<ConversationRecord, 'wire'>[];
+  await Promise.all(
+    all.map((c) => {
+      // Someone we never answered can't have changed keys: theirs is still
+      // their first. Once answered, it may have changed (firstKey stays unknown).
+      const firstKey = c.role === 'owner' && c.myKey === null ? { firstKey: c.peerKey } : {};
+      return conversations.put({ ...c, wire: c.id, ...firstKey });
+    }),
+  );
+  const files = new Set(await media.getAllKeys());
+  const kept = new Set<IDBValidKey>();
+  for (let after: string | undefined; ; ) {
+    const batch = (await before.getAll(after === undefined ? null : IDBKeyRange.lowerBound(after, true), 500)) as MessageRecord[];
+    if (batch.length === 0) break;
+    await Promise.all(
+      batch.map((m) => {
+        if (!files.has(m.id)) return messages.put(m);
+        kept.add(m.id);
+        return messages.put({ ...m, legacyFile: true });
+      }),
+    );
+    after = batch[batch.length - 1]!.id;
   }
-  for (let cursor = await before.openCursor(); cursor; cursor = await cursor.continue()) {
-    await messages.put(cursor.value);
-  }
-  for (const id of await media.getAllKeys()) {
-    const message = (await before.get(id)) as MessageRecord | undefined;
-    const file = message && (await media.get(id));
-    // One without its message (left by a send that never finished) was never shown: it goes.
-    if (file) await media.put(file, [message.conv, id]);
-    await media.delete(id);
-  }
+  // A file without its message (left by a send that never finished) was
+  // never shown: it goes. Deleting needs no space.
+  for (const key of files) if (!kept.has(key)) await media.delete(key);
   db.deleteObjectStore('messages-v3');
 }
 
-/** Opens (and if needed creates or upgrades) the app's database. */
-export function openDatabase(name = DB_NAME): Promise<Database> {
-  return openDB<Schema>(name, DB_VERSION, {
-    async upgrade(db, oldVersion, _newVersion, tx) {
-      try {
-        for (let v = oldVersion; v < DB_VERSION; v++) {
-          const step = upgrades[v]?.(db, tx);
-          if (step) await step;
-        }
-      } catch {
-        // Nothing is kept half-done: the database stays as it was, and
-        // opening it fails. (openDB rejects; so does tx.done, which nothing
-        // else waits on.)
+/**
+ * Opens (and if needed creates or upgrades) the app's database. If that
+ * fails, it rejects with a StorageError and the database is as it was.
+ * onBlocked runs if another copy of the app, on an older version, keeps it
+ * open, so the upgrade has to wait for that copy to close.
+ */
+export async function openDatabase(name = DB_NAME, { onBlocked }: { onBlocked?: () => void } = {}): Promise<Database> {
+  let failure: unknown;
+  try {
+    return await openDB<Schema>(name, DB_VERSION, {
+      async upgrade(db, oldVersion, _newVersion, tx) {
+        // How it ends is what openDB resolves or rejects with; nothing waits on tx.done.
         tx.done.catch(() => {});
+        // Aborted by the engine, not by us (a commit that failed): its reason.
+        tx.addEventListener('abort', () => (failure ??= tx.error ?? undefined));
         try {
-          tx.abort();
-        } catch {
-          // Already aborted by the request that failed.
+          for (let v = oldVersion; v < DB_VERSION; v++) {
+            const step = upgrades[v]?.(db, tx);
+            if (step) await step;
+          }
+        } catch (err) {
+          // Nothing is kept half-done: the database stays as it was, and
+          // opening it fails with this, not the abort it leads to.
+          failure = err;
+          try {
+            tx.abort();
+          } catch {
+            // Already aborted by the request that failed.
+          }
         }
-      }
-    },
-    // Another copy of the app is running an older version: let it close.
-    blocking() {
-      location.reload();
-    },
-  });
+      },
+      blocked() {
+        onBlocked?.();
+      },
+      // Another copy of the app is running an older version: let it close.
+      blocking() {
+        location.reload();
+      },
+    });
+  } catch (err) {
+    // Opened before by a newer version, which upgraded it past ours.
+    if (failure === undefined && (err as { name?: unknown } | null)?.name === 'VersionError') throw new StorageError('newer', err);
+    throw new StorageError('failed', failure ?? err);
+  }
 }
 
 export async function getKey(db: Database, name: string): Promise<CryptoKey | undefined> {
