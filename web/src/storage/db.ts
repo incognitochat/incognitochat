@@ -61,8 +61,27 @@ export interface ConversationRecord {
   myKey: string | null;
   /** The mailbox we write to. */
   sendTo: string;
-  /** The mailbox they write to us at; null for an owner who hasn't replied yet (they write to the link). */
+  /**
+   * The mailbox they write to us at; null for an owner who hasn't replied yet
+   * (they write to the link's intro mailbox). Envelopes written for our keys
+   * here count only through it, through the link's intro mailbox until
+   * introUntil (an owner's), or through one of formerMailboxes.
+   */
   myMailbox: string | null;
+  /**
+   * For an owner: until when (Unix ms) the intro mailbox of the link it came
+   * through counts for it. They write there until they hear of our mailbox,
+   * and that may wait in the inbox: set to 31 days after something first came
+   * through myMailbox. Missing (as in conversations from before it was kept):
+   * it counts.
+   */
+  introUntil?: number;
+  /**
+   * Mailboxes of ours this conversation moved on from (an unblock, or one the
+   * server lost): they wrote there until our next message told them. Each
+   * counts until `until` (Unix ms), set like introUntil; missing until then.
+   */
+  formerMailboxes?: { id: string; until?: number }[];
   /** Unix ms of the latest message, for ordering. */
   lastAt: number;
   unread: number;

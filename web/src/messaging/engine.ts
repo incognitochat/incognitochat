@@ -8,10 +8,14 @@
 // carries the owner's mailbox. From then on each side writes for the other's
 // latest key, to the other's mailbox.
 //
+// An envelope counts only through the mailbox it belongs to (receive): one
+// written for a link's key, through that link's intro mailbox; one written
+// for a conversation's key, through our mailbox for that conversation.
+//
 // Sends carry no login: they go to POST /send with an anonymous token.
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
-import { keyName, listLinks, rotateLinkKey } from '../account/links';
+import { introMailbox, keyName, listLinks, rotateLinkKey, setLinkMailbox } from '../account/links';
 import {
   countTokens,
   LOW_WATER,
@@ -92,6 +96,14 @@ const ROTATE_MIN = 6 * DAY;
 const ROTATE_SPREAD = 3 * DAY;
 /** How long a sender not answered yet trusts the link key it has before fetching the current one. */
 const LINK_KEY_RECHECK = 3600 * 1000;
+/**
+ * How long a conversation's former mailbox still counts once something came
+ * through the current one: the other side wrote to the old one until our
+ * message told them, and that may wait in the inbox for 30 days.
+ */
+const MAILBOX_GRACE = MAX_AGE;
+/** The most former mailboxes a conversation keeps (it rarely has more than one). */
+const MAX_FORMER_MAILBOXES = 8;
 
 export class NoTokens extends Error {
   constructor() {
@@ -533,6 +545,8 @@ export function createMessaging(deps: MessagingDeps) {
           if (err instanceof ApiError && err.code === 'rate_limited') throw new NoMailboxes();
           throw err;
         }
+        // In a chat someone started through our link, the link's intro
+        // mailbox still counts until they've used this one (introUntil).
         c = { ...c, myMailbox: mailbox };
         await putConversation(db, c);
       }
@@ -549,6 +563,19 @@ export function createMessaging(deps: MessagingDeps) {
       // receipts or key updates.
       await deliver(c.sendTo, await sealMessage(draft, myKey, fromBase64Url(c.peerKey)), fields.kind !== 'message');
     });
+  }
+
+  /**
+   * A conversation's former mailboxes, once it moves on from one of ours (to
+   * another, or to none): the one it leaves still counts, until
+   * MAILBOX_GRACE after something comes through the next one (receive), and
+   * those whose time is up go.
+   */
+  function retire(c: ConversationRecord, left: string | null | undefined): Pick<ConversationRecord, 'formerMailboxes'> {
+    const t = now();
+    const kept = (c.formerMailboxes ?? []).filter((f) => (f.until === undefined || t < f.until) && f.id !== left);
+    if (left) kept.push({ id: left });
+    return { formerMailboxes: kept.slice(-MAX_FORMER_MAILBOXES) };
   }
 
   /**
@@ -642,7 +669,7 @@ export function createMessaging(deps: MessagingDeps) {
     if (c.myMailbox !== null) {
       // Blocks used to delete the conversation's keys: then a new one.
       const keyKept = c.myKey !== null && (await hasKey(db, c.myKey));
-      await putConversation(db, { ...c, myMailbox: null, myKey: keyKept ? c.myKey : null });
+      await putConversation(db, { ...c, myMailbox: null, myKey: keyKept ? c.myKey : null, ...retire(c, c.myMailbox) });
       // If this fails, it stays blocked, and unblocking can be tried again.
       await transmit(c.id, { kind: 'key_update', id: newId(), at: now() });
     }
@@ -802,14 +829,20 @@ export function createMessaging(deps: MessagingDeps) {
     const t = now();
     if (!entry || message.at < t - MAX_AGE || message.at > t + DAY) return false;
 
-    // Which conversation it belongs to comes from the key it was written for,
-    // never from its IDs alone: those are the other side's choice, so the
-    // same ID in any other conversation on this device must change nothing.
+    // Which conversation it belongs to comes from how it reached us: the key
+    // it was written for, and the mailbox it came through (the server says
+    // which). Never from its IDs alone: those are the other side's choice, so
+    // the same ID in any other conversation on this device must change
+    // nothing. And through any mailbox but its key's own, it's dropped like
+    // one we can't open: else whoever knows one of our keys could leave
+    // envelopes in suspects' mailboxes and watch which one is taken in.
     let conv: ConversationRecord;
     if (entry.link) {
-      // Written for our link's key: a new conversation, or more from a sender
-      // we haven't answered yet (whose key can't change meanwhile). Only a
-      // conversation through this link, with this ID, from this key, counts.
+      // Written for our link's key: only through that link's intro mailbox.
+      if (item.mailbox !== (entry.link.mailbox ?? (await introOf(entry.link.id)))) return false;
+      // A new conversation, or more from a sender we haven't answered yet
+      // (whose key can't change meanwhile). Only a conversation through this
+      // link, with this ID, from this key, counts.
       const found = await findLinkConversation(db, entry.link.id, message.conv, message.from);
       if (found) {
         if (found.peerKey !== message.from) return false;
@@ -824,7 +857,7 @@ export function createMessaging(deps: MessagingDeps) {
           id: newLocalId(),
           wire: message.conv,
           role: 'owner',
-          link: entry.link,
+          link: { id: entry.link.id, fingerprint: entry.link.fingerprint },
           // Senders who don't send a tag (modified clients) are named by their key.
           label: await label(secret, 'anon', fromBase64Url(message.tag ?? message.from)),
           peerKey: message.from,
@@ -843,9 +876,10 @@ export function createMessaging(deps: MessagingDeps) {
         };
       }
     } else if (entry.conv) {
-      // Written for our conversation key, which only the other side knows.
+      // Written for our conversation key, which only the other side knows:
+      // only through that conversation's mailbox.
       const found = await getConversation(db, entry.conv);
-      if (!found || found.wire !== message.conv) return false;
+      if (!found || found.wire !== message.conv || !(await cameThrough(found, item.mailbox))) return false;
       conv = found;
     } else {
       return false;
@@ -859,6 +893,16 @@ export function createMessaging(deps: MessagingDeps) {
       // those go once anything written to them has expired from the inbox.
       const { id: local, myKey: current } = conv;
       await scheduleKeyDeletion(db, (e) => e.conv === local && e.pub !== current, now() + KEY_RETENTION_MS);
+    }
+    if (item.mailbox === conv.myMailbox) {
+      // Likewise, they write to our current mailbox: the ones they wrote to
+      // before (the link's, or a former one of ours) count until what they
+      // wrote there can no longer be waiting.
+      const until = t + MAILBOX_GRACE;
+      if (conv.role === 'owner' && conv.introUntil === undefined) conv = { ...conv, introUntil: until };
+      if (conv.formerMailboxes?.some((f) => f.until === undefined)) {
+        conv = { ...conv, formerMailboxes: conv.formerMailboxes.map((f) => (f.until === undefined ? { ...f, until } : f)) };
+      }
     }
 
     // The sender's key may have rotated, and their mailbox changed.
@@ -950,6 +994,42 @@ export function createMessaging(deps: MessagingDeps) {
     return changed;
   }
 
+  /**
+   * Whether an envelope written for one of a conversation's keys came through
+   * that conversation's mailbox: ours for it; or one of ours it used until
+   * recently (retire); or, in a chat someone started through our link, the
+   * link's intro mailbox: they write there until they hear of ours, so it
+   * counts until introUntil (receive).
+   */
+  async function cameThrough(c: ConversationRecord, mailbox: string): Promise<boolean> {
+    const t = now();
+    if (c.myMailbox !== null && mailbox === c.myMailbox) return true;
+    if ((c.formerMailboxes ?? []).some((f) => f.id === mailbox && (f.until === undefined || t < f.until))) return true;
+    if (c.role !== 'owner' || (c.introUntil !== undefined && t >= c.introUntil)) return false;
+    return mailbox === (await introOf(c.link.id));
+  }
+
+  /**
+   * The intro mailbox of one of our links: the current one, or one replaced
+   * while its keys are kept. A link made before it was kept learns it from
+   * its bundle; if that can't be fetched now, this throws, so the sync stops
+   * and confirms nothing, and whatever it should take in is taken next time.
+   */
+  async function introOf(linkId: string): Promise<string | undefined> {
+    const known = await introMailbox(db, linkId);
+    if (known || !(await listLinks(db)).some((l) => l.id === linkId)) return known;
+    let bundle: Bundle;
+    try {
+      bundle = await api.request('GET', `/links/${linkId}`, {}, checkBundle);
+    } catch (err) {
+      // Gone (revoked or replaced elsewhere): nothing comes through it now.
+      if (err instanceof ApiError && err.code === 'not_found') return undefined;
+      throw err;
+    }
+    await setLinkMailbox(db, linkId, bundle.mailbox);
+    return bundle.mailbox;
+  }
+
   async function markRead(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (c && c.unread > 0) await putConversation(db, { ...c, unread: 0 });
@@ -973,7 +1053,7 @@ export function createMessaging(deps: MessagingDeps) {
     }
     // Deleting old keys needs no network, so it goes first.
     if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
-    await backfillLinkKeys();
+    await backfillLinks();
     await rotateLinkKey(db, session, Math.floor(now() / 1000));
   }
 
@@ -1007,31 +1087,34 @@ export function createMessaging(deps: MessagingDeps) {
     for (const c of convs) {
       if (!missing.has(c.myMailbox!)) continue;
       await withLock(`send:${c.id}`, async () => {
-        const now = await getConversation(db, c.id);
-        if (now && now.myMailbox === c.myMailbox) await putConversation(db, { ...now, myMailbox: null });
+        const current = await getConversation(db, c.id);
+        if (current && current.myMailbox === c.myMailbox) await putConversation(db, { ...current, myMailbox: null, ...retire(current, current.myMailbox) });
       });
     }
   }
 
   /**
-   * Links made before keys were indexed: match each one's sealed key to the
-   * public key in its bundle, so first messages to it can be opened.
+   * Links made before their intro mailbox was kept, or before keys were
+   * indexed: both come from the link's bundle. Each sealed key is matched to
+   * the public key there, so first messages to it can be opened.
    */
-  async function backfillLinkKeys(): Promise<void> {
+  async function backfillLinks(): Promise<void> {
     for (const link of await listLinks(db)) {
-      if (await hasLinkKey(db, link.id)) continue;
+      const indexed = await hasLinkKey(db, link.id);
+      if (link.mailbox && indexed) continue;
       let bundle: Bundle;
       try {
         bundle = await api.request('GET', `/links/${link.id}`, {}, checkBundle);
       } catch {
         continue;
       }
-      for (const k of bundle.keys) {
+      for (const k of indexed ? [] : bundle.keys) {
         const own = link.keys.find((mine) => mine.from === k.from);
         if (own && (await getSealed(db, keyName(link.id, k.from)))) {
-          await indexKey(db, k.key, { name: keyName(link.id, k.from), link: { id: link.id, fingerprint: link.fingerprint } });
+          await indexKey(db, k.key, { name: keyName(link.id, k.from), link: { id: link.id, fingerprint: link.fingerprint, mailbox: bundle.mailbox } });
         }
       }
+      await setLinkMailbox(db, link.id, bundle.mailbox);
     }
   }
 

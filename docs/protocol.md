@@ -264,12 +264,12 @@ text, an attachment or a sticker; `seen` needs `seen` and no text;
 **IDs count only within their conversation.** `conv` and `id` are the
 sender's choice, so the recipient never takes them as unique on its device,
 and never uses them to pick the conversation. That comes from how the
-envelope reached it, which today means the key it was written for (later
-checks, such as the mailbox it came through, only narrow it): one of its
-conversation keys belongs to one conversation, whose `conv` the message must
-carry; a link's key means a first message (or more from a sender who has had
-nothing back yet), which belongs to the conversation started through that
-link with that `conv` from that `from` key, or else starts a new one.
+envelope reached it: the key it was written for, through the mailbox that key
+belongs to (below). One of its conversation keys belongs to one
+conversation, whose `conv` the message must carry; a link's key means a
+first message (or more from a sender who has had nothing back yet), which
+belongs to the conversation started through that link with that `conv` from
+that `from` key, or else starts a new one.
 Within the conversation, an `id` it already has is a replay and is dropped,
 and the IDs in `seen`, `reaction`, `edit`, `delete` and `replyTo` name that
 conversation's messages only. So an ID that another conversation on the
@@ -284,6 +284,31 @@ unless `from` is the sender's current key, as before. Only someone who knows
 that `conv` (its sender, or whoever they told) can tell this from a fresh
 ID, and all it tells them is that our device still has that conversation,
 nothing about who its sender is.
+
+**Each envelope counts only through its own mailbox.** The inbox says which
+mailbox each envelope came through (Delivery). The recipient takes one in
+only if that's the mailbox its key belongs to:
+
+- written for a key of one of its links: that link's intro mailbox. A replaced
+  link's keys keep theirs for as long as they're kept, for what was already
+  on its way;
+- written for one of its conversation keys: its mailbox for that
+  conversation. In a conversation someone started through its link, also
+  that link's intro mailbox, where they write until they hear of its own.
+  And a mailbox of its own the conversation moved on from (unblocking takes
+  a new one, as does replacing one the server no longer has). The intro
+  mailbox and former ones count until 31 days after something first comes
+  through the current one: the other side writes to the old one until a
+  message tells them of the new, and what they wrote may wait in the inbox
+  for 30 days.
+
+Anything else is dropped exactly like an envelope it can't open, and
+confirmed the same way. Otherwise whoever knows one of its keys (the other
+side of a conversation) could seal to it and leave copies in suspects'
+mailboxes, which anyone can write to: only the real owner's device would
+open one, and its "seen" would say whose mailbox that was. The check trusts
+the server to report the mailbox honestly; a server that lied learns
+nothing it doesn't already know, since it knows every mailbox's owner.
 
 **Deleting for both sides.** A sender can delete their own messages on the
 recipient's device too, whether or not they were opened: the app sends a
@@ -368,7 +393,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   mailboxes get the same `200 {}`, after a similar pause, and nothing is
   stored. `quiet` sends (seen receipts, reactions, edits, deletes and key
   updates) trigger no notice.
-- `GET /inbox` returns a device's undelivered envelopes in no meaningful order;
+- `GET /inbox` returns a device's undelivered envelopes in no meaningful order,
+  each with the mailbox it came through (`{id, mailbox, envelope}`): the app
+  takes an envelope in only through the mailbox it belongs to (Inner message);
   `POST /ack {ids}` deletes the ones it has stored. Undelivered envelopes expire
   after 30 days.
 - **Push:** an open app keeps a WebSocket (`new WebSocket(url, ["v1", token])`,

@@ -15,7 +15,7 @@ import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { createMessaging } from './engine';
-import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes } from './store';
+import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
 
@@ -66,6 +66,7 @@ async function fakeBackend() {
    */
   const down = {
     deletes: false,
+    bundles: false,
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
     renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing')[],
   };
@@ -158,6 +159,7 @@ async function fakeBackend() {
         return check({});
       }
       if (method === 'GET' && path.startsWith('/links/')) {
+        if (down.bundles) throw new NetworkError('down');
         const b = bundles.get(path.split('/')[2]!);
         if (!b) throw new ApiError(404, 'not_found');
         return check(b);
@@ -691,6 +693,8 @@ describe('key rotation', () => {
     expect(toBase64Url(rotated.keys[0]!.key)).not.toBe(toBase64Url(firstKey));
     const keys = await linkKeys(owner.db, ref.id);
     expect(keys.map((k) => k.deleteAfter !== undefined)).toEqual([true, false]);
+    // Both are the link's: first messages count only through its intro mailbox.
+    expect(keys.map((k) => k.link!.mailbox)).toEqual([bundle.mailbox, bundle.mailbox]);
 
     // Not answered yet: the early sender fetches the new key before writing again.
     await early.messaging.send(conv, 'me again');
@@ -1406,6 +1410,359 @@ describe('IDs from another conversation', () => {
   });
 });
 
+type Person = Awaited<ReturnType<typeof person>>;
+const DAY = 24 * 3600 * 1000;
+
+/** A modified app: writes in one of its conversations, but to another mailbox than the conversation's. */
+async function sendVia(who: Person, conv: string, mailbox: string, text: string): Promise<void> {
+  const c = (await getConversation(who.db, conv))!;
+  await putConversation(who.db, { ...c, sendTo: mailbox });
+  await who.messaging.send(conv, text);
+  await putConversation(who.db, { ...(await getConversation(who.db, conv))!, sendTo: c.sendTo });
+}
+
+/** What a device keeps about its chats and keys: taking in an envelope would change some of it. */
+async function state(db: Database) {
+  const chats = await Promise.all((await listConversations(db)).map(async (c) => ({ ...c, messages: await listMessages(db, c.id) })));
+  return { chats, keys: await getMeta(db, 'recipient-keys'), links: await getMeta(db, 'links') };
+}
+
+describe('envelopes through a mailbox they do not belong to', () => {
+  // A owns a link and got an anonymous message there from V, so A knows V's
+  // key for that chat, and the mailbox V gets answers at. A modified app
+  // seals to what A knows and leaves it where only one suspect would get it.
+  // Whoever can open it must do exactly what someone who can't does.
+  async function setting() {
+    const backend = await fakeBackend();
+    const a = await person(backend, 'a');
+    const v = await person(backend, 'v');
+    const w = await person(backend, 'w');
+    const linkA = await linkOf(backend, a);
+    const anon = await v.messaging.startConversation(linkA.ref, linkA.bundle, 'guess who');
+    await a.messaging.sync();
+    const atA = await across(v.db, anon, a.db);
+    await a.messaging.send(atA, 'hi, who is this?');
+    await v.messaging.sync();
+    await v.messaging.markSeen(anon);
+    await a.messaging.sync();
+    const suspects = [
+      { who: v, name: 'v', link: await linkOf(backend, v) },
+      { who: w, name: 'w', link: await linkOf(backend, w) },
+    ];
+    return { backend, a, v, anon, atA, suspects };
+  }
+
+  it("a message for an anonymous chat's key, left in a suspect's intro mailbox, is dropped like one that can't be opened", async () => {
+    const s = await setting();
+    for (const { who, name, link } of s.suspects) {
+      const before = await state(who.db);
+      await sendVia(s.a, s.atA, link.bundle.mailbox, `is it you, ${name}?`);
+      expect(await who.messaging.sync()).toBe(0);
+      // Confirmed, like anything it can't open, and nothing changed.
+      expect(s.backend.inboxes.get(name)).toEqual([]);
+      expect(await state(who.db)).toEqual(before);
+      // Opening every chat sends nothing.
+      const sends = s.backend.seenEnvelopes.length;
+      for (const c of await listConversations(who.db)) await who.messaging.markSeen(c.id);
+      expect(s.backend.seenEnvelopes.length).toBe(sends);
+    }
+    // A learns nothing: neither probe is seen.
+    await s.a.messaging.sync();
+    expect((await listMessages(s.a.db, s.atA)).filter((m) => m.out).map((m) => [m.text, m.status])).toEqual([
+      ['hi, who is this?', 'seen'],
+      ['is it you, v?', 'sent'],
+      ['is it you, w?', 'sent'],
+    ]);
+    // The chat itself carries on.
+    await s.a.messaging.send(s.atA, 'never mind');
+    expect(await s.v.messaging.sync()).toBe(1);
+    expect((await listMessages(s.v.db, s.anon)).at(-1)!.text).toBe('never mind');
+  });
+
+  it("a first message for a suspect's link key, left in an anonymous chat's mailbox, is dropped", async () => {
+    const s = await setting();
+    // Where V's anonymous chat gets its answers.
+    const replyV = (await getConversation(s.a.db, s.atA))!.sendTo;
+    for (const { link } of s.suspects) {
+      const before = await state(s.v.db);
+      await s.a.messaging.startConversation(link.ref, { ...link.bundle, mailbox: replyV }, 'is this your link?');
+      expect(await s.v.messaging.sync()).toBe(0);
+      expect(s.backend.inboxes.get('v')).toEqual([]);
+      expect(await state(s.v.db)).toEqual(before);
+    }
+    // Through V's link itself, it starts a chat.
+    await s.a.messaging.startConversation(s.suspects[0]!.link.ref, s.suspects[0]!.link.bundle, 'hello V');
+    expect(await s.v.messaging.sync()).toBe(1);
+  });
+
+  it("two people one sender wrote to can't cross their chats to learn it's the same person", async () => {
+    const backend = await fakeBackend();
+    const a = await person(backend, 'a');
+    const b = await person(backend, 'b');
+    const v = await person(backend, 'v');
+    const [linkA, linkB] = [await linkOf(backend, a), await linkOf(backend, b)];
+    const toA = await v.messaging.startConversation(linkA.ref, linkA.bundle, 'hi A');
+    const toB = await v.messaging.startConversation(linkB.ref, linkB.bundle, 'hi B');
+    await a.messaging.sync();
+    await b.messaging.sync();
+    const [atA, atB] = [await across(v.db, toA, a.db), await across(v.db, toB, b.db)];
+    // B tells A where its anonymous sender gets answers; A writes there, for its own chat's key.
+    const before = await state(v.db);
+    await sendVia(a, atA, (await getConversation(b.db, atB))!.sendTo, 'same person?');
+    expect(await v.messaging.sync()).toBe(0);
+    expect(await state(v.db)).toEqual(before);
+    // Each chat still gets what's written to it.
+    await a.messaging.send(atA, 'hello from A');
+    await b.messaging.send(atB, 'hello from B');
+    expect(await v.messaging.sync()).toBe(2);
+  });
+
+  it("a first message for one link's key, left in another link's intro mailbox, is dropped", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    // Two links, as an account could have before it had one.
+    const one = await linkOf(backend, owner);
+    const two = await linkOf(backend, owner);
+    const before = await state(owner.db);
+    await sender.messaging.startConversation(one.ref, { ...one.bundle, mailbox: two.bundle.mailbox }, 'wrong door');
+    await sender.messaging.startConversation(two.ref, { ...two.bundle, mailbox: one.bundle.mailbox }, 'wrong door too');
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(backend.inboxes.get('owner')).toEqual([]);
+    expect(await state(owner.db)).toEqual(before);
+    await sender.messaging.startConversation(one.ref, one.bundle, 'right door');
+    await sender.messaging.startConversation(two.ref, two.bundle, 'right door too');
+    expect(await owner.messaging.sync()).toBe(2);
+  });
+});
+
+describe('envelopes through the mailbox they belong to', () => {
+  it("what a sender wrote to the link before hearing of the owner's mailbox still arrives, until well after they use it", async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const sender = await person(backend, 'sender', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    // Read: from then on the sender writes for the owner's key, still to the link.
+    await owner.messaging.markSeen(mine);
+    await sender.messaging.sync();
+    clock += 1000;
+    await sender.messaging.send(conv, 'two');
+    // The owner answers before that arrives, from a mailbox of its own, and
+    // is away for weeks while it waits.
+    clock += 1000;
+    await owner.messaging.send(mine, 'hi');
+    clock += 20 * DAY;
+    expect(await owner.messaging.sync()).toBe(1);
+    // That answer never reaches the sender: weeks later, still to the link.
+    backend.inboxes.get('sender')!.length = 0;
+    clock += 20 * DAY;
+    await sender.messaging.send(conv, 'three');
+    expect(await owner.messaging.sync()).toBe(1);
+
+    // Once they write to the owner's mailbox, the link's counts 31 days more for this chat.
+    clock += 1000;
+    await owner.messaging.send(mine, 'hi again');
+    await sender.messaging.sync();
+    clock += 1000;
+    await sender.messaging.send(conv, 'four');
+    expect(await owner.messaging.sync()).toBe(1);
+    clock += 30 * DAY;
+    await sendVia(sender, conv, bundle.mailbox, 'five');
+    expect(await owner.messaging.sync()).toBe(1);
+    clock += 2 * DAY;
+    await sendVia(sender, conv, bundle.mailbox, 'late');
+    expect(await owner.messaging.sync()).toBe(0);
+    await sender.messaging.send(conv, 'on time');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three', 'hi again', 'four', 'five', 'on time']);
+  });
+
+  it('a mailbox of ours a chat moved on from still counts until well after they use the new one', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const sender = await person(backend, 'sender', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    clock += 1000;
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    const first = (await getConversation(owner.db, mine))!.myMailbox!;
+    // Written to that mailbox, and still waiting, when the owner blocks and unblocks.
+    clock += 1000;
+    await sender.messaging.send(conv, 'waiting');
+    await owner.messaging.block(mine);
+    await owner.messaging.unblock(mine);
+    expect((await getConversation(owner.db, mine))!.myMailbox).not.toBe(first);
+    expect(await owner.messaging.sync()).toBe(1);
+
+    // They move to the new one; 31 days on, the old one no longer counts.
+    await sender.messaging.sync();
+    clock += 1000;
+    await sender.messaging.send(conv, 'moved');
+    expect(await owner.messaging.sync()).toBe(1);
+    clock += 32 * DAY;
+    await sender.messaging.send(conv, 'late');
+    const inbox = backend.inboxes.get('owner')!;
+    inbox.push({ ...inbox.pop()!, mailbox: first });
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['hello', 'hi', 'waiting', 'moved']);
+  });
+
+  it('a chat answered before any of this was kept still takes what was on its way through the link', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const sender = await person(backend, 'sender', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.markSeen(mine);
+    await sender.messaging.sync();
+    clock += 1000;
+    await sender.messaging.send(conv, 'two');
+    clock += 1000;
+    await owner.messaging.send(mine, 'hi');
+    // As an older version kept it.
+    const { introUntil: _, formerMailboxes: __, ...old } = (await getConversation(owner.db, mine))!;
+    await putConversation(owner.db, old);
+    expect(await owner.messaging.sync()).toBe(1);
+
+    // Once they write to the owner's mailbox, the link's counts 31 days more.
+    await sender.messaging.sync();
+    clock += 1000;
+    await sender.messaging.send(conv, 'three');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect((await getConversation(owner.db, mine))!.introUntil).toBe(clock + 31 * DAY);
+    clock += 32 * DAY;
+    await sendVia(sender, conv, bundle.mailbox, 'late');
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three']);
+  });
+
+  it('after the link is replaced, what was on its way through the old one still arrives, and chats carry on', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [r, p, q, newcomer] = [await person(backend, 'r'), await person(backend, 'p'), await person(backend, 'q'), await person(backend, 'n')];
+    const old = await linkOf(backend, owner);
+    const fromR = await r.messaging.startConversation(old.ref, old.bundle, 'from r');
+    const fromP = await p.messaging.startConversation(old.ref, old.bundle, 'from p');
+    expect(await owner.messaging.sync()).toBe(2);
+    const [atR, atP] = [await across(r.db, fromR, owner.db), await across(p.db, fromP, owner.db)];
+    await owner.messaging.send(atR, 'hi r');
+    // Read, not answered: p writes for the owner's key, to the old link.
+    await owner.messaging.markSeen(atP);
+    await r.messaging.sync();
+    await p.messaging.sync();
+
+    // On their way when the link is replaced: a first message, and more from p.
+    await q.messaging.startConversation(old.ref, old.bundle, 'from q');
+    await p.messaging.send(fromP, 'more from p');
+    const record = await replaceLink(owner.db, owner.session);
+    const next = { ref: { id: record.id, fingerprint: record.fingerprint }, bundle: await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle) };
+    expect(record.mailbox).toBe(next.bundle.mailbox);
+    expect(await owner.messaging.sync()).toBe(2);
+    expect((await listMessages(owner.db, atP)).map((m) => m.text)).toEqual(['from p', 'more from p']);
+    expect((await listConversations(owner.db)).length).toBe(3);
+
+    // The answered chat carries on, and the new link takes new chats.
+    await r.messaging.send(fromR, 'still here');
+    await newcomer.messaging.startConversation(next.ref, next.bundle, 'hello new link');
+    expect(await owner.messaging.sync()).toBe(2);
+
+    // One link's key through the other link's mailbox counts for neither.
+    const before = await state(owner.db);
+    await newcomer.messaging.startConversation(old.ref, { ...old.bundle, mailbox: next.bundle.mailbox }, 'old key, new door');
+    await newcomer.messaging.startConversation(next.ref, next.bundle, 'new key, old door');
+    const inbox = backend.inboxes.get('owner')!;
+    inbox.push({ ...inbox.pop()!, mailbox: old.bundle.mailbox });
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(await state(owner.db)).toEqual(before);
+  });
+});
+
+describe('links from before their intro mailbox was kept', () => {
+  /** Forgets the intro mailbox on the links and their keys, as an older version kept them. */
+  async function asBefore(db: Database): Promise<void> {
+    const links = (await getMeta<Record<string, unknown>[]>(db, 'links'))!;
+    await putMeta(db, 'links', links.map(({ mailbox: _, ...l }) => l));
+    const index = (await getMeta<Record<string, KeyEntry>>(db, 'recipient-keys'))!;
+    await putMeta(
+      db,
+      'recipient-keys',
+      Object.fromEntries(Object.entries(index).map(([id, e]) => [id, e.link ? { ...e, link: { id: e.link.id, fingerprint: e.link.fingerprint } } : e])),
+    );
+  }
+  const linkMailboxes = async (db: Database) => ({
+    links: (await listLinks(db)).map((l) => l.mailbox),
+    keys: Object.values((await getMeta<Record<string, KeyEntry>>(db, 'recipient-keys'))!).flatMap((e) => (e.link ? [e.link.mailbox] : [])),
+  });
+
+  it('learn it from the bundle when something comes through the link, and accept nothing through another mailbox', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [reader, other, newcomer] = [await person(backend, 'reader'), await person(backend, 'other'), await person(backend, 'n')];
+    const { ref, bundle } = await linkOf(backend, owner);
+    expect(await linkMailboxes(owner.db)).toEqual({ links: [bundle.mailbox], keys: [bundle.mailbox] });
+    // A chat the owner has read but not answered, and one answered.
+    const read = await reader.messaging.startConversation(ref, bundle, 'read me');
+    const answered = await other.messaging.startConversation(ref, bundle, 'answer me');
+    await owner.messaging.sync();
+    const [atRead, atAnswered] = [await across(reader.db, read, owner.db), await across(other.db, answered, owner.db)];
+    await owner.messaging.markSeen(atRead);
+    await owner.messaging.send(atAnswered, 'hi');
+    await reader.messaging.sync();
+    await other.messaging.sync();
+    await asBefore(owner.db);
+    expect(await linkMailboxes(owner.db)).toEqual({ links: [undefined], keys: [undefined] });
+
+    // Through the link: for its key, and for the owner's key in the chat it read. And to the answered chat's mailbox.
+    await newcomer.messaging.startConversation(ref, bundle, 'new here');
+    await reader.messaging.send(read, 'more');
+    await other.messaging.send(answered, 'and more');
+    expect(await owner.messaging.sync()).toBe(3);
+    expect(await linkMailboxes(owner.db)).toEqual({ links: [bundle.mailbox], keys: [bundle.mailbox] });
+
+    // Through any other mailbox, nothing.
+    await asBefore(owner.db);
+    const before = await state(owner.db);
+    const wrong = (await getConversation(owner.db, atAnswered))!.myMailbox!;
+    await (await person(backend, 'x')).messaging.startConversation(ref, { ...bundle, mailbox: wrong }, 'wrong door');
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await state(owner.db)).chats).toEqual(before.chats);
+  });
+
+  it("confirm nothing while the bundle can't be fetched", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    await asBefore(owner.db);
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    backend.down.bundles = true;
+    await expect(owner.messaging.sync()).rejects.toThrow(NetworkError);
+    expect(backend.inboxes.get('owner')).toHaveLength(1);
+    backend.down.bundles = false;
+    expect(await owner.messaging.sync()).toBe(1);
+  });
+
+  it('learn it at upkeep too', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { bundle } = await linkOf(backend, owner);
+    await asBefore(owner.db);
+    await owner.messaging.maintain();
+    expect(await linkMailboxes(owner.db)).toEqual({ links: [bundle.mailbox], keys: [bundle.mailbox] });
+  });
+});
+
 /**
  * A copy of a device's database as version 3 of the app kept it: each
  * conversation under its wire ID, messages and attachments by message ID.
@@ -1424,13 +1781,20 @@ async function asVersion3(db: Database, name: string): Promise<void> {
   for (const k of await db.getAllKeys('vault')) await v3.put('vault', await db.get('vault', k), k);
   for (const k of await db.getAllKeys('meta')) {
     let value = await db.get('meta', k);
+    // Nor did it keep links' intro mailboxes.
     if (k === 'recipient-keys') {
       const index = value as Record<string, KeyEntry>;
-      value = Object.fromEntries(Object.entries(index).map(([id, e]) => [id, e.conv ? { ...e, conv: wire.get(e.conv)! } : e]));
+      value = Object.fromEntries(
+        Object.entries(index).map(([id, e]) => [
+          id,
+          e.conv ? { ...e, conv: wire.get(e.conv)! } : e.link ? { ...e, link: { id: e.link.id, fingerprint: e.link.fingerprint } } : e,
+        ]),
+      );
     }
+    if (k === 'links') value = (value as Record<string, unknown>[]).map(({ mailbox: _, ...l }) => l);
     await v3.put('meta', value, k);
   }
-  for (const { wire: id, firstKey: _, ...c } of conversations) await v3.put('conversations', { ...c, id });
+  for (const { wire: id, firstKey: _, introUntil: __, formerMailboxes: ___, ...c } of conversations) await v3.put('conversations', { ...c, id });
   for (const { legacyFile: _, ...m } of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
   for (const key of await db.getAllKeys('media')) await v3.put('media', await db.get('media', key), typeof key === 'string' ? key : key[1]);
   v3.close();

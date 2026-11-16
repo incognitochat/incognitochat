@@ -45,7 +45,7 @@ device.
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations. |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes. |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
 
@@ -179,6 +179,14 @@ it. This is how close it gets.
 - **A blocked sender may still trigger a notice**: the server can't tell a
   blocked first message from any other, so the owner may be notified of a
   message their app then drops.
+- **The server says which mailbox an envelope came through.** The app
+  takes an envelope in only through the mailbox it belongs to
+  ([protocol.md](protocol.md#inner-message)), so a user who knows one of
+  someone's keys can't seal to it, leave copies in suspects' mailboxes (anyone
+  can write to a link's), and watch whose app answers. That check trusts the
+  server to report the mailbox honestly. A malicious server could lie and get
+  past it, but would learn nothing new: it knows every mailbox's owner
+  already. The check is against other users.
 - **Forward secrecy is weekly, not per message.** Encryption keys rotate about
   weekly and old private keys are deleted after 35 days. A stolen device key
   exposes at most about five weeks of messages a malicious server might have
