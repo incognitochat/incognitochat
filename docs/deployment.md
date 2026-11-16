@@ -110,6 +110,8 @@ alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 | `media-uploads`, `media-downloads` | The media bucket had more than 3,000 PUT or GET requests in 5 minutes (10 a second; `media_requests_alarm`). These go straight to S3, past the API and its alarms, and each is billed. They read the bucket's request metrics, which the app stack turns on. Those are billed like custom metrics, $0.30 a month each for up to 16, counted only in hours with requests: at most about $5 a month per environment. |
 | `media-download-bytes` | More than 2 GiB was downloaded from the media bucket in 5 minutes (about 7 MB a second; `media_download_gib_alarm`). Downloads cost by the data sent: one 51 MiB download costs as much as about 11,000 GET requests. Same request metrics. |
 
+What to do when a media alarm fires: [emergency switches](#emergency-switches).
+
 The topic starts without subscribers, so no address is stored in the
 repository or in Terraform state. Subscribe one, and confirm the email AWS
 sends:
@@ -120,7 +122,9 @@ AWS_PROFILE=<profile> aws sns subscribe --region <aws-region> --protocol email \
   --notification-endpoint <address>
 ```
 
-CI can't change these alerts: they belong to the bootstrap stack.
+CI can't change these alerts: they belong to the bootstrap stack. Nor can
+it write table items, so a deploy never overwrites runtime data such as the
+[emergency switches](#emergency-switches).
 
 Then set the rest:
 
@@ -197,6 +201,80 @@ The tables are on-demand with per-table caps on read and write units, the
 WebSocket API is throttled, and nothing runs when idle. Logs are kept 7 days.
 A budget and alarms watch the account, and each function can be given its
 own share of concurrency (`RESERVE_CONCURRENCY`), both above.
+
+## Emergency switches
+
+Two switches pause attachments for everyone without a release: **uploads**
+(no new upload URLs: `POST /media` and `POST /media/{id}/upload` answer
+`503 uploads_paused`) and **downloads** (no new download URLs: `GET
+/media/{id}` answers `503 downloads_paused`). Both answer before any media
+token is looked at, any fresh upload URL is used up or any download is
+counted, so users lose nothing. Messages, reactions and everything else keep
+working. The app says "Attachments are paused for now; try again later",
+keeps an unsent attachment as Not sent with Try again in its menu, and stops
+fetching attachments by itself for two minutes at a time.
+
+They are one item in the directory table, pk `S#switches`, sk `S`, with BOOL
+attributes `uploadsPaused` and `downloadsPaused`. No item, a missing
+attribute, or anything but BOOL true means not paused. Each `api` instance
+reads it at most every 30 seconds, and only when a media route is called. If
+a read fails, the instance keeps what it last read (not paused, if nothing
+yet) and reads again 5 seconds later. Terraform doesn't manage the item, and
+the deploy role is denied writing table items, so deploys never reset it.
+
+**When a media alarm fires** (`media-uploads`, `media-downloads`,
+`media-download-bytes`):
+
+1. Look at the bucket's request metrics in CloudWatch (namespace AWS/S3,
+   dimensions BucketName and FilterId, filter `<prefix>-media`, where
+   `<prefix>` is `incognitochat-<env>`): `PutRequests`, `GetRequests`,
+   `BytesDownloaded` and `4xxErrors`, a minute at a time. Real use rises and
+   falls with the `api` function's invocations. A URL being replayed is a
+   flat, high rate: for uploads mostly `4xxErrors` (refused requests are
+   billed too), for downloads data far beyond what the users could fetch.
+2. If it isn't clearly real use and it lasts longer than one alarm period,
+   pause the side it's on. At today's prices a replayed upload URL can cost
+   about $1,500 a day and 2 GiB of downloads every 5 minutes about $50 a
+   day, while a pause only holds attachments back for a while.
+3. Pause with the AWS CLI (an admin profile of the environment's AWS
+   account), or from the app: Link tab, Admin, Attachments (admins only;
+   it asks to confirm).
+
+   ```shell
+   export AWS_PROFILE=<profile> AWS_REGION=<aws-region>
+   table=<prefix>-directory key='{"pk":{"S":"S#switches"},"sk":{"S":"S"}}'
+   # Pause uploads (for downloads: downloadsPaused). :p false resumes.
+   aws dynamodb update-item --table-name "$table" --key "$key" \
+     --update-expression 'SET uploadsPaused = :p' \
+     --expression-attribute-values '{":p":{"BOOL":true}}'
+   # Or set both at once.
+   aws dynamodb put-item --table-name "$table" --item \
+     '{"pk":{"S":"S#switches"},"sk":{"S":"S"},"uploadsPaused":{"BOOL":true},"downloadsPaused":{"BOOL":false}}'
+   # What is set now.
+   aws dynamodb get-item --table-name "$table" --key "$key" --consistent-read
+   ```
+
+4. Check that it took effect. Within half a minute the API answers so
+   (`<api-url>` is the site's `API_URL`, ending in `/`), and each `api`
+   instance logs "uploads paused" or "downloads paused" once:
+
+   ```shell
+   curl -s '<api-url>media/AAAAAAAAAAAAAAAAAAAAAA'   # downloads_paused, else not_found
+   curl -s -X POST '<api-url>media' -H 'Content-Type: application/json' \
+     -H 'X-Amz-Content-Sha256: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a' \
+     -d '{}'                                          # uploads_paused, else bad_request
+   ```
+
+   URLs given out just before still work for up to a minute (S3 refuses
+   any older), and the metrics lag a minute or two, so the request rate
+   should drop within about three minutes. If it doesn't, the requests
+   aren't coming from URLs the API gives out: look elsewhere.
+5. Undo the same way, with `false` (or Resume in the app), once the cause is
+   dealt with or the alarm has stayed quiet. Apps fetch by themselves again
+   the next time a chat opens, at most two minutes after their last refused
+   try; an unsent attachment goes with Try again.
+
+The switches aren't flipped automatically by the alarms.
 
 ## CloudFront in front of the API
 

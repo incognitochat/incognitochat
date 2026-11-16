@@ -187,6 +187,12 @@ it. This is how close it gets.
   server to report the mailbox honestly. A malicious server could lie and get
   past it, but would learn nothing new: it knows every mailbox's owner
   already. The check is against other users.
+- **Attachments can be paused for everyone.** The operator, or anyone with
+  an admin's unlocked device, can stop uploads or downloads of attachments
+  (the emergency switches, for runaway costs). The app says so. It's one
+  switch for all: uploads and downloads carry no login, so it can't single
+  anyone out, and it reads or stores nothing about anyone. Messages keep
+  working.
 - **Forward secrecy is weekly, not per message.** Encryption keys rotate about
   weekly and old private keys are deleted after 35 days. A stolen device key
   exposes at most about five weeks of messages a malicious server might have

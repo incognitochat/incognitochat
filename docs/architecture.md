@@ -221,6 +221,15 @@ the server never sees a key, name or type.
   payment; once the upload is stored it says so. The app runs two uploads at
   a time and asks for a URL only when one can start. Request metrics on the
   bucket feed alarms on uploads, downloads and the data downloaded.
+- **Emergency switches.** If those costs run away, the operator can pause
+  uploads or downloads for everyone, with the AWS CLI or from the app's
+  admin screen, and no release. They are one settings item in the directory
+  table, which each `api` instance reads at most every 30 seconds (keeping
+  the last value if a read fails). While paused, the API gives out no new
+  upload or download URLs, answering before any token is spent or download
+  counted; messages keep working. The app says attachments are paused,
+  keeps an unsent one to send again, and stops fetching by itself for two
+  minutes at a time ([deployment.md](deployment.md#emergency-switches)).
 - **Downloads.** A download URL also starts within a minute, and S3 answers
   it uncompressed whatever the upload claimed. The app reads only the padded
   size the message says and stops at once otherwise, so an upload can't
@@ -288,7 +297,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 
 | Table | Holds | Expires |
 |---|---|---|
-| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations | mailboxes expire |
+| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | mailboxes expire |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
 | `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 

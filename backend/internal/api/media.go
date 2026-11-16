@@ -69,6 +69,11 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 	if s.Media == nil || s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
+	// Before any token is looked at, so a paused upload costs nothing: the
+	// app keeps its tokens and tries again later.
+	if s.switches(ctx, route).UploadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
+	}
 	if !media.PaddedSize(in.Size) || len(in.DeleteHash) != sha256.Size {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
@@ -137,6 +142,11 @@ func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.R
 	if s.Media == nil || !ids.Valid(id) || len(in.Secret) == 0 {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
+	// Before the upload is read or one of its fresh URLs used up: a fresh
+	// URL is another minute of PUTs, and the upload keeps them for later.
+	if s.switches(ctx, route).UploadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
+	}
 	// Read and check before writing anything: anyone can call this, as often
 	// as the firewall lets them, and a refused conditional write still costs
 	// write capacity.
@@ -182,6 +192,10 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	id := httpapi.Param(ctx, "id")
 	if s.Media == nil || !ids.Valid(id) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	// Before anything is read or the file's downloads are counted.
+	if s.switches(ctx, route).DownloadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "downloads_paused")
 	}
 	if ok, err := s.Uploads.Exists(ctx, id); err != nil {
 		return s.internal(route, err)

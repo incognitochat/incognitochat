@@ -29,6 +29,7 @@ import {
   type InvitationsInfo,
   type LevelAllowance,
 } from '../account/invitations';
+import { checkSwitches, type Switch, type Switches } from '../account/switches';
 import { checkAccountInfo, createLink, listLinks, replaceLink, revokeLink, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
 import { budgetLeft, countTokens, rememberLeft, type TokenIssuer } from '../account/wallet';
@@ -36,7 +37,7 @@ import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
-import { createMessaging, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
+import { createMessaging, isPaused, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
 import { clearMedia, deleteMessage, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
@@ -95,10 +96,13 @@ export interface StorageUsage {
   app: { usage: number; quota: number } | null;
 }
 
-export type AdminNotice = 'saved' | 'granted' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
+export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
 
-/** Why a message couldn't be sent. */
-export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'network' | 'too-big' | 'unreadable' | 'generic';
+/**
+ * Why a message couldn't be sent. media-paused: the operator has paused
+ * attachments for now (also said when a tapped download is refused for it).
+ */
+export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'media-paused' | 'network' | 'too-big' | 'unreadable' | 'generic';
 
 /** A conversation in the list. */
 export interface ConversationView {
@@ -187,7 +191,8 @@ export type Screen =
       /** The code just created, to highlight. */
       created: string | null;
     }
-  | { kind: 'admin'; levels: LevelAllowance[]; busy: boolean; notice: AdminNotice | null }
+  /** switches: the emergency switches for attachments; null if they couldn't be read. */
+  | { kind: 'admin'; levels: LevelAllowance[]; switches: Switches | null; busy: boolean; notice: AdminNotice | null }
   | { kind: 'link'; status: Exclude<LinkStatus, 'existing'>; canWrite: boolean; busy: boolean; error: SendError | null }
   /** chat: the conversation already written through this link. */
   | { kind: 'link'; status: 'existing'; canWrite: false; busy: boolean; error: null; chat: string }
@@ -248,6 +253,12 @@ export interface LinkView extends LinkRecord {
 const CLOSE_DELAY_MS = 400;
 /** GIFs up to this size are fetched without a tap, like photos. */
 const AUTO_GIF_BYTES = 10 * 1024 * 1024;
+/**
+ * After the server says downloads are paused, attachments aren't fetched by
+ * themselves for this long; then on the next opening or new message. A tap
+ * still asks.
+ */
+const PAUSED_WAIT_MS = 2 * 60_000;
 
 export function createApp(deps: Deps) {
   const screen = signal<Screen>({ kind: 'loading' });
@@ -777,20 +788,68 @@ export function createApp(deps: Deps) {
     await show();
   }
 
-  /** Fetches a received attachment (a tap, or automatically for photos, GIFs, voice and video messages). */
-  async function fetchMedia(m: MessageRef): Promise<void> {
+  /**
+   * Sends again one of our attachments in the open conversation that
+   * failed before it was uploaded (Try again in its menu): attachments were
+   * paused, say. It goes to the end of the conversation, as a new one would.
+   */
+  async function resendMedia(id: string): Promise<void> {
+    const current = screen.value;
+    if (current.kind !== 'conversation' || current.busy || !messaging) return;
+    const conv = current.id;
+    const key = messageKey({ conv, id });
+    if (transfers.value[key] !== undefined) return;
+    screen.value = { ...current, error: null };
+    let error: SendError | null = null;
+    const show = async () => {
+      const now = currentScreen();
+      if (now.kind === 'conversation' && now.id === conv) screen.value = { ...now, error, messages: await listMessages(deps.db, conv) };
+    };
+    setProgress(key, 0);
+    try {
+      await messaging.resendMedia(conv, id, show, (f) => setProgress(key, f));
+    } catch (err) {
+      if (handleGone(err)) return;
+      error = sendError(err);
+    } finally {
+      setProgress(key, null);
+    }
+    deps.broadcast({ type: 'data-changed' });
+    await show();
+  }
+
+  // Until when attachments aren't fetched by themselves: the server said
+  // downloads are paused.
+  let downloadsPausedUntil = 0;
+
+  /**
+   * Fetches a received attachment: on a tap, or by itself (auto) for
+   * photos, GIFs, voice and video messages. If downloads are paused, a tap
+   * says so; fetching by itself stops quietly for a while (PAUSED_WAIT_MS).
+   */
+  async function fetchMedia(m: MessageRef, auto = false): Promise<void> {
     const key = messageKey(m);
     if (!messaging || transfers.value[key] !== undefined) return;
     setProgress(key, 0);
+    let paused = false;
     try {
       await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f));
-    } catch {
-      // Tried again on the next tap or opening.
+    } catch (err) {
+      // Otherwise tried again on the next tap or opening.
+      if (isPaused(err)) {
+        paused = true;
+        downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS;
+      }
     } finally {
       setProgress(key, null);
     }
     const now = currentScreen();
-    if (now.kind === 'conversation') screen.value = { ...now, messages: await listMessages(deps.db, now.id) };
+    if (now.kind === 'conversation') {
+      // A tap says it's paused, or that it no longer is.
+      let error = now.error;
+      if (!auto && now.id === m.conv) error = paused ? 'media-paused' : error === 'media-paused' ? null : error;
+      screen.value = { ...now, error, messages: await listMessages(deps.db, now.id) };
+    }
   }
 
   /**
@@ -839,7 +898,9 @@ export function createApp(deps: Deps) {
       (auto.gifs && media.t === 'gif' && media.s <= AUTO_GIF_BYTES);
     void (async () => {
       for (const m of now.messages) {
-        if (m.file === 'remote' && m.media && automatic(m.media) && !m.out) await fetchMedia(m);
+        // Paused: one refusal, not one per attachment.
+        if (Date.now() < downloadsPausedUntil) return;
+        if (m.file === 'remote' && m.media && automatic(m.media) && !m.out) await fetchMedia(m, true);
       }
     })();
   }
@@ -981,6 +1042,7 @@ export function createApp(deps: Deps) {
     if (err instanceof NoTokens) return 'no-tokens';
     if (err instanceof NoMailboxes) return 'no-mailboxes';
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
+    if (isPaused(err)) return 'media-paused';
     if (err instanceof NetworkError) return 'network';
     return 'generic';
   }
@@ -1267,8 +1329,24 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       return showHome({ notice: err instanceof NetworkError ? 'network' : 'generic' });
     }
+    // The rest of the screen still works if these can't be read.
+    let switches: Switches | null = null;
+    try {
+      switches = await session!.call('GET', '/admin/switches', undefined, checkSwitches);
+    } catch (err) {
+      if (handleGone(err)) return;
+    }
     backButton(true);
-    screen.value = { kind: 'admin', levels, busy: false, notice };
+    screen.value = { kind: 'admin', levels, switches, busy: false, notice };
+  }
+
+  /**
+   * Pauses or resumes uploads or downloads of attachments for everyone (the
+   * emergency switches), after a confirmation in the UI. Every server
+   * follows within about half a minute.
+   */
+  function setSwitch(which: Switch, paused: boolean): Promise<void> {
+    return adminAction(() => session!.call('PUT', '/admin/switches', { switch: which, paused }, checkSwitches, { sign: true }), 'switched');
   }
 
   /** Runs an admin change, then shows the admin screen again with its outcome. */
@@ -1471,9 +1549,11 @@ export function createApp(deps: Deps) {
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,
     sendMedia,
+    resendMedia,
     sendVoice,
     sendRound,
-    fetchMedia,
+    /** Fetches an attachment on a tap. */
+    fetchMedia: (m: MessageRef) => fetchMedia(m),
     saveMedia,
     mediaUrl,
     transfers,
@@ -1575,6 +1655,7 @@ export function createApp(deps: Deps) {
     setLevel: (level: number, invitations: number) =>
       adminAction(() => session!.call('PUT', '/admin/levels', { level, invitations }, checkObject, { sign: true }), 'saved'),
     grant,
+    setSwitch,
   };
 }
 
