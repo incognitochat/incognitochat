@@ -131,6 +131,7 @@ describe('setup', () => {
     await putSealed(db, 'link-signing', new Uint8Array([1, 2, 3]));
     await putConversation(db, {
       id: 'G'.repeat(22),
+      wire: 'I'.repeat(22),
       role: 'sender',
       link: { id: 'E'.repeat(11), fingerprint: 'F'.repeat(43) },
       label: 'x',

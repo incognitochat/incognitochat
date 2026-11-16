@@ -44,7 +44,32 @@ import {
 } from './keys';
 import { dropFromPool, pooled, POOL_LOW, poolSize, refillPool, takeMailbox } from './pool';
 import { accountSecret, label, senderTag } from './secret';
-import { addMessage, deleteMessage, deleteMessages, getConversation, getMessage, hasMessage, listConversations, listMessages, markOwnSeen, putConversation, putMedia, setFile, setMessageStatus, setReaction, queueUploadDeletes, pendingUploadDeletes, forgetUploadDeletes, setText, sealPendingEdit, openPendingEdit, type LocalMedia } from './store';
+import {
+  addMessage,
+  deleteMessage,
+  deleteMessages,
+  findLinkConversation,
+  forgetUploadDeletes,
+  getConversation,
+  getMessage,
+  hasMessage,
+  listConversations,
+  listMessages,
+  markOwnSeen,
+  mediaLock,
+  newLocalId,
+  openPendingEdit,
+  pendingUploadDeletes,
+  putConversation,
+  putMedia,
+  queueUploadDeletes,
+  sealPendingEdit,
+  setFile,
+  setMessageStatus,
+  setReaction,
+  setText,
+  type LocalMedia,
+} from './store';
 import { decryptFile, encryptFile, newFileKey, uploadSize } from '../crypto/media';
 import { xhrTransfer, type Transfer } from '../net/transfer';
 
@@ -147,11 +172,11 @@ export function createMessaging(deps: MessagingDeps) {
   const transfer = deps.transfer ?? xhrTransfer;
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
 
-  /** Writes the first message to someone's link, starting a conversation. Returns its ID. */
   /**
    * Writes the first message to someone's link, starting a conversation.
    * onStored runs as soon as the conversation and message are stored, before
-   * the (slower) delivery. Returns the conversation's ID once delivered.
+   * the (slower) delivery. Returns the conversation's ID (on this device)
+   * once delivered.
    */
   async function startConversation(
     ref: LinkRef,
@@ -160,11 +185,12 @@ export function createMessaging(deps: MessagingDeps) {
     onStored?: (conv: string) => void | Promise<void>,
   ): Promise<string> {
     const { raw: linkKey } = await verifyBundle(ref, bundle, Math.floor(now() / 1000));
-    const id = newId();
+    const id = newLocalId();
     const myKey = await createConversationKey(db, id);
     const secret = await accountSecret(db);
     const conversation: ConversationRecord = {
       id,
+      wire: newId(),
       role: 'sender',
       link: { id: ref.id, fingerprint: ref.fingerprint },
       label: await label(secret, 'link', utf8(ref.fingerprint)),
@@ -211,9 +237,9 @@ export function createMessaging(deps: MessagingDeps) {
     try {
       await transmit(conversation.id, { kind: 'message', id, at, ...content, ...answer });
       // Unless their receipt came in first.
-      await setMessageStatus(db, id, 'sent', 'sending');
+      await setMessageStatus(db, conversation.id, id, 'sent', 'sending');
     } catch (err) {
-      await setMessageStatus(db, id, 'failed');
+      await setMessageStatus(db, conversation.id, id, 'failed');
       throw err;
     }
   }
@@ -236,7 +262,7 @@ export function createMessaging(deps: MessagingDeps) {
     const id = newId();
     const at = now();
     const body = (media: LocalMedia) => ({ text: caption, ...(replyTo ? { replyTo } : {}), media });
-    await putMedia(db, id, out.file);
+    await putMedia(db, conv, id, out.file);
     await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(out.media));
     await putConversation(db, { ...conversation, lastAt: at, hidden: false });
     await onStored?.(id);
@@ -244,9 +270,9 @@ export function createMessaging(deps: MessagingDeps) {
       const media = await upload(out, onProgress);
       await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(media));
       await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media });
-      await setMessageStatus(db, id, 'sent', 'sending');
+      await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
-      await setMessageStatus(db, id, 'failed');
+      await setMessageStatus(db, conv, id, 'failed');
       throw err;
     }
   }
@@ -277,9 +303,9 @@ export function createMessaging(deps: MessagingDeps) {
    * message or the conversation, or it expires.
    * Returns where the file is now.
    */
-  function fetchMedia(id: string, onProgress?: (fraction: number) => void): Promise<'local' | 'gone'> {
-    return withLock(`media:${id}`, async () => {
-      const message = await getMessage(db, id);
+  function fetchMedia(conv: string, id: string, onProgress?: (fraction: number) => void): Promise<'local' | 'gone'> {
+    return withLock(mediaLock(conv, id), async () => {
+      const message = await getMessage(db, conv, id);
       if (!message?.media || (message.file !== 'remote' && message.file !== 'cleared')) return message?.file === 'local' ? 'local' : 'gone';
       const m = message.media as Media;
       let url: string;
@@ -287,14 +313,14 @@ export function createMessaging(deps: MessagingDeps) {
         url = await api.request('GET', `/media/${m.id}`, {}, checkUrl);
       } catch (err) {
         if (err instanceof ApiError && err.code === 'not_found') {
-          await setFile(db, id, 'gone');
+          await setFile(db, conv, id, 'gone');
           return 'gone';
         }
         throw err;
       }
       const file = await decryptFile(await transfer.get(url, onProgress), fromBase64Url(m.k), m.s);
-      await putMedia(db, id, file);
-      await setFile(db, id, 'local');
+      await putMedia(db, conv, id, file);
+      await setFile(db, conv, id, 'local');
       return 'local';
     });
   }
@@ -363,8 +389,8 @@ export function createMessaging(deps: MessagingDeps) {
    */
   async function edit(conv: string, id: string, text: string): Promise<void> {
     const c = await getConversation(db, conv);
-    const m = await getMessage(db, id);
-    if (!c || c.status !== 'active' || !m || m.conv !== conv || !m.out || (m.status !== 'sent' && m.status !== 'seen') || m.sticker) {
+    const m = await getMessage(db, conv, id);
+    if (!c || c.status !== 'active' || !m || !m.out || (m.status !== 'sent' && m.status !== 'seen') || m.sticker) {
       throw new Error('nothing to edit');
     }
     if ((text.trim() === '' && !m.media) || utf8(text).length > MAX_TEXT_BYTES) throw new Error('not a valid text');
@@ -372,7 +398,7 @@ export function createMessaging(deps: MessagingDeps) {
     const at = now();
     if (at - m.at > EDIT_WINDOW_MS) throw new Error('too late to edit');
     await transmit(conv, { kind: 'edit', id: newId(), at, edit: { to: id, text } });
-    await setText(db, id, text, at);
+    await setText(db, conv, id, text, at);
   }
 
   /**
@@ -384,13 +410,13 @@ export function createMessaging(deps: MessagingDeps) {
    */
   async function deleteForEveryone(conv: string, id: string): Promise<void> {
     const c = await getConversation(db, conv);
-    const m = await getMessage(db, id);
-    if (!c || c.status !== 'active' || !m || m.conv !== conv || !m.out || (m.status !== 'sent' && m.status !== 'seen')) {
+    const m = await getMessage(db, conv, id);
+    if (!c || c.status !== 'active' || !m || !m.out || (m.status !== 'sent' && m.status !== 'seen')) {
       throw new Error('nothing to delete for both sides');
     }
     await transmit(conv, { kind: 'delete', id: newId(), at: now(), delete: [id] });
     await deleteUploadsLater([m.media]);
-    await deleteMessage(db, id);
+    await deleteMessage(db, conv, id);
   }
 
   /**
@@ -432,7 +458,8 @@ export function createMessaging(deps: MessagingDeps) {
       const myKey = await conversationKey(db, c.myKey!);
       const draft: Draft = {
         ...fields,
-        conv: c.id,
+        // The conversation's ID on the wire; c.id is this device's own.
+        conv: c.wire,
         ...(c.myMailbox !== null ? { reply: c.myMailbox } : {}),
         ...(c.lastReceived ? { last: c.lastReceived } : {}),
       };
@@ -469,15 +496,15 @@ export function createMessaging(deps: MessagingDeps) {
    */
   async function react(conv: string, id: string, emoji: string): Promise<void> {
     const c = await getConversation(db, conv);
-    const target = await getMessage(db, id);
-    if (!c || c.status !== 'active' || !target || target.conv !== conv) throw new Error('nothing to react to');
+    const target = await getMessage(db, conv, id);
+    if (!c || c.status !== 'active' || !target) throw new Error('nothing to react to');
     if (emoji !== '' && !isReactionEmoji(emoji)) throw new Error('not an emoji');
     const before = target.reactions?.mine?.e ?? '';
-    await setReaction(db, id, 'mine', emoji, now());
+    await setReaction(db, conv, id, 'mine', emoji, now());
     try {
       await transmit(conv, { kind: 'reaction', id: newId(), at: now(), reaction: { to: id, e: emoji } });
     } catch (err) {
-      await setReaction(db, id, 'mine', before, now());
+      await setReaction(db, conv, id, 'mine', before, now());
       throw err;
     }
   }
@@ -496,7 +523,7 @@ export function createMessaging(deps: MessagingDeps) {
       const batch = unseen.slice(i, i + MAX_SEEN);
       // Left as received if this fails, so the next opening tries again.
       await transmit(conv, { kind: 'seen', id: newId(), at: now(), seen: batch });
-      for (const id of batch) await setMessageStatus(db, id, 'read');
+      for (const id of batch) await setMessageStatus(db, conv, id, 'read');
     }
   }
 
@@ -693,28 +720,34 @@ export function createMessaging(deps: MessagingDeps) {
     const entry = await lookupKey(db, keyId);
     const t = now();
     if (!entry || message.at < t - MAX_AGE || message.at > t + DAY) return false;
-    if (await hasMessage(db, message.id)) return false; // a replay
 
-    let conv = await getConversation(db, message.conv);
-    // Nothing more from a blocked conversation.
-    if (conv?.status === 'blocked') return false;
+    // Which conversation it belongs to comes from the key it was written for,
+    // never from its IDs alone: those are the other side's choice, so the
+    // same ID in any other conversation on this device must change nothing.
+    let conv: ConversationRecord;
     if (entry.link) {
       // Written for our link's key: a new conversation, or more from a sender
-      // we haven't answered yet (whose key can't change meanwhile).
-      if (conv && (conv.role !== 'owner' || conv.link.id !== entry.link.id || conv.peerKey !== message.from)) return false;
-      if (!conv) {
+      // we haven't answered yet (whose key can't change meanwhile). Only a
+      // conversation through this link, with this ID, from this key, counts.
+      const found = await findLinkConversation(db, entry.link.id, message.conv, message.from);
+      if (found) {
+        if (found.peerKey !== message.from) return false;
+        conv = found;
+      } else {
         if (!message.reply) return false;
         // A new conversation from a person we blocked through this link.
         // By the link's fingerprint, which a replaced link keeps.
         if (message.tag && (await blockedTags()).has(`${entry.link.fingerprint}:${message.tag}`)) return false;
         const secret = await accountSecret(db);
         conv = {
-          id: message.conv,
+          id: newLocalId(),
+          wire: message.conv,
           role: 'owner',
           link: entry.link,
           // Senders who don't send a tag (modified clients) are named by their key.
           label: await label(secret, 'anon', fromBase64Url(message.tag ?? message.from)),
           peerKey: message.from,
+          firstKey: message.from,
           myKey: null,
           sendTo: message.reply,
           myMailbox: null,
@@ -730,15 +763,21 @@ export function createMessaging(deps: MessagingDeps) {
       }
     } else if (entry.conv) {
       // Written for our conversation key, which only the other side knows.
-      if (!conv || entry.conv !== message.conv) return false;
-      if (entry.pub === conv.myKey) {
-        // They have our current key, so they no longer write to older ones:
-        // those go once anything written to them has expired from the inbox.
-        const current = conv.myKey;
-        await scheduleKeyDeletion(db, (e) => e.conv === conv!.id && e.pub !== current, now() + KEY_RETENTION_MS);
-      }
+      const found = await getConversation(db, entry.conv);
+      if (!found || found.wire !== message.conv) return false;
+      conv = found;
     } else {
       return false;
+    }
+    // Nothing more from a blocked conversation.
+    if (conv.status === 'blocked') return false;
+    // A replay: this conversation has it already.
+    if (await hasMessage(db, conv.id, message.id)) return false;
+    if (entry.conv && entry.pub === conv.myKey) {
+      // They have our current key, so they no longer write to older ones:
+      // those go once anything written to them has expired from the inbox.
+      const { id: local, myKey: current } = conv;
+      await scheduleKeyDeletion(db, (e) => e.conv === local && e.pub !== current, now() + KEY_RETENTION_MS);
     }
 
     // The sender's key may have rotated, and their mailbox changed.
@@ -778,22 +817,22 @@ export function createMessaging(deps: MessagingDeps) {
         conv.edits = conv.edits!.filter((e) => e !== early);
         const text = await openPendingEdit(db, early.id, early.sealed);
         // Both times are from their clock: only within the edit window.
-        if ((text.trim() !== '' || message.media) && early.at - message.at <= EDIT_WINDOW_MS + EDIT_GRACE_MS) await setText(db, message.id, text, early.at);
+        if ((text.trim() !== '' || message.media) && early.at - message.at <= EDIT_WINDOW_MS + EDIT_GRACE_MS) await setText(db, conv.id, message.id, text, early.at);
       }
     } else if (message.kind === 'seen') {
       // They opened these: our messages in this conversation only.
       for (const id of message.seen ?? []) if (await markOwnSeen(db, conv.id, id)) changed = true;
     } else if (message.kind === 'edit' && message.edit) {
-      // Only their own messages, within a day of sending (with some grace,
-      // since the message's time here may be when it arrived), and the
-      // latest edit wins. One for a message that hasn't arrived yet is kept,
-      // sealed, until it does.
+      // Only their own messages in this conversation, within a day of sending
+      // (with some grace, since the message's time here may be when it
+      // arrived), and the latest edit wins. One for a message that hasn't
+      // arrived yet is kept, sealed, until it does.
       const { to, text } = message.edit;
-      const target = await getMessage(db, to);
+      const target = await getMessage(db, conv.id, to);
       if (target) {
         const inTime = message.at - target.at <= EDIT_WINDOW_MS + EDIT_GRACE_MS;
-        if (target.conv === conv.id && !target.out && !target.sticker && inTime && (text.trim() !== '' || target.media)) {
-          changed = await setText(db, to, text, message.at);
+        if (!target.out && !target.sticker && inTime && (text.trim() !== '' || target.media)) {
+          changed = await setText(db, conv.id, to, text, message.at);
         }
       } else {
         const since = t - MAX_AGE;
@@ -808,20 +847,20 @@ export function createMessaging(deps: MessagingDeps) {
       const since = t - MAX_AGE;
       const remembered = (conv.deleted ?? []).filter((d) => d.at >= since);
       for (const id of message.delete) {
-        const target = await db.get('messages', id);
+        const target = await db.get('messages', [conv.id, id]);
         if (!target) {
           if (!remembered.some((d) => d.id === id)) remembered.push({ id, at: t });
-        } else if (target.conv === conv.id && !target.out) {
+        } else if (!target.out) {
           if (target.status === 'received' && conv.unread > 0) conv.unread -= 1;
-          await deleteMessage(db, id);
+          await deleteMessage(db, conv.id, id);
           changed = true;
         }
       }
       conv.deleted = remembered.slice(-MAX_REMEMBERED_DELETES);
     } else if (message.kind === 'reaction' && message.reaction) {
       // To a message of this conversation only, by their clock: the latest wins.
-      const target = await getMessage(db, message.reaction.to);
-      if (target?.conv === conv.id) changed = await setReaction(db, target.id, 'theirs', message.reaction.e, message.at);
+      const target = await getMessage(db, conv.id, message.reaction.to);
+      if (target) changed = await setReaction(db, conv.id, target.id, 'theirs', message.reaction.e, message.at);
     } else if (message.kind === 'end') {
       changed = conv.status !== 'ended';
       conv.status = 'ended';

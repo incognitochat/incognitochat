@@ -112,6 +112,14 @@ export interface ConversationView {
   last: { text: string; out: boolean; status: MessageView['status']; media?: { t: string; n?: string }; sticker?: Sticker } | null;
 }
 
+/** A message: its conversation (on this device) and its ID, which is unique only within that conversation. */
+export type MessageRef = Pick<MessageView, 'conv' | 'id'>;
+
+/** A key for one message on this device, e.g. for its transfer's progress. */
+export function messageKey(m: MessageRef): string {
+  return `${m.conv}/${m.id}`;
+}
+
 /** What a picked file is sent as (music is "audio"). */
 export type SendAs = 'photo' | 'video' | 'gif' | 'audio' | 'file';
 
@@ -651,12 +659,12 @@ export function createApp(deps: Deps) {
     autoFetch(id);
   }
 
-  // Upload and download progress of attachments, by message ID (0 to 1).
+  // Upload and download progress of attachments, by messageKey (0 to 1).
   const transfers = signal<Record<string, number>>({});
-  const setProgress = (id: string, fraction: number | null) => {
+  const setProgress = (key: string, fraction: number | null) => {
     const next = { ...transfers.value };
-    if (fraction === null) delete next[id];
-    else next[id] = fraction;
+    if (fraction === null) delete next[key];
+    else next[key] = fraction;
     transfers.value = next;
   };
 
@@ -750,8 +758,8 @@ export function createApp(deps: Deps) {
         caption,
         replyTo,
         async (id) => {
-          sent = id;
-          setProgress(id, 0);
+          sent = messageKey({ conv, id });
+          setProgress(sent, 0);
           await show();
           unprepare(key);
         },
@@ -768,15 +776,16 @@ export function createApp(deps: Deps) {
   }
 
   /** Fetches a received attachment (a tap, or automatically for photos, GIFs, voice and video messages). */
-  async function fetchMedia(id: string): Promise<void> {
-    if (!messaging || transfers.value[id] !== undefined) return;
-    setProgress(id, 0);
+  async function fetchMedia(m: MessageRef): Promise<void> {
+    const key = messageKey(m);
+    if (!messaging || transfers.value[key] !== undefined) return;
+    setProgress(key, 0);
     try {
-      await messaging.fetchMedia(id, (f) => setProgress(id, f));
+      await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f));
     } catch {
       // Tried again on the next tap or opening.
     } finally {
-      setProgress(id, null);
+      setProgress(key, null);
     }
     const now = currentScreen();
     if (now.kind === 'conversation') screen.value = { ...now, messages: await listMessages(deps.db, now.id) };
@@ -792,7 +801,7 @@ export function createApp(deps: Deps) {
     const media = m.media;
     if (!media) return 'unavailable';
     if (typeof navigator.canShare === 'function') {
-      const file = await getMedia(deps.db, m.id);
+      const file = await getMedia(deps.db, m.conv, m.id);
       const shareable = file && new File([file], fileName(media), media.m ? { type: media.m } : {});
       if (shareable && navigator.canShare({ files: [shareable] })) {
         try {
@@ -828,7 +837,7 @@ export function createApp(deps: Deps) {
       (auto.gifs && media.t === 'gif' && media.s <= AUTO_GIF_BYTES);
     void (async () => {
       for (const m of now.messages) {
-        if (m.file === 'remote' && m.media && automatic(m.media) && !m.out) await fetchMedia(m.id);
+        if (m.file === 'remote' && m.media && automatic(m.media) && !m.out) await fetchMedia(m);
       }
     })();
   }
@@ -837,7 +846,7 @@ export function createApp(deps: Deps) {
   let urls = new Map<string, string>();
   let urlsFor: string | null = null;
   /** A URL for a message's attachment, if it's on this device. */
-  async function mediaUrl(id: string, type?: string): Promise<string | null> {
+  async function mediaUrl(m: MessageRef, type?: string): Promise<string | null> {
     const now = currentScreen();
     const conv = now.kind === 'conversation' ? now.id : null;
     if (conv !== urlsFor) {
@@ -845,14 +854,15 @@ export function createApp(deps: Deps) {
       urls = new Map();
       urlsFor = conv;
     }
-    const cached = urls.get(id);
+    const key = messageKey(m);
+    const cached = urls.get(key);
     if (cached) return cached;
-    const file = await getMedia(deps.db, id);
+    const file = await getMedia(deps.db, m.conv, m.id);
     if (!file) return null;
     // QuickTime videos and .m4a songs play as MP4 (the same container) where a browser doesn't know their type.
     const shown = type === 'video/quicktime' ? 'video/mp4' : type === 'audio/x-m4a' ? 'audio/mp4' : type;
     const url = URL.createObjectURL(new Blob([file], shown ? { type: shown } : {}));
-    urls.set(id, url);
+    urls.set(key, url);
     return url;
   }
 
@@ -1453,11 +1463,6 @@ export function createApp(deps: Deps) {
     deleteConversation,
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,
-    /** A received or sent attachment as a file, for saving or sharing. */
-    mediaFile: async (id: string, name: string, type?: string) => {
-      const bytes = await getMedia(deps.db, id);
-      return bytes ? new File([bytes], name, type ? { type } : {}) : null;
-    },
     sendMedia,
     sendVoice,
     sendRound,
@@ -1474,7 +1479,7 @@ export function createApp(deps: Deps) {
       if (current.kind !== 'conversation') return;
       const message = current.messages.find((m) => m.id === id);
       if (message) await messaging?.discardUploads([message]);
-      await deleteMessage(deps.db, id);
+      await deleteMessage(deps.db, current.id, id);
       deps.broadcast({ type: 'data-changed' });
       const now = currentScreen();
       if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, messages: await listMessages(deps.db, current.id) };
