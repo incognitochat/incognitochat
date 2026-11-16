@@ -241,6 +241,20 @@ text, an attachment or a sticker; `seen` needs `seen` and no text;
 `delete` or `all` (one of them), and nothing else;
 `key_update` and `end` carry none of these.
 
+**IDs count only within their conversation.** `conv` and `id` are the
+sender's choice, so the recipient never takes them as unique on its device.
+It finds the conversation from the key the envelope was written for: one of
+its conversation keys belongs to one conversation, whose `conv` the message
+must carry; a link's key means a first message (or more from a sender who
+has had nothing back yet), which belongs to the conversation started through
+that link with that `conv` from that `from` key, or else starts a new one.
+Within the conversation, an `id` it already has is a replay and is dropped,
+and the IDs in `seen`, `reaction`, `edit`, `delete` and `replyTo` name that
+conversation's messages only. So an ID that another conversation on the
+device also uses changes nothing: whether one is there can't be told from
+anything the recipient's app does. Each app keeps a conversation under an
+ID of its own, which never goes out.
+
 **Deleting for both sides.** A sender can delete their own messages on the
 recipient's device too, whether or not they were opened: the app sends a
 `delete`, deletes the uploads of any attachments (it holds their delete

@@ -26,6 +26,7 @@ import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import {
   confirmationMatches,
+  messageKey,
   type AdminNotice,
   type App as AppState,
   type ErrorKind,
@@ -2108,11 +2109,11 @@ function useMediaUrl(app: AppState, m: MessageView) {
   const url = useSignal<string | null>(null);
   useEffect(() => {
     let alive = true;
-    if (m.file === 'local') void app.mediaUrl(m.id, m.media!.m).then((u) => alive && (url.value = u));
+    if (m.file === 'local') void app.mediaUrl(m, m.media!.m).then((u) => alive && (url.value = u));
     return () => {
       alive = false;
     };
-  }, [m.id, m.file]);
+  }, [m.conv, m.id, m.file]);
   return url;
 }
 
@@ -2134,7 +2135,7 @@ function MediaState({ app, message: m, language, progress }: { app: AppState; me
         </span>
       )}
       {fetchable(app, m) && progress === undefined && (
-        <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
+        <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m)}>
           ↓
         </button>
       )}
@@ -2290,7 +2291,7 @@ function PlayButton({ app, message: m, language, progress, playing, onPlay }: { 
   }
   if (fetchable(app, m)) {
     return (
-      <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
+      <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m)}>
         ↓
       </button>
     );
@@ -2556,7 +2557,7 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
   const busy = progress !== undefined;
   const onClick = () => {
     if (busy) return;
-    if (fetchable(app, m)) void app.fetchMedia(m.id);
+    if (fetchable(app, m)) void app.fetchMedia(m);
     else if (m.file === 'local') void save(app, m, language);
   };
   return (
@@ -2771,7 +2772,7 @@ function Bubble({
           ) : (
             <Quote name={tr('deletedMessage')} text="" />
           ))}
-        {m.media && <Attachment app={app} message={m} language={language} progress={app.transfers.value[m.id]} />}
+        {m.media && <Attachment app={app} message={m} language={language} progress={app.transfers.value[messageKey(m)]} />}
         {m.sticker && <StickerView sticker={m.sticker} language={language} />}
         {m.text && (
           <span class="text" dir="auto">

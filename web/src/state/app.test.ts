@@ -386,6 +386,7 @@ describe('setup', () => {
 async function chatOnDevice(db: Awaited<ReturnType<typeof openDatabase>>) {
   await putConversation(db, {
     id: 'c1',
+    wire: 'W'.repeat(22),
     role: 'sender',
     link: { id: 'E'.repeat(11), fingerprint: 'F'.repeat(43) },
     label: 'x',
@@ -569,11 +570,11 @@ describe('when the server stops taking this device', () => {
     await app.openConversation('c1');
     expect(app.screen.value).toMatchObject({ kind: 'conversation', readOnly: true, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
     app.markSeen();
-    await app.fetchMedia('p1');
+    await app.fetchMedia({ conv: 'c1', id: 'p1' });
     await app.home();
     await tick();
     expect(server.calls.slice(before)).toEqual([]);
-    expect(await getMedia(db, 'p1')).toBeUndefined();
+    expect(await getMedia(db, 'c1', 'p1')).toBeUndefined();
   });
 
   it('starts messaging again when Try again works, with one of each background listener', async () => {
@@ -822,7 +823,7 @@ describe('data and storage', () => {
       { id, conv: 'c1', at: Date.now() - daysAgo * DAY, out: false, status: 'read', file: 'local' },
       { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
     );
-    await putMedia(db, id, new Uint8Array(1000));
+    await putMedia(db, 'c1', id, new Uint8Array(1000));
   }
 
   it('shows what is on the device, and saves the settings', async () => {
@@ -844,14 +845,14 @@ describe('data and storage', () => {
     await owner.app.setKeepMedia('week');
     expect(owner.app.screen.value).toMatchObject({ kind: 'storage', settings: { keep: 'week' }, usage: { media: 1000 }, cleared: 1000 });
     expect((await listMessages(owner.db, 'c1')).map((m) => [m.id, m.file])).toEqual([['old', 'cleared'], ['new', 'local']]);
-    expect(await getMedia(owner.db, 'old')).toBeUndefined();
+    expect(await getMedia(owner.db, 'c1', 'old')).toBeUndefined();
 
     // Later, at the next start, the one that has grown old goes too.
     await photoOnDevice(owner.db, 'older', 8);
     const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
     await again.app.start();
-    expect(await getMedia(owner.db, 'older')).toBeUndefined();
-    expect(await getMedia(owner.db, 'new')).toBeDefined();
+    expect(await getMedia(owner.db, 'c1', 'older')).toBeUndefined();
+    expect(await getMedia(owner.db, 'c1', 'new')).toBeDefined();
   });
 
   it('clears all media on request, and goes back to the link tab', async () => {

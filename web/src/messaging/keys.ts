@@ -22,7 +22,7 @@ export interface KeyEntry {
   pub: string;
   /** For a link encryption key: the link's ID and fingerprint. */
   link?: { id: string; fingerprint: string };
-  /** For a conversation key: the conversation's ID. */
+  /** For a conversation key: the conversation's ID on this device (not the one on the wire). */
   conv?: string;
   /**
    * Unix ms after which the private key is deleted (design D11): set once

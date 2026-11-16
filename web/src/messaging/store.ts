@@ -1,8 +1,14 @@
 // Conversations and history on this device (design D6: history lives on the
 // device only). Message text is encrypted under the device's storage key, a
 // non-extractable AES-GCM key, and bound to the message ID.
+//
+// Message and conversation IDs are chosen by the other side, so they count
+// only within their conversation: messages and attachments are kept by
+// (conversation, message ID), and each conversation by an ID of this
+// device's own. An ID that is in use elsewhere on the device then changes
+// nothing the other side could notice.
 
-import { concat, randomBytes, utf8 } from '../crypto/encoding';
+import { concat, randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import type { Media, Sticker } from '../protocol/message';
 import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type MessageRecord } from '../storage/db';
 import { withLock } from '../sync/locks';
@@ -60,8 +66,27 @@ async function openBody(db: Database, id: string, sealed: Uint8Array<ArrayBuffer
   return JSON.parse(new TextDecoder().decode(pt)) as MessageBody;
 }
 
+/** A new ID for a conversation on this device: random, and never sent. */
+export function newLocalId(): string {
+  return toBase64Url(randomBytes(16));
+}
+
+/** A conversation, by its ID on this device. */
 export function getConversation(db: Database, id: string): Promise<ConversationRecord | undefined> {
   return db.get('conversations', id);
+}
+
+/**
+ * The conversation a message written for one of our links' keys belongs to:
+ * the one someone started through that link with this wire ID, from this key
+ * (their first). Conversations through other links, our own ones, and anyone
+ * else's with the same wire ID don't count. One from before version 4 that
+ * we had answered doesn't know their first key: as before, it's the only one
+ * with its wire ID on its link.
+ */
+export async function findLinkConversation(db: Database, link: string, wire: string, from: string): Promise<ConversationRecord | undefined> {
+  const started = (await db.getAllFromIndex('conversations', 'byWire', [link, wire])).filter((c) => c.role === 'owner');
+  return started.find((c) => c.firstKey === from) ?? started.find((c) => c.firstKey === undefined);
 }
 
 export async function putConversation(db: Database, conversation: ConversationRecord): Promise<void> {
@@ -73,8 +98,9 @@ export async function listConversations(db: Database): Promise<ConversationRecor
   return (await db.getAll('conversations')).sort((a, b) => b.lastAt - a.lastAt);
 }
 
-export async function hasMessage(db: Database, id: string): Promise<boolean> {
-  return (await db.getKey('messages', id)) !== undefined;
+/** Whether a conversation has a message with this ID (another conversation's doesn't count). */
+export async function hasMessage(db: Database, conv: string, id: string): Promise<boolean> {
+  return (await db.getKey('messages', [conv, id])) !== undefined;
 }
 
 export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed'>, body: MessageBody): Promise<void> {
@@ -82,36 +108,41 @@ export async function addMessage(db: Database, record: Omit<MessageRecord, 'seal
 }
 
 /** Sets a message's status; with from, only if it has that status now. */
-export async function setMessageStatus(db: Database, id: string, status: MessageRecord['status'], from?: MessageRecord['status']): Promise<void> {
-  const record = await db.get('messages', id);
+export async function setMessageStatus(db: Database, conv: string, id: string, status: MessageRecord['status'], from?: MessageRecord['status']): Promise<void> {
+  const record = await db.get('messages', [conv, id]);
   if (record && (from === undefined || record.status === from)) await db.put('messages', { ...record, status });
 }
 
 /** Deletes one message from this device, and its attachment. */
-export async function deleteMessage(db: Database, id: string): Promise<void> {
-  await db.delete('messages', id);
-  await db.delete('media', id);
+export async function deleteMessage(db: Database, conv: string, id: string): Promise<void> {
+  await db.delete('messages', [conv, id]);
+  await db.delete('media', [conv, id]);
 }
 
 /** Keeps a message's attachment on this device, sealed under the storage key. */
-export async function putMedia(db: Database, id: string, file: Uint8Array<ArrayBuffer>): Promise<void> {
+export async function putMedia(db: Database, conv: string, id: string, file: Uint8Array<ArrayBuffer>): Promise<void> {
   const iv = randomBytes(IV);
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(`media:${id}`) }, await storageKey(db), file);
-  await db.put('media', concat(iv, new Uint8Array(ct)), id);
+  await db.put('media', concat(iv, new Uint8Array(ct)), [conv, id]);
 }
 
 /** A message's attachment, if it's on this device. */
-export async function getMedia(db: Database, id: string): Promise<Uint8Array<ArrayBuffer> | undefined> {
-  const sealed = await db.get('media', id);
+export async function getMedia(db: Database, conv: string, id: string): Promise<Uint8Array<ArrayBuffer> | undefined> {
+  const sealed = await db.get('media', [conv, id]);
   if (!sealed) return undefined;
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.slice(0, IV), additionalData: utf8(`media:${id}`) }, await storageKey(db), sealed.slice(IV));
   return new Uint8Array(pt);
 }
 
 /** Sets where a message's attachment is. */
-export async function setFile(db: Database, id: string, file: NonNullable<MessageRecord['file']>): Promise<void> {
-  const record = await db.get('messages', id);
+export async function setFile(db: Database, conv: string, id: string, file: NonNullable<MessageRecord['file']>): Promise<void> {
+  const record = await db.get('messages', [conv, id]);
   if (record) await db.put('messages', { ...record, file });
+}
+
+/** The lock that keeps fetching and clearing one message's attachment apart. */
+export function mediaLock(conv: string, id: string): string {
+  return `media:${conv}:${id}`;
 }
 
 /** The size of the attachments on this device, in bytes: in all, and by conversation. */
@@ -142,15 +173,16 @@ export async function clearMedia(db: Database, which: { conv?: string; before?: 
     if (record.out && (record.status === 'sending' || record.status === 'failed')) continue;
     const { media } = await openBody(db, record.id, record.sealed);
     if (!media?.id || !media.k) continue;
+    const key: [string, string] = [record.conv, record.id];
     // The same lock as fetching, so a fetch can't put the file back halfway.
-    freed += await withLock(`media:${record.id}`, async () => {
+    freed += await withLock(mediaLock(...key), async () => {
       const tx = db.transaction(['messages', 'media'], 'readwrite');
-      const now = await tx.objectStore('messages').get(record.id);
+      const now = await tx.objectStore('messages').get(key);
       if (now?.file !== 'local') {
         await tx.done;
         return 0;
       }
-      await tx.objectStore('media').delete(record.id);
+      await tx.objectStore('media').delete(key);
       await tx.objectStore('messages').put({ ...now, file: 'cleared' });
       await tx.done;
       return media.s;
@@ -164,9 +196,9 @@ export async function clearMedia(db: Database, which: { conv?: string; before?: 
  * set at an earlier time than the one there (a replay, or an old one
  * arriving late) changes nothing. Returns whether what's shown changed.
  */
-export async function setReaction(db: Database, id: string, side: 'mine' | 'theirs', e: string, at: number): Promise<boolean> {
-  return withLock(`message:${id}`, async () => {
-    const message = await getMessage(db, id);
+export async function setReaction(db: Database, conv: string, id: string, side: 'mine' | 'theirs', e: string, at: number): Promise<boolean> {
+  return withLock(`message:${conv}:${id}`, async () => {
+    const message = await getMessage(db, conv, id);
     if (!message) return false;
     const current = message.reactions?.[side];
     if (current && current.at >= at) return false;
@@ -180,7 +212,7 @@ export async function setReaction(db: Database, id: string, side: 'mine' | 'thei
     };
     const sealed = await sealBody(db, id, body);
     const tx = db.transaction('messages', 'readwrite');
-    const record = await tx.store.get(id);
+    const record = await tx.store.get([conv, id]);
     if (record) await tx.store.put({ ...record, sealed });
     await tx.done;
     return !!record && (current?.e ?? '') !== e;
@@ -192,9 +224,9 @@ export async function setReaction(db: Database, id: string, side: 'mine' | 'thei
  * edit older than the last one changes nothing (a replay, or one arriving
  * late). Returns whether it changed.
  */
-export async function setText(db: Database, id: string, text: string, at: number): Promise<boolean> {
-  return withLock(`message:${id}`, async () => {
-    const message = await getMessage(db, id);
+export async function setText(db: Database, conv: string, id: string, text: string, at: number): Promise<boolean> {
+  return withLock(`message:${conv}:${id}`, async () => {
+    const message = await getMessage(db, conv, id);
     if (!message || (message.edited ?? 0) >= at) return false;
     const body: MessageBody = {
       text,
@@ -206,7 +238,7 @@ export async function setText(db: Database, id: string, text: string, at: number
     };
     const sealed = await sealBody(db, id, body);
     const tx = db.transaction('messages', 'readwrite');
-    const record = await tx.store.get(id);
+    const record = await tx.store.get([conv, id]);
     if (record) await tx.store.put({ ...record, sealed });
     await tx.done;
     return !!record;
@@ -224,15 +256,15 @@ export async function openPendingEdit(db: Database, id: string, sealed: Uint8Arr
 
 /** Marks one of our messages in a conversation as seen, if it was sent; returns whether it did. */
 export async function markOwnSeen(db: Database, conv: string, id: string): Promise<boolean> {
-  const record = await db.get('messages', id);
-  if (!record || record.conv !== conv || !record.out || (record.status !== 'sent' && record.status !== 'sending')) return false;
+  const record = await db.get('messages', [conv, id]);
+  if (!record || !record.out || (record.status !== 'sent' && record.status !== 'sending')) return false;
   await db.put('messages', { ...record, status: 'seen' });
   return true;
 }
 
-/** One message with its text, if it's on this device. */
-export async function getMessage(db: Database, id: string): Promise<MessageView | undefined> {
-  const record = await db.get('messages', id);
+/** One message of a conversation with its text, if it's on this device. */
+export async function getMessage(db: Database, conv: string, id: string): Promise<MessageView | undefined> {
+  const record = await db.get('messages', [conv, id]);
   if (!record) return undefined;
   const { sealed, ...rest } = record;
   return { ...rest, ...(await openBody(db, id, sealed)) };
@@ -251,9 +283,9 @@ export async function deleteMessages(db: Database, conv: string): Promise<void> 
   const tx = db.transaction(['messages', 'media'], 'readwrite');
   const messages = tx.objectStore('messages');
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
-  for (const id of await messages.index('byConversation').getAllKeys(range)) {
-    await messages.delete(id);
-    await tx.objectStore('media').delete(id);
+  for (const key of await messages.index('byConversation').getAllKeys(range)) {
+    await messages.delete(key);
+    await tx.objectStore('media').delete(key);
   }
   await tx.done;
 }

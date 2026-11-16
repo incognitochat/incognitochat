@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { openDB } from 'idb';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLink, listLinks, replaceLink } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
@@ -10,12 +11,28 @@ import type { Session } from '../net/session';
 import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER } from '../account/wallet';
+import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { createMessaging } from './engine';
-import { clearMedia, getConversation, getMedia, listConversations, listMessages, mediaUsage, pendingUploadDeletes } from './store';
+import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes } from './store';
 import type { Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
+
+// A modified app chooses its IDs: tests make it reuse some (nextIds).
+vi.mock('../protocol/message', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../protocol/message')>();
+  return { ...actual, newId: vi.fn(actual.newId) };
+});
+
+/** The next IDs the app makes for the wire (conversation, then message, in the order it makes them) are these. */
+function nextIds(...ids: string[]): void {
+  for (const id of ids) vi.mocked(newId).mockReturnValueOnce(id);
+}
+
+afterEach(() => {
+  vi.mocked(newId).mockReset();
+});
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -180,6 +197,17 @@ async function linkOf(backend: Awaited<ReturnType<typeof fakeBackend>>, owner: A
   return { ref, bundle };
 }
 
+/**
+ * The same conversation on the other side's device. Each device has its own
+ * ID for it; they share only the one on the wire.
+ */
+async function across(from: Database, conv: string, to: Database): Promise<string> {
+  const { wire } = (await getConversation(from, conv))!;
+  const there = (await listConversations(to)).filter((c) => c.wire === wire);
+  expect(there).toHaveLength(1);
+  return there[0]!.id;
+}
+
 describe('messaging between two people', () => {
   it('starts through a link, then talks on per-conversation keys and mailboxes', async () => {
     const backend = await fakeBackend();
@@ -190,13 +218,17 @@ describe('messaging between two people', () => {
     const conv = await sender.messaging.startConversation(ref, bundle, 'سلام! hello');
     expect(await owner.messaging.sync()).toBe(1);
 
+    // Each side has its own ID for the conversation; only the wire ID is shared.
     const [ownerConv] = await listConversations(owner.db);
-    expect(ownerConv).toMatchObject({ id: conv, role: 'owner', unread: 1, myKey: null, link: { id: ref.id } });
+    const { wire } = (await getConversation(sender.db, conv))!;
+    expect(ownerConv).toMatchObject({ wire, role: 'owner', unread: 1, myKey: null, link: { id: ref.id } });
+    expect(new Set([conv, wire, ownerConv!.id]).size).toBe(3);
+    const mine = ownerConv!.id;
     expect(ownerConv!.label).toMatch(/^\S+ [0-9A-Z]{4}$/u);
-    expect((await listMessages(owner.db, conv)).map((m) => [m.out, m.text])).toEqual([[false, 'سلام! hello']]);
+    expect((await listMessages(owner.db, mine)).map((m) => [m.out, m.text])).toEqual([[false, 'سلام! hello']]);
 
     // The owner's first reply brings the owner's own key and mailbox.
-    await owner.messaging.send(conv, 'hi back');
+    await owner.messaging.send(mine, 'hi back');
     expect(await sender.messaging.sync()).toBe(1);
     const [senderConv] = await listConversations(sender.db);
     const [ownerAfter] = await listConversations(owner.db);
@@ -206,7 +238,7 @@ describe('messaging between two people', () => {
 
     await sender.messaging.send(conv, 'how are you?');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['سلام! hello', 'hi back', 'how are you?']);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['سلام! hello', 'hi back', 'how are you?']);
     expect((await listMessages(sender.db, conv)).map((m) => [m.out, m.status])).toEqual([
       [true, 'sent'],
       [false, 'received'],
@@ -236,6 +268,7 @@ describe('messaging between two people', () => {
     const again = backend.seenEnvelopes[0]!;
     backend.inboxes.get('owner')!.push({ id: rand(), mailbox: bundle.mailbox, envelope: again });
     expect(await owner.messaging.sync()).toBe(0);
+    expect(await listConversations(owner.db)).toHaveLength(1);
 
     // The same sender starting a second conversation keeps their label; someone else doesn't share it.
     const second = await sender.messaging.startConversation(ref, bundle, 'two');
@@ -243,9 +276,35 @@ describe('messaging between two people', () => {
     expect(await owner.messaging.sync()).toBe(2);
     const byId = new Map((await listConversations(owner.db)).map((c) => [c.id, c]));
     expect(byId.size).toBe(3);
-    expect(byId.get(first)!.label).toBe(byId.get(second)!.label);
-    const otherConv = [...byId.values()].find((c) => c.id !== first && c.id !== second)!;
-    expect(otherConv.label).not.toBe(byId.get(first)!.label);
+    const [one, two] = [await across(sender.db, first, owner.db), await across(sender.db, second, owner.db)];
+    expect(byId.get(one)!.label).toBe(byId.get(two)!.label);
+    const otherConv = [...byId.values()].find((c) => c.id !== one && c.id !== two)!;
+    expect(otherConv.label).not.toBe(byId.get(one)!.label);
+  });
+
+  it('ignores a message delivered again within a conversation', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    const sent = backend.seenEnvelopes.length;
+    await sender.messaging.send(conv, 'once');
+    const once = backend.seenEnvelopes[sent]!;
+    await sender.messaging.send(conv, 'later');
+    expect(await owner.messaging.sync()).toBe(2);
+    const before = (await getConversation(owner.db, mine))!;
+
+    // Written for the owner's conversation key, to their mailbox: delivered again, dropped.
+    backend.inboxes.get('owner')!.push({ id: rand(), mailbox: before.myMailbox!, envelope: once });
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['hello', 'hi', 'once', 'later']);
+    // Nothing about the conversation changed: not its unread count, nor the last message it names.
+    expect(await getConversation(owner.db, mine)).toEqual(before);
   });
 
   it('drops messages it cannot open or that claim another conversation', async () => {
@@ -298,11 +357,12 @@ describe('seen receipts', () => {
     const conv = await sender.messaging.startConversation(ref, bundle, 'one');
     await sender.messaging.send(conv, 'two');
     await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
 
-    await owner.messaging.markSeen(conv);
-    expect((await listMessages(owner.db, conv)).map((m) => m.status)).toEqual(['read', 'read']);
+    await owner.messaging.markSeen(mine);
+    expect((await listMessages(owner.db, mine)).map((m) => m.status)).toEqual(['read', 'read']);
     const sends = backend.seenEnvelopes.length;
-    await owner.messaging.markSeen(conv); // nothing new to report
+    await owner.messaging.markSeen(mine); // nothing new to report
     expect(backend.seenEnvelopes.length).toBe(sends);
 
     await sender.messaging.sync();
@@ -319,11 +379,12 @@ describe('seen receipts', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'one');
     await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
     const pool = await poolSize(owner.db);
 
     // Read: the sender sees it, but keeps writing to the link.
-    await owner.messaging.markSeen(conv);
-    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    await owner.messaging.markSeen(local);
+    expect((await getConversation(owner.db, local))!.myMailbox).toBeNull();
     expect(await poolSize(owner.db)).toBe(pool);
     await sender.messaging.sync();
     expect((await listMessages(sender.db, conv)).map((m) => m.status)).toEqual(['seen']);
@@ -332,19 +393,19 @@ describe('seen receipts', () => {
     // Their next message still arrives, for the key the receipt brought.
     await sender.messaging.send(conv, 'two');
     expect(await owner.messaging.sync()).toBe(1);
-    await owner.messaging.markSeen(conv);
-    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    await owner.messaging.markSeen(local);
+    expect((await getConversation(owner.db, local))!.myMailbox).toBeNull();
     expect(await poolSize(owner.db)).toBe(pool);
 
     // A reply takes one, and they move to it.
-    await owner.messaging.send(conv, 'hi');
-    const mine = (await getConversation(owner.db, conv))!.myMailbox;
+    await owner.messaging.send(local, 'hi');
+    const mine = (await getConversation(owner.db, local))!.myMailbox;
     expect(mine).not.toBeNull();
     await sender.messaging.sync();
     expect((await getConversation(sender.db, conv))!.sendTo).toBe(mine);
     await sender.messaging.send(conv, 'three');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three']);
+    expect((await listMessages(owner.db, local)).map((m) => m.text)).toEqual(['one', 'two', 'hi', 'three']);
   });
 
   it('a chat deleted for both before any reply takes no mailbox either', async () => {
@@ -354,8 +415,9 @@ describe('seen receipts', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'spam');
     await owner.messaging.sync();
-    await owner.messaging.remove(conv, true);
-    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.remove(mine, true);
+    expect((await getConversation(owner.db, mine))!.myMailbox).toBeNull();
     expect(await sender.messaging.sync()).toBeGreaterThanOrEqual(0);
     expect(await listMessages(sender.db, conv)).toEqual([]);
   });
@@ -371,10 +433,11 @@ describe('blocks', () => {
 
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
     await sender.messaging.sync();
 
-    await owner.messaging.block(conv);
+    await owner.messaging.block(mine);
     // Their sends still look accepted, but nothing arrives.
     await sender.messaging.send(conv, 'are you there?');
     await sender.messaging.startConversation(ref, bundle, 'it is me again');
@@ -393,11 +456,12 @@ describe('blocks', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.block(conv);
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.block(mine);
     // Still writing to the link's intro mailbox, which the owner can't discard.
     await sender.messaging.send(conv, 'more');
     expect(await owner.messaging.sync()).toBe(0);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['hello']);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['hello']);
   });
 
   it('let a sender block a conversation too', async () => {
@@ -408,7 +472,7 @@ describe('blocks', () => {
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
     await sender.messaging.block(conv);
-    await owner.messaging.send(conv, 'please reply');
+    await owner.messaging.send(await across(sender.db, conv, owner.db), 'please reply');
     expect(await sender.messaging.sync()).toBe(0);
   });
 });
@@ -421,20 +485,21 @@ describe('deleting a conversation', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
     await sender.messaging.sync();
 
-    await owner.messaging.remove(conv);
-    expect(await listMessages(owner.db, conv)).toEqual([]);
-    expect((await listConversations(owner.db)).map((c) => [c.id, c.hidden, c.unread])).toEqual([[conv, true, 0]]);
+    await owner.messaging.remove(mine);
+    expect(await listMessages(owner.db, mine)).toEqual([]);
+    expect((await listConversations(owner.db)).map((c) => [c.id, c.hidden, c.unread])).toEqual([[mine, true, 0]]);
     // The other side keeps theirs, and can still write: it comes back with only the new message.
     expect((await listMessages(sender.db, conv)).map((m) => m.text)).toEqual(['hello', 'hi']);
     await sender.messaging.send(conv, 'still there?');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['still there?']);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['still there?']);
     expect((await listConversations(owner.db))[0]!.hidden).toBe(false);
     // Replying works as before.
-    await owner.messaging.send(conv, 'yes');
+    await owner.messaging.send(mine, 'yes');
     expect(await sender.messaging.sync()).toBe(1);
   });
 });
@@ -449,7 +514,7 @@ describe('a replaced link', () => {
     const spam = await blocked.messaging.startConversation(old.ref, old.bundle, 'spam');
     await friend.messaging.startConversation(old.ref, old.bundle, 'hi, it is me');
     expect(await owner.messaging.sync()).toBe(2);
-    await owner.messaging.block(spam);
+    await owner.messaging.block(await across(blocked.db, spam, owner.db));
     const labelOf = async (text: string) => {
       for (const c of await listConversations(owner.db)) {
         if ((await listMessages(owner.db, c.id)).some((m) => m.text === text)) return c.label;
@@ -491,45 +556,46 @@ describe('key rotation', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
     await sender.messaging.sync();
-    const first = (await getConversation(owner.db, conv))!.myKey!;
+    const first = (await getConversation(owner.db, mine))!.myKey!;
 
     // Before it's due: the same key.
     clock += 5 * DAY;
-    await owner.messaging.send(conv, 'still the same key');
-    expect((await getConversation(owner.db, conv))!.myKey).toBe(first);
+    await owner.messaging.send(mine, 'still the same key');
+    expect((await getConversation(owner.db, mine))!.myKey).toBe(first);
 
     // Due: the next message carries a new key; nothing extra is sent.
     clock += 5 * DAY;
     const sendsBefore = backend.seenEnvelopes.length;
-    await owner.messaging.send(conv, 'a new key comes with this');
+    await owner.messaging.send(mine, 'a new key comes with this');
     expect(backend.seenEnvelopes.length).toBe(sendsBefore + 1);
-    const second = (await getConversation(owner.db, conv))!.myKey!;
+    const second = (await getConversation(owner.db, mine))!.myKey!;
     expect(second).not.toBe(first);
     expect(await sender.messaging.sync()).toBe(2);
     expect((await getConversation(sender.db, conv))!.peerKey).toBe(second);
 
     // The old key stays while they haven't written to the new one...
-    expect((await convKeys(owner.db, conv)).map((k) => [k.pub, k.deleteAfter])).toEqual([
+    expect((await convKeys(owner.db, mine)).map((k) => [k.pub, k.deleteAfter])).toEqual([
       [first, undefined],
       [second, undefined],
     ]);
     clock += 40 * DAY;
     await owner.messaging.maintain();
-    expect((await convKeys(owner.db, conv)).length).toBe(2);
+    expect((await convKeys(owner.db, mine)).length).toBe(2);
 
     // ...and goes 35 days after they have.
     await sender.messaging.send(conv, 'got your new key');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await convKeys(owner.db, conv)).find((k) => k.pub === first)!.deleteAfter).toBe(clock + KEY_RETENTION_MS);
+    expect((await convKeys(owner.db, mine)).find((k) => k.pub === first)!.deleteAfter).toBe(clock + KEY_RETENTION_MS);
     clock += 34 * DAY;
     await owner.messaging.maintain();
-    expect((await convKeys(owner.db, conv)).length).toBe(2);
+    expect((await convKeys(owner.db, mine)).length).toBe(2);
     clock += 2 * DAY;
     await owner.messaging.maintain();
-    expect((await convKeys(owner.db, conv)).map((k) => k.pub)).toEqual([second]);
-    expect(await getSealed(owner.db, (await convKeys(owner.db, conv))[0]!.name)).toBeDefined();
+    expect((await convKeys(owner.db, mine)).map((k) => k.pub)).toEqual([second]);
+    expect(await getSealed(owner.db, (await convKeys(owner.db, mine))[0]!.name)).toBeDefined();
     // Still talking.
     await sender.messaging.send(conv, 'still here');
     expect(await owner.messaging.sync()).toBe(1);
@@ -597,31 +663,32 @@ describe('unblocking', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
     await sender.messaging.sync();
 
-    await owner.messaging.block(conv);
+    await owner.messaging.block(mine);
     await sender.messaging.send(conv, 'lost while blocked');
     // A new conversation through the link is dropped too.
     await sender.messaging.startConversation(ref, bundle, 'lost as well');
     expect(await owner.messaging.sync()).toBe(0);
     // Blocks used to delete the keys: unblocking copes either way.
-    await scheduleKeyDeletion(owner.db, (e) => e.conv === conv, 0);
+    await scheduleKeyDeletion(owner.db, (e) => e.conv === mine, 0);
     await owner.messaging.maintain();
 
     const before = backend.quietSends.length;
-    await owner.messaging.unblock(conv);
-    expect((await getConversation(owner.db, conv))!.status).toBe('active');
+    await owner.messaging.unblock(mine);
+    expect((await getConversation(owner.db, mine))!.status).toBe('active');
     // One quiet key update went out: no Telegram notice for them.
     expect(backend.quietSends.slice(before)).toEqual([true]);
     await sender.messaging.sync();
     await sender.messaging.send(conv, 'can you hear me now?');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['hello', 'hi', 'can you hear me now?']);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['hello', 'hi', 'can you hear me now?']);
     // And new conversations through the link get through again.
     const other = await sender.messaging.startConversation(ref, bundle, 'a fresh start');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await getConversation(owner.db, other))!.status).toBe('active');
+    expect((await getConversation(owner.db, await across(sender.db, other, owner.db)))!.status).toBe('active');
   });
 
   it('needs nothing sent when the owner never replied', async () => {
@@ -631,9 +698,10 @@ describe('unblocking', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.block(conv);
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.block(mine);
     const sends = backend.seenEnvelopes.length;
-    await owner.messaging.unblock(conv);
+    await owner.messaging.unblock(mine);
     expect(backend.seenEnvelopes.length).toBe(sends);
     await sender.messaging.send(conv, 'still writing to your link');
     expect(await owner.messaging.sync()).toBe(1);
@@ -648,11 +716,12 @@ describe('healing dead mailboxes', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
     await sender.messaging.sync();
     // The server no longer has the owner's reply mailbox, nor one in the pool
     // (as after an account was replaced on the same device).
-    const dead = (await getConversation(owner.db, conv))!.myMailbox!;
+    const dead = (await getConversation(owner.db, mine))!.myMailbox!;
     backend.mailboxes.delete(dead);
     const pool = (await getMeta<string[]>(owner.db, 'mailbox-pool'))!;
     backend.mailboxes.delete(pool[0]!);
@@ -660,11 +729,11 @@ describe('healing dead mailboxes', () => {
     expect(await owner.messaging.sync()).toBe(0);
 
     await owner.messaging.maintain();
-    expect((await getConversation(owner.db, conv))!.myMailbox).toBeNull();
+    expect((await getConversation(owner.db, mine))!.myMailbox).toBeNull();
     expect(await getMeta<string[]>(owner.db, 'mailbox-pool')).not.toContain(pool[0]);
     // The next message carries a new reply mailbox; their answer arrives.
-    await owner.messaging.send(conv, 'are you there?');
-    expect((await getConversation(owner.db, conv))!.myMailbox).not.toBe(dead);
+    await owner.messaging.send(mine, 'are you there?');
+    expect((await getConversation(owner.db, mine))!.myMailbox).not.toBe(dead);
     await sender.messaging.sync();
     await sender.messaging.send(conv, 'yes!');
     expect(await owner.messaging.sync()).toBe(1);
@@ -679,12 +748,14 @@ describe('reactions', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    const [hello] = await listMessages(owner.db, conv);
-    const reactionOf = async (who: typeof owner, side: 'mine' | 'theirs') => (await listMessages(who.db, conv))[0]!.reactions?.[side]?.e;
+    const mine = await across(sender.db, conv, owner.db);
+    const [hello] = await listMessages(owner.db, mine);
+    const reactionOf = async (who: typeof owner, side: 'mine' | 'theirs') =>
+      (await listMessages(who.db, who === owner ? mine : conv))[0]!.reactions?.[side]?.e;
 
     // The owner reacts to the sender's message: shown at once, sent with no notice.
     const quiet = backend.quietSends.length;
-    await owner.messaging.react(conv, hello!.id, '❤️');
+    await owner.messaging.react(mine, hello!.id, '❤️');
     expect(backend.quietSends.slice(quiet)).toEqual([true]);
     expect(await reactionOf(owner, 'mine')).toBe('❤️');
     expect(await sender.messaging.sync()).toBe(1);
@@ -693,9 +764,9 @@ describe('reactions', () => {
     expect((await listMessages(sender.db, conv))[0]).toMatchObject({ text: 'hello', out: true });
 
     // Changed, then taken back.
-    await owner.messaging.react(conv, hello!.id, '👍');
+    await owner.messaging.react(mine, hello!.id, '👍');
     const thumbs = backend.seenEnvelopes.at(-1)!;
-    await owner.messaging.react(conv, hello!.id, '');
+    await owner.messaging.react(mine, hello!.id, '');
     expect(await sender.messaging.sync()).toBe(2);
     expect(await reactionOf(sender, 'theirs')).toBe('');
     // The older one delivered again doesn't bring it back.
@@ -736,11 +807,12 @@ describe('deleting for both sides', () => {
     await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
     await sender.messaging.send(conv, 'oops');
     expect(await owner.messaging.sync()).toBe(3);
+    const mine = await across(sender.db, conv, owner.db);
     const [hello, pic, oops] = await listMessages(sender.db, conv);
     // They downloaded the photo; they haven't opened the conversation.
-    await owner.messaging.fetchMedia(pic!.id);
+    await owner.messaging.fetchMedia(mine, pic!.id);
     expect(backend.uploads.size).toBe(1);
-    const unread = (await getConversation(owner.db, conv))!.unread;
+    const unread = (await getConversation(owner.db, mine))!.unread;
 
     const quiet = backend.quietSends.length;
     await sender.messaging.deleteForEveryone(conv, oops!.id);
@@ -752,9 +824,9 @@ describe('deleting for both sides', () => {
     expect(backend.uploads.size).toBe(0);
     // Gone there too, with the downloaded photo, and from the unread count.
     expect(await owner.messaging.sync()).toBe(2);
-    expect((await listMessages(owner.db, conv)).map((m) => m.id)).toEqual([hello!.id]);
-    expect(await getMedia(owner.db, pic!.id)).toBeUndefined();
-    expect((await getConversation(owner.db, conv))!.unread).toBe(unread - 2);
+    expect((await listMessages(owner.db, mine)).map((m) => m.id)).toEqual([hello!.id]);
+    expect(await getMedia(owner.db, mine, pic!.id)).toBeUndefined();
+    expect((await getConversation(owner.db, mine))!.unread).toBe(unread - 2);
   });
 
   it('drops a message whose delete arrives first, and keeps no empty conversation', async () => {
@@ -769,8 +841,9 @@ describe('deleting for both sides', () => {
     // The delete arrives before the message.
     backend.inboxes.get('owner')!.reverse();
     expect(await owner.messaging.sync()).toBe(0);
-    expect(await listMessages(owner.db, conv)).toEqual([]);
-    const c = await getConversation(owner.db, conv);
+    const mine = await across(sender.db, conv, owner.db);
+    expect(await listMessages(owner.db, mine)).toEqual([]);
+    const c = await getConversation(owner.db, mine);
     expect(c?.hidden).toBe(true);
     expect(c?.deleted?.map((d) => d.id)).toEqual([hello!.id]);
     expect((await listConversations(owner.db)).filter((x) => !x.hidden)).toEqual([]);
@@ -783,26 +856,27 @@ describe('deleting for both sides', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'my reply');
+    const local = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(local, 'my reply');
     await sender.messaging.sync();
     const reply = (await listMessages(sender.db, conv)).find((m) => !m.out)!;
     // Their message can't be deleted for both sides from here.
     await expect(sender.messaging.deleteForEveryone(conv, reply.id)).rejects.toThrow();
     // A modified app naming their message in a delete: their app ignores it.
-    const record = (await sender.db.get('messages', reply.id))!;
+    const record = (await sender.db.get('messages', [conv, reply.id]))!;
     await sender.db.put('messages', { ...record, out: true, status: 'sent' });
     await sender.messaging.deleteForEveryone(conv, reply.id);
     expect(await owner.messaging.sync()).toBe(0);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['hello', 'my reply']);
+    expect((await listMessages(owner.db, local)).map((m) => m.text)).toEqual(['hello', 'my reply']);
     // Deleting ours for both sides takes only ours there: theirs stays.
     const [hello] = await listMessages(sender.db, conv);
     await sender.messaging.deleteForEveryone(conv, hello!.id);
     await owner.messaging.sync();
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['my reply']);
+    expect((await listMessages(owner.db, local)).map((m) => m.text)).toEqual(['my reply']);
     // Deleting our own photo only for us keeps the upload, for them to fetch.
     const photo = crypto.getRandomValues(new Uint8Array(500));
-    await owner.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 5, h: 5, m: 'image/jpeg' } });
-    const mine = (await listMessages(owner.db, conv)).at(-1)!;
+    await owner.messaging.sendMedia(local, { file: photo, media: { t: 'photo', s: photo.length, w: 5, h: 5, m: 'image/jpeg' } });
+    const mine = (await listMessages(owner.db, local)).at(-1)!;
     await owner.messaging.discardUploads([mine]);
     expect(backend.uploads.size).toBe(1);
   });
@@ -816,7 +890,8 @@ describe('deleting a whole conversation for both sides', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi back');
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi back');
     await sender.messaging.sync();
     const photo = crypto.getRandomValues(new Uint8Array(800));
     await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 8, h: 8, m: 'image/jpeg' } });
@@ -825,7 +900,7 @@ describe('deleting a whole conversation for both sides', () => {
     const inbox = backend.inboxes.get('owner')!;
     const late = inbox.pop()!;
     await owner.messaging.sync();
-    expect((await listMessages(owner.db, conv)).length).toBe(3);
+    expect((await listMessages(owner.db, mine)).length).toBe(3);
 
     // The sender deletes the whole conversation for both sides.
     const quiet = backend.quietSends.length;
@@ -836,17 +911,17 @@ describe('deleting a whole conversation for both sides', () => {
     expect(backend.uploads.size).toBe(0);
     // The owner's side: both sides' messages go, and it leaves the list.
     expect(await owner.messaging.sync()).toBe(1);
-    expect(await listMessages(owner.db, conv)).toEqual([]);
-    expect((await getConversation(owner.db, conv))!.hidden).toBe(true);
+    expect(await listMessages(owner.db, mine)).toEqual([]);
+    expect((await getConversation(owner.db, mine))!.hidden).toBe(true);
     // The message sent before it, arriving late, is dropped.
-    inbox.push(late);
+    backend.inboxes.get('owner')!.push(late);
     expect(await owner.messaging.sync()).toBe(0);
-    expect(await listMessages(owner.db, conv)).toEqual([]);
+    expect(await listMessages(owner.db, mine)).toEqual([]);
     // Writing again brings it back, on both sides.
     await sender.messaging.send(conv, 'new start');
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['new start']);
-    expect((await getConversation(owner.db, conv))!.hidden).toBe(false);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['new start']);
+    expect((await getConversation(owner.db, mine))!.hidden).toBe(false);
   });
 
   it('deletes nothing if it cannot be sent', async () => {
@@ -856,9 +931,10 @@ describe('deleting a whole conversation for both sides', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.block(conv);
-    await expect(owner.messaging.remove(conv, true)).rejects.toThrow();
-    expect((await listMessages(owner.db, conv)).length).toBe(1);
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.block(mine);
+    await expect(owner.messaging.remove(mine, true)).rejects.toThrow();
+    expect((await listMessages(owner.db, mine)).length).toBe(1);
   });
 });
 
@@ -870,7 +946,7 @@ describe('deleting uploads in the background', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'hi');
+    await owner.messaging.send(await across(sender.db, conv, owner.db), 'hi');
     await sender.messaging.sync();
     for (let i = 0; i < 9; i++) {
       const photo = crypto.getRandomValues(new Uint8Array(300 + i));
@@ -911,13 +987,14 @@ describe('editing', () => {
     expect(backend.quietSends.slice(quiet)).toEqual([true]);
     expect((await listMessages(sender.db, conv))[0]).toMatchObject({ text: 'hello', edited: expect.any(Number) });
     expect(await owner.messaging.sync()).toBe(1);
-    expect((await listMessages(owner.db, conv))[0]).toMatchObject({ text: 'hello', edited: expect.any(Number) });
+    const local = await across(sender.db, conv, owner.db);
+    expect((await listMessages(owner.db, local))[0]).toMatchObject({ text: 'hello', edited: expect.any(Number) });
     // A second edit, then the first delivered again: the second stays.
     await sender.messaging.edit(conv, mine!.id, 'hello there');
     await owner.messaging.sync();
     backend.inboxes.get('owner')!.push({ id: rand(), mailbox: bundle.mailbox, envelope: first });
     expect(await owner.messaging.sync()).toBe(0);
-    expect((await listMessages(owner.db, conv))[0]!.text).toBe('hello there');
+    expect((await listMessages(owner.db, local))[0]!.text).toBe('hello there');
     // A text message can't be emptied; the same text sends nothing.
     await expect(sender.messaging.edit(conv, mine!.id, '  ')).rejects.toThrow();
     const sends = backend.quietSends.length;
@@ -939,9 +1016,10 @@ describe('editing', () => {
     // The edit arrives first.
     backend.inboxes.get('owner')!.reverse();
     await owner.messaging.sync();
-    const theirs = (await listMessages(owner.db, conv)).at(-1)!;
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
     expect(theirs).toMatchObject({ id: pic.id, text: '', edited: expect.any(Number), media: { t: 'photo' } });
-    expect((await getConversation(owner.db, conv))!.edits).toEqual([]);
+    expect((await getConversation(owner.db, local))!.edits).toEqual([]);
   });
 
   it('only within a day of sending; their app drops a later edit, even from a modified app', async () => {
@@ -954,24 +1032,25 @@ describe('editing', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'helo');
     await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
     const [mine] = await listMessages(sender.db, conv);
 
     // Within the day: fine.
     clock += 23 * HOUR;
     await sender.messaging.edit(conv, mine!.id, 'hello');
     await owner.messaging.sync();
-    expect((await listMessages(owner.db, conv))[0]!.text).toBe('hello');
+    expect((await listMessages(owner.db, local))[0]!.text).toBe('hello');
 
     // After it (and past the receiver's hour of grace): refused here.
     clock += 3 * HOUR;
     await expect(sender.messaging.edit(conv, mine!.id, 'hello again')).rejects.toThrow();
 
     // A modified app that sends it anyway: dropped there.
-    const record = (await sender.db.get('messages', mine!.id))!;
+    const record = (await sender.db.get('messages', [conv, mine!.id]))!;
     await sender.db.put('messages', { ...record, at: clock });
     await sender.messaging.edit(conv, mine!.id, 'hello again');
     await owner.messaging.sync();
-    expect((await listMessages(owner.db, conv))[0]!.text).toBe('hello');
+    expect((await listMessages(owner.db, local))[0]!.text).toBe('hello');
   });
 
   it("can't edit the other side's messages, even from a modified app", async () => {
@@ -981,15 +1060,16 @@ describe('editing', () => {
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
-    await owner.messaging.send(conv, 'my words');
+    const local = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(local, 'my words');
     await sender.messaging.sync();
     const theirs = (await listMessages(sender.db, conv)).find((m) => !m.out)!;
     await expect(sender.messaging.edit(conv, theirs.id, 'not your words')).rejects.toThrow();
-    const record = (await sender.db.get('messages', theirs.id))!;
+    const record = (await sender.db.get('messages', [conv, theirs.id]))!;
     await sender.db.put('messages', { ...record, out: true, status: 'sent' });
     await sender.messaging.edit(conv, theirs.id, 'not your words');
     expect(await owner.messaging.sync()).toBe(0);
-    expect((await listMessages(owner.db, conv)).map((m) => m.text)).toEqual(['hello', 'my words']);
+    expect((await listMessages(owner.db, local)).map((m) => m.text)).toEqual(['hello', 'my words']);
   });
 });
 
@@ -1023,20 +1103,21 @@ describe('attachments', () => {
     // Ours shows at once, from this device.
     const mine = (await listMessages(sender.db, conv)).at(-1)!;
     expect(mine).toMatchObject({ text: 'see this', file: 'local', status: 'sent', media: { t: 'file', n: 'notes.pdf', s: big.length } });
-    expect(await getMedia(sender.db, mine.id)).toEqual(big);
+    expect(await getMedia(sender.db, conv, mine.id)).toEqual(big);
 
     // Theirs arrives without the file, then fetches it.
     expect(await owner.messaging.sync()).toBe(1);
-    const theirs = (await listMessages(owner.db, conv)).at(-1)!;
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
     expect(theirs).toMatchObject({ text: 'see this', file: 'remote', media: { t: 'file', n: 'notes.pdf' } });
-    expect(await getMedia(owner.db, theirs.id)).toBeUndefined();
-    expect(await owner.messaging.fetchMedia(theirs.id)).toBe('local');
-    expect(await getMedia(owner.db, theirs.id)).toEqual(big);
-    expect((await listMessages(owner.db, conv)).at(-1)!.file).toBe('local');
+    expect(await getMedia(owner.db, local, theirs.id)).toBeUndefined();
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    expect(await getMedia(owner.db, local, theirs.id)).toEqual(big);
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('local');
     // Kept in the bucket until it's saved outside the app...
     expect(backend.uploads.size).toBe(1);
     // ...or the conversation is deleted here.
-    await owner.messaging.remove(conv);
+    await owner.messaging.remove(local);
     await owner.messaging.flushUploadDeletes();
     expect(backend.uploads.size).toBe(0);
   });
@@ -1052,31 +1133,32 @@ describe('attachments', () => {
     await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
     await sender.messaging.sendMedia(conv, { file: notes, media: { t: 'file', s: notes.length, n: 'notes.pdf' } });
     await owner.messaging.sync();
-    const [first, second] = (await listMessages(owner.db, conv)).filter((m) => m.media);
-    await owner.messaging.fetchMedia(first!.id);
-    await owner.messaging.fetchMedia(second!.id);
-    expect(await mediaUsage(owner.db)).toEqual({ total: 8000, byConversation: { [conv]: 8000 } });
+    const local = await across(sender.db, conv, owner.db);
+    const [first, second] = (await listMessages(owner.db, local)).filter((m) => m.media);
+    await owner.messaging.fetchMedia(local, first!.id);
+    await owner.messaging.fetchMedia(local, second!.id);
+    expect(await mediaUsage(owner.db)).toEqual({ total: 8000, byConversation: { [local]: 8000 } });
 
     // Only what's older than the cutoff goes.
     expect(await clearMedia(owner.db, { before: first!.at })).toBe(0);
     // A conversation's attachments go; their messages stay, marked cleared.
     expect(await clearMedia(owner.db, { conv: 'another' })).toBe(0);
-    expect(await clearMedia(owner.db, { conv })).toBe(8000);
+    expect(await clearMedia(owner.db, { conv: local })).toBe(8000);
     expect(await mediaUsage(owner.db)).toEqual({ total: 0, byConversation: {} });
-    expect(await getMedia(owner.db, first!.id)).toBeUndefined();
-    expect((await listMessages(owner.db, conv)).filter((m) => m.media).map((m) => m.file)).toEqual(['cleared', 'cleared']);
+    expect(await getMedia(owner.db, local, first!.id)).toBeUndefined();
+    expect((await listMessages(owner.db, local)).filter((m) => m.media).map((m) => m.file)).toEqual(['cleared', 'cleared']);
 
     // A tap fetches one again while the server keeps it.
-    expect(await owner.messaging.fetchMedia(first!.id)).toBe('local');
-    expect(await getMedia(owner.db, first!.id)).toEqual(photo);
+    expect(await owner.messaging.fetchMedia(local, first!.id)).toBe('local');
+    expect(await getMedia(owner.db, local, first!.id)).toEqual(photo);
     // Ours too: the sender clears both and fetches one back.
     expect(await clearMedia(sender.db)).toBe(8000);
     const [mine] = (await listMessages(sender.db, conv)).filter((m) => m.media);
-    expect(await sender.messaging.fetchMedia(mine!.id)).toBe('local');
-    expect(await getMedia(sender.db, mine!.id)).toEqual(photo);
+    expect(await sender.messaging.fetchMedia(conv, mine!.id)).toBe('local');
+    expect(await getMedia(sender.db, conv, mine!.id)).toEqual(photo);
     // Once the upload is gone, a cleared one is gone for good.
     backend.uploads.clear();
-    expect(await owner.messaging.fetchMedia(second!.id)).toBe('gone');
+    expect(await owner.messaging.fetchMedia(local, second!.id)).toBe('gone');
   });
 
   it('marks an attachment gone when the upload has expired', async () => {
@@ -1089,9 +1171,281 @@ describe('attachments', () => {
     await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
     backend.uploads.clear();
     await owner.messaging.sync();
-    const theirs = (await listMessages(owner.db, conv)).at(-1)!;
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
     expect(theirs.media).toMatchObject({ t: 'photo', w: 10, h: 10 });
-    expect(await owner.messaging.fetchMedia(theirs.id)).toBe('gone');
-    expect((await listMessages(owner.db, conv)).at(-1)!.file).toBe('gone');
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('gone');
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('gone');
+  });
+});
+
+describe('IDs from another conversation', () => {
+  // A owns a link and got an anonymous message there, from V. A modified app
+  // lets A reuse that conversation's IDs in messages to suspects, through
+  // their links or in chats A has with them openly. Nothing a suspect's app
+  // does in return may depend on whether it holds those IDs: V's app must
+  // answer exactly as W's does.
+  async function setting() {
+    const backend = await fakeBackend();
+    const a = await person(backend, 'a');
+    const v = await person(backend, 'v');
+    const w = await person(backend, 'w');
+    const linkA = await linkOf(backend, a);
+    const anon = await v.messaging.startConversation(linkA.ref, linkA.bundle, 'guess who');
+    expect(await a.messaging.sync()).toBe(1);
+    const [m] = await listMessages(a.db, await across(v.db, anon, a.db));
+    const suspects = [
+      { who: v, link: await linkOf(backend, v) },
+      { who: w, link: await linkOf(backend, w) },
+    ];
+    return { a, v, w, linkV: suspects[0]!.link, suspects, anon, messageId: m!.id, convId: (await getConversation(v.db, anon))!.wire };
+  }
+
+  it('a first message through their link that reuses a message ID is shown and seen like any other', async () => {
+    const s = await setting();
+    for (const { who, link } of s.suspects) {
+      nextIds(rand(), s.messageId);
+      const probe = await s.a.messaging.startConversation(link.ref, link.bundle, 'hello?');
+      expect((await listMessages(s.a.db, probe)).map((m) => m.id)).toEqual([s.messageId]);
+      expect(await who.messaging.sync()).toBe(1);
+      const there = await across(s.a.db, probe, who.db);
+      expect((await listMessages(who.db, there)).map((m) => [m.id, m.text])).toEqual([[s.messageId, 'hello?']]);
+      // Opened, it's seen: their receipt names it.
+      await who.messaging.markSeen(there);
+      expect(await s.a.messaging.sync()).toBe(1);
+      expect((await listMessages(s.a.db, probe)).map((m) => m.status)).toEqual(['seen']);
+    }
+    // V's own conversation is as it was.
+    expect((await listMessages(s.v.db, s.anon)).map((m) => [m.id, m.text, m.status])).toEqual([[s.messageId, 'guess who', 'sent']]);
+  });
+
+  it('in a chat they already have, a message that reuses a message ID is shown, seen, and named as the last', async () => {
+    const s = await setting();
+    for (const { who, link } of s.suspects) {
+      // A wrote to their link, and they answered.
+      const known = await s.a.messaging.startConversation(link.ref, link.bundle, 'hi, it is A');
+      await who.messaging.sync();
+      const there = await across(s.a.db, known, who.db);
+      await who.messaging.send(there, 'hi A');
+      await s.a.messaging.sync();
+      // A fresh message, then one that reuses the anonymous message's ID.
+      await s.a.messaging.send(known, 'one');
+      nextIds(s.messageId);
+      await s.a.messaging.send(known, 'two');
+      expect((await listMessages(s.a.db, known)).at(-1)!.id).toBe(s.messageId);
+      expect(await who.messaging.sync()).toBe(2);
+      expect((await listMessages(who.db, there)).map((m) => m.text)).toEqual(['hi, it is A', 'hi A', 'one', 'two']);
+      // Their next message names it as the last they got.
+      expect((await getConversation(who.db, there))!.lastReceived).toBe(s.messageId);
+      // Opened, all of it is seen.
+      await who.messaging.markSeen(there);
+      await s.a.messaging.sync();
+      expect((await listMessages(s.a.db, known)).filter((m) => m.out).map((m) => [m.text, m.status])).toEqual([
+        ['hi, it is A', 'seen'],
+        ['one', 'seen'],
+        ['two', 'seen'],
+      ]);
+    }
+    expect((await listMessages(s.v.db, s.anon)).map((m) => [m.id, m.text])).toEqual([[s.messageId, 'guess who']]);
+  });
+
+  it('reactions, edits, deletes and attachments under a reused ID reach only their own conversation', async () => {
+    const s = await setting();
+    // V also sent A a photo, anonymously: it's on V's device, under its ID.
+    const mine = crypto.getRandomValues(new Uint8Array(700));
+    await s.v.messaging.sendMedia(s.anon, { file: mine, media: { t: 'photo', s: mine.length, w: 7, h: 7, m: 'image/jpeg' } }, 'my cat');
+    await s.a.messaging.sync();
+    const photoId = (await listMessages(s.v.db, s.anon)).at(-1)!.id;
+    // In a chat A starts with V openly, A sends a photo under the same ID.
+    const known = await s.a.messaging.startConversation(s.linkV.ref, s.linkV.bundle, 'hi V');
+    const theirs = crypto.getRandomValues(new Uint8Array(900));
+    nextIds(photoId);
+    await s.a.messaging.sendMedia(known, { file: theirs, media: { t: 'photo', s: theirs.length, w: 9, h: 9, m: 'image/jpeg' } }, 'a dog');
+    expect(await s.v.messaging.sync()).toBe(2);
+    const there = await across(s.a.db, known, s.v.db);
+    expect(await s.v.messaging.fetchMedia(there, photoId)).toBe('local');
+    expect(await getMedia(s.v.db, there, photoId)).toEqual(theirs);
+    // A reacts to it and edits its caption: shown there.
+    await s.a.messaging.react(known, photoId, '👍');
+    await s.a.messaging.edit(known, photoId, 'a cat?');
+    expect(await s.v.messaging.sync()).toBe(2);
+    expect(await getMessage(s.v.db, there, photoId)).toMatchObject({ text: 'a cat?', edited: expect.any(Number), reactions: { theirs: { e: '👍' } } });
+    // Then deletes it for both sides: gone there, with its file.
+    await s.a.messaging.deleteForEveryone(known, photoId);
+    expect(await s.v.messaging.sync()).toBe(1);
+    expect(await getMessage(s.v.db, there, photoId)).toBeUndefined();
+    expect(await getMedia(s.v.db, there, photoId)).toBeUndefined();
+    // V's own photo, in the anonymous conversation, is as it was.
+    const own = (await getMessage(s.v.db, s.anon, photoId))!;
+    expect(own).toMatchObject({ text: 'my cat', file: 'local', out: true });
+    expect(own.reactions).toBeUndefined();
+    expect(own.edited).toBeUndefined();
+    expect(await getMedia(s.v.db, s.anon, photoId)).toEqual(mine);
+  });
+
+  it("a first message through their link that reuses a conversation's ID starts a chat of its own", async () => {
+    const s = await setting();
+    for (const { who, link } of s.suspects) {
+      nextIds(s.convId);
+      const probe = await s.a.messaging.startConversation(link.ref, link.bundle, 'hello?');
+      expect((await getConversation(s.a.db, probe))!.wire).toBe(s.convId);
+      const before = await listConversations(who.db);
+      expect(await who.messaging.sync()).toBe(1);
+      const added = (await listConversations(who.db)).filter((c) => !before.some((b) => b.id === c.id));
+      expect(added).toMatchObject([{ role: 'owner', wire: s.convId, unread: 1 }]);
+      const there = added[0]!.id;
+      expect((await listMessages(who.db, there)).map((m) => m.text)).toEqual(['hello?']);
+      // Opened, it's seen; an answer reaches A's probe, nothing else.
+      await who.messaging.markSeen(there);
+      expect(await s.a.messaging.sync()).toBe(1);
+      expect((await listMessages(s.a.db, probe)).map((m) => m.status)).toEqual(['seen']);
+      await who.messaging.send(there, 'who is this?');
+      expect(await s.a.messaging.sync()).toBe(1);
+      expect((await listMessages(s.a.db, probe)).map((m) => m.text)).toEqual(['hello?', 'who is this?']);
+    }
+    // The anonymous conversation carries on beside it, on both sides.
+    const anonAtA = (await listConversations(s.a.db)).find((c) => c.role === 'owner' && c.wire === s.convId)!.id;
+    await s.a.messaging.send(anonAtA, 'no idea');
+    expect(await s.v.messaging.sync()).toBe(1);
+    expect((await listMessages(s.v.db, s.anon)).map((m) => m.text)).toEqual(['guess who', 'no idea']);
+    await s.v.messaging.send(s.anon, 'ha');
+    expect(await s.a.messaging.sync()).toBe(1);
+    expect((await listMessages(s.a.db, anonAtA)).map((m) => m.text)).toEqual(['guess who', 'no idea', 'ha']);
+  });
+
+  it('two people who start a conversation through one link with the same ID get a chat each', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const p = await person(backend, 'p');
+    const q = await person(backend, 'q');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const wire = rand();
+    nextIds(wire);
+    const fromP = await p.messaging.startConversation(ref, bundle, 'from p');
+    expect(await owner.messaging.sync()).toBe(1);
+    nextIds(wire);
+    const fromQ = await q.messaging.startConversation(ref, bundle, 'from q');
+    expect(await owner.messaging.sync()).toBe(1);
+    const chats = await listConversations(owner.db);
+    expect(chats.map((c) => c.wire)).toEqual([wire, wire]);
+    const chatOf = async (first: string) => {
+      for (const c of chats) if ((await listMessages(owner.db, c.id))[0]!.text === first) return c.id;
+      throw new Error('no such chat');
+    };
+    const [toP, toQ] = [await chatOf('from p'), await chatOf('from q')];
+
+    // More from each lands in their own chat, before an answer and after.
+    await p.messaging.send(fromP, 'more from p');
+    await q.messaging.send(fromQ, 'more from q');
+    expect(await owner.messaging.sync()).toBe(2);
+    await owner.messaging.send(toP, 'to p');
+    await owner.messaging.send(toQ, 'to q');
+    expect(await p.messaging.sync()).toBe(1);
+    expect(await q.messaging.sync()).toBe(1);
+    await p.messaging.send(fromP, 'p again');
+    await q.messaging.send(fromQ, 'q again');
+    expect(await owner.messaging.sync()).toBe(2);
+    expect((await listMessages(owner.db, toP)).map((m) => m.text)).toEqual(['from p', 'more from p', 'to p', 'p again']);
+    expect((await listMessages(owner.db, toQ)).map((m) => m.text)).toEqual(['from q', 'more from q', 'to q', 'q again']);
+    expect((await listMessages(q.db, fromQ)).map((m) => m.text)).toEqual(['from q', 'more from q', 'to q', 'q again']);
+  });
+});
+
+/**
+ * A copy of a device's database as version 3 of the app kept it: each
+ * conversation under its wire ID, messages and attachments by message ID.
+ */
+async function asVersion3(db: Database, name: string): Promise<void> {
+  const conversations = await db.getAll('conversations');
+  const wire = new Map(conversations.map((c) => [c.id, c.wire]));
+  const v3 = await openDB(name, 3, {
+    upgrade(d) {
+      for (const store of ['keys', 'vault', 'meta', 'media']) d.createObjectStore(store);
+      d.createObjectStore('conversations', { keyPath: 'id' });
+      d.createObjectStore('messages', { keyPath: 'id' }).createIndex('byConversation', ['conv', 'at']);
+    },
+  });
+  for (const k of await db.getAllKeys('keys')) await v3.put('keys', await db.get('keys', k), k);
+  for (const k of await db.getAllKeys('vault')) await v3.put('vault', await db.get('vault', k), k);
+  for (const k of await db.getAllKeys('meta')) {
+    let value = await db.get('meta', k);
+    if (k === 'recipient-keys') {
+      const index = value as Record<string, KeyEntry>;
+      value = Object.fromEntries(Object.entries(index).map(([id, e]) => [id, e.conv ? { ...e, conv: wire.get(e.conv)! } : e]));
+    }
+    await v3.put('meta', value, k);
+  }
+  for (const { wire: id, firstKey: _, ...c } of conversations) await v3.put('conversations', { ...c, id });
+  for (const m of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
+  for (const [conv, id] of await db.getAllKeys('media')) await v3.put('media', await db.get('media', [conv, id]), id);
+  v3.close();
+}
+
+describe('a database from before conversations had IDs of their own', () => {
+  it('upgrades and carries on: its conversations, attachments, and what was still on its way', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const other = await person(backend, 'other');
+    const { ref, bundle } = await linkOf(backend, owner);
+    // An answered conversation with a photo, and an edit and a delete that overtook their messages.
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    await owner.messaging.send(await across(sender.db, conv, owner.db), 'hi');
+    await sender.messaging.sync();
+    const photo = crypto.getRandomValues(new Uint8Array(900));
+    await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 9, h: 9, m: 'image/jpeg' } });
+    const inbox = backend.inboxes.get('owner')!;
+    await sender.messaging.send(conv, 'helo');
+    const typo = inbox.pop()!;
+    await sender.messaging.edit(conv, (await listMessages(sender.db, conv)).at(-1)!.id, 'hello again');
+    await sender.messaging.send(conv, 'oops');
+    const oops = inbox.pop()!;
+    await sender.messaging.deleteForEveryone(conv, (await listMessages(sender.db, conv)).at(-1)!.id);
+    // And one not answered yet.
+    const unanswered = await other.messaging.startConversation(ref, bundle, 'hey');
+    expect(await owner.messaging.sync()).toBe(2);
+    const pic = (await listMessages(owner.db, await across(sender.db, conv, owner.db))).at(-1)!;
+    expect(await owner.messaging.fetchMedia(pic.conv, pic.id)).toBe('local');
+
+    // The same device as version 3 kept it, opened by this version.
+    const name = `engine-v3-${n++}`;
+    await asVersion3(owner.db, name);
+    const db = await openDatabase(name);
+    const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer });
+    // Its conversations keep the IDs they had: their wire IDs.
+    const [answered, waiting] = [(await getConversation(sender.db, conv))!.wire, (await getConversation(other.db, unanswered))!.wire];
+    expect((await listConversations(db)).map((c) => c.id).sort()).toEqual([answered, waiting].sort());
+    expect((await listMessages(db, answered)).map((m) => m.text)).toEqual(['hello', 'hi', '']);
+    expect(await getMedia(db, answered, pic.id)).toEqual(photo);
+
+    // What was still on its way arrives: the edited message edited, the deleted one not at all.
+    backend.inboxes.get('owner')!.push(typo, oops);
+    expect(await after.sync()).toBe(1);
+    expect((await listMessages(db, answered)).map((m) => [m.text, m.edited !== undefined])).toEqual([
+      ['hello', false],
+      ['hi', false],
+      ['', false],
+      ['hello again', true],
+    ]);
+
+    // Both conversations carry on, both ways: the one not answered yet still through the link.
+    await other.messaging.send(unanswered, 'still me');
+    await sender.messaging.send(conv, 'and now?');
+    expect(await after.sync()).toBe(2);
+    expect((await listMessages(db, waiting)).map((m) => m.text)).toEqual(['hey', 'still me']);
+    expect((await listMessages(db, answered)).at(-1)!.text).toBe('and now?');
+    await after.send(waiting, 'hi other');
+    await after.send(answered, 'yes');
+    expect(await other.messaging.sync()).toBe(1);
+    expect(await sender.messaging.sync()).toBe(1);
+    expect((await listMessages(sender.db, conv)).at(-1)!.text).toBe('yes');
+
+    // Someone new through the link, reusing an old conversation's ID: a chat of their own.
+    const newcomer = await person(backend, 'newcomer');
+    nextIds(waiting);
+    await newcomer.messaging.startConversation(ref, bundle, 'me too');
+    expect(await after.sync()).toBe(1);
+    expect(await listConversations(db)).toHaveLength(3);
   });
 });

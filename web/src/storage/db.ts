@@ -5,10 +5,10 @@
 // indexes: a WebKit bug breaks index queries on records that contain a
 // CryptoKey. Each schema change is a new version with its own upgrade step.
 
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
 
 export const DB_NAME = 'incognitochat';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export interface StoredKeyPair {
   privateKey: CryptoKey;
@@ -22,17 +22,30 @@ interface Schema extends DBSchema {
   vault: { key: string; value: Uint8Array<ArrayBuffer> };
   /** Small app state: account and device IDs, settings. */
   meta: { key: string; value: unknown };
-  /** Conversations (messaging/store.ts). */
-  conversations: { key: string; value: ConversationRecord };
-  /** Message history, text encrypted under the device's storage key (messaging/store.ts). */
-  messages: { key: string; value: MessageRecord; indexes: { byConversation: [string, number] } };
-  /** Attachments on this device, by message ID, encrypted under the storage key (messaging/store.ts). */
-  media: { key: string; value: Uint8Array<ArrayBuffer> };
+  /** Conversations (messaging/store.ts), by their ID on this device; byWire finds one started through our link. */
+  conversations: { key: string; value: ConversationRecord; indexes: { byWire: [string, string] } };
+  /**
+   * Message history, by conversation and message ID, text encrypted under
+   * the device's storage key (messaging/store.ts).
+   */
+  messages: { key: [string, string]; value: MessageRecord; indexes: { byConversation: [string, number] } };
+  /** Attachments on this device, by conversation and message ID, encrypted under the storage key (messaging/store.ts). */
+  media: { key: [string, string]; value: Uint8Array<ArrayBuffer> };
 }
 
-/** A conversation, as kept on the device. */
+/**
+ * A conversation, as kept on the device.
+ *
+ * Its ID here is its own, never sent: the ID in messages (wire) is chosen by
+ * whoever started it, so two conversations may share one. Messages are kept
+ * by conversation, too: an ID one conversation shares with another changes
+ * nothing in either.
+ */
 export interface ConversationRecord {
+  /** This device's ID for it. Conversations from before version 4 keep their wire ID here. */
   id: string;
+  /** Its ID in messages (`conv`), chosen by whoever started it. */
+  wire: string;
   /** owner: someone wrote to our link; sender: we wrote to someone's link. */
   role: 'owner' | 'sender';
   /** The link the conversation came through. */
@@ -53,6 +66,14 @@ export interface ConversationRecord {
   status: 'active' | 'ended' | 'blocked';
   /** For an owner: the sender's tag (base64url), to block the person and not just this conversation. */
   tag?: string;
+  /**
+   * For an owner: the key their first message came from. With the link and
+   * the wire ID, it tells this conversation apart from any other someone
+   * starts through our link with the same ID. Missing for one from before
+   * version 4 that we had answered (their key may have changed since): that
+   * one is the only one with its wire ID on its link.
+   */
+  firstKey?: string;
   /** The ID of the last message received from them. */
   lastReceived: string | null;
   /** Deleted on this device: out of the list, with no messages, until a new one comes or goes. */
@@ -78,7 +99,9 @@ export interface ConversationRecord {
 
 /** A message, as kept on the device. Only its text is sealed; times and status are local metadata. */
 export interface MessageRecord {
+  /** Its ID in messages, chosen by whoever wrote it: unique only within its conversation. */
   id: string;
+  /** The conversation's ID on this device. */
   conv: string;
   /** Unix ms shown: the sender's time, but never later than when it arrived. */
   at: number;
@@ -97,7 +120,12 @@ export interface MessageRecord {
 
 export type Database = IDBPDatabase<Schema>;
 
-const upgrades: ((db: IDBPDatabase<Schema>) => void)[] = [
+type Upgrade = (db: IDBPDatabase<Schema>, tx: IDBPTransaction<Schema, StoreNames<Schema>[], 'versionchange'>) => void | Promise<void>;
+
+// Each step's schema changes come before anything it awaits, and it awaits
+// only the upgrade's own requests, so the upgrade stays one transaction:
+// all of it happens, or none.
+const upgrades: Upgrade[] = [
   // Version 1.
   (db) => {
     db.createObjectStore('keys');
@@ -114,13 +142,67 @@ const upgrades: ((db: IDBPDatabase<Schema>) => void)[] = [
   (db) => {
     db.createObjectStore('media');
   },
+  // Version 4: IDs count only within their conversation.
+  (db, tx) => scopeIds(db as unknown as IDBPDatabase, tx as unknown as IDBPTransaction<unknown, string[], 'versionchange'>),
 ];
+
+/**
+ * Version 4. Message and conversation IDs are the other side's choice, so
+ * whether one is already on this device must change nothing they could
+ * notice. Messages and attachments are kept by (conversation, message ID),
+ * and a conversation gets an ID of its own here, apart from the one on the
+ * wire; those from before keep theirs, which was unique on the device.
+ * Untyped: it reads the stores as version 3 left them.
+ */
+async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[], 'versionchange'>): Promise<void> {
+  const conversations = tx.objectStore('conversations');
+  conversations.createIndex('byWire', ['link.id', 'wire']);
+  const before = tx.objectStore('messages');
+  before.name = 'messages-v3';
+  const messages = db.createObjectStore('messages', { keyPath: ['conv', 'id'] });
+  messages.createIndex('byConversation', ['conv', 'at']);
+  const media = tx.objectStore('media');
+
+  for (let cursor = await conversations.openCursor(); cursor; cursor = await cursor.continue()) {
+    const c = cursor.value as Omit<ConversationRecord, 'wire'>;
+    // Someone we never answered can't have changed keys: theirs is still
+    // their first. Once answered, it may have changed (firstKey stays unknown).
+    const firstKey = c.role === 'owner' && c.myKey === null ? { firstKey: c.peerKey } : {};
+    await cursor.update({ ...c, wire: c.id, ...firstKey });
+  }
+  for (let cursor = await before.openCursor(); cursor; cursor = await cursor.continue()) {
+    await messages.put(cursor.value);
+  }
+  for (const id of await media.getAllKeys()) {
+    const message = (await before.get(id)) as MessageRecord | undefined;
+    const file = message && (await media.get(id));
+    // One without its message (left by a send that never finished) was never shown: it goes.
+    if (file) await media.put(file, [message.conv, id]);
+    await media.delete(id);
+  }
+  db.deleteObjectStore('messages-v3');
+}
 
 /** Opens (and if needed creates or upgrades) the app's database. */
 export function openDatabase(name = DB_NAME): Promise<Database> {
   return openDB<Schema>(name, DB_VERSION, {
-    upgrade(db, oldVersion) {
-      for (let v = oldVersion; v < DB_VERSION; v++) upgrades[v]?.(db);
+    async upgrade(db, oldVersion, _newVersion, tx) {
+      try {
+        for (let v = oldVersion; v < DB_VERSION; v++) {
+          const step = upgrades[v]?.(db, tx);
+          if (step) await step;
+        }
+      } catch {
+        // Nothing is kept half-done: the database stays as it was, and
+        // opening it fails. (openDB rejects; so does tx.done, which nothing
+        // else waits on.)
+        tx.done.catch(() => {});
+        try {
+          tx.abort();
+        } catch {
+          // Already aborted by the request that failed.
+        }
+      }
     },
     // Another copy of the app is running an older version: let it close.
     blocking() {
