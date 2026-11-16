@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { openDB, type IDBPDatabase } from 'idb';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { concat, utf8 } from '../crypto/encoding';
 import { generateCopyableSigningKey, generateSigningKey } from '../crypto/keys';
 import { LABEL_SESSION, sign, verify } from '../crypto/signing';
@@ -18,8 +18,10 @@ import {
   openPendingEdit,
   pendingUploadDeletes,
   putMedia,
+  setFile,
+  type MessageBody,
 } from '../messaging/store';
-import { DB_VERSION, getKey, getKeyPair, getMeta, getSealed, openDatabase, putKey, putMeta, putSealed, StorageError } from './db';
+import { DB_VERSION, getKey, getKeyPair, getMeta, getSealed, openDatabase, putKey, putMeta, putSealed, StorageError, type Database } from './db';
 
 let n = 0;
 const fresh = () => openDatabase(`test-${n++}`);
@@ -249,6 +251,119 @@ describe('upgrades', () => {
     await deleteMessages(db, 'a');
     expect(await db.getAllKeys('media')).toEqual([]);
     expect(await listMessages(db, 'a')).toEqual([]);
+  });
+
+  /** A version 3 database with one photo, 'x' in conversation 'a', on the device; and an empty conversation 'b'. Opened by this version. */
+  async function oneOldPhoto(): Promise<{ db: Database; photo: Uint8Array<ArrayBuffer>; body: MessageBody }> {
+    const name = `upgrade-test-${n++}`;
+    const photo = crypto.getRandomValues(new Uint8Array(500));
+    const body: MessageBody = { text: '', media: { t: 'photo', s: photo.length, id: 'upload', k: 'a2V5', d: 'c2VjcmV0' } };
+    await version3(name, async (v3) => {
+      const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      await v3.put('keys', key, 'storage-key');
+      for (const id of ['a', 'b']) await v3.put('conversations', { id, role: 'sender', link: { id: 'L', fingerprint: 'F' }, myKey: 'k' });
+      await v3.put('messages', { id: 'x', conv: 'a', at: 1, out: false, status: 'read', file: 'local', sealed: await sealed(key, 'x', utf8(JSON.stringify(body))) });
+      await v3.put('media', await sealed(key, 'media:x', photo), 'x');
+    });
+    return { db: await openDatabase(name), photo, body };
+  }
+
+  it('never lets the same ID in another conversation reach, move or delete an old file', async () => {
+    const { db, photo, body } = await oneOldPhoto();
+    const untouched = async () => {
+      expect(await db.getKey('media', 'x')).toBe('x');
+      expect((await getMessage(db, 'a', 'x'))!.legacyFile).toBe(true);
+      expect(await getMedia(db, 'a', 'x')).toEqual(photo);
+    };
+    const theirs = crypto.getRandomValues(new Uint8Array(700));
+    const arrive = (file: 'remote' | 'local') => addMessage(db, { id: 'x', conv: 'b', at: 2, out: false, status: 'received', file }, body);
+
+    await arrive('remote');
+    expect(await getMedia(db, 'b', 'x')).toBeUndefined();
+    await untouched();
+    await putMedia(db, 'b', 'x', theirs);
+    expect(await getMedia(db, 'b', 'x')).toEqual(theirs);
+    await untouched();
+    await setFile(db, 'b', 'x', 'local');
+    expect(await clearMedia(db, { conv: 'b' })).toBe(photo.length);
+    expect(await getMedia(db, 'b', 'x')).toBeUndefined();
+    await untouched();
+    await putMedia(db, 'b', 'x', theirs);
+    await deleteMessage(db, 'b', 'x');
+    await untouched();
+    await arrive('local');
+    await putMedia(db, 'b', 'x', theirs);
+    await deleteMessages(db, 'b');
+    await untouched();
+    expect(await db.getAllKeys('media')).toEqual(['x']);
+  });
+
+  it('finds and deletes a moved file even if a stale write marks it old again', async () => {
+    const { db, photo } = await oneOldPhoto();
+    const stale = async () => {
+      // As a write from a copy read before the move would leave it.
+      await putMedia(db, 'a', 'x', photo);
+      const record = (await db.get('messages', ['a', 'x']))!;
+      await db.put('messages', { ...record, file: 'local', legacyFile: true });
+      expect(await db.getAllKeys('media')).toEqual([['a', 'x']]);
+      expect(await getMedia(db, 'a', 'x')).toEqual(photo);
+    };
+    await stale();
+    expect(await clearMedia(db, { conv: 'a' })).toBe(photo.length);
+    expect(await db.getAllKeys('media')).toEqual([]);
+    await stale();
+    await deleteMessages(db, 'b');
+    await deleteMessage(db, 'a', 'x');
+    expect(await db.getAllKeys('media')).toEqual([]);
+    await addMessage(db, { id: 'x', conv: 'a', at: 1, out: false, status: 'read', file: 'local' }, { text: '' });
+    await stale();
+    await deleteMessages(db, 'a');
+    expect(await db.getAllKeys('media')).toEqual([]);
+  });
+
+  it('upgrades more messages than one batch takes, marking exactly those whose file is on the device', async () => {
+    const name = `upgrade-test-${n++}`;
+    const id = (i: number) => `m${String(i).padStart(4, '0')}`;
+    const total = 1234;
+    // Spread over all three batches of 500, at their edges too.
+    const local = [0, 100, 200, 300, 400, 499, 500, 501, 600, 700, 800, 900, 999, 1000, 1100, 1200, 1233];
+    await version3(name, async (v3) => {
+      await v3.put('conversations', { id: 'c', role: 'sender', link: { id: 'L', fingerprint: 'F' }, myKey: 'k' });
+      const tx = v3.transaction(['messages', 'media'], 'readwrite');
+      for (let i = 0; i < total; i++) {
+        const file = local.includes(i) ? 'local' : i === 7 ? 'remote' : i === 8 ? 'cleared' : undefined;
+        void tx.objectStore('messages').put({ id: id(i), conv: 'c', at: i, out: false, status: 'read', ...(file ? { file } : {}), sealed: new Uint8Array(1) });
+      }
+      // Files under the IDs of messages that show them as here, and leftovers:
+      // under the IDs of messages that don't (still to fetch, cleared, none at
+      // all), and under no message's ID.
+      for (const i of [...local, 7, 8, 9]) void tx.objectStore('media').put(new Uint8Array(4), id(i));
+      void tx.objectStore('media').put(new Uint8Array(4), 'stray');
+      await tx.done;
+    });
+    const db = await openDatabase(name);
+    expect(await db.count('messages')).toBe(total);
+    expect([...db.objectStoreNames]).not.toContain('messages-v3');
+    const marked = (await db.getAll('messages')).filter((m) => m.legacyFile).map((m) => m.id);
+    expect(marked).toEqual(local.map(id));
+    expect(await db.getAllKeys('media')).toEqual(local.map(id));
+    expect((await db.getAll('messages')).map((m) => m.id)).toEqual(Array.from({ length: total }, (_, i) => id(i)));
+  });
+
+  it('closes at once when a newer copy of the app needs the database, and reloads', async () => {
+    const name = `upgrade-test-${n++}`;
+    const reload = vi.fn();
+    vi.stubGlobal('location', { reload });
+    try {
+      await openDatabase(name);
+      let blocked = false;
+      const newer = await openDB(name, DB_VERSION + 1, { blocked: () => (blocked = true) });
+      expect(blocked).toBe(false);
+      expect(reload).toHaveBeenCalledOnce();
+      newer.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("leaves a database it can't upgrade as it was, and says why", async () => {

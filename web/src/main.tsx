@@ -27,6 +27,9 @@ const language = pickLanguage(launch.userLanguage, navigator.language);
 applyLanguage(language);
 applyTheme(launch.themeParams);
 
+/** How long the storage may wait for another copy of the app before the app says so. */
+const BLOCKED_DELAY_MS = 500;
+
 if (telegram) {
   telegram.on('theme_changed', (d) => applyTheme(d.theme_params));
   telegram.on('safe_area_changed', (d) => applyInsets({ safe: d }));
@@ -49,14 +52,21 @@ async function main(): Promise<void> {
   const profile = await profileFor(launch.userId);
   useProfile(profile);
   let db: Database;
+  // Another copy holding the storage open: said only if it doesn't let go
+  // at once (an older copy closes and reloads on its own, within moments).
+  let blocked: ReturnType<typeof setTimeout> | undefined;
   try {
     db = await openDatabase(databaseName(profile), {
       // Shown until the other copy closes; then the app starts over it.
-      onBlocked: () => render(<StorageScreen problem="blocked" language={language} />, root),
+      onBlocked: () => (blocked ??= setTimeout(() => render(<StorageScreen problem="blocked" language={language} />, root), BLOCKED_DELAY_MS)),
     });
   } catch (err) {
+    // On this device only, for whoever debugs it: the app sends no logs.
+    console.error(err instanceof StorageError ? err.cause : err);
     render(<StorageScreen problem={err instanceof StorageError ? err.kind : 'failed'} language={language} />, root);
     return;
+  } finally {
+    clearTimeout(blocked);
   }
   void requestPersistence();
 

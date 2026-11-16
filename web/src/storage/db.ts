@@ -123,8 +123,10 @@ export interface MessageRecord {
   /**
    * Its file is in the media store under its message ID alone, as version 3
    * kept it (IDs were unique on the device then): the upgrade leaves files
-   * where they are, since moving them would need as much space again. Until
-   * the file goes; any file stored since is under (conversation, message ID).
+   * where they are, since moving them would need as much space again, and
+   * marks only messages whose file was on the device ('local'). Until the
+   * file goes or moves; any file stored since is under (conversation,
+   * message ID), and deleting a marked message's file deletes both.
    */
   legacyFile?: true;
 }
@@ -184,6 +186,8 @@ const upgrades: Upgrade[] = [
  * Untyped: it reads the stores as version 3 left them.
  */
 async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[], 'versionchange'>): Promise<void> {
+  /** How many messages it copies at a time. */
+  const MIGRATION_BATCH = 500;
   const conversations = tx.objectStore('conversations');
   conversations.createIndex('byWire', ['link.id', 'wire']);
   const before = tx.objectStore('messages');
@@ -206,19 +210,22 @@ async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[],
   const files = new Set(await media.getAllKeys());
   const kept = new Set<IDBValidKey>();
   for (let after: string | undefined; ; ) {
-    const batch = (await before.getAll(after === undefined ? null : IDBKeyRange.lowerBound(after, true), 500)) as MessageRecord[];
+    const batch = (await before.getAll(after === undefined ? null : IDBKeyRange.lowerBound(after, true), MIGRATION_BATCH)) as MessageRecord[];
     if (batch.length === 0) break;
     await Promise.all(
       batch.map((m) => {
-        if (!files.has(m.id)) return messages.put(m);
+        // Only a message whose file is on the device owns the file under its
+        // ID; any other one there is a leftover it must not pick up.
+        if (m.file !== 'local' || !files.has(m.id)) return messages.put(m);
         kept.add(m.id);
         return messages.put({ ...m, legacyFile: true });
       }),
     );
     after = batch[batch.length - 1]!.id;
   }
-  // A file without its message (left by a send that never finished) was
-  // never shown: it goes. Deleting needs no space.
+  // Any other file (left by a send that never finished, or one whose message
+  // doesn't show it as here) was never shown: it goes. Deleting needs no
+  // space. One whose message can fetch it downloads it again.
   for (const key of files) if (!kept.has(key)) await media.delete(key);
   db.deleteObjectStore('messages-v3');
 }
@@ -257,8 +264,10 @@ export async function openDatabase(name = DB_NAME, { onBlocked }: { onBlocked?: 
       blocked() {
         onBlocked?.();
       },
-      // Another copy of the app is running an older version: let it close.
-      blocking() {
+      // Another copy of the app is running a newer version: close at once, so
+      // it needn't wait for the reload, which then brings that version.
+      blocking(_current, _blocked, event) {
+        (event.target as IDBDatabase).close();
         location.reload();
       },
     });

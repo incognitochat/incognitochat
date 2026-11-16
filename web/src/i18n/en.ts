@@ -297,9 +297,9 @@ export const en = {
   tryAgain: 'Try again',
   continue: 'Continue',
 
-  storageFailed: "Couldn't update this app's storage. Free some space on the device and try again.",
+  storageFailed: "Couldn't open this app's storage. Free some space on the device and try again.",
   storageNewer: 'A newer version of this app has been used on this device. Reload to continue.',
-  storageBlocked: 'Close other copies of this app that are open to continue.',
+  storageBlocked: 'If this app is also open somewhere else, close it there to continue.',
   reload: 'Reload',
 } as const;
 
