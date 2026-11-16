@@ -115,6 +115,21 @@ func TestDirectoryCapacity(t *testing.T) {
 		t.Fatalf("lookup read %.1f units", d.Read)
 	}
 
+	// A replacement refused by the day's limit doesn't list the partition.
+	for {
+		if ok, _ := h.server.Limits.Allow(context.Background(), "reg#"+directory.TelegramHash(h.server.Pepper, big.user), RegistrationsPerDay, 24*time.Hour); !ok {
+			break
+		}
+	}
+	replace := other.registration(t, h.now, nil)
+	replace["replace"] = true
+	tb.meter.Reset()
+	status, out := h.post(t, "/register", replace)
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if d, _ := tb.cost(t, "POST /register replace, refused by the daily limit"); d.Read > 2 {
+		t.Fatalf("a refused replacement read %.1f units", d.Read)
+	}
+
 	// Replays of one launch are counted, the retries and refusals too, and
 	// once the day's attempts are used up nothing is read.
 	body := big.registration(t, h.now, nil)
@@ -125,7 +140,7 @@ func TestDirectoryCapacity(t *testing.T) {
 		}
 	}
 	tb.meter.Reset()
-	status, out := h.post(t, "/register", body)
+	status, out = h.post(t, "/register", body)
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
 	if d, _ := tb.cost(t, "POST /register, attempts used up"); refused == 0 || d.Read != 0 {
 		t.Fatalf("%d refused; refusal read %.1f units", refused, d.Read)
