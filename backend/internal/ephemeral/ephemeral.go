@@ -6,9 +6,9 @@
 //	S#<nonce>  S              a spent send token's nonce
 //	Q#<key>    Q              a quiet period (e.g. after a notice)
 //	R#<key>    <window start> a rate counter (c)
-//	C#, K#                    open sockets (sockets.go)
+//	C#<account> <connection>  a socket (sockets.go)
 //
-// Only socket records hold an account ID, while the app is open.
+// Only socket records hold an account ID, for at most a socket's lifetime.
 package ephemeral
 
 import (
