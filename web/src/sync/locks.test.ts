@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { openChannel, useProfile, withLock, type SyncEvent } from './locks';
+import { openChannel, useProfile, withLock, withLockIfFree, type SyncEvent } from './locks';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,6 +36,28 @@ describe('withLock', () => {
 
   it('runs directly where Web Locks are missing', async () => {
     expect(await withLock('none', async () => 42, undefined)).toBe(42);
+  });
+});
+
+describe('withLockIfFree', () => {
+  it('runs holding the lock when nobody has it, and gives up at once when somebody does', async () => {
+    expect(await withLockIfFree('test-free', async () => 1)).toEqual({ value: 1 });
+    let release!: () => void;
+    const holding = withLock('test-free', () => new Promise<void>((r) => (release = r)));
+    let ran = false;
+    expect(
+      await withLockIfFree('test-free', async () => {
+        ran = true;
+      }),
+    ).toBeNull();
+    expect(ran).toBe(false);
+    release();
+    await holding;
+    expect(await withLockIfFree('test-free', async () => 2)).toEqual({ value: 2 });
+  });
+
+  it('runs directly where Web Locks are missing', async () => {
+    expect(await withLockIfFree('none', async () => 42, undefined)).toEqual({ value: 42 });
   });
 
   it('releases the lock when the task fails', async () => {

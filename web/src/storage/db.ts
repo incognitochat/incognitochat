@@ -94,6 +94,12 @@ export interface ConversationRecord {
   unread: number;
   /** blocked: our mailbox is discarded and anything more from them is dropped. */
   status: 'active' | 'ended' | 'blocked';
+  /**
+   * Being unblocked: we've moved off the discarded mailbox, but the quiet key
+   * update telling them our new one hasn't gone out yet. It stays blocked
+   * until it has; unblocking again sends it.
+   */
+  unblocking?: true;
   /** For an owner: the sender's tag (base64url), to block the person and not just this conversation. */
   tag?: string;
   /**

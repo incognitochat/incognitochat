@@ -442,8 +442,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   conversations from them are dropped too. Silent: their sends still look
   accepted. **Unblocking** forgets the tag and, if we had a mailbox, sends
   them a quiet `key_update` from a new mailbox (and a new key if ours is
-  gone), so their app writes there from then on. What they sent meanwhile is
-  lost. Only `message` sends trigger a Telegram notice.
+  gone), so their app writes there from then on; until that has gone out, the
+  conversation stays blocked, and unblocking again sends it. What they sent
+  meanwhile is lost. Only `message` sends trigger a Telegram notice.
 
 ## Media
 

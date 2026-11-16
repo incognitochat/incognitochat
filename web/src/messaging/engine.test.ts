@@ -14,7 +14,7 @@ import { countTokens, LOW_WATER } from '../account/wallet';
 import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
-import { createMessaging } from './engine';
+import { createMessaging, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
@@ -27,13 +27,13 @@ vi.mock('../protocol/message', async (importOriginal) => {
 
 // Storing a message can be held up (pause.before), so a test can run
 // something else in the middle of taking a message in.
-const pause = vi.hoisted(() => ({ before: null as null | ((conv: string) => Promise<void>) }));
+const pause = vi.hoisted(() => ({ before: null as null | ((conv: string, text: string) => Promise<void>) }));
 vi.mock('./store', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./store')>();
   return {
     ...actual,
     addMessage: async (...args: Parameters<typeof actual.addMessage>) => {
-      await pause.before?.(args[1].conv);
+      await pause.before?.(args[1].conv, args[2].text);
       return actual.addMessage(...args);
     },
   };
@@ -1805,6 +1805,56 @@ describe('envelopes through the mailbox they belong to', () => {
   });
 });
 
+/** Another copy of the app on someone's device: the same storage, its own engine. */
+function copyOf(backend: Awaited<ReturnType<typeof fakeBackend>>, p: Person, extra: Partial<MessagingDeps> = {}) {
+  return createMessaging({ db: p.db, api: backend.api, session: p.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, ...extra });
+}
+
+/** A gate: reached once something comes to it, and everything waits there until released. */
+function gate() {
+  let reach!: () => void;
+  let release!: () => void;
+  const reached = new Promise<void>((r) => (reach = r));
+  const open = new Promise<void>((r) => (release = r));
+  return { reached, release, pass: () => (reach(), open) };
+}
+
+/** Holds every send (POST /send) at a gate. */
+function holdSends(backend: Awaited<ReturnType<typeof fakeBackend>>) {
+  const g = gate();
+  const request = backend.api.request;
+  backend.api.request = async (method, path, init, check) => {
+    if (method === 'POST' && path === '/send') await g.pass();
+    return request(method, path, init, check);
+  };
+  return g;
+}
+
+/** Holds someone's requests for new mailboxes at a gate (their pool is emptied, so taking one asks). */
+async function holdNewMailboxes(p: Person) {
+  await putMeta(p.db, 'mailbox-pool', []);
+  const g = gate();
+  const call = p.session.call;
+  p.session.call = async (method, path, body, check, options) => {
+    if (method === 'POST' && path === '/mailboxes') await g.pass();
+    return call(method, path, body, check, options);
+  };
+  return g;
+}
+
+/** Fails someone's next request for new mailboxes (their pool is emptied, so taking one asks). */
+async function failNewMailboxes(p: Person, err: Error) {
+  await putMeta(p.db, 'mailbox-pool', []);
+  const call = p.session.call;
+  p.session.call = async (method, path, body, check, options) => {
+    if (method === 'POST' && path === '/mailboxes') {
+      p.session.call = call;
+      throw err;
+    }
+    return call(method, path, body, check, options);
+  };
+}
+
 describe('our side changing a chat while something of theirs comes in', () => {
   it('keeps the mailbox and key our first reply takes while a message is being taken in', async () => {
     const backend = await fakeBackend();
@@ -1847,6 +1897,183 @@ describe('our side changing a chat while something of theirs comes in', () => {
     expect(await owner.messaging.sync()).toBe(1);
     expect((await listMessages(owner.db, mine)).map((m) => m.text).sort()).toEqual(['hi', 'one', 'three', 'two']);
   });
+
+  it("doesn't wait for a send of ours going out: that chat's message waits for the next sync, and the app is told when", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [sender, other] = [await person(backend, 'sender'), await person(backend, 'other')];
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    const conv2 = await other.messaging.startConversation(ref, bundle, 'x');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await sender.messaging.send(conv, 'two');
+    await other.messaging.send(conv2, 'y');
+    let told = 0;
+    const app = copyOf(backend, owner, { onWaiting: () => told++ });
+    const sending = holdSends(backend);
+    const replying = app.send(mine, 'hi');
+    await sending.reached;
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('sync waited for the send')), 2000));
+    expect(await Promise.race([app.sync(), timeout])).toBe(1);
+    expect(backend.inboxes.get('owner')).toHaveLength(1);
+    expect(told).toBe(0);
+    sending.release();
+    await replying;
+    await vi.waitFor(() => expect(told).toBe(1));
+    expect(await app.sync()).toBe(1);
+    expect(backend.inboxes.get('owner')).toEqual([]);
+    expect((await listMessages(owner.db, mine)).map((m) => m.text).sort()).toEqual(['hi', 'one', 'two']);
+  });
+});
+
+describe('our side changing a chat', () => {
+  async function setting() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await sender.messaging.send(conv, 'two');
+    expect(await owner.messaging.sync()).toBe(2);
+    return { backend, owner, sender, conv, mine: await across(sender.db, conv, owner.db) };
+  }
+
+  it('shows a new message at once while one before it is still going out', async () => {
+    const { backend, owner, mine } = await setting();
+    await owner.messaging.send(mine, 'first reply');
+    const sending = holdSends(backend);
+    const one = owner.messaging.send(mine, 'a');
+    await sending.reached;
+    let shown = false;
+    const two = owner.messaging.send(mine, 'b', undefined, () => {
+      shown = true;
+    });
+    // 'b' waits for 'a' to go out, but shows already.
+    await waitingFor(`send:${mine}`);
+    expect(shown).toBe(true);
+    sending.release();
+    await Promise.all([one, two]);
+  });
+
+  it('two quick first replies take one mailbox, which the sender then writes to', async () => {
+    const { backend, owner, sender, conv, mine } = await setting();
+    // The second is stored only once the first is out, from what the chat was before.
+    let firstOut!: () => void;
+    const out = new Promise<void>((r) => (firstOut = r));
+    pause.before = async (c, text) => {
+      if (c === mine && text === 'b') await out;
+    };
+    await Promise.all([owner.messaging.send(mine, 'a').then(firstOut), owner.messaging.send(mine, 'b')]);
+    const c = (await getConversation(owner.db, mine))!;
+    expect(c.formerMailboxes ?? []).toEqual([]);
+    // Whichever reply the sender takes in last names the mailbox it writes to.
+    backend.inboxes.get('sender')!.reverse();
+    expect(await sender.messaging.sync()).toBe(2);
+    expect((await getConversation(sender.db, conv))!.sendTo).toBe(c.myMailbox);
+    await sender.messaging.send(conv, 'got both');
+    expect(await owner.messaging.sync()).toBe(1);
+  });
+
+  for (const read of ['markRead', 'markSeen'] as const) {
+    it(`${read} while our first reply takes a mailbox keeps both`, async () => {
+      const { owner, sender, conv, mine } = await setting();
+      const taking = await holdNewMailboxes(owner);
+      const replying = owner.messaging.send(mine, 'hi');
+      await taking.reached;
+      const reading = owner.messaging[read](mine);
+      await Promise.race([reading, waitingFor(`send:${mine}`)]);
+      taking.release();
+      await Promise.all([replying, reading]);
+      const c = (await getConversation(owner.db, mine))!;
+      expect(c.unread).toBe(0);
+      expect(c.myMailbox).not.toBeNull();
+      await sender.messaging.sync();
+      await sender.messaging.send(conv, 'three');
+      expect(await owner.messaging.sync()).toBe(1);
+    });
+  }
+
+  it('blocking while our first reply takes a mailbox discards that mailbox', async () => {
+    const { backend, owner, mine } = await setting();
+    const taking = await holdNewMailboxes(owner);
+    const replying = owner.messaging.send(mine, 'hi');
+    await taking.reached;
+    const blocking = owner.messaging.block(mine);
+    await Promise.race([blocking, waitingFor(`send:${mine}`)]);
+    taking.release();
+    await Promise.all([replying, blocking]);
+    const c = (await getConversation(owner.db, mine))!;
+    expect(c.status).toBe('blocked');
+    expect(c.myMailbox).not.toBeNull();
+    expect(backend.mailboxes.has(c.myMailbox!)).toBe(false);
+  });
+
+  for (const failing of ['taking a mailbox', 'sending'] as const) {
+    it(`unblocking again after its key update failed (${failing}) still sends it`, async () => {
+      const { backend, owner, sender, conv, mine } = await setting();
+      await owner.messaging.send(mine, 'hi');
+      await sender.messaging.sync();
+      await owner.messaging.block(mine);
+      if (failing === 'taking a mailbox') {
+        await failNewMailboxes(owner, new NetworkError('down'));
+      } else {
+        const request = backend.api.request;
+        backend.api.request = async (method, path, init, check) => {
+          if (method === 'POST' && path === '/send') {
+            backend.api.request = request;
+            throw new NetworkError('down');
+          }
+          return request(method, path, init, check);
+        };
+      }
+      await expect(owner.messaging.unblock(mine)).rejects.toThrow(NetworkError);
+      expect((await getConversation(owner.db, mine))!.status).toBe('blocked');
+      const quiet = backend.quietSends.length;
+      await owner.messaging.unblock(mine);
+      const c = (await getConversation(owner.db, mine))!;
+      expect([c.status, c.unblocking]).toEqual(['active', undefined]);
+      expect(backend.quietSends.slice(quiet)).toEqual([true]);
+      await sender.messaging.sync();
+      await sender.messaging.send(conv, 'back?');
+      expect(await owner.messaging.sync()).toBe(1);
+    });
+  }
+
+  it("doesn't get stuck when everything runs at once, across two copies of the app", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const tab = copyOf(backend, owner);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const senders: Person[] = [];
+    for (let i = 0; i < 4; i++) senders.push(await person(backend, `s${i}`));
+    const convs: string[] = [];
+    for (const s of senders) convs.push(await s.messaging.startConversation(ref, bundle, 'first'));
+    await owner.messaging.sync();
+    const mine: string[] = [];
+    for (const [i, s] of senders.entries()) mine.push(await across(s.db, convs[i]!, owner.db));
+    for (const [i, s] of senders.entries()) for (let k = 0; k < 3; k++) await s.messaging.send(convs[i]!, `m${k}`);
+    const ops: Promise<unknown>[] = [owner.messaging.sync(), tab.sync(), owner.messaging.maintain(), tab.maintain()];
+    for (const [i, id] of mine.entries()) {
+      ops.push(owner.messaging.markSeen(id), tab.markSeen(id), owner.messaging.send(id, `reply ${i}`), tab.send(id, `reply again ${i}`), owner.messaging.markRead(id), tab.sync());
+    }
+    ops.push(
+      (async () => {
+        await owner.messaging.block(mine[3]!);
+        await tab.unblock(mine[3]!);
+      })(),
+    );
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('stuck')), 20_000));
+    const results = await Promise.race([Promise.allSettled(ops), timeout]);
+    expect(results.filter((r) => r.status === 'rejected').map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+    await owner.messaging.sync();
+    for (const s of senders) await s.messaging.sync();
+    for (const [i, s] of senders.entries()) await s.messaging.send(convs[i]!, 'after');
+    expect(await owner.messaging.sync()).toBe(4);
+    for (const [i, s] of senders.entries()) {
+      expect((await listMessages(s.db, convs[i]!)).filter((m) => !m.out).map((m) => m.text).sort()).toEqual([`reply ${i}`, `reply again ${i}`].sort());
+    }
+  }, 30_000);
 });
 
 describe('links from before their intro mailbox was kept', () => {
@@ -1962,6 +2189,21 @@ describe('links from before their intro mailbox was kept', () => {
       expect(await owner.messaging.sync()).toBe(1);
       expect((await listLinks(owner.db)).find((l) => l.id === ref.id)!.mailbox).toBe(bundle.mailbox);
     }
+  });
+
+  it('learn it at upkeep even when another upkeep step fails', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    await asBefore(owner.db);
+    // Topping up the mailbox pool is refused today.
+    await failNewMailboxes(owner, new ApiError(429, 'rate_limited'));
+    await expect(owner.messaging.maintain()).rejects.toThrow(ApiError);
+    expect(await linkMailboxes(owner.db)).toEqual({ links: [bundle.mailbox], keys: [bundle.mailbox] });
+    expect((await listConversations(owner.db))[0]!.intro).toBe(bundle.mailbox);
   });
 
   it('learn it at upkeep too, and keep it on chats through the link', async () => {

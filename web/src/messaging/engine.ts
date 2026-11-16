@@ -33,7 +33,7 @@ import type { Session } from '../net/session';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import { EDIT_GRACE_MS, EDIT_WINDOW_MS, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
 import { getMeta, getSealed, putMeta, type ConversationRecord, type Database } from '../storage/db';
-import { withLock } from '../sync/locks';
+import { withLock, withLockIfFree } from '../sync/locks';
 import {
   conversationKey,
   createConversationKey,
@@ -150,6 +150,12 @@ export interface MessagingDeps {
   wait?: (ms: number) => Promise<void>;
   /** Called after send tokens were spent or fetched, so the app can say when they run low. */
   onTokens?: () => void;
+  /**
+   * Called when a sync left something unconfirmed because a send of ours was
+   * going out in its chat, once that send is done: syncing again then takes
+   * it in.
+   */
+  onWaiting?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -285,8 +291,10 @@ export function createMessaging(deps: MessagingDeps) {
     const at = now();
     const answer = replyTo ? { replyTo } : {};
     await addMessage(db, { id, conv: conversation.id, at, out: true, status: 'sending' }, { text: '', ...content, ...answer });
-    await update(conversation.id, (c) => ({ ...c, lastAt: at, hidden: false }));
+    // Shown now; its chat's place in the list may wait for a send of ours
+    // still going out there.
     await onStored?.();
+    await update(conversation.id, (c) => ({ ...c, lastAt: at, hidden: false }));
     try {
       await transmit(conversation.id, { kind: 'message', id, at, ...content, ...answer });
       // Unless their receipt came in first.
@@ -317,8 +325,8 @@ export function createMessaging(deps: MessagingDeps) {
     const body = (media: LocalMedia) => ({ text: caption, ...(replyTo ? { replyTo } : {}), media });
     await putMedia(db, conv, id, out.file);
     await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(out.media));
-    await update(conv, (c) => ({ ...c, lastAt: at, hidden: false }));
     await onStored?.(id);
+    await update(conv, (c) => ({ ...c, lastAt: at, hidden: false }));
     try {
       const media = await upload(out, onProgress);
       await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(media));
@@ -673,15 +681,19 @@ export function createMessaging(deps: MessagingDeps) {
   async function block(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (!c) return;
-    if (c.myMailbox) {
-      try {
-        await session.call('POST', `/mailboxes/${c.myMailbox}/discard`, undefined, checkObject);
-      } catch (err) {
-        if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
-      }
-    }
     if (c.role === 'owner' && c.tag) await addBlockedTag(c.link.fingerprint, c.tag);
-    await update(conv, (current) => ({ ...current, status: 'blocked', unread: 0 }));
+    // Under the chat's lock: a reply of ours going out takes its mailbox
+    // first, and that's the one discarded. Again if blocking is tried again.
+    await update(conv, async (current) => {
+      if (current.myMailbox) {
+        try {
+          await session.call('POST', `/mailboxes/${current.myMailbox}/discard`, undefined, checkObject);
+        } catch (err) {
+          if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
+        }
+      }
+      return { ...current, status: 'blocked', unread: 0 };
+    });
   }
 
   /**
@@ -694,17 +706,20 @@ export function createMessaging(deps: MessagingDeps) {
   async function unblock(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (!c || c.status !== 'blocked') return;
-    if (c.myMailbox !== null) {
-      await update(conv, async (current) => {
-        // Blocks used to delete the conversation's keys: then a new one.
-        const keyKept = current.myKey !== null && (await hasKey(db, current.myKey));
-        return { ...current, myMailbox: null, myKey: keyKept ? current.myKey : null, ...retire(current, current.myMailbox) };
-      });
-      // If this fails, it stays blocked, and unblocking can be tried again.
-      await transmit(c.id, { kind: 'key_update', id: newId(), at: now() });
-    }
+    let tell = false;
+    await update(conv, async (current) => {
+      if (current.status !== 'blocked') return null;
+      // A try that didn't get the key update out has left the discarded mailbox already.
+      tell = current.unblocking === true || current.myMailbox !== null;
+      if (current.unblocking || current.myMailbox === null) return null;
+      // Blocks used to delete the conversation's keys: then a new one.
+      const keyKept = current.myKey !== null && (await hasKey(db, current.myKey));
+      return { ...current, myMailbox: null, myKey: keyKept ? current.myKey : null, unblocking: true, ...retire(current, current.myMailbox) };
+    });
+    // If this fails, it stays blocked, and unblocking again sends it.
+    if (tell) await transmit(c.id, { kind: 'key_update', id: newId(), at: now() });
     if (c.role === 'owner' && c.tag) await removeBlockedTag(c.link.fingerprint, c.tag);
-    await update(conv, (current) => ({ ...current, status: 'active' }));
+    await update(conv, ({ unblocking: _, ...current }) => ({ ...current, status: 'active' }));
   }
 
   /**
@@ -834,13 +849,14 @@ export function createMessaging(deps: MessagingDeps) {
     return withLock('messaging-sync', async () => {
       let received = 0;
       unresolved = new Map();
+      const busy = new Set<string>();
       for (let page = 0; page < MAX_INBOX_PAGES; page++) {
         const { items, more } = await session.call('GET', '/inbox', undefined, checkInbox);
         if (items.length === 0) break;
         const held = new Set<string>();
         for (const item of items) {
           try {
-            if (await receive(item)) received++;
+            if (await receive(item, busy)) received++;
           } catch (err) {
             if (!(err instanceof NotYet)) throw err;
             held.add(item.id);
@@ -853,12 +869,18 @@ export function createMessaging(deps: MessagingDeps) {
         if (done.length > 0) await session.call('POST', '/ack', { ids: done }, checkObject);
         if (!more || done.length === 0) break;
       }
+      // Once each chat that was busy is free, the app syncs again for what waits.
+      for (const id of busy) void withLock(`send:${id}`, async () => {}).then(() => deps.onWaiting?.());
       return received;
     });
   }
 
-  /** Handles one inbox item; returns whether it changed anything shown (a new message, a receipt, an end). */
-  async function receive(item: InboxItem): Promise<boolean> {
+  /**
+   * Handles one inbox item; returns whether it changed anything shown (a new
+   * message, a receipt, an end). Throws NotYet for one to leave in the inbox:
+   * its chat is busy (added to busy), or its link can't be asked now.
+   */
+  async function receive(item: InboxItem, busy: Set<string>): Promise<boolean> {
     let message: Message;
     let keyId: Uint8Array;
     try {
@@ -926,8 +948,13 @@ export function createMessaging(deps: MessagingDeps) {
     }
     // The rest reads and writes the conversation under the lock our sends in
     // it hold: else a reply going out meanwhile (taking a mailbox and a key)
-    // would be undone by this writing back what it read before.
-    return withLock(`send:${local}`, () => takeIn(item, message, entry, t, local, fresh));
+    // would be undone by this writing back what it read before. If a send
+    // holds it now, this waits for the next sync rather than holding up
+    // everything else coming in.
+    const taken = await withLockIfFree(`send:${local}`, () => takeIn(item, message, entry, t, local, fresh));
+    if (taken) return taken.value;
+    busy.add(local);
+    throw new NotYet();
   }
 
   /** Takes an envelope into its conversation (receive), under that conversation's send lock. */
@@ -1132,24 +1159,46 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Upkeep, run at a random moment after the app opens: tops up the mailbox
    * pool and the token wallet, so neither is fetched right before a send;
-   * deletes old keys whose time has come; gives the link a new key when due.
+   * deletes old keys whose time has come; fills in what older versions
+   * didn't keep (links' intro mailboxes); gives the link a new key when due.
    */
   async function maintain(): Promise<void> {
-    await flushUploadDeletes();
-    await healMailboxes();
-    if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
-    if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
-      await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
-      deps.onTokens?.();
+    const steps = [
+      flushUploadDeletes,
+      healMailboxes,
+      async () => {
+        if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
+      },
+      async () => {
+        if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
+          await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
+          deps.onTokens?.();
+        }
+      },
+      async () => {
+        if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
+          await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
+        }
+      },
+      async () => {
+        if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
+      },
+      backfillLinks,
+      backfillIntros,
+      () => rotateLinkKey(db, session, Math.floor(now() / 1000)),
+    ];
+    // Each on its own: one that fails (out of reach, or a daily limit
+    // reached) doesn't keep the others from running. The first failure is
+    // reported once all have run.
+    let failure: { err: unknown } | null = null;
+    for (const step of steps) {
+      try {
+        await step();
+      } catch (err) {
+        failure ??= { err };
+      }
     }
-    if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
-      await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
-    }
-    // Deleting old keys needs no network, so it goes first.
-    if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
-    await backfillLinks();
-    await backfillIntros();
-    await rotateLinkKey(db, session, Math.floor(now() / 1000));
+    if (failure) throw failure.err;
   }
 
   /**
