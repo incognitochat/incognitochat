@@ -4,12 +4,15 @@
 //
 // $connect checks the session token, sent as the second subprotocol
 // (new WebSocket(url, ["v1", token])) so it never appears in a URL, and
-// records the connection; $disconnect forgets it; anything else is the app's
-// heartbeat, answered so the socket isn't closed as idle.
+// records the connection (ephemeral.Sockets.Open, which also limits connects);
+// anything else is the app's heartbeat, answered so the socket isn't closed
+// as idle. $disconnect isn't routed here: a closed socket's record goes when
+// a push finds it gone, when a connect needs its place, or once it expires.
 package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -34,7 +37,6 @@ const Protocol = "v1"
 // Sockets records open connections (ephemeral.Sockets).
 type Sockets interface {
 	Open(ctx context.Context, account, connection string) error
-	Close(ctx context.Context, connection string) error
 }
 
 type handler struct {
@@ -91,20 +93,27 @@ func (h *handler) handle(ctx context.Context, req events.APIGatewayWebsocketProx
 		if err != nil {
 			return status(http.StatusForbidden), nil
 		}
-		if err := h.sockets.Open(ctx, claims.AccountID, conn); err != nil {
+		err = h.sockets.Open(ctx, claims.AccountID, conn)
+		switch {
+		case errors.Is(err, ephemeral.ErrTooManyConnects):
+			// The app tries again later, and polls meanwhile. Logged with
+			// nothing about the account or connection, to count how often
+			// the limit is met.
+			h.log.Warn("connect refused: too many")
+			return status(http.StatusTooManyRequests), nil
+		case errors.Is(err, ephemeral.ErrTidy):
+			// Recorded; only old records are left over. Refusing would make
+			// the app retry and record another.
+			h.log.Warn("connect tidying failed", logx.ErrorKind(err))
+		case err != nil:
 			h.log.Warn("connect failed", logx.ErrorKind(err))
 			return status(http.StatusInternalServerError), nil
 		}
 		resp := status(http.StatusOK)
 		resp.Headers = map[string]string{"Sec-WebSocket-Protocol": Protocol}
 		return resp, nil
-	case "$disconnect":
-		if err := h.sockets.Close(ctx, conn); err != nil {
-			h.log.Warn("disconnect failed", logx.ErrorKind(err))
-		}
-		return status(http.StatusOK), nil
 	default:
-		// The heartbeat: nothing to do.
+		// The heartbeat (and $disconnect, if it were routed here): nothing to do.
 		return status(http.StatusOK), nil
 	}
 }

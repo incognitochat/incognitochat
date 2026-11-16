@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/session"
@@ -25,11 +27,6 @@ func (m *memSockets) Open(_ context.Context, account, conn string) error {
 		return m.fail
 	}
 	m.open[conn] = account
-	return nil
-}
-
-func (m *memSockets) Close(_ context.Context, conn string) error {
-	delete(m.open, conn)
 	return nil
 }
 
@@ -59,13 +56,15 @@ func TestHandle(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || resp.Headers["Sec-WebSocket-Protocol"] != "v1" || sockets.open["c1"] != account {
 		t.Fatalf("connect: %+v, %v", resp, sockets.open)
 	}
-	// Heartbeats are answered; disconnect forgets.
+	// Heartbeats are answered; a disconnect costs nothing: the record goes
+	// when a push finds the socket gone, or when it expires.
 	if resp, _ := h.handle(ctx, request("$default", "c1", nil)); resp.StatusCode != http.StatusOK {
 		t.Fatalf("heartbeat: %d", resp.StatusCode)
 	}
-	if resp, _ := h.handle(ctx, request("$disconnect", "c1", nil)); resp.StatusCode != http.StatusOK || len(sockets.open) != 0 {
+	if resp, _ := h.handle(ctx, request("$disconnect", "c1", nil)); resp.StatusCode != http.StatusOK || len(sockets.open) != 1 {
 		t.Fatalf("disconnect: %d %v", resp.StatusCode, sockets.open)
 	}
+	delete(sockets.open, "c1")
 
 	// Refused: no token, wrong protocol, a bad or expired token.
 	for _, protocols := range []string{"", "v1", "v2, " + token, token, "v1, nonsense", "v1, " + token + ", extra"} {
@@ -81,13 +80,38 @@ func TestHandle(t *testing.T) {
 		t.Fatalf("refused connections recorded: %v", sockets.open)
 	}
 
-	// A store failure: refused, logged without the connection or token.
+	// Too many connects: refused, and counted in the logs with nothing about
+	// the account, connection or token.
 	h.now = func() time.Time { return now }
+	sockets.fail = ephemeral.ErrTooManyConnects
+	if resp, _ := h.handle(ctx, request("$connect", "c5", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token})); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("too many connects: %d", resp.StatusCode)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("connect refused")) {
+		t.Fatalf("not logged: %s", logs.String())
+	}
+	for _, secret := range []string{"c5", token, account, device} {
+		if bytes.Contains(logs.Bytes(), []byte(secret)) {
+			t.Fatalf("logs leak %q: %s", secret, logs.String())
+		}
+	}
+	logs.Reset()
+
+	// Recorded, but old records couldn't be deleted: the connect stands
+	// (refusing would make the app retry and record another), and it's
+	// logged without the connection or token.
+	sockets.fail = fmt.Errorf("%w: boom c6 %s", ephemeral.ErrTidy, token)
+	resp, _ = h.handle(ctx, request("$connect", "c6", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token}))
+	if resp.StatusCode != http.StatusOK || resp.Headers["Sec-WebSocket-Protocol"] != "v1" || logs.Len() == 0 {
+		t.Fatalf("tidying failure: %+v, logs %q", resp, logs.String())
+	}
+
+	// A store failure: refused, logged without the connection or token.
 	sockets.fail = errors.New("boom c4 " + token)
 	if resp, _ := h.handle(ctx, request("$connect", "c4", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token})); resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("store failure: %d", resp.StatusCode)
 	}
-	if bytes.Contains(logs.Bytes(), []byte("c4")) || bytes.Contains(logs.Bytes(), []byte(token)) {
+	if bytes.Contains(logs.Bytes(), []byte("c4")) || bytes.Contains(logs.Bytes(), []byte("c6")) || bytes.Contains(logs.Bytes(), []byte(token)) {
 		t.Fatalf("logs leak: %s", logs.String())
 	}
 }

@@ -6,9 +6,14 @@
 //	S#<nonce>  S              a spent send token's nonce
 //	Q#<key>    Q              a quiet period (e.g. after a notice)
 //	R#<key>    <window start> a rate counter (c)
-//	C#, K#                    open sockets (sockets.go)
+//	C#<account> <connection>  a socket (sockets.go)
 //
-// Only socket records hold an account ID, while the app is open.
+// Socket records and notice quiet periods (Q#notice#<account>) hold an
+// account ID, neither with an exact time. A socket's record lasts from a
+// connect until a push finds the socket closed, a later connect needs the
+// place, the account is deleted, or a connect or push finds it expired (40
+// minutes after the minute it opened, rounded up to the minute; TTL itself
+// can take days, and an expired record is never used).
 package ephemeral
 
 import (

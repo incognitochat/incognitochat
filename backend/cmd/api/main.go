@@ -127,6 +127,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 		o.RequestChecksumCalculation = awsv2.RequestChecksumCalculationWhenRequired
 	})
 	now := time.Now
+	sockets := &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now}
 	return &api.Server{
 		Telegram:    initdata.NewVerifier(botID),
 		Sessions:    issuer,
@@ -145,8 +146,9 @@ func setup(ctx context.Context) (*api.Server, error) {
 		Notices:     &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
 		Media:       &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
 		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Sockets:     sockets,
 		Push: &push.Pusher{
-			Sockets: &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+			Sockets: sockets,
 			API: apigatewaymanagementapi.NewFromConfig(aws, func(o *apigatewaymanagementapi.Options) {
 				o.BaseEndpoint = &wsEndpoint
 			}),

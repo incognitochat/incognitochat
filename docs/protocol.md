@@ -131,9 +131,10 @@ launch, never one that names a link or an invitation, and stores nothing.
 account's waiting envelopes, links (their bundles then answer "not found"),
 mailboxes (sends to them get the usual answer and are dropped), invitation
 codes, device list, devices and the account itself, and the item that keeps
-one account per Telegram user, so the same user can set up again. Unlike a
-replacement, it keeps no marker; only rate-limit counters and socket records
-remain until they expire (within about a day). The daily limits (send and
+one account per Telegram user, so the same user can set up again, and, in
+the last step, its socket records. Unlike a replacement, it keeps no
+marker; only rate-limit counters remain until they expire (within about a
+day; DynamoDB can take longer to delete them). The daily limits (send and
 media tokens, new mailboxes, link changes, notice setups, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that
 keeps one account per user, so deleting an account and setting up again
@@ -374,12 +375,27 @@ each mailbox's owner, to deliver, but not who writes to it.
   the session token as the second subprotocol, never in a URL). After a
   delivery the server sends the owner's open sockets `{"t":"sync"}` and nothing
   else; the app then fetches its inbox. The Telegram notice goes out only if
-  no socket took the push. Receipts are pushed but never noticed. The server
-  pushes to an account's 5 newest sockets only; opening more drops the
-  oldest from its records. The app
-  sends a heartbeat about every 5 minutes and keeps the socket only while
-  it's visible. The server keeps a socket's account and connection ID until
-  it closes (at most 2 h 10 min).
+  no socket took the push. Receipts are pushed but never noticed. The app
+  sends a heartbeat about every 5 minutes, keeps the socket only while it's
+  visible, and replaces it with a new one about every 30 minutes.
+
+  The server doesn't hear when a socket closes. It keeps a record of each
+  socket (account ID, connection ID, and when it expires: 40 minutes after
+  the minute it opened, rounded up to the minute) until a push finds the
+  socket closed, a later connect needs the place, the account is deleted, or
+  a connect or push finds it expired; DynamoDB's TTL can take days to delete
+  an expired record, which is never used. A socket an app keeps open longer
+  than that (an older app that doesn't replace it) gets no pushes, and the
+  app polls. A delivery is pushed to the account's most recently opened
+  sockets first, 5 at a time, passing over closed ones (each found closed is
+  forgotten), until 5 have taken it. An account can open about 5 sockets a
+  minute (UTC minutes) and keep about 10 records; more connects are refused,
+  and the app tries again later, polling meanwhile. These are about, not
+  exact: connects at the same moment are checked against what each read
+  before writing. A connect at 7 records forgets the oldest, which may be of
+  a socket still open; that one gets no pushes until its app replaces it.
+  The app opens the replacement before closing the old socket, and keeps the
+  old one if the replacement is refused.
 - `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
   conversation); a link's intro mailbox ends with the link.
 - `POST /mailboxes/check {ids}` returns which of the given mailboxes aren't
