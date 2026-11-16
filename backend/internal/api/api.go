@@ -52,6 +52,8 @@ type Directory interface {
 	Create(ctx context.Context, n directory.NewAccount) error
 	Replace(ctx context.Context, old directory.Account, n directory.NewAccount, now time.Time) error
 	Device(ctx context.Context, accountID, deviceID string, now time.Time) (directory.Device, error)
+	// LoginDevice is Device for /session, eventually consistent.
+	LoginDevice(ctx context.Context, accountID, deviceID string, now time.Time) (directory.Device, error)
 	CreateLink(ctx context.Context, accountID string, l directory.Link, max int) error
 	Link(ctx context.Context, id string) (directory.Link, error)
 	// Bundle is Link for anyone, eventually consistent.

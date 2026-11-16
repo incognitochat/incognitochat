@@ -117,7 +117,7 @@ func (s *Store) SetLevel(ctx context.Context, level, allowance int) error {
 // maxAllocated is the most uses they may have put into codes after this one
 // (their allowance plus grants); admins pass -1 for no limit. It returns
 // ErrConflict if the code is taken, and ErrLimit if the member has too few
-// invitations left.
+// invitations left, or the account is gone or replaced.
 func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, uses, ownerLevel, maxAllocated int) error {
 	k := codeKey(code)
 	writes := []types.TransactWriteItem{
@@ -144,6 +144,13 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 				":uses": nv(int64(uses)),
 				":most": nv(int64(maxAllocated - uses)),
 			},
+		}})
+	} else {
+		// An admin's account must still be there (a member's level says so).
+		writes = append(writes, types.TransactWriteItem{ConditionCheck: &types.ConditionCheck{
+			TableName:           &s.Table,
+			Key:                 key(accountPK(accountID), skAccount),
+			ConditionExpression: aws.String("attribute_exists(ak)"),
 		}})
 	}
 	reasons, err := s.transactReasons(ctx, writes)

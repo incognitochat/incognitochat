@@ -146,12 +146,12 @@ func TestDirectoryCapacity(t *testing.T) {
 		t.Fatalf("%d refused; refusal read %.1f units", refused, d.Read)
 	}
 
-	// Logins: one read, and what can be refused without the device's key
-	// reads nothing.
+	// Logins: one eventually consistent read, and what can be refused
+	// without the device's key reads nothing.
 	if status, _ := h.post(t, "/session", m.d.login(t, h.now)); status != http.StatusOK {
 		t.Fatalf("login: %d", status)
 	}
-	if d, _ := tb.cost(t, "POST /session"); d.Read != 1 {
+	if d, _ := tb.cost(t, "POST /session"); d.Read != 0.5 {
 		t.Fatalf("a login read %.1f units", d.Read)
 	}
 	stranger := newDevice(t)
@@ -160,8 +160,8 @@ func TestDirectoryCapacity(t *testing.T) {
 		t.Fatalf("stranger: %d", status)
 	}
 	// DynamoDB Local reports nothing for a query that finds nothing;
-	// DynamoDB charges the minimum, 1 unit.
-	if d, _ := tb.cost(t, "POST /session, random IDs"); d.Read > 1 {
+	// DynamoDB charges the minimum, half a unit.
+	if d, _ := tb.cost(t, "POST /session, random IDs"); d.Read > 0.5 {
 		t.Fatalf("a login read %.1f units", d.Read)
 	}
 	stale := m.d.login(t, h.now.Add(-time.Hour))

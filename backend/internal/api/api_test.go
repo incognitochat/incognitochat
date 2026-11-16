@@ -474,6 +474,10 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	return nil
 }
 
+func (m *memDirectory) LoginDevice(ctx context.Context, account, device string, now time.Time) (directory.Device, error) {
+	return m.Device(ctx, account, device, now)
+}
+
 func (m *memDirectory) Device(_ context.Context, account, device string, _ time.Time) (directory.Device, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

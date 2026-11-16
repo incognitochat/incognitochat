@@ -49,7 +49,9 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 		return httpapi.Error(http.StatusUnauthorized, "login_refused")
 	}
 
-	device, err := s.Directory.Device(ctx, in.Account, in.Device, now)
+	// Eventually consistent, at half the cost: every request with the token
+	// reads the device again, strongly, so one just replaced is refused then.
+	device, err := s.Directory.LoginDevice(ctx, in.Account, in.Device, now)
 	if errors.Is(err, directory.ErrNotFound) {
 		return httpapi.Error(http.StatusUnauthorized, "login_refused")
 	}

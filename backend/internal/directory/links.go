@@ -92,8 +92,8 @@ func (s *Store) oldLinkWrites(accountID string, old Link) []types.TransactWriteI
 
 // ReplaceLink swaps an account's link for a new one in one step: the old
 // link and its intro mailbox go, the new one takes its place, and the link
-// count stays the same. It returns ErrNotFound unless the account owns oldID,
-// and ErrConflict if the new ID is taken.
+// count stays the same. It returns ErrNotFound unless the account (still
+// there, not replaced) owns oldID, and ErrConflict if the new ID is taken.
 func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link) error {
 	if oldID == l.ID {
 		return ErrConflict
@@ -104,8 +104,16 @@ func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link
 	}
 	writes := append(s.oldLinkWrites(accountID, old), s.newLinkWrites(accountID, l)...)
 	writes = append(writes, s.introMailboxWrites(accountID, l.ID, l.Mailbox)...)
+	// As for every item made in the partition: a replaced account's item is
+	// only a marker, with no account key, and nothing new joins it.
+	writes = append(writes, types.TransactWriteItem{ConditionCheck: &types.ConditionCheck{
+		TableName:           &s.Table,
+		Key:                 key(accountPK(accountID), skAccount),
+		ConditionExpression: aws.String("attribute_exists(ak)"),
+	}})
 	reasons, err := s.transactReasons(ctx, writes)
-	if errors.Is(err, ErrConflict) && len(reasons) > 0 && reasons[0] == "ConditionalCheckFailed" {
+	if errors.Is(err, ErrConflict) && len(reasons) == len(writes) &&
+		(reasons[0] == "ConditionalCheckFailed" || reasons[len(reasons)-1] == "ConditionalCheckFailed") {
 		return ErrNotFound
 	}
 	return err

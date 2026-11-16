@@ -90,7 +90,7 @@ flowchart LR
   request reads the device and its account once, so a
   replaced or deleted account is refused at once; logins and registrations
   check what they can before reading anything, and registrations count every
-  attempt per Telegram user.
+  attempt that gets past the signature checks, per Telegram user.
 
 ## Links
 

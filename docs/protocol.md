@@ -67,9 +67,11 @@ next to the session token. Nonces are 16–64 base64url characters and are used
 once; timestamps must be within 60 seconds of the server's clock. A login that
 can't be valid whatever the device's key (its timestamp, nonce or signature
 malformed or out of range) is refused with `login_refused` before the server
-reads anything. Each logged-in request reads the device and its account in
+reads anything. A login reads the device eventually consistent, at half the
+cost, so a device replaced or removed in about the last second may still get
+a token; each logged-in request reads the device and its account again, in
 one strongly consistent read, so a replaced or deleted account is refused at
-once.
+its first request.
 
 **Clocks.** A login or signed request whose timestamp is more than 60 seconds
 from the server's clock, and a new account's device list issued outside its

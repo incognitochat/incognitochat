@@ -37,10 +37,7 @@ const Suite = 0x01
 // SignatureLen is the length of a signature: r ‖ s, 32 bytes each.
 const SignatureLen = 64
 
-const (
-	publicKeyLen = 65
-	signatureLen = SignatureLen
-)
+const publicKeyLen = 65
 
 var (
 	// ErrPublicKey is returned for a malformed public key.
@@ -126,7 +123,7 @@ func Verify(pub *ecdsa.PublicKey, signature []byte, label string, parts ...[]byt
 
 // VerifyEncoded checks a P1363 signature over an already encoded message.
 func VerifyEncoded(pub *ecdsa.PublicKey, signature, msg []byte) error {
-	if pub == nil || len(signature) != signatureLen {
+	if pub == nil || len(signature) != SignatureLen {
 		return ErrSignature
 	}
 	digest := sha256.Sum256(msg)

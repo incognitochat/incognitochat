@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
@@ -185,5 +188,171 @@ func TestBundle(t *testing.T) {
 	}
 	if u := meter.Units(s.Table); u.Read != 1 {
 		t.Fatalf("two bundle reads cost %.1f units, want 1", u.Read)
+	}
+}
+
+// A login reads the device eventually consistent: half a unit.
+func TestLoginDevice(t *testing.T) {
+	s, meter, _ := metered(t)
+	ctx := context.Background()
+	n := newAccount(t, "th-1")
+	if err := s.Create(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	meter.Reset()
+	dev, err := s.LoginDevice(ctx, n.ID, n.DeviceID, now)
+	if err != nil || !bytes.Equal(dev.Key, n.DeviceKey) {
+		t.Fatalf("LoginDevice = %+v, %v", dev, err)
+	}
+	if u := meter.Units(s.Table); u.Read != 0.5 {
+		t.Fatalf("a login read %.1f units, want 0.5", u.Read)
+	}
+}
+
+// failAfterSwap is a table that refuses reads once a transaction has
+// committed, as a throttled one would.
+type failAfterSwap struct {
+	DB
+	swapped bool
+}
+
+func (f *failAfterSwap) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	out, err := f.DB.TransactWriteItems(ctx, in, opts...)
+	f.swapped = f.swapped || err == nil
+	return out, err
+}
+
+func (f *failAfterSwap) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	if f.swapped {
+		return nil, errors.New("throttled")
+	}
+	return f.DB.Query(ctx, in, opts...)
+}
+
+// A replacement still cleans up the old account when the table refuses
+// to list it after the swap: what it listed before goes.
+func TestReplaceCleansUpWhenTheLaterListingFails(t *testing.T) {
+	s, _, client := metered(t)
+	ctx := context.Background()
+	first := newAccount(t, "th-1")
+	if err := s.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	l := testLink(t)
+	if err := s.CreateLink(ctx, first.ID, l, 1); err != nil {
+		t.Fatal(err)
+	}
+	pool := []string{ids.New(), ids.New()}
+	if err := s.CreateMailboxes(ctx, first.ID, pool, 10); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	throttled := &Store{DB: &failAfterSwap{DB: client}, Table: s.Table}
+	if err := throttled.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bundle(ctx, l.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the old link is still served: %v", err)
+	}
+	for _, m := range append(pool, l.Mailbox) {
+		if _, err := s.Mailbox(ctx, m); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("mailbox %s still routes: %v", m, err)
+		}
+	}
+	// The old device stays, to be told, but expires.
+	dev, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(first.ID), devicePrefix+first.DeviceID)})
+	if err != nil || dev.Item["e"] == nil {
+		t.Fatalf("old device = %v, %v", dev, err)
+	}
+}
+
+// Nothing new joins a replaced account's partition: a link replaced or an
+// admin's code made in the moment before its cleanup is refused.
+func TestReplacedAccountMakesNothing(t *testing.T) {
+	s, _, client := metered(t)
+	ctx := context.Background()
+	n := newAccount(t, "th-1")
+	if err := s.Create(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	l := testLink(t)
+	if err := s.CreateLink(ctx, n.ID, l, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Replaced, its cleanup not yet run: the account item is only a marker.
+	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: item(accountPK(n.ID), skAccount, attrs{"g": sv(goneReplaced), "e": nv(roundUp(now.Add(ReplacedTTL)))})}); err != nil {
+		t.Fatal(err)
+	}
+	next := testLink(t)
+	if err := s.ReplaceLink(ctx, n.ID, l.ID, next); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ReplaceLink on a replaced account: %v", err)
+	}
+	if _, err := s.Bundle(ctx, next.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("its new link is served: %v", err)
+	}
+	if err := s.CreateInvitation(ctx, n.ID, "abcd-efgh", 1, 0, -1); !errors.Is(err, ErrLimit) {
+		t.Fatalf("an admin code on a replaced account: %v", err)
+	}
+	if err := s.CreateLink(ctx, n.ID, testLink(t), 2); err == nil {
+		t.Fatal("CreateLink on a replaced account")
+	}
+}
+
+// The one-read login (Device) reads from "A" to "D#<device>": only device
+// items may sort in between. A new kind of item in the account partition
+// must be listed in accountSortKeys and sort after the devices.
+func TestAccountSortKeys(t *testing.T) {
+	if !slices.IsSorted(accountSortKeys) || accountSortKeys[0] != skAccount || accountSortKeys[1] != devicePrefix {
+		t.Fatalf("accountSortKeys = %v", accountSortKeys)
+	}
+	// Device IDs are base64url, all below "~".
+	for _, k := range accountSortKeys[2:] {
+		if k <= devicePrefix+"~" {
+			t.Fatalf("%q sorts among the devices", k)
+		}
+	}
+
+	// Every kind of item an account's partition gets is one of them.
+	s, _, client := metered(t)
+	ctx := context.Background()
+	n := newAccount(t, "th-1")
+	if err := s.Create(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateLink(ctx, n.ID, testLink(t), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMailboxes(ctx, n.ID, []string{ids.New()}, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateInvitation(ctx, n.ID, "abcd-efgh", 1, 0, -1); err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.Query(ctx, &dynamodb.QueryInput{
+		TableName:                 &s.Table,
+		KeyConditionExpression:    aws.String("pk = :pk"),
+		ExpressionAttributeValues: attrs{":pk": sv(accountPK(n.ID))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, it := range out.Items {
+		sk, _ := str(it, "sk")
+		known := false
+		for _, k := range accountSortKeys {
+			if sk == k || (strings.HasSuffix(k, "#") && strings.HasPrefix(sk, k)) {
+				known, kinds[k] = true, true
+			}
+		}
+		if !known {
+			t.Fatalf("sort key %q isn't in accountSortKeys", sk)
+		}
+	}
+	if len(kinds) != len(accountSortKeys) {
+		t.Fatalf("made %d kinds of item, accountSortKeys lists %d", len(kinds), len(accountSortKeys))
 	}
 }
