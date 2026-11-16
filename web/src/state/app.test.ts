@@ -593,23 +593,27 @@ describe('when the server stops taking this device', () => {
     try {
       const owner = await registered(server.api, { bridge, issuer, background: true });
       const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
-      expect(listeners.get('visibility_changed')).toBe(1);
+      const visible = () => listeners.get('visibility_changed') ?? 0;
+      // With the background running (other parts of the app may listen for good).
+      const running = visible();
+      expect(running).toBeGreaterThan(0);
       expect(inbox()).toBe(1);
 
       await owner.app.home();
       expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'refused' });
-      expect(listeners.get('visibility_changed')).toBe(0);
+      // The background's own listener is gone with it.
+      expect(visible()).toBe(running - 1);
 
       await owner.app.recheck();
       expect(home(owner.app.screen.value)).toMatchObject({ signedOut: null, offline: false });
       expect(owner.app.readOnly.value).toBe(false);
       // Messaging runs again (it fetched the inbox), its background started once.
       expect(inbox()).toBe(2);
-      expect(listeners.get('visibility_changed')).toBe(1);
+      expect(visible()).toBe(running);
 
       // Stops it again (and so ends this test's timers).
       await owner.app.home();
-      expect(listeners.get('visibility_changed')).toBe(0);
+      expect(visible()).toBe(running - 1);
     } finally {
       vi.unstubAllGlobals();
     }
