@@ -11,186 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 )
-
-// An account keeps at most MaxSockets connections on record: opening more
-// forgets the oldest, so a delivery never fans out further.
-func TestSocketsAreCapped(t *testing.T) {
-	client := dynamotest.Client(t)
-	clock := time.Unix(1_800_000_000, 0)
-	s := &Sockets{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return clock }}
-	ctx := context.Background()
-
-	var opened []string
-	for i := range MaxSockets + 3 {
-		c := "conn" + string(rune('a'+i))
-		opened = append(opened, c)
-		if err := s.Open(ctx, "acct", c); err != nil {
-			t.Fatal(err)
-		}
-		// Slower than the connect limit.
-		clock = clock.Add(ConnectWindow / MaxSockets)
-	}
-	if err := s.Open(ctx, "other", "theirs"); err != nil {
-		t.Fatal(err)
-	}
-	conns, err := s.Connections(ctx, "acct")
-	slices.Sort(conns)
-	if want := opened[3:]; err != nil || !slices.Equal(conns, want) {
-		t.Fatalf("connections = %v, %v; want the newest %v", conns, err, want)
-	}
-	if conns, _ := s.Connections(ctx, "other"); !slices.Equal(conns, []string{"theirs"}) {
-		t.Fatalf("another account's connections = %v", conns)
-	}
-}
-
-// A connect writes one record, plus one delete once the account is at its
-// cap; it no longer writes a second record for $disconnect, which costs
-// nothing. Before: 2 writes, plus 2 deletes per record forgotten, and 1
-// read and 2 deletes on disconnect.
-func TestSocketWrites(t *testing.T) {
-	client := dynamotest.Client(t)
-	meter := dynamotest.NewMeter(client)
-	clock := time.Unix(1_800_000_000, 0)
-	table := dynamotest.Table(t, client)
-	s := &Sockets{DB: meter, Table: table, Now: func() time.Time { return clock }}
-	ctx := context.Background()
-
-	meter.Reset()
-	if err := s.Open(ctx, "acct", "first"); err != nil {
-		t.Fatal(err)
-	}
-	if u := meter.Units(table); u.Write != 1 || u.Read > 0.5 {
-		t.Fatalf("a first connect cost %+v", u)
-	}
-	for i := range MaxSockets {
-		clock = clock.Add(ConnectWindow / MaxSockets)
-		if err := s.Open(ctx, "acct", "c"+string(rune('a'+i))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	clock = clock.Add(ConnectWindow / MaxSockets)
-	meter.Reset()
-	if err := s.Open(ctx, "acct", "at-cap"); err != nil {
-		t.Fatal(err)
-	}
-	if u := meter.Units(table); u.Write != 2 || u.Read > 0.5 {
-		t.Fatalf("a connect at the cap cost %+v", u)
-	}
-	t.Logf("connect at the cap: %.1f read, %.1f write units", meter.Units(table).Read, meter.Units(table).Write)
-	// Only C# records, all expiring.
-	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: &table})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, it := range out.Items {
-		pk := it["pk"].(*types.AttributeValueMemberS).Value
-		if !strings.HasPrefix(pk, "C#") || it["e"] == nil {
-			t.Fatalf("unexpected record %v", it)
-		}
-	}
-	if len(out.Items) != MaxSockets {
-		t.Fatalf("%d records, want %d", len(out.Items), MaxSockets)
-	}
-}
-
-// One account can open at most MaxSockets sockets a minute: a loop of
-// connects (each was 4 or more writes) stops costing writes at all.
-func TestSocketConnectsAreLimited(t *testing.T) {
-	client := dynamotest.Client(t)
-	meter := dynamotest.NewMeter(client)
-	start := time.Unix(1_800_000_000, 0)
-	clock := start
-	table := dynamotest.Table(t, client)
-	s := &Sockets{DB: meter, Table: table, Now: func() time.Time { return clock }}
-	ctx := context.Background()
-
-	for i := range MaxSockets {
-		if err := s.Open(ctx, "acct", "c"+string(rune('a'+i))); err != nil {
-			t.Fatalf("connect %d: %v", i+1, err)
-		}
-		clock = clock.Add(time.Second)
-	}
-	meter.Reset()
-	for range 20 {
-		if err := s.Open(ctx, "acct", connID()); !errors.Is(err, ErrTooManyConnects) {
-			t.Fatalf("past the limit: %v", err)
-		}
-	}
-	if u := meter.Units(table); u.Write != 0 || u.Read > 20*0.5 {
-		t.Fatalf("20 refused connects cost %+v", u)
-	}
-	// Others aren't affected, and a minute after the first it opens again.
-	if err := s.Open(ctx, "other", "theirs"); err != nil {
-		t.Fatal(err)
-	}
-	// The first two (at 0 s and 1 s) are a minute old at 61 s.
-	clock = start.Add(ConnectWindow + time.Second)
-	for _, c := range []string{"later", "again"} {
-		if err := s.Open(ctx, "acct", c); err != nil {
-			t.Fatalf("a minute later: %v", err)
-		}
-	}
-	if err := s.Open(ctx, "acct", "too-soon"); !errors.Is(err, ErrTooManyConnects) {
-		t.Fatalf("one more, too soon: %v", err)
-	}
-	if conns, _ := s.Connections(ctx, "acct"); len(conns) != MaxSockets {
-		t.Fatalf("%d on record", len(conns))
-	}
-}
-
-// Connects at once, on an account at its cap, used to race their trims
-// (measured at 15 writes each for 10 at once): now about 2 each, and the
-// burst is then refused.
-func TestSocketConnectBurst(t *testing.T) {
-	client := dynamotest.Client(t)
-	meter := dynamotest.NewMeter(client)
-	clock := time.Unix(1_800_000_000, 0)
-	table := dynamotest.Table(t, client)
-	s := &Sockets{DB: meter, Table: table, Now: func() time.Time { return clock }}
-	ctx := context.Background()
-	for range MaxSockets {
-		if err := s.Open(ctx, "acct", connID()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	clock = clock.Add(ConnectWindow + time.Second)
-	meter.Reset()
-	var wg sync.WaitGroup
-	var refused atomic.Int32
-	for range 10 {
-		wg.Go(func() {
-			if err := s.Open(ctx, "acct", connID()); errors.Is(err, ErrTooManyConnects) {
-				refused.Add(1)
-			} else if err != nil {
-				t.Error(err)
-			}
-		})
-	}
-	wg.Wait()
-	u := meter.Units(table)
-	t.Logf("10 connects at once: %.1f read, %.1f write units, %d refused", u.Read, u.Write, refused.Load())
-	if u.Write > 2*10 {
-		t.Fatalf("10 connects at once cost %.1f write units", u.Write)
-	}
-	// Pushes still go to MaxSockets at most.
-	if conns, err := s.Connections(ctx, "acct"); err != nil || len(conns) != MaxSockets {
-		t.Fatalf("pushed to %d, %v", len(conns), err)
-	}
-	meter.Reset()
-	for range 10 {
-		if err := s.Open(ctx, "acct", connID()); !errors.Is(err, ErrTooManyConnects) {
-			t.Fatalf("after the burst: %v", err)
-		}
-	}
-	if u := meter.Units(table); u.Write != 0 {
-		t.Fatalf("refused connects cost %.1f write units", u.Write)
-	}
-}
 
 var nextID atomic.Int64
 
@@ -198,10 +24,32 @@ func connID() string {
 	return "conn-" + strconv.FormatInt(nextID.Add(1), 10)
 }
 
-func TestSockets(t *testing.T) {
+// socketsAt is a metered socket store on a fresh table, with a clock the
+// test moves.
+func socketsAt(t *testing.T, clock *time.Time) (*Sockets, *dynamotest.Meter, *dynamodb.Client) {
+	t.Helper()
 	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	return &Sockets{DB: meter, Table: dynamotest.Table(t, client), Now: func() time.Time { return *clock }}, meter, client
+}
+
+// stored is every item in an account's partition, expired ones included.
+func stored(t *testing.T, client *dynamodb.Client, table, account string) []map[string]types.AttributeValue {
+	t.Helper()
+	out, err := client.Query(context.Background(), &dynamodb.QueryInput{
+		TableName:                 &table,
+		KeyConditionExpression:    aws.String("pk = :pk"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out.Items
+}
+
+func TestSockets(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
-	s := &Sockets{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return clock }}
+	s, _, _ := socketsAt(t, &clock)
 	ctx := context.Background()
 
 	if conns, err := s.Connections(ctx, "acct"); err != nil || len(conns) != 0 {
@@ -211,13 +59,13 @@ func TestSockets(t *testing.T) {
 		if err := s.Open(ctx, "acct", c); err != nil {
 			t.Fatal(err)
 		}
+		clock = clock.Add(time.Minute)
 	}
 	if err := s.Open(ctx, "other", "conn3"); err != nil {
 		t.Fatal(err)
 	}
-	conns, err := s.Connections(ctx, "acct")
-	slices.Sort(conns)
-	if err != nil || !slices.Equal(conns, []string{"conn1", "conn2"}) {
+	// Newest first.
+	if conns, err := s.Connections(ctx, "acct"); err != nil || !slices.Equal(conns, []string{"conn2", "conn1"}) {
 		t.Fatalf("connections = %v, %v", conns, err)
 	}
 	// A push that finds a socket gone forgets it.
@@ -237,11 +85,182 @@ func TestSockets(t *testing.T) {
 		t.Fatalf("after forget = %v", conns)
 	}
 	// Expired records don't count, even before TTL deletion.
-	clock = clock.Add(SocketTTL + time.Second)
+	clock = clock.Add(SocketTTL + time.Minute)
 	if conns, _ := s.Connections(ctx, "other"); len(conns) != 0 {
 		t.Fatalf("expired = %v", conns)
 	}
 	if conns, _ := s.Connections(ctx, ""); len(conns) != 0 {
 		t.Fatalf("empty account = %v", conns)
+	}
+}
+
+// A record says only the minute its socket opened: its expiry is on a whole
+// minute, after the socket's longest life.
+func TestSocketRecordsHoldNoExactTime(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0).Add(37 * time.Second)
+	s, _, client := socketsAt(t, &clock)
+	if err := s.Open(context.Background(), "acct", "c"); err != nil {
+		t.Fatal(err)
+	}
+	items := stored(t, client, s.Table, "acct")
+	if len(items) != 1 {
+		t.Fatalf("%d items", len(items))
+	}
+	e, _ := strconv.ParseInt(items[0]["e"].(*types.AttributeValueMemberN).Value, 10, 64)
+	if e%60 != 0 || e < clock.Add(SocketTTL).Unix() || e > clock.Add(SocketTTL+time.Minute).Unix() {
+		t.Fatalf("expiry %d for a socket opened at %d", e, clock.Unix())
+	}
+	for name := range items[0] {
+		if name != "pk" && name != "sk" && name != "e" {
+			t.Fatalf("stored %q", name)
+		}
+	}
+}
+
+// A connect writes one record; at most one older record goes with it, once
+// the account is near MaxRecords. There's no second record for $disconnect.
+func TestSocketWrites(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, meter, client := socketsAt(t, &clock)
+	ctx := context.Background()
+
+	meter.Reset()
+	if err := s.Open(ctx, "acct", connID()); err != nil {
+		t.Fatal(err)
+	}
+	if u := meter.Units(s.Table); u.Write != 1 || u.Read > 0.5 {
+		t.Fatalf("a first connect cost %+v", u)
+	}
+	for range MaxRecords - 2 {
+		clock = clock.Add(time.Minute)
+		if err := s.Open(ctx, "acct", connID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = clock.Add(time.Minute)
+	meter.Reset()
+	if err := s.Open(ctx, "acct", connID()); err != nil {
+		t.Fatal(err)
+	}
+	u := meter.Units(s.Table)
+	t.Logf("connect with %d on record: %.1f read, %.1f write units", MaxRecords-1, u.Read, u.Write)
+	if u.Write != 2 || u.Read > 0.5 {
+		t.Fatalf("a connect near the limit cost %+v", u)
+	}
+	items := stored(t, client, s.Table, "acct")
+	if len(items) != MaxRecords-1 {
+		t.Fatalf("%d records, want %d", len(items), MaxRecords-1)
+	}
+	for _, it := range items {
+		if !strings.HasPrefix(it["pk"].(*types.AttributeValueMemberS).Value, "C#") {
+			t.Fatalf("unexpected record %v", it)
+		}
+	}
+}
+
+// At most MaxSockets connects a minute (UTC minutes) per account, and a
+// refused one writes nothing.
+func TestSocketConnectsAreLimited(t *testing.T) {
+	minute := time.Unix(1_800_000_000, 0).Truncate(time.Minute)
+	clock := minute
+	s, meter, _ := socketsAt(t, &clock)
+	ctx := context.Background()
+
+	for i := range MaxSockets {
+		if err := s.Open(ctx, "acct", connID()); err != nil {
+			t.Fatalf("connect %d: %v", i+1, err)
+		}
+		clock = clock.Add(5 * time.Second)
+	}
+	meter.Reset()
+	for range 20 {
+		if err := s.Open(ctx, "acct", connID()); !errors.Is(err, ErrTooManyConnects) {
+			t.Fatalf("past the limit: %v", err)
+		}
+	}
+	if u := meter.Units(s.Table); u.Write != 0 || u.Read > 20*0.5 {
+		t.Fatalf("20 refused connects cost %+v", u)
+	}
+	// Others aren't affected, and the next minute it opens again.
+	if err := s.Open(ctx, "other", connID()); err != nil {
+		t.Fatal(err)
+	}
+	clock = minute.Add(time.Minute)
+	if err := s.Open(ctx, "acct", connID()); err != nil {
+		t.Fatalf("the next minute: %v", err)
+	}
+}
+
+// Records the account no longer uses don't pile up: expired ones go when
+// connects see them (maxTidy each), rather than waiting for TTL, which can
+// lag by days.
+func TestOpenDeletesExpired(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, _, client := socketsAt(t, &clock)
+	ctx := context.Background()
+	for range maxTidy + 1 {
+		if err := s.Open(ctx, "acct", connID()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = clock.Add(SocketTTL + 2*time.Minute)
+	for _, c := range []string{"fresh", "fresher"} {
+		if err := s.Open(ctx, "acct", c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var left []string
+	for _, it := range stored(t, client, s.Table, "acct") {
+		left = append(left, it["sk"].(*types.AttributeValueMemberS).Value)
+	}
+	slices.Sort(left)
+	if !slices.Equal(left, []string{"fresh", "fresher"}) {
+		t.Fatalf("records left: %v", left)
+	}
+}
+
+// Bursts of connects at once, again and again, keep the account's records
+// bounded (they used to grow by about the burst's size each time, to over
+// a thousand), and connects refused at the bound write nothing.
+func TestSocketBurstsStayBounded(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, meter, client := socketsAt(t, &clock)
+	ctx := context.Background()
+	const burst = 10
+	most, refused := 0, 0
+	mostWrites := 0.0
+	// Longer than SocketTTL, so records expire along the way.
+	for i := range 150 {
+		meter.Reset()
+		var wg sync.WaitGroup
+		var refusedNow atomic.Int32
+		for range burst {
+			wg.Go(func() {
+				err := s.Open(ctx, "acct", connID())
+				switch {
+				case errors.Is(err, ErrTooManyConnects):
+					refusedNow.Add(1)
+				case err != nil:
+					t.Error(err)
+				}
+			})
+		}
+		wg.Wait()
+		refused += int(refusedNow.Load())
+		n := len(stored(t, client, s.Table, "acct"))
+		most = max(most, n)
+		if n > MaxRecords+burst {
+			t.Fatalf("burst %d: %d records", i+1, n)
+		}
+		w := meter.Units(s.Table).Write
+		mostWrites = max(mostWrites, w)
+		if w > float64(4*burst) {
+			t.Fatalf("burst %d cost %.0f write units", i+1, w)
+		}
+		clock = clock.Add(61 * time.Second)
+	}
+	t.Logf("150 bursts of %d: at most %d records, at most %.0f write units a burst, %d connects refused", burst, most, mostWrites, refused)
+	if refused == 0 {
+		t.Fatal("nothing refused")
 	}
 }

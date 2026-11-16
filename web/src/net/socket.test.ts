@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPushSocket, HEARTBEAT_MS } from './socket';
+import { createPushSocket, HEARTBEAT_MS, REOPEN_MS } from './socket';
 
 class FakeSocket {
   static CONNECTING = 0;
@@ -77,6 +77,31 @@ describe('push socket', () => {
     // Heartbeats keep it from closing as idle.
     await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 2);
     expect(ws.sent).toEqual(['{"action":"ping"}', '{"action":"ping"}']);
+  });
+
+  it('replaces an open socket about every half hour, without a retry delay', async () => {
+    const { socket, hints } = make();
+    socket.start();
+    await flush();
+    const first = FakeSocket.all[0]!;
+    first.open();
+    await vi.advanceTimersByTimeAsync(REOPEN_MS * 0.85);
+    expect(FakeSocket.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(REOPEN_MS * 0.3);
+    expect(first.readyState).toBe(FakeSocket.CLOSED);
+    expect(FakeSocket.all).toHaveLength(2);
+    const second = FakeSocket.all[1]!;
+    expect(second.protocols).toEqual(['v1', 'v1.token.2']);
+    second.open();
+    // The new one syncs on opening; the old one's close starts no retry.
+    expect(hints()).toBe(2);
+    expect(socket.connected).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeSocket.all).toHaveLength(2);
+    // Hidden, it neither stays open nor reopens.
+    socket.setVisible(false);
+    await vi.advanceTimersByTimeAsync(REOPEN_MS * 2);
+    expect(FakeSocket.all).toHaveLength(2);
   });
 
   it('reconnects with backoff, and closes while hidden', async () => {

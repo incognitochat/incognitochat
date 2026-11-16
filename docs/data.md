@@ -40,11 +40,11 @@ cleared on their own (Data and storage), and their messages stay.
 | Messages waiting for the device, encrypted | Delivery | Until the device confirms them, at most 30 days |
 | Attachments, encrypted, with their padded size | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them |
 | Invitation codes the account created, and its invitation level | Invite-only access to links | While the account exists |
-| Short-lived counters (the daily ones under the keyed hash of the Telegram ID, so setting up again doesn't reset them), login nonces, spent send and media tokens, open-socket records | Rate limits, replay protection, live updates | Minutes, up to two weeks; daily counters until about 2 hours after the day ends (UTC) |
+| Short-lived counters (the daily ones under the keyed hash of the Telegram ID, so setting up again doesn't reset them), login nonces, spent send and media tokens, socket records (account ID and connection ID, with the minute they expire; kept from opening the app until the server finds the socket closed or the record expires, 2 h 10 min after it opened, though DynamoDB can take days to delete an expired one) | Rate limits, replay protection, live updates | Minutes, up to two weeks; daily counters until about 2 hours after the day ends (UTC) |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 
 When a user deletes their account, all of the above goes at once. Only
-short-lived rate-limit counters and open-socket records are left, and they
+short-lived rate-limit counters and socket records are left, and they
 expire on their own within about a day. Until then, that day's counters
 still say, under the keyed hash of the Telegram ID, how much was used that
 day (for example how many send tokens were fetched), not what was sent or to

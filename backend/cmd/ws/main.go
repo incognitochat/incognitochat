@@ -4,10 +4,10 @@
 //
 // $connect checks the session token, sent as the second subprotocol
 // (new WebSocket(url, ["v1", token])) so it never appears in a URL, and
-// records the connection, at most ephemeral.MaxSockets a minute per account;
+// records the connection (ephemeral.Sockets.Open, which also limits connects);
 // anything else is the app's heartbeat, answered so the socket isn't closed
-// as idle. $disconnect does nothing: the record of a closed socket goes when
-// a push finds it gone, when newer ones push it out, or when it expires.
+// as idle. $disconnect isn't routed here: a closed socket's record goes when
+// a push finds it gone, when a connect needs its place, or once it expires.
 package main
 
 import (
@@ -94,11 +94,15 @@ func (h *handler) handle(ctx context.Context, req events.APIGatewayWebsocketProx
 			return status(http.StatusForbidden), nil
 		}
 		err = h.sockets.Open(ctx, claims.AccountID, conn)
-		if errors.Is(err, ephemeral.ErrTooManyConnects) {
+		switch {
+		case errors.Is(err, ephemeral.ErrTooManyConnects):
 			// The app tries again later, and polls meanwhile.
 			return status(http.StatusTooManyRequests), nil
-		}
-		if err != nil {
+		case errors.Is(err, ephemeral.ErrTidy):
+			// Recorded; only old records are left over. Refusing would make
+			// the app retry and record another.
+			h.log.Warn("connect tidying failed", logx.ErrorKind(err))
+		case err != nil:
 			h.log.Warn("connect failed", logx.ErrorKind(err))
 			return status(http.StatusInternalServerError), nil
 		}
@@ -106,7 +110,7 @@ func (h *handler) handle(ctx context.Context, req events.APIGatewayWebsocketProx
 		resp.Headers = map[string]string{"Sec-WebSocket-Protocol": Protocol}
 		return resp, nil
 	default:
-		// $disconnect, which needs nothing, or a heartbeat.
+		// The heartbeat (and $disconnect, if it were routed here): nothing to do.
 		return status(http.StatusOK), nil
 	}
 }

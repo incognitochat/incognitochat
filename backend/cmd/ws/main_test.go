@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -89,12 +90,21 @@ func TestHandle(t *testing.T) {
 		t.Fatalf("logged: %s", logs.String())
 	}
 
+	// Recorded, but old records couldn't be deleted: the connect stands
+	// (refusing would make the app retry and record another), and it's
+	// logged without the connection or token.
+	sockets.fail = fmt.Errorf("%w: boom c6 %s", ephemeral.ErrTidy, token)
+	resp, _ = h.handle(ctx, request("$connect", "c6", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token}))
+	if resp.StatusCode != http.StatusOK || resp.Headers["Sec-WebSocket-Protocol"] != "v1" || logs.Len() == 0 {
+		t.Fatalf("tidying failure: %+v, logs %q", resp, logs.String())
+	}
+
 	// A store failure: refused, logged without the connection or token.
 	sockets.fail = errors.New("boom c4 " + token)
 	if resp, _ := h.handle(ctx, request("$connect", "c4", map[string]string{"Sec-WebSocket-Protocol": "v1, " + token})); resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("store failure: %d", resp.StatusCode)
 	}
-	if bytes.Contains(logs.Bytes(), []byte("c4")) || bytes.Contains(logs.Bytes(), []byte(token)) {
+	if bytes.Contains(logs.Bytes(), []byte("c4")) || bytes.Contains(logs.Bytes(), []byte("c6")) || bytes.Contains(logs.Bytes(), []byte(token)) {
 		t.Fatalf("logs leak: %s", logs.String())
 	}
 }

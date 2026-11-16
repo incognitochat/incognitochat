@@ -11,6 +11,13 @@ const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
 /** A connection that lasted this long resets the backoff. */
 const STABLE_MS = 60_000;
+/**
+ * An open socket is replaced about this often (give or take a tenth). The
+ * server doesn't hear when sockets close, and pushes to the most recently
+ * opened ones first, so a copy that stays open long must reopen to stay
+ * among them while other copies come and go.
+ */
+export const REOPEN_MS = 30 * 60_000;
 
 export interface PushSocketDeps {
   url: string;
@@ -40,6 +47,7 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
   let connecting = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let reopenTimer: ReturnType<typeof setTimeout> | null = null;
   let backoff = FIRST_RETRY_MS;
   let openedAt = 0;
 
@@ -63,6 +71,7 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
     ws.onopen = () => {
       openedAt = Date.now();
       heartbeat = setInterval(() => ws.readyState === WS.OPEN && ws.send('{"action":"ping"}'), HEARTBEAT_MS);
+      reopenTimer = setTimeout(() => reopen(ws), REOPEN_MS * (0.9 + 0.2 * Math.random()));
       // Anything that arrived while there was no socket.
       deps.onHint();
     };
@@ -76,11 +85,22 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
     ws.onclose = () => {
       if (socket !== ws) return;
       socket = null;
-      stopHeartbeat();
+      stopTimers();
       if (openedAt && Date.now() - openedAt >= STABLE_MS) backoff = FIRST_RETRY_MS;
       openedAt = 0;
       retry();
     };
+  }
+
+  /** Replaces an open socket with a new one (the new one syncs on opening, so nothing in between is missed). */
+  function reopen(ws: WebSocket): void {
+    if (socket !== ws) return;
+    socket = null;
+    stopTimers();
+    openedAt = 0;
+    ws.close();
+    backoff = FIRST_RETRY_MS;
+    void connect();
   }
 
   /** Tries again later, with growing, jittered delays. */
@@ -94,15 +114,17 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
     }, delay);
   }
 
-  function stopHeartbeat(): void {
+  function stopTimers(): void {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
+    if (reopenTimer) clearTimeout(reopenTimer);
+    reopenTimer = null;
   }
 
   function close(): void {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
-    stopHeartbeat();
+    stopTimers();
     const ws = socket;
     socket = null;
     ws?.close();

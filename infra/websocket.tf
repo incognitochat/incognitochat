@@ -17,9 +17,12 @@ resource "aws_apigatewayv2_integration" "ws" {
 }
 
 # $default answers the app's heartbeat, so open sockets aren't closed as idle
-# (API Gateway closes them after 10 minutes without traffic).
+# (API Gateway closes them after 10 minutes without traffic). There is no
+# $disconnect route: a closed socket's record goes when a push finds it gone,
+# when a connect needs its place, or once it expires, so closing a socket
+# costs nothing.
 resource "aws_apigatewayv2_route" "ws" {
-  for_each = toset(["$connect", "$disconnect", "$default"])
+  for_each = toset(["$connect", "$default"])
 
   api_id    = aws_apigatewayv2_api.ws.id
   route_key = each.key

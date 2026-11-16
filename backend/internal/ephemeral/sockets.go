@@ -1,8 +1,10 @@
 package ephemeral
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -16,19 +18,26 @@ import (
 // socket after 2 hours, plus margin.
 const SocketTTL = 2*time.Hour + 10*time.Minute
 
-// MaxSockets is how many connections one account keeps on record. An
-// account has one device, with a socket for each visible copy of the app,
-// so a few are plenty. It bounds what a delivery costs: each one is pushed
-// to every recorded connection of the recipient.
+// MaxSockets is how many of an account's sockets a delivery is pushed to,
+// and how many it may open in a minute. An account has one device, with a
+// socket for each visible copy of the app, so a few are plenty.
 const MaxSockets = 5
 
-// ConnectWindow is how far back Open looks to limit connects: an account
-// may open MaxSockets sockets in it, no more.
-const ConnectWindow = time.Minute
+// MaxRecords is how many socket records one account may have: the open
+// ones, and closed ones not yet tidied away. A connect is refused at it,
+// and the oldest are forgotten before it is reached, so a closed socket's
+// record never locks an account out and the partition stays small.
+const MaxRecords = 2 * MaxSockets
 
-// ErrTooManyConnects is returned by Open for an account that opened
-// MaxSockets sockets in the last ConnectWindow.
-var ErrTooManyConnects = errors.New("ephemeral: too many connects")
+var (
+	// ErrTooManyConnects is returned by Open, which writes nothing then,
+	// for an account that opened MaxSockets sockets this minute or has
+	// MaxRecords on record.
+	ErrTooManyConnects = errors.New("ephemeral: too many connects")
+	// ErrTidy is returned by Open when the connection was recorded but old
+	// records couldn't be deleted: the connect stands.
+	ErrTidy = errors.New("ephemeral: socket records not tidied")
+)
 
 // SocketDB is the part of the DynamoDB client Sockets (and Uploads) use.
 type SocketDB interface {
@@ -42,81 +51,134 @@ type SocketDB interface {
 //
 //	C#<account>  <connection>  a socket, until it expires (e)
 //
-// Nothing else is kept: no device, IP or time beyond the expiry. A record
-// isn't deleted when its socket closes: $disconnect knows only the
-// connection, and a record of it would cost two more writes a connect. A
-// closed socket's record is dropped when a push finds it gone, when newer
-// ones push it out, or when it expires.
+// Nothing else is kept: no device or IP, and no exact time: the expiry is
+// SocketTTL after the minute the socket opened, rounded up to the minute.
+//
+// A record isn't deleted when its socket closes: $disconnect knows only the
+// connection, so it would need a second record per connect, and it isn't
+// routed at all. A closed socket's record goes when a push finds it gone,
+// when a connect needs its place (MaxRecords), or when a connect finds it
+// expired (TTL deletion can lag by days; expired records are never used).
 type Sockets struct {
 	DB    SocketDB
 	Table string
 	Now   func() time.Time
 }
 
-// Open records a connection for an account: one write, and a delete once
-// the account has MaxSockets on record. The oldest is forgotten then: it
-// stays open but gets no more pushes. Forgetting, rather than refusing the
-// new one, means records of sockets that have closed never lock anyone out.
-//
-// Its records also limit connects, for free: an account that opened
-// MaxSockets sockets in the last ConnectWindow (their records' expiries
-// say when) gets ErrTooManyConnects, and nothing is written.
-func (s *Sockets) Open(ctx context.Context, account, connection string) error {
-	now := s.Now()
-	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
+// socketRecord is one stored connection of an account.
+type socketRecord struct {
+	connection string
+	expires    int64 // Unix seconds, on a whole minute
+}
+
+// expiryAt is the expiry of a socket opened at t: SocketTTL after the start
+// of the next minute, so it outlives the socket and says only its minute.
+func expiryAt(t time.Time) int64 {
+	return t.Truncate(time.Minute).Add(SocketTTL + time.Minute).Unix()
+}
+
+// oldestFirst orders records by expiry, so by the minute they opened.
+func oldestFirst(a, b socketRecord) int { return cmp.Compare(a.expires, b.expires) }
+
+// records reads an account's socket records, eventually consistent: a
+// record written in about the last second may be missing.
+func (s *Sockets) records(ctx context.Context, account string) ([]socketRecord, error) {
+	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account)},
 		ProjectionExpression:      aws.String("sk, e"),
 	})
+	var records []socketRecord
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range page.Items {
+			c, ok := it["sk"].(*types.AttributeValueMemberS)
+			if !ok {
+				continue
+			}
+			var expires int64
+			if e, ok := it["e"].(*types.AttributeValueMemberN); ok {
+				expires, _ = strconv.ParseInt(e.Value, 10, 64)
+			}
+			records = append(records, socketRecord{c.Value, expires})
+		}
+	}
+	return records, nil
+}
+
+// maxTidy is how many expired records one connect deletes, at most.
+const maxTidy = 2
+
+// Open records a connection for an account: one write.
+//
+// It refuses (ErrTooManyConnects, writing nothing) an account that has
+// opened MaxSockets sockets this minute (UTC minutes; records say which
+// minute they opened in) or has MaxRecords on record, which only connects
+// at the same moment can reach.
+//
+// Once recorded, it tidies: up to maxTidy records it finds expired go, and
+// the oldest one goes once the account would have MaxRecords, so a connect
+// writes 4 times at most. A record forgotten this way may be of a socket
+// still open, which then gets no pushes until the app reopens it (it does
+// every half hour). If tidying fails, Open returns ErrTidy, and the connect
+// stands.
+func (s *Sockets) Open(ctx context.Context, account, connection string) error {
+	now := s.Now()
+	records, err := s.records(ctx, account)
 	if err != nil {
 		return err
 	}
-	type record struct {
-		connection string
-		expires    int64
-	}
-	var live []record
-	recent := 0
-	for _, it := range out.Items {
-		c, ok := it["sk"].(*types.AttributeValueMemberS)
-		if !ok || c.Value == connection {
-			continue
-		}
-		var expires int64
-		if e, ok := it["e"].(*types.AttributeValueMemberN); ok {
-			expires, _ = strconv.ParseInt(e.Value, 10, 64)
-		}
-		// Expired ones get no pushes, and TTL deletes them for free.
-		if expires <= now.Unix() {
-			continue
-		}
-		live = append(live, record{c.Value, expires})
-		if expires > now.Add(SocketTTL-ConnectWindow).Unix() {
-			recent++
+	expires := expiryAt(now)
+	var live, expired []socketRecord
+	thisMinute := 0
+	for _, r := range records {
+		switch {
+		case r.connection == connection:
+		case r.expires <= now.Unix():
+			expired = append(expired, r)
+		default:
+			live = append(live, r)
+			if r.expires >= expires {
+				thisMinute++
+			}
 		}
 	}
-	if recent >= MaxSockets {
+	if thisMinute >= MaxSockets || len(live) >= MaxRecords {
 		return ErrTooManyConnects
 	}
 	if _, err := s.DB.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &s.Table,
-		Item:      map[string]types.AttributeValue{"pk": sv("C#" + account), "sk": sv(connection), "e": num(now.Add(SocketTTL).Unix())},
+		Item:      map[string]types.AttributeValue{"pk": sv("C#" + account), "sk": sv(connection), "e": num(expires)},
 	}); err != nil {
 		return err
 	}
-	// The opened connection takes one place. One delete at most, so a
-	// connect never costs more than two writes, even when connects at the
-	// same moment see each other's records; Connections pushes to the
-	// newest MaxSockets anyway, and the next connects trim the rest.
-	if len(live) < MaxSockets {
-		return nil
+
+	// A few expired ones at a time: connects at the same moment see the
+	// same ones, and each delete costs a write whether or not it's done.
+	var errs []error
+	slices.SortFunc(expired, oldestFirst)
+	for _, r := range expired[:min(maxTidy, len(expired))] {
+		errs = append(errs, s.Forget(ctx, account, r.connection))
 	}
-	oldest := slices.MinFunc(live, func(a, b record) int { return int(a.expires - b.expires) })
-	return s.Forget(ctx, account, oldest.connection)
+	// With the new one, at most MaxRecords-1 are kept, so the next connect
+	// fits.
+	if extra := len(live) + 1 - (MaxRecords - 1); extra > 0 {
+		slices.SortFunc(live, oldestFirst)
+		for _, r := range live[:min(extra, len(live))] {
+			errs = append(errs, s.Forget(ctx, account, r.connection))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: %w", ErrTidy, err)
+	}
+	return nil
 }
 
-// Forget deletes a connection's record (it is gone, or pushed out).
+// Forget deletes a connection's record (it is gone, expired or pushed out).
 func (s *Sockets) Forget(ctx context.Context, account, connection string) error {
 	_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: &s.Table,
@@ -125,41 +187,21 @@ func (s *Sockets) Forget(ctx context.Context, account, connection string) error 
 	return err
 }
 
-// Connections lists an account's open connections: its newest MaxSockets
-// (connects at the same moment can leave a few more on record until the
-// next one). An empty account has none, at the same cost (a send to an
-// unknown mailbox asks for it).
+// Connections lists an account's recorded connections that haven't
+// expired, newest first: at most MaxRecords or so, some of them of sockets
+// that have closed (a push finds out, and forgets those). An empty account
+// has none, at the same cost (a send to an unknown mailbox asks for it).
 func (s *Sockets) Connections(ctx context.Context, account string) ([]string, error) {
-	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 &s.Table,
-		KeyConditionExpression:    aws.String("pk = :pk"),
-		FilterExpression:          aws.String("e > :now"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account), ":now": num(s.Now().Unix())},
-		ProjectionExpression:      aws.String("sk, e"),
-	})
+	records, err := s.records(ctx, account)
 	if err != nil {
 		return nil, err
 	}
-	type record struct {
-		connection string
-		expires    int64
-	}
-	records := make([]record, 0, len(out.Items))
-	for _, it := range out.Items {
-		c, ok := it["sk"].(*types.AttributeValueMemberS)
-		if !ok {
-			continue
-		}
-		var expires int64
-		if e, ok := it["e"].(*types.AttributeValueMemberN); ok {
-			expires, _ = strconv.ParseInt(e.Value, 10, 64)
-		}
-		records = append(records, record{c.Value, expires})
-	}
-	slices.SortStableFunc(records, func(a, b record) int { return int(b.expires - a.expires) })
-	conns := make([]string, 0, min(len(records), MaxSockets))
-	for _, r := range records[:min(len(records), MaxSockets)] {
-		conns = append(conns, r.connection)
+	now := s.Now().Unix()
+	records = slices.DeleteFunc(records, func(r socketRecord) bool { return r.expires <= now })
+	slices.SortStableFunc(records, func(a, b socketRecord) int { return oldestFirst(b, a) })
+	conns := make([]string, len(records))
+	for i, r := range records {
+		conns[i] = r.connection
 	}
 	return conns, nil
 }

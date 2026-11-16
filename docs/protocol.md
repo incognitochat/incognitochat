@@ -331,14 +331,22 @@ each mailbox's owner, to deliver, but not who writes to it.
   the session token as the second subprotocol, never in a URL). After a
   delivery the server sends the owner's open sockets `{"t":"sync"}` and nothing
   else; the app then fetches its inbox. The Telegram notice goes out only if
-  no socket took the push. Receipts are pushed but never noticed. The server
-  pushes to an account's 5 newest sockets only; opening more drops the
-  oldest from its records. An account can open at most 5 sockets a minute:
-  more are refused, and the app tries again later, polling meanwhile. The app
-  sends a heartbeat about every 5 minutes and keeps the socket only while
-  it's visible. The server keeps a socket's account and connection ID until a
-  push finds it closed, newer sockets push it out, or 2 h 10 min after it
-  opened; a socket closing costs the server nothing.
+  no socket took the push. Receipts are pushed but never noticed. The app
+  sends a heartbeat about every 5 minutes, keeps the socket only while it's
+  visible, and replaces it with a new one about every 30 minutes.
+
+  The server doesn't hear when a socket closes. It keeps a record of each
+  socket (account ID, connection ID, and when it expires: 2 h 10 min after
+  the minute it opened, rounded up to the minute) until a push finds the
+  socket closed, a later connect needs the place, or a connect finds it
+  expired; DynamoDB's TTL can take days to delete an expired record, which is
+  never used. A delivery is pushed to the account's most recently opened
+  sockets first, passing over closed ones (each found closed is forgotten),
+  until 5 have taken it. An account can open at most 5 sockets a minute (UTC
+  minutes) and keep at most 10 records: more connects are refused, and the
+  app tries again later, polling meanwhile. A connect at 9 records forgets
+  the oldest, which may be of a socket still open; it gets no pushes until
+  that copy of the app reopens its socket.
 - `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
   conversation); a link's intro mailbox ends with the link.
 - `POST /mailboxes/check {ids}` returns which of the given mailboxes aren't
