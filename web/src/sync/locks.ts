@@ -16,7 +16,7 @@ export function useProfile(profile: string): void {
 }
 
 export interface LockManagerLike {
-  request<T>(name: string, options: { mode: 'exclusive' }, callback: () => Promise<T>): Promise<T>;
+  request<T>(name: string, options: { mode: 'exclusive'; ifAvailable?: boolean }, callback: (lock: unknown) => Promise<T>): Promise<T>;
 }
 
 function defaultLocks(): LockManagerLike | undefined {
@@ -30,6 +30,16 @@ function defaultLocks(): LockManagerLike | undefined {
 export function withLock<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | undefined = defaultLocks()): Promise<T> {
   if (!locks) return fn();
   return locks.request(PREFIX + namespace + name, { mode: 'exclusive' }, fn);
+}
+
+/**
+ * Like withLock, but only if nobody holds the lock now: then fn runs holding
+ * it, and this resolves to its result; otherwise to null at once, without
+ * waiting.
+ */
+export function withLockIfFree<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | undefined = defaultLocks()): Promise<{ value: T } | null> {
+  if (!locks) return fn().then((value) => ({ value }));
+  return locks.request(PREFIX + namespace + name, { mode: 'exclusive', ifAvailable: true }, async (lock) => (lock ? { value: await fn() } : null));
 }
 
 export type SyncEvent = { type: 'account-changed' } | { type: 'keys-changed' } | { type: 'data-changed' };

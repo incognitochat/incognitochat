@@ -61,13 +61,45 @@ export interface ConversationRecord {
   myKey: string | null;
   /** The mailbox we write to. */
   sendTo: string;
-  /** The mailbox they write to us at; null for an owner who hasn't replied yet (they write to the link). */
+  /**
+   * The mailbox they write to us at; null for an owner who hasn't replied yet
+   * (they write to the link's intro mailbox). Envelopes written for our keys
+   * here count only through it, through the link's intro mailbox until
+   * introUntil (an owner's), or through one of formerMailboxes.
+   */
   myMailbox: string | null;
+  /**
+   * For an owner: the intro mailbox of the link it came through, where their
+   * first message arrived. Kept here so it counts without asking the link,
+   * which may be revoked or replaced since. Missing in conversations from
+   * before it was kept, until upkeep copies it from the link.
+   */
+  intro?: string;
+  /**
+   * For an owner: until when (Unix ms) the intro mailbox of the link it came
+   * through counts for it. They write there until they hear of our mailbox,
+   * and that may wait in the inbox: set to 31 days after something first came
+   * through myMailbox. Missing (as in conversations from before it was kept):
+   * it counts.
+   */
+  introUntil?: number;
+  /**
+   * Mailboxes of ours this conversation moved on from (an unblock, or one the
+   * server lost): they wrote there until our next message told them. Each
+   * counts until `until` (Unix ms), set like introUntil; missing until then.
+   */
+  formerMailboxes?: { id: string; until?: number }[];
   /** Unix ms of the latest message, for ordering. */
   lastAt: number;
   unread: number;
   /** blocked: our mailbox is discarded and anything more from them is dropped. */
   status: 'active' | 'ended' | 'blocked';
+  /**
+   * Being unblocked: we've moved off the discarded mailbox, but the quiet key
+   * update telling them our new one hasn't gone out yet. It stays blocked
+   * until it has; unblocking again sends it.
+   */
+  unblocking?: true;
   /** For an owner: the sender's tag (base64url), to block the person and not just this conversation. */
   tag?: string;
   /**

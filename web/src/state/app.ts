@@ -467,6 +467,7 @@ export function createApp(deps: Deps) {
           issuer,
           ...(mediaIssuer ? { mediaIssuer } : {}),
           onTokens: () => void refreshBudget(),
+          onWaiting: () => void sync(),
         });
       } catch {
         // Without a usable issuer key the app still works, but can't send.
@@ -641,7 +642,8 @@ export function createApp(deps: Deps) {
     const list = await listConversations(deps.db);
     const c = list.find((x) => x.id === id);
     if (!c) return showHome();
-    await messaging?.markRead(id);
+    // In the background: it waits for a send of ours still going out in this chat.
+    void messaging?.markRead(id).catch(() => {});
     backButton(true);
     screen.value = {
       kind: 'conversation',

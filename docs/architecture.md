@@ -131,6 +131,17 @@ never who writes to it. Mailbox IDs only travel inside encrypted messages.
    deleting it takes no mailbox, so a flood of first messages can't use up
    the owner's.
 
+An envelope counts only through the mailbox it belongs to: one written for
+the link's key through the link's intro mailbox; one written for a
+conversation key through that conversation's own mailbox. The link's intro
+mailbox counts for the conversation too until 31 days after the sender first
+writes through the owner's mailbox, and so does a mailbox the conversation
+moved on from (a new one after unblocking, say), until 31 days after they
+first write through the new one. Anything else is dropped as if it couldn't
+be opened, so someone who knows a key can't leave envelopes in suspects'
+mailboxes and watch whose app answers. The server says which mailbox an
+envelope came through.
+
 Each side only ever sees the other as that conversation's key. Two people the
 same sender wrote to see unrelated keys and mailboxes, so they can't compare
 notes. If the owner also writes to the sender's own link, that's a separate

@@ -23,7 +23,7 @@ import { hourFloor } from '../protocol/device-list';
 import { KEY_VALIDITY_SECONDS, keyParts, newLinkId, type LinkRef } from '../protocol/link';
 import { deleteSealed, getKey, getMeta, getSealed, putMeta, putSealed, type Database } from '../storage/db';
 import { withLock } from '../sync/locks';
-import { indexKey, KEY_RETENTION_MS, scheduleKeyDeletion, unindexKeys } from '../messaging/keys';
+import { indexKey, KEY_RETENTION_MS, linkKeysMailbox, scheduleKeyDeletion, setLinkKeysMailbox, unindexKeys } from '../messaging/keys';
 
 const META_LINKS = 'links';
 /** The account's link signing key (sealed), and its public key (meta). */
@@ -34,12 +34,19 @@ const LOCK = 'links';
 const ID_ATTEMPTS = 3;
 const ID = /^[A-Za-z0-9_-]{11}$/;
 const FP = /^[A-Za-z0-9_-]{43}$/;
+const MAILBOX = /^[A-Za-z0-9_-]{22}$/;
 
 export interface LinkRecord extends LinkRef {
   /** The encryption keys sealed for this link: validity window and public key (base64url). */
   keys: { from: number; until: number; pub?: string }[];
   /** Unix seconds when the link next gets a new encryption key (weekly, jittered). */
   rotateAt?: number;
+  /**
+   * Its intro mailbox, where first messages arrive: the only one an envelope
+   * written for its keys counts through. Missing for a link made before it
+   * was kept, until the link's bundle says (messaging/engine.ts).
+   */
+  mailbox?: string;
 }
 
 /** Link encryption keys are replaced every 6 to 9 days (design D11). */
@@ -147,8 +154,9 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
     // Sealed before the server knows the link, so a link never exists
     // without its keys on this device.
     await putSealed(db, keyName(id, from), await seal(vaultKey, encryption.privateKey, keyName(id, from)));
+    let mailbox: string | undefined;
     try {
-      await session.call(
+      const created = await session.call(
         'POST',
         '/links',
         {
@@ -160,6 +168,9 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
         checkObject,
         { sign: true },
       );
+      // The server picks the intro mailbox. Without a valid one here, it's
+      // learned from the bundle later, as for a link from before it was kept.
+      if (typeof created.mailbox === 'string' && MAILBOX.test(created.mailbox)) mailbox = created.mailbox;
     } catch (err) {
       await deleteSealed(db, keyName(id, from));
       if (err instanceof ApiError && err.code === 'conflict' && attempt < ID_ATTEMPTS) continue;
@@ -170,6 +181,7 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
       fingerprint: signing.fp,
       keys: [{ from, until, pub: toBase64Url(encryptionKey) }],
       rotateAt: nextRotation(now()),
+      ...(mailbox ? { mailbox } : {}),
     };
     await putMeta(db, META_LINKS, [...(await listLinks(db)).filter((l) => l.id !== replaces?.id), record]);
     if (replaces) {
@@ -177,8 +189,8 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
       // no longer be waiting in the inbox.
       await scheduleKeyDeletion(db, (e) => e.link?.id === replaces.id, now() * 1000 + KEY_RETENTION_MS);
     }
-    // First messages to the link are wrapped to this key.
-    await indexKey(db, encryptionKey, { name: keyName(id, from), link: { id, fingerprint: signing.fp } });
+    // First messages to the link are wrapped to this key, and come through its intro mailbox.
+    await indexKey(db, encryptionKey, { name: keyName(id, from), link: { id, fingerprint: signing.fp, ...(mailbox ? { mailbox } : {}) } });
     return record;
   }
 }
@@ -231,7 +243,7 @@ export function rotateLinkKey(db: Database, session: Session, now: number): Prom
       if (err instanceof ApiError && err.code === 'not_found') return false;
       throw err;
     }
-    await indexKey(db, encryptionKey, { name, link: { id: link.id, fingerprint: link.fingerprint } });
+    await indexKey(db, encryptionKey, { name, link: { id: link.id, fingerprint: link.fingerprint, ...(link.mailbox ? { mailbox: link.mailbox } : {}) } });
     await scheduleKeyDeletion(db, (e) => e.link?.id === link.id && e.name !== name, now * 1000 + KEY_RETENTION_MS);
     await save({
       ...link,
@@ -240,6 +252,27 @@ export function rotateLinkKey(db: Database, session: Session, now: number): Prom
       rotateAt: nextRotation(now),
     });
     return true;
+  });
+}
+
+/**
+ * The intro mailbox of one of our links, if known: the current link's, or a
+ * replaced one's while its keys are kept (35 days, longer than anything sent
+ * to it can wait in the inbox).
+ */
+export async function introMailbox(db: Database, id: string): Promise<string | undefined> {
+  return (await listLinks(db)).find((l) => l.id === id)?.mailbox ?? (await linkKeysMailbox(db, id));
+}
+
+/** Records the intro mailbox of a link made before it was kept, on the link and its keys. */
+export function setLinkMailbox(db: Database, id: string, mailbox: string): Promise<void> {
+  if (!MAILBOX.test(mailbox)) return Promise.reject(new Error('bad mailbox'));
+  return withLock(LOCK, async () => {
+    const links = await listLinks(db);
+    if (links.some((l) => l.id === id && l.mailbox !== mailbox)) {
+      await putMeta(db, META_LINKS, links.map((l) => (l.id === id ? { ...l, mailbox } : l)));
+    }
+    await setLinkKeysMailbox(db, id, mailbox);
   });
 }
 
