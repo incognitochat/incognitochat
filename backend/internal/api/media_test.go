@@ -50,6 +50,11 @@ func (m *memUploads) Get(_ context.Context, id string) (ephemeral.Upload, bool, 
 	return up, ok, nil
 }
 
+func (m *memUploads) Exists(ctx context.Context, id string) (bool, error) {
+	_, ok, err := m.Get(ctx, id)
+	return ok, err
+}
+
 func (m *memUploads) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

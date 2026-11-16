@@ -3,16 +3,22 @@
 // Everything an account owns lives in one partition, "A#<account ID>", so
 // replacing or deleting an account can find all of it:
 //
-//	A#<account>  A          account: account key (ak), Telegram hash (th)
-//	A#<account>  D#<device> device: signing key (k)
-//	A#<account>  L          signed device list: bytes (b), signature (s), sequence (q)
-//	A#<account>  K#<link>   marks a link the account owns (links.go)
-//	L#<link>     L          a link: owner (a), signing key (k), encryption keys (ek)
-//	A#<account>  I#<code>   marks an invitation code the account made (invitations.go)
-//	I#<code>     I          a code: owner (o), owner's level (l), uses (u), uses left (r)
-//	S#levels     S          invitation allowance per level (m), version (v)
-//	M#<mailbox>  M          a mailbox (mailboxes.go)
-//	T#<hash>     T          one account per Telegram user: account ID (a)
+//	A#<account>  A           account: account key (ak), Telegram hash (th)
+//	A#<account>  D#<device>  device: signing key (k)
+//	A#<account>  I#<code>    marks an invitation code the account made (invitations.go)
+//	A#<account>  K#<link>    marks a link the account owns (links.go)
+//	A#<account>  L           signed device list: bytes (b), signature (s), sequence (q)
+//	A#<account>  M#<mailbox> marks a mailbox the account owns (mailboxes.go)
+//	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek)
+//	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r)
+//	S#levels     S           invitation allowance per level (m), version (v)
+//	M#<mailbox>  M           a mailbox (mailboxes.go)
+//	T#<hash>     T           one account per Telegram user: account ID (a)
+//
+// The account partition's sort keys sort as listed (accountSortKeys).
+// Every logged-in request reads the account item and its device's in one
+// query, from "A" to "D#<device>" (Device), so nothing but devices may
+// sort between them: a new kind of item needs a sort key after "D#~".
 //
 // The account item also counts the account's active links (lc) and, once it
 // joined through an invitation, records its level (lv), the invitations
@@ -34,6 +40,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,6 +52,10 @@ import (
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 )
+
+// accountSortKeys are the sort keys, or their prefixes, of the items in an
+// account's partition, in sort order (see the package comment).
+var accountSortKeys = []string{skAccount, devicePrefix, codePrefix, linkPrefix, skDeviceList, mailboxPrefix}
 
 // ReplacedTTL is how long a replaced account's devices are told so.
 const ReplacedTTL = 90 * 24 * time.Hour
@@ -69,6 +80,9 @@ var (
 	ErrNotFound = errors.New("directory: not found")
 	// ErrConflict is returned when a concurrent change won.
 	ErrConflict = errors.New("directory: conflict")
+	// errCutShort is returned when a read meant to take one page didn't:
+	// something unexpected sorts in its range.
+	errCutShort = errors.New("directory: read cut short")
 )
 
 // DB is the part of the DynamoDB client the store uses.
@@ -97,10 +111,9 @@ func TelegramHash(pepper []byte, userID int64) string {
 
 // Account is an existing account, as registration needs it.
 type Account struct {
-	ID      string
-	Key     []byte            // account key; nil if the account item is missing
-	Devices map[string][]byte // device ID -> signing key
-	items   []string          // every sort key in the partition
+	ID        string
+	Key       []byte // account key; nil if the account item is missing
+	DeviceKey []byte // the signing key of the device asked about; nil if the account has no such device
 }
 
 // NewAccount is a registration to store.
@@ -129,51 +142,78 @@ type Device struct {
 	Notices      bool   // Telegram notices are set up and not turned off
 }
 
-// ByTelegram returns the account registered for a Telegram hash.
-func (s *Store) ByTelegram(ctx context.Context, telegramHash string) (Account, error) {
+// AccountOf returns the ID of the account registered for a Telegram hash,
+// reading only the item that keeps one account per Telegram user.
+func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, error) {
 	out, err := s.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &s.Table,
 		Key:            key("T#"+telegramHash, skTelegram),
 		ConsistentRead: aws.Bool(true),
 	})
 	if err != nil {
-		return Account{}, err
+		return "", err
 	}
 	id, ok := str(out.Item, "a")
 	if !ok {
-		return Account{}, ErrNotFound
+		return "", ErrNotFound
 	}
+	return id, nil
+}
 
-	acct := Account{ID: id, Devices: map[string][]byte{}}
-	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
+// ByTelegram returns the account registered for a Telegram hash, with the
+// signing key of one of its devices, if it has that device. It reads only
+// those items, never the rest of the partition, which can hold thousands
+// (only Replace lists it, after the caller's limit on replacements).
+func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (Account, error) {
+	id, err := s.AccountOf(ctx, telegramHash)
+	if err != nil {
+		return Account{}, err
+	}
+	acct, dev, err := s.accountAndDevice(ctx, id, deviceID, true)
+	if err != nil {
+		return Account{}, err
+	}
+	out := Account{ID: id}
+	if _, gone := str(acct, "g"); !gone {
+		out.Key, _ = bin(acct, "ak")
+	}
+	out.DeviceKey, _ = bin(dev, "k")
+	return out, nil
+}
+
+// accountAndDevice reads an account's item and one device's item (either
+// nil if missing) in one query, strongly consistent if consistent: the
+// device's sort key follows the account's ("A" < "D#…"), and only the
+// account's other devices, if any, sort between them (accountSortKeys). A
+// result cut short (over 1 MB between them) is an error, never a device
+// taken for missing.
+func (s *Store) accountAndDevice(ctx context.Context, accountID, deviceID string, consistent bool) (map[string]types.AttributeValue, map[string]types.AttributeValue, error) {
+	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.Table,
-		KeyConditionExpression: aws.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": &types.AttributeValueMemberS{Value: accountPK(id)},
+		KeyConditionExpression: aws.String("pk = :pk AND sk BETWEEN :a AND :d"),
+		ExpressionAttributeValues: attrs{
+			":pk": sv(accountPK(accountID)),
+			":a":  sv(skAccount),
+			":d":  sv(devicePrefix + deviceID),
 		},
-		ConsistentRead: aws.Bool(true),
+		ConsistentRead: aws.Bool(consistent),
 	})
-	for pages.HasMorePages() {
-		page, err := pages.NextPage(ctx)
-		if err != nil {
-			return Account{}, err
-		}
-		for _, it := range page.Items {
-			sk, _ := str(it, "sk")
-			acct.items = append(acct.items, sk)
-			switch {
-			case sk == skAccount:
-				if _, gone := str(it, "g"); !gone {
-					acct.Key, _ = bin(it, "ak")
-				}
-			case strings.HasPrefix(sk, devicePrefix):
-				if k, ok := bin(it, "k"); ok {
-					acct.Devices[strings.TrimPrefix(sk, devicePrefix)] = k
-				}
-			}
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(out.LastEvaluatedKey) > 0 {
+		return nil, nil, errCutShort
+	}
+	var acct, dev map[string]types.AttributeValue
+	for _, it := range out.Items {
+		switch sk, _ := str(it, "sk"); sk {
+		case skAccount:
+			acct = it
+		case devicePrefix + deviceID:
+			dev = it
 		}
 	}
-	return acct, nil
+	return acct, dev, nil
 }
 
 // Create stores a new account. It returns ErrConflict if the Telegram user
@@ -191,7 +231,19 @@ func (s *Store) Create(ctx context.Context, n NewAccount) error {
 
 // Replace ends old and stores n in its place, atomically. It returns
 // ErrConflict if the Telegram user's account changed since old was read.
+//
+// The old partition is listed (it can hold thousands of mailboxes) only
+// here, so after the caller's limit on replacements. Once before the swap,
+// eventually consistent (half the cost), so the cleanup can still run if
+// the table refuses reads after it; and once after, strongly consistent,
+// which is the listing that counts: it also finds what was made in
+// between. Nothing joins the partition after the swap: making anything in
+// it needs the account item, then only a marker.
 func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time.Time) error {
+	sks, devices, err := s.partition(ctx, old.ID, false)
+	if err != nil {
+		return err
+	}
 	expires := roundUp(now.Add(ReplacedTTL))
 	writes := []types.TransactWriteItem{{
 		Update: &types.Update{
@@ -215,10 +267,24 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 		return err
 	}
 
-	// Then the rest of its partition: device keys stay until the marker
-	// expires, everything else goes now.
+	// Then the rest of its partition, with what was made since it was
+	// listed. That read is tried a few times; if it still fails, what was
+	// listed before goes anyway. Device keys stay until the marker expires,
+	// everything else goes now.
+	if after, afterDevices, err := s.listAgain(ctx, old.ID); err == nil {
+		listed := make(map[string]bool, len(sks))
+		for _, sk := range sks {
+			listed[sk] = true
+		}
+		for _, sk := range after {
+			if !listed[sk] {
+				sks = append(sks, sk)
+			}
+		}
+		maps.Copy(devices, afterDevices)
+	}
 	var requests []types.WriteRequest
-	for _, sk := range old.items {
+	for _, sk := range sks {
 		switch {
 		case sk == skAccount:
 		case strings.HasPrefix(sk, mailboxPrefix):
@@ -240,7 +306,7 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink)}},
 			)
 		case strings.HasPrefix(sk, devicePrefix):
-			k, ok := old.Devices[strings.TrimPrefix(sk, devicePrefix)]
+			k, ok := devices[sk]
 			if !ok {
 				continue
 			}
@@ -274,7 +340,7 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 // write to the account cancels that last step, it reports not finished, and
 // asking again finishes it: a conflict is never taken for "already gone".
 func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error) {
-	sks, err := s.sortKeys(ctx, accountID)
+	sks, _, err := s.partition(ctx, accountID, true)
 	if err != nil {
 		return false, err
 	}
@@ -362,40 +428,85 @@ func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max 
 	return true, s.batchWrite(ctx, devices)
 }
 
-// sortKeys lists every item in an account's partition.
-func (s *Store) sortKeys(ctx context.Context, accountID string) ([]string, error) {
+// listTries is how many times Replace lists the old partition after the
+// swap before falling back to its listing from before.
+const listTries = 3
+
+// listAgain is partition, strongly consistent, tried up to listTries times
+// with a short pause between (a throttled table often takes the next one).
+func (s *Store) listAgain(ctx context.Context, accountID string) ([]string, map[string][]byte, error) {
+	var err error
+	for try := range listTries {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(time.Duration(50<<try) * time.Millisecond):
+			}
+		}
+		var sks []string
+		var devices map[string][]byte
+		if sks, devices, err = s.partition(ctx, accountID, true); err == nil {
+			return sks, devices, nil
+		}
+	}
+	return nil, nil, err
+}
+
+// partition lists an account's whole partition: every sort key, and the
+// signing key of each device (by sort key).
+func (s *Store) partition(ctx context.Context, accountID string, consistent bool) ([]string, map[string][]byte, error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
 		ExpressionAttributeValues: attrs{":pk": sv(accountPK(accountID))},
-		ProjectionExpression:      aws.String("sk"),
-		ConsistentRead:            aws.Bool(true),
+		ProjectionExpression:      aws.String("sk, k"),
+		ConsistentRead:            aws.Bool(consistent),
 	})
 	var sks []string
+	devices := map[string][]byte{}
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, it := range page.Items {
-			if sk, ok := str(it, "sk"); ok {
-				sks = append(sks, sk)
+			sk, ok := str(it, "sk")
+			if !ok {
+				continue
+			}
+			sks = append(sks, sk)
+			if k, ok := bin(it, "k"); ok && strings.HasPrefix(sk, devicePrefix) {
+				devices[sk] = k
 			}
 		}
 	}
-	return sks, nil
+	return sks, devices, nil
 }
 
 // Device returns a device's signing key, and whether its account was
 // replaced. It returns ErrNotFound if the device or its account is gone.
+// Every logged-in request asks, so it is one strongly consistent read of
+// both items (a replaced or deleted account is refused at once), not two.
 func (s *Store) Device(ctx context.Context, accountID, deviceID string, now time.Time) (Device, error) {
-	dev, err := s.get(ctx, accountPK(accountID), devicePrefix+deviceID, now)
+	return s.device(ctx, accountID, deviceID, now, true)
+}
+
+// LoginDevice is Device for a login, eventually consistent at half the
+// cost: anyone can ask, with any IDs. A device replaced or removed in about
+// the last second may still get a token, but every request with it reads
+// strongly (Device) and is refused.
+func (s *Store) LoginDevice(ctx context.Context, accountID, deviceID string, now time.Time) (Device, error) {
+	return s.device(ctx, accountID, deviceID, now, false)
+}
+
+func (s *Store) device(ctx context.Context, accountID, deviceID string, now time.Time, consistent bool) (Device, error) {
+	acct, dev, err := s.accountAndDevice(ctx, accountID, deviceID, consistent)
 	if err != nil {
 		return Device{}, err
 	}
-	acct, err := s.get(ctx, accountPK(accountID), skAccount, now)
-	if err != nil {
-		return Device{}, err
+	if acct == nil || dev == nil || expired(acct, now) || expired(dev, now) {
+		return Device{}, ErrNotFound
 	}
 	k, ok := bin(dev, "k")
 	if !ok {
@@ -440,13 +551,19 @@ func (s *Store) newAccountItems(n NewAccount) []types.TransactWriteItem {
 	}
 }
 
-// get reads one item, treating an expired item as missing: TTL deletion can
-// lag by days.
+// get reads one item, strongly consistent, treating an expired item as
+// missing: TTL deletion can lag by days.
 func (s *Store) get(ctx context.Context, pk, sk string, now time.Time) (map[string]types.AttributeValue, error) {
+	return s.read(ctx, pk, sk, now, true)
+}
+
+// read is get, eventually consistent unless consistent: at half the cost,
+// it may miss a write made in about the last second.
+func (s *Store) read(ctx context.Context, pk, sk string, now time.Time, consistent bool) (map[string]types.AttributeValue, error) {
 	out, err := s.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &s.Table,
 		Key:            key(pk, sk),
-		ConsistentRead: aws.Bool(true),
+		ConsistentRead: aws.Bool(consistent),
 	})
 	if err != nil {
 		return nil, err

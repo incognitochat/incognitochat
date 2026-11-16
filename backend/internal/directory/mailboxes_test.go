@@ -107,7 +107,7 @@ func TestReplaceEndsMailboxes(t *testing.T) {
 	if err := s.CreateMailboxes(ctx, first.ID, pool, 10); err != nil {
 		t.Fatal(err)
 	}
-	old, _ := s.ByTelegram(ctx, first.TelegramHash)
+	old, _ := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
 	if err := s.Replace(ctx, old, newAccount(t, first.TelegramHash), now); err != nil {
 		t.Fatal(err)
 	}

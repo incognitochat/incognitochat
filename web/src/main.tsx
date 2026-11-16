@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     bridge: telegram,
     broadcast: (event) => channel?.send(event),
   });
-  restart = () => void app.start();
+  restart = () => void app.accountChanged();
   // No browser menu on a long press (messages open their own); fields keep theirs.
   document.addEventListener('contextmenu', (e) => {
     if (!(e.target instanceof Element && e.target.closest('input, textarea'))) e.preventDefault();

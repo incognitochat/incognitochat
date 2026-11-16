@@ -192,7 +192,7 @@ func (s *Server) linkBundle(ctx context.Context, _ httpapi.Request) httpapi.Resp
 	if !links.ValidID(id) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	link, err := s.Directory.Link(ctx, id)
+	link, err := s.Directory.Bundle(ctx, id)
 	if errors.Is(err, directory.ErrNotFound) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}

@@ -22,6 +22,10 @@ const (
 	// RegistrationsPerDay limits new accounts and replacements per Telegram
 	// user per UTC day.
 	RegistrationsPerDay = 3
+	// RegisterAttemptsPerDay limits, per Telegram user and UTC day, the
+	// registrations that get as far as reading the directory: retries,
+	// refusals and replays of one launch (valid for minutes) included.
+	RegisterAttemptsPerDay = 20
 
 	maxInitData = 8 << 10
 	// A first device list may be issued this far from the server's clock.
@@ -110,7 +114,14 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		DeviceListSeq: list.Seq,
 	}
 
-	existing, err := s.Directory.ByTelegram(ctx, telegramHash)
+	// Counted before anything is read, whatever comes of it. Then only the
+	// items it needs are read: the Telegram user's account, its account
+	// item and this device's, never the whole partition (thousands of
+	// mailboxes), which only a replacement lists, once counted.
+	if resp, ok := s.allowPerDay(ctx, route, "regtry#"+telegramHash, RegisterAttemptsPerDay); !ok {
+		return resp
+	}
+	existing, err := s.Directory.ByTelegram(ctx, telegramHash, in.Device)
 	switch {
 	case errors.Is(err, directory.ErrNotFound):
 		if resp, ok := s.allowRegistration(ctx, route, telegramHash); !ok {
@@ -123,7 +134,7 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		}
 	case err != nil:
 		return s.internal(route, err)
-	case bytes.Equal(existing.Key, in.AccountKey) && bytes.Equal(existing.Devices[in.Device], in.DeviceKey):
+	case bytes.Equal(existing.Key, in.AccountKey) && bytes.Equal(existing.DeviceKey, in.DeviceKey):
 		// A retry of a registration that already succeeded, e.g. after its
 		// response was lost.
 		return s.issue(route, existing.ID, in.Device, now)
@@ -145,7 +156,11 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 }
 
 func (s *Server) allowRegistration(ctx context.Context, route, telegramHash string) (httpapi.Response, bool) {
-	ok, err := s.Limits.Allow(ctx, "reg#"+telegramHash, RegistrationsPerDay, 24*time.Hour)
+	return s.allowPerDay(ctx, route, "reg#"+telegramHash, RegistrationsPerDay)
+}
+
+func (s *Server) allowPerDay(ctx context.Context, route, key string, limit int) (httpapi.Response, bool) {
+	ok, err := s.Limits.Allow(ctx, key, limit, 24*time.Hour)
 	if err != nil {
 		return s.internal(route, err), false
 	}
