@@ -159,8 +159,12 @@ resource "aws_cloudwatch_metric_alarm" "table_throttles" {
 # presigned URLs, past the API, its firewall and the alarms above, and S3
 # bills every request, refused ones included. Each needs a URL from the api
 # function first, so far more than real use is a URL being replayed. The
-# bucket's name is random (infra/media.tf), so the query finds its request
+# bucket's name is random (infra/media.tf), so the queries find its request
 # metrics by their configuration's name.
+locals {
+  media_metrics = "FROM SCHEMA(\"AWS/S3\", BucketName, FilterId) WHERE FilterId = '${local.prefix}-media'"
+}
+
 resource "aws_cloudwatch_metric_alarm" "media_requests" {
   for_each = { uploads = "PutRequests", downloads = "GetRequests" }
 
@@ -175,8 +179,29 @@ resource "aws_cloudwatch_metric_alarm" "media_requests" {
 
   metric_query {
     id          = "requests"
-    expression  = "SELECT SUM(${each.value}) FROM SCHEMA(\"AWS/S3\", BucketName, FilterId) WHERE FilterId = '${local.prefix}-media'"
+    expression  = "SELECT SUM(${each.value}) ${local.media_metrics}"
     label       = each.value
+    period      = local.alarm_period
+    return_data = true
+  }
+}
+
+# What downloads cost is the data sent, not the requests: one 51 MiB
+# download costs as much as about 11,000 GET requests.
+resource "aws_cloudwatch_metric_alarm" "media_download_bytes" {
+  alarm_name          = "${local.prefix}-media-download-bytes"
+  alarm_description   = "More than ${var.media_download_gib_alarm} GiB was downloaded from the media bucket in 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.media_download_gib_alarm * 1073741824
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "bytes"
+    expression  = "SELECT SUM(BytesDownloaded) ${local.media_metrics}"
+    label       = "BytesDownloaded"
     period      = local.alarm_period
     return_data = true
   }

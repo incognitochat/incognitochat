@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"net/http"
 	"time"
@@ -24,10 +25,17 @@ const DownloadsPerDay = 5
 // URL can be tried (and billed), so there are few.
 const UploadRenewals = 3
 
+// UploadRenewalWindow is how long after paying for an upload its fresh URLs
+// can be asked for: plenty for four tries of 50 MB on a slow connection. An
+// upload written much later would outlive its record, which expires
+// media.Retention after payment, with nothing to delete it by.
+const UploadRenewalWindow = 3 * time.Hour
+
 // Media is the media bucket (media.Bucket).
 type Media interface {
 	UploadURL(ctx context.Context, id string, size int64) (string, error)
 	DownloadURL(ctx context.Context, id string) (string, error)
+	Exists(ctx context.Context, id string) (bool, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -37,7 +45,7 @@ type Uploads interface {
 	Get(ctx context.Context, id string) (ephemeral.Upload, bool, error)
 	// Exists is Get for downloads: eventually consistent.
 	Exists(ctx context.Context, id string) (bool, error)
-	Renew(ctx context.Context, id string, deleteHash []byte, most int) (ephemeral.Upload, bool, error)
+	Renew(ctx context.Context, id string, most int, expiresAfter time.Time) (bool, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -111,10 +119,12 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 }
 
 // renewUpload gives a paid upload a fresh upload URL, for whoever holds its
-// delete secret: the app trying again after a failed PUT, once the first
-// URL can no longer start one. It costs no tokens. A URL can't overwrite
-// what an earlier PUT wrote (media.UploadURL), so a fresh one only helps
-// while nothing is stored; there are at most UploadRenewals.
+// delete secret: the app trying again after a failed PUT (a URL starts a PUT
+// only within a minute). It costs no tokens. A fresh URL is given only while
+// nothing is stored, at most UploadRenewals times and within
+// UploadRenewalWindow of payment. Once the upload is stored the answer says
+// so ({"uploaded": true}), and the app counts its upload as done. Every
+// refusal is the same not_found.
 func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/{id}/upload"
 	id := httpapi.Param(ctx, "id")
@@ -127,14 +137,31 @@ func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.R
 	if s.Media == nil || !ids.Valid(id) || len(in.Secret) == 0 {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
+	// Read and check the secret before writing anything: anyone can call
+	// this, and a refused conditional write still costs write capacity.
+	up, ok, err := s.Uploads.Get(ctx, id)
+	if err != nil {
+		return s.internal(route, err)
+	}
 	hash := sha256.Sum256(in.Secret)
-	up, ok, err := s.Uploads.Renew(ctx, id, hash[:], UploadRenewals)
+	if !ok || subtle.ConstantTimeCompare(hash[:], up.DeleteHash) != 1 {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	// Counted before S3 is asked, so the lookups are limited too.
+	ok, err = s.Uploads.Renew(ctx, id, UploadRenewals, s.Now().Add(media.Retention-UploadRenewalWindow))
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if !ok {
-		// No such upload, the wrong secret, or no fresh URLs left.
+		// Paid for too long ago, or no fresh URLs left.
 		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	stored, err := s.Media.Exists(ctx, id)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	if stored {
+		return httpapi.JSON(http.StatusOK, map[string]bool{"uploaded": true})
 	}
 	url, err := s.Media.UploadURL(ctx, id, up.Size)
 	if err != nil {
@@ -190,7 +217,7 @@ func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.
 		return s.internal(route, err)
 	}
 	hash := sha256.Sum256(in.Secret)
-	if !ok || !bytes.Equal(hash[:], up.DeleteHash) {
+	if !ok || subtle.ConstantTimeCompare(hash[:], up.DeleteHash) != 1 {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
 	if err := s.Media.Delete(ctx, id); err != nil {

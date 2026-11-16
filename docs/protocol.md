@@ -427,18 +427,25 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 - An upload URL writes once and starts within a minute. S3 refuses a PUT
   once the upload exists (412), and a PUT that starts more than a minute
   after the URL was signed (S3 checks when a request starts, so a long
-  upload that started in time finishes). The bucket also refuses any
-  presigned request whose signature is over two minutes old. So an upload
-  can't be replaced after it was sent, or written again after it was
-  deleted.
+  upload that started in time finishes). The bucket also refuses any PUT
+  that creates an object without `If-None-Match`, and any presigned request
+  whose signature is over two minutes old. So an upload can't be replaced
+  after it was sent.
 - **Trying again.** If a PUT fails, the app tries again, up to four tries in
-  all, with no new tokens. It reuses the URL while it can still start a PUT
-  (for 40 seconds after it arrived), and otherwise asks
-  `POST /media/{id}/upload {secret}` (the delete secret; no login) for a
-  fresh `{url}` for the same upload and size. An upload gets at most 3; a
-  fourth request, an unknown upload or a wrong secret gets `not_found`. A
-  412 to a later try means an earlier one wrote the upload and only its
-  answer was lost, so the upload is done.
+  all, with no new tokens. Before each later try it asks
+  `POST /media/{id}/upload {secret}` (the delete secret; no login). The
+  server checks the secret, then looks in the bucket: if the upload is
+  stored (an earlier try wrote it and only its answer was lost), it answers
+  `{uploaded: true}` and the app counts the upload as done; otherwise it
+  answers a fresh `{url}` for the same upload and size. It answers at most
+  3 times per upload, and only in the 3 hours after `POST /media`; past
+  that, and for an unknown upload or a wrong secret, it answers
+  `not_found`, and the app marks the message failed. A 412 to any try also
+  means the upload is stored. The recipient's message carries the delete
+  secret too, so the recipient can ask as well; with the upload stored, it
+  only ever learns that. Once the upload is deleted, no URL is given for it
+  again; only one given less than a minute before could write it back
+  (where the bucket's 30-day expiry still removes it).
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),

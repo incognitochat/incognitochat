@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { encryptFile, newFileKey } from '../crypto/media';
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
 import { ApiError, type Api } from '../net/api';
-import type { Media } from '../protocol/message';
+import { MAX_FILE_BYTES, type Media } from '../protocol/message';
 import { fetchForSaving, Gone, readTicket, saveUrl, SAVE_PREFIX } from './save';
 
 const key = newFileKey();
@@ -27,6 +27,10 @@ describe('save tickets', () => {
   it('refuse broken ones', () => {
     expect(readTicket('#save=nonsense')).toBeNull();
     expect(readTicket('#other')).toBeNull();
+    // No bigger than a message allows, since the page reads that much.
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: MAX_FILE_BYTES })).hash)).not.toBeNull();
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: MAX_FILE_BYTES + 1 })).hash)).toBeNull();
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: Number.MAX_SAFE_INTEGER })).hash)).toBeNull();
     const bad = saveUrl('https://x/', { ...media, k: 'AAAA' });
     expect(readTicket(new URL(bad).hash)).toBeNull();
   });

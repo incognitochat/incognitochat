@@ -7,6 +7,8 @@ package media
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -60,15 +62,16 @@ type Presigner interface {
 	PresignGetObject(context.Context, *s3.GetObjectInput, ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error)
 }
 
-// Deleter deletes objects (s3.Client).
-type Deleter interface {
+// Objects looks up and deletes objects (s3.Client).
+type Objects interface {
+	HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
 // Bucket is the media bucket.
 type Bucket struct {
 	Presign Presigner
-	S3      Deleter
+	S3      Objects
 	Name    string
 }
 
@@ -111,6 +114,18 @@ func (b *Bucket) DownloadURL(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	return req.URL, nil
+}
+
+// Exists reports whether id's ciphertext has been uploaded. The api role may
+// read objects but not list the bucket, so S3 answers 403 rather than 404
+// for one that isn't there; both mean no.
+func (b *Bucket) Exists(ctx context.Context, id string) (bool, error) {
+	_, err := b.S3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &b.Name, Key: key(id)})
+	var answer interface{ HTTPStatusCode() int }
+	if errors.As(err, &answer) && (answer.HTTPStatusCode() == http.StatusNotFound || answer.HTTPStatusCode() == http.StatusForbidden) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Delete deletes id's ciphertext. Deleting one that's gone is fine.

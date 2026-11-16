@@ -104,6 +104,33 @@ data "aws_iam_policy_document" "media" {
       values   = ["120000"]
     }
   }
+
+  # Uploads only create: a PUT that creates an object must send
+  # If-None-Match (backend/internal/media signs it into every upload URL), so
+  # no later change can bring back overwrites unnoticed. Only object-creating
+  # requests are covered: multipart part uploads can't carry the header. The
+  # app is the only writer; nothing here copies objects (CopyObject would be
+  # refused).
+  statement {
+    sid       = "CreateOnly"
+    effect    = "Deny"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.media.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Null"
+      variable = "s3:if-none-match"
+      values   = ["true"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "s3:ObjectCreationOperation"
+      values   = ["true"]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "media" {

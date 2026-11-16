@@ -137,22 +137,25 @@ export interface Outgoing {
 const TOKEN_BYTES = 1024 * 1024;
 /**
  * How many times an upload is tried in all. Tries after the first cost no
- * tokens; the server gives an upload three fresh URLs for them.
+ * tokens: the server gives an upload three fresh URLs for them, in the first
+ * hours after paying. (An upload URL only starts a PUT within a minute.)
  */
 const PUT_TRIES = 4;
 /** How long to wait before each try after the first. */
 const PUT_RETRY_MS = [1_000, 3_000, 6_000];
-/**
- * An upload URL only works if the PUT starts within a minute of the server
- * signing it (S3 checks when a request starts; one that has started may go
- * on longer). A try this long after the URL arrived asks for a fresh one.
- */
-const UPLOAD_URL_FRESH_MS = 40_000;
 
 function checkUpload(value: unknown): { id: string; url: string } {
   const { id, url } = checkObject(value);
   if (typeof id !== 'string' || typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
   return { id, url };
+}
+
+/** A fresh upload URL, or word that the upload is stored already. */
+function checkRenewal(value: unknown): string | 'uploaded' {
+  const { url, uploaded } = checkObject(value);
+  if (uploaded === true) return 'uploaded';
+  if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
+  return url;
 }
 
 function checkUrl(value: unknown): string {
@@ -316,28 +319,28 @@ export function createMessaging(deps: MessagingDeps) {
 
   /**
    * PUTs a paid upload, trying again a few times if that fails. Tries again
-   * cost no tokens: they use the same URL while it can still start a PUT,
-   * and otherwise a fresh one, which the server gives for the upload's
-   * delete secret. A URL writes only once, so 412 means an earlier try did
-   * write the upload and only its answer was lost.
+   * cost no tokens: each asks the server, with the upload's delete secret,
+   * for a fresh URL, or learns that the upload is stored already (an earlier
+   * try wrote it and only its answer was lost). A URL writes only once, so a
+   * 412 means the same.
    */
   async function put(id: string, first: string, body: Uint8Array<ArrayBuffer>, secret: Uint8Array, onProgress?: (fraction: number) => void): Promise<void> {
     let url = first;
-    let arrived = now();
     for (let tries = 1; ; tries++) {
       try {
         await transfer.put(url, body, onProgress);
         return;
       } catch (err) {
+        // It's there already: an earlier try wrote it.
         if (err instanceof TransferError && err.status === 412) return;
         if (!(err instanceof TransferError) || tries >= PUT_TRIES) throw err;
-        await wait(PUT_RETRY_MS[tries - 1] ?? 0);
-        // 403: refused, most likely because the URL can no longer start one.
-        if (err.status === 403 || now() - arrived > UPLOAD_URL_FRESH_MS) {
-          url = await api.post(`/media/${id}/upload`, { secret: toBase64Url(secret) }, checkUrl);
-          arrived = now();
-        }
       }
+      await wait(PUT_RETRY_MS[tries - 1] ?? 0);
+      // The server knows whether a try that seemed to fail wrote it after
+      // all (its answer lost); if not, it gives a fresh URL.
+      const next = await api.post(`/media/${id}/upload`, { secret: toBase64Url(secret) }, checkRenewal);
+      if (next === 'uploaded') return;
+      url = next;
     }
   }
 

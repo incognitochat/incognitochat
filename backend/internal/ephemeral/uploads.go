@@ -76,36 +76,27 @@ func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, 
 	return Upload{DeleteHash: d.Value, Size: size}, true, nil
 }
 
-// Renew counts one more fresh upload URL for an upload, for whoever holds its
-// delete secret (deleteHash is its SHA-256), and returns the upload. It
-// reports false if there is no such upload (or it expired), the hash is
-// wrong, or the upload already had most.
-func (u *Uploads) Renew(ctx context.Context, id string, deleteHash []byte, most int) (Upload, bool, error) {
-	out, err := u.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+// Renew counts one more fresh upload URL for an upload. It reports false if
+// there is no such upload, the upload expires at or before expiresAfter
+// (so it was paid for too long ago, or it expired), or it already had most.
+// It writes, so the caller checks the delete secret first (Get).
+func (u *Uploads) Renew(ctx context.Context, id string, most int, expiresAfter time.Time) (bool, error) {
+	_, err := u.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           &u.Table,
 		Key:                 map[string]types.AttributeValue{"pk": sv("U#" + id), "sk": sv("U")},
 		UpdateExpression:    aws.String("ADD r :one"),
-		ConditionExpression: aws.String("attribute_exists(pk) AND d = :d AND e > :now AND (attribute_not_exists(r) OR r < :most)"),
+		ConditionExpression: aws.String("attribute_exists(pk) AND e > :after AND e > :now AND (attribute_not_exists(r) OR r < :most)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":one":  num(1),
-			":d":    &types.AttributeValueMemberB{Value: deleteHash},
-			":now":  num(u.Now().Unix()),
-			":most": num(int64(most)),
+			":one":   num(1),
+			":after": num(expiresAfter.Unix()),
+			":now":   num(u.Now().Unix()),
+			":most":  num(int64(most)),
 		},
-		ReturnValues: types.ReturnValueAllNew,
 	})
 	if conditionFailed(err) {
-		return Upload{}, false, nil
+		return false, nil
 	}
-	if err != nil {
-		return Upload{}, false, err
-	}
-	size, ok1 := intAttr(out.Attributes, "s")
-	d, ok2 := out.Attributes["d"].(*types.AttributeValueMemberB)
-	if !ok1 || !ok2 {
-		return Upload{}, false, nil
-	}
-	return Upload{DeleteHash: d.Value, Size: size}, true, nil
+	return err == nil, err
 }
 
 func intAttr(item map[string]types.AttributeValue, name string) (int64, bool) {

@@ -59,10 +59,16 @@ async function fakeBackend() {
   const sendHeaders: (Record<string, string> | undefined)[] = [];
   /**
    * Parts of the server that can't be reached. puts: how the next PUTs go
-   * wrong: the bucket can't be reached, or the upload is written but its
-   * answer is lost, or the URL can no longer start one.
+   * wrong: the bucket can't be reached; the upload is written but the answer
+   * is lost; the URL can no longer start one; a delete races the write (409);
+   * or the upload is there already (412). renewals: whether the next fresh
+   * URLs asked for are refused.
    */
-  const down = { deletes: false, puts: [] as ('unreachable' | 'lost' | 'expired')[] };
+  const down = {
+    deletes: false,
+    puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
+    renewals: [] as ('ok' | 'refused')[],
+  };
   const quietSends: boolean[] = [];
   const uploads = new Map<string, { size: number; deleteHash: string; body: Uint8Array<ArrayBuffer> | null; renewals: number }>();
   /** Every upload URL handed out, and every PUT tried. */
@@ -79,6 +85,8 @@ async function fakeBackend() {
       const failure = down.puts.shift();
       if (failure === 'unreachable') throw new TransferError(0, 'unreachable');
       if (failure === 'expired') throw new TransferError(403, 'expired');
+      if (failure === 'conflict') throw new TransferError(409, 'deleted meanwhile');
+      if (failure === 'there') up.body = body;
       if (up.body) throw new TransferError(412, 'already there');
       up.body = body;
       if (failure === 'lost') throw new TransferError(0, 'answer lost');
@@ -119,13 +127,15 @@ async function fakeBackend() {
         return check({ id, url: uploadUrls.at(-1) });
       }
       if (method === 'POST' && path.startsWith('/media/') && path.endsWith('/upload')) {
-        // A fresh URL for the delete secret, three times at most.
+        // For the delete secret, three times at most: a fresh URL, or word
+        // that the upload is stored.
         const id = path.split('/')[2]!;
         const { secret } = JSON.parse(init.body!) as { secret: string };
         const hash = toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(secret))));
         const up = uploads.get(id);
-        if (!up || up.deleteHash !== hash || up.renewals >= 3) throw new ApiError(404, 'not_found');
+        if (!up || up.deleteHash !== hash || up.renewals >= 3 || down.renewals.shift() === 'refused') throw new ApiError(404, 'not_found');
         up.renewals++;
+        if (up.body) return check({ uploaded: true });
         uploadUrls.push(`https://bucket.example/m/${id}?n=${up.renewals}`);
         return check({ url: uploadUrls.at(-1) });
       }
@@ -1505,10 +1515,10 @@ describe('a database from before conversations had IDs of their own', () => {
 
 describe('uploading and downloading attachments', () => {
   /** Sends a small photo from sender to owner; returns what's needed to check it. */
-  async function photoChat(now?: () => number) {
+  async function photoChat() {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
-    const sender = await person(backend, 'sender', now);
+    const sender = await person(backend, 'sender');
     const { ref, bundle } = await linkOf(backend, owner);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     const photo = crypto.getRandomValues(new Uint8Array(2000));
@@ -1519,64 +1529,76 @@ describe('uploading and downloading attachments', () => {
       const local = await across(sender.db, conv, owner.db);
       return { local, theirs: (await listMessages(owner.db, local)).at(-1)! };
     };
-    return { backend, owner, sender, conv, photo, send, received };
+    /** The sender's message, and whether its tokens were paid only once. */
+    const mine = async () => (await listMessages(sender.db, conv)).at(-1)!;
+    const paidOnce = async () => (await countTokens(sender.db, undefined, 'media')) === backend.mediaSigned() - 1;
+    return { backend, owner, sender, conv, photo, send, received, mine, paidOnce };
   }
 
-  it('tries a failed upload again on the same URL, without new tokens', async () => {
-    const { backend, owner, sender, conv, photo, send, received } = await photoChat();
-    backend.down.puts.push('unreachable', 'unreachable');
+  it('tries a failed upload again with fresh URLs, without new tokens', async () => {
+    const { backend, owner, photo, send, received, mine, paidOnce } = await photoChat();
+    // The bucket can't be reached, then the URL is refused (too late to start).
+    backend.down.puts.push('unreachable', 'expired');
     await send();
-    // Three tries with the one URL the tokens paid for.
-    expect(backend.uploadUrls).toHaveLength(1);
-    expect(backend.puts).toEqual([backend.uploadUrls[0], backend.uploadUrls[0], backend.uploadUrls[0]]);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(backend.mediaSigned() - 1);
-    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ status: 'sent', file: 'local' });
+    const [first, second, third] = backend.uploadUrls;
+    expect(backend.uploadUrls).toHaveLength(3);
+    expect(backend.puts).toEqual([first, second, third]);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'sent', file: 'local' });
     const { local, theirs } = await received();
     expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
     expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
   });
 
-  it('counts an upload whose answer was lost as done: the URL writes only once', async () => {
-    const { backend, sender, conv, send } = await photoChat();
+  it('counts an upload as done when the server says it is stored: a try whose answer was lost', async () => {
+    const { backend, send, mine, paidOnce } = await photoChat();
     backend.down.puts.push('lost');
     await send();
-    // The second try was refused with 412, since the first had written it.
-    expect(backend.puts).toHaveLength(2);
-    expect([...backend.uploads.values()][0]!.body).not.toBeNull();
-    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ status: 'sent' });
+    // No second PUT: asked for a fresh URL, the server said it's there.
+    expect(backend.puts).toHaveLength(1);
+    expect(backend.uploadUrls).toHaveLength(1);
+    expect([...backend.uploads.values()][0]!.renewals).toBe(1);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'sent' });
   });
 
-  it('asks for a fresh URL with the delete secret once the first can no longer start an upload', async () => {
-    let clock = Date.now();
-    const { backend, sender, conv, send } = await photoChat(() => clock);
-    // Refused as expired: a fresh URL at once.
-    backend.down.puts.push('expired');
-    // Failed after a while: by then the URL is too old to start another.
-    const put = backend.transfer.put.bind(backend.transfer);
-    let stalls = 1;
-    backend.transfer.put = async (url, body, onProgress) => {
-      if (backend.puts.length === 1 && stalls-- > 0) {
-        backend.puts.push(url);
-        clock += 45_000;
-        throw new TransferError(0, 'stalled');
-      }
-      return put(url, body, onProgress);
-    };
+  it('counts a 412 as done, even on the first try: the URL writes only once', async () => {
+    const { backend, send, mine } = await photoChat();
+    backend.down.puts.push('there');
     await send();
-    const [first, second, third] = backend.uploadUrls;
-    expect(backend.uploadUrls).toHaveLength(3);
-    expect(backend.puts).toEqual([first, second, third]);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(backend.mediaSigned() - 1);
-    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ status: 'sent' });
+    expect(backend.puts).toHaveLength(1);
+    expect([...backend.uploads.values()][0]!.renewals).toBe(0);
+    expect(await mine()).toMatchObject({ status: 'sent' });
+  });
+
+  it('tries again after a 409, when a delete raced the write', async () => {
+    const { backend, send, mine, paidOnce } = await photoChat();
+    backend.down.puts.push('conflict');
+    await send();
+    expect(backend.puts).toEqual(backend.uploadUrls);
+    expect(backend.puts).toHaveLength(2);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'sent' });
+  });
+
+  it('fails the message when a fresh URL is refused partway', async () => {
+    const { backend, send, mine, paidOnce } = await photoChat();
+    backend.down.puts.push('unreachable', 'unreachable');
+    backend.down.renewals.push('ok', 'refused');
+    await expect(send()).rejects.toMatchObject({ code: 'not_found' });
+    expect(backend.puts).toHaveLength(2);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'failed' });
   });
 
   it('gives up after four tries, and the message is marked failed', async () => {
-    const { backend, sender, conv, send } = await photoChat();
+    const { backend, send, mine, paidOnce } = await photoChat();
     backend.down.puts.push('unreachable', 'unreachable', 'unreachable', 'unreachable');
     await expect(send()).rejects.toBeInstanceOf(TransferError);
     expect(backend.puts).toHaveLength(4);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(backend.mediaSigned() - 1);
-    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ status: 'failed' });
+    expect(backend.uploadUrls).toHaveLength(4);
+    expect(await paidOnce()).toBe(true);
+    expect(await mine()).toMatchObject({ status: 'failed' });
   });
 
   it('downloads only the padded size the message says', async () => {

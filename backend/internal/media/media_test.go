@@ -2,6 +2,8 @@ package media
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -104,6 +106,34 @@ func TestDownloadURLFixesTheAnswersEncodingAndType(t *testing.T) {
 	}
 	if q.Get("X-Amz-Expires") != "60" || q.Get("X-Amz-Signature") == "" {
 		t.Errorf("url = %s", raw)
+	}
+}
+
+func TestExists(t *testing.T) {
+	// What S3 answers a HEAD for each key: without s3:ListBucket, a missing
+	// key is 403, not 404.
+	answers := map[string]int{"/b/m/there": 200, "/b/m/missing": 403, "/b/m/listed": 404, "/b/m/broken": 400}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(answers[r.URL.Path])
+	}))
+	defer srv.Close()
+	client := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String(srv.URL),
+		UsePathStyle: true,
+		Credentials:  credentials.NewStaticCredentialsProvider("AKIDEXAMPLE", "secret", ""),
+	})
+	bucket := &Bucket{S3: client, Name: "b"}
+	for id, want := range map[string]bool{"there": true, "missing": false, "listed": false} {
+		if got, err := bucket.Exists(context.Background(), id); err != nil || got != want {
+			t.Errorf("Exists(%s) = %v, %v", id, got, err)
+		}
+	}
+	if _, err := bucket.Exists(context.Background(), "broken"); err == nil {
+		t.Error("an error answer counted as an answer")
 	}
 }
 

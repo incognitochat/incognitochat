@@ -129,8 +129,12 @@ it. This is how close it gets.
   pass, whether or not it was downloaded or saved, so the app can fetch it
   again meanwhile. It's ciphertext the server can't open, but it exists. It
   can be written only once, from a link that must start the upload within a
-  minute: the sender can't swap it after sending, or put it back after the
-  recipient deleted it. The link used to save a file in the device's
+  minute; the server gives such links only while nothing is stored, and
+  only in the 3 hours after payment, to whoever holds the delete secret
+  (the sender, and the recipient, whose message carries it). So the sender
+  can't swap it after sending, and once the recipient deleted it, it can
+  come back only from a link given in that same minute, as a copy that
+  still expires within 30 days. The link used to save a file in the device's
   browser can stay in that browser's history; it carries no delete secret,
   and once the upload is gone it opens nothing.
 - **"Seen" right after a link.** Opening a link from Telegram never opens a
