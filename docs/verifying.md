@@ -23,9 +23,10 @@ so the app is built so that anyone can check what is actually served.
   builds it, writes `manifest.json` (the commit, the build settings and the
   SHA-256 of every file), attests every file and the manifest with Sigstore,
   and deploys with GitHub's own Pages action. It builds only a commit on
-  `main`; CI's request also names the commit it deployed the backend from,
-  and the workflow refuses to build any other. This repository can only
-  start that workflow, with a token that can do nothing else.
+  `main` itself (not one merged in from another branch); CI's request also
+  names the commit it deployed the backend from, and the workflow refuses to
+  build any other. This repository can only start that workflow, with a
+  token that can do nothing else.
 - **Locked down at runtime.** A strict Content Security Policy allows only the
   app's own scripts, and connections only to the API, the socket and the
   attachment bucket. The app loads no third-party code, and no code or settings

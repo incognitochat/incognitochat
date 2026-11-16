@@ -28,7 +28,9 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   same commit (production: the release tag), and waits until the site serves
   it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)). The
   request names the commit too, and the hosting repository refuses to build
-  any other commit, or one that isn't on `main`.
+  any other commit, or one that isn't on `main` itself (not merged in from
+  another branch). Before deploying anything, CI checks that the hosting
+  repository's workflow takes that request.
 
 Both environments run the same steps
 ([`deploy-environment.yml`](../.github/workflows/deploy-environment.yml)).
@@ -50,7 +52,7 @@ them is done by hand:
 3. The published release runs CI on the tag: everything is built and tested
    again from the tag, and the production deploy waits for a required
    reviewer's approval in GitHub. It checks that the tag points at the
-   commit it deploys and that the commit is on `main`. The hosting
+   commit it deploys and that the commit is on `main` itself. The hosting
    repository builds the same tag, checked out as `refs/tags/vX.Y.Z`, after
    checking both again.
 

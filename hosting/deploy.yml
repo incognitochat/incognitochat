@@ -9,9 +9,9 @@
 # commit with the same settings to get the same bytes (scripts/verify-site.sh).
 #
 # It builds nothing but what was asked for: a tag is checked out by its full
-# name, the commit must be on RELEASE_BRANCH, and when the request names the
-# commit (CI sends the one it deployed the backend from), the checkout must be
-# exactly that commit.
+# name and must exist as that tag, the commit must be on RELEASE_BRANCH's own
+# (first-parent) history, and when the request names the commit (CI sends the
+# one it deployed the backend from), the checkout must be exactly that commit.
 #
 # Repository variables:
 #   CODE_REPOSITORY  e.g. incognitochat/incognitochat
@@ -88,10 +88,19 @@ jobs:
           REFS: ${{ vars.REFS }}
           RELEASE_BRANCH: ${{ vars.RELEASE_BRANCH }}
         run: |
+          # A commit or a tag leaves HEAD detached. Without the tag, git would
+          # check out a branch made from anything else named refs/tags/vX.Y.Z.
+          if git symbolic-ref -q HEAD >/dev/null; then
+            echo "::error::The checkout is a branch, not ${REF}"
+            exit 1
+          fi
           head=$(git rev-parse HEAD)
           case "$REFS" in
             commits) want=$REF ;;
-            tags) want=$(git rev-parse --verify "refs/tags/${REF}^{commit}") ;;
+            tags)
+              git show-ref --verify --quiet "refs/tags/${REF}" \
+                || { echo "::error::There is no tag ${REF}"; exit 1; }
+              want=$(git rev-parse --verify "refs/tags/${REF}^{commit}") ;;
             *) want= ;;
           esac
           if [ "$head" != "$want" ]; then
@@ -102,10 +111,12 @@ jobs:
             echo "::error::The checkout (${head}) isn't the requested commit ${COMMIT}"
             exit 1
           fi
-          # Fetched and named in full: "origin/main" would resolve to a tag
-          # called that before the branch.
+          # On the release branch itself, among its first parents (checkout
+          # fetched the full history): a commit that only came in through a
+          # merge doesn't count. Fetched and named in full, since
+          # "origin/main" would resolve to a tag called that first.
           git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
-          if ! git merge-base --is-ancestor "$head" "refs/remotes/origin/${RELEASE_BRANCH}"; then
+          if ! grep -qxF -- "$head" <(git rev-list --first-parent "refs/remotes/origin/${RELEASE_BRANCH}"); then
             echo "::error::${head} is not on ${RELEASE_BRANCH}"
             exit 1
           fi

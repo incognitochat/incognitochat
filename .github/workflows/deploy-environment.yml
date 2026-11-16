@@ -86,19 +86,41 @@ jobs:
           fetch-depth: 0
 
       # The release tag must point at this commit (GITHUB_SHA), and the
-      # commit must be on main. The hosting repository checks both again on
-      # its own checkout before it builds the tag, against the commit sent
-      # with the request (below). Full ref names: "origin/main" would resolve
-      # to a tag called that before the branch.
+      # commit must be on main itself, among its first parents: one that only
+      # came in through a merge doesn't count. The hosting repository checks
+      # both again on its own checkout before it builds the tag, against the
+      # commit sent with the request (below). Full ref names: "origin/main"
+      # would resolve to a tag called that before the branch.
       - name: Check the release is on main
         if: inputs.environment == 'production'
         env:
           SITE_REF: ${{ inputs.site-ref }}
         run: |
-          [ "$(git rev-parse --verify "refs/tags/${SITE_REF}^{commit}")" = "$GITHUB_SHA" ] \
-            || { echo "::error::The release tag doesn't point at this commit"; exit 1; }
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main \
+          if ! git show-ref --verify --quiet "refs/tags/${SITE_REF}" \
+            || [ "$(git rev-parse --verify "refs/tags/${SITE_REF}^{commit}")" != "$GITHUB_SHA" ]; then
+            echo "::error::The release tag doesn't point at this commit"
+            exit 1
+          fi
+          grep -qxF -- "$GITHUB_SHA" <(git rev-list --first-parent refs/remotes/origin/main) \
             || { echo "::error::This release isn't a commit on main"; exit 1; }
+
+      # The site's workflow (hosting/deploy.yml) is copied into the hosting
+      # repository by hand, and refuses a request with an input it doesn't
+      # declare. That request comes last, after the backend is deployed, so
+      # check before deploying anything that the copy takes `commit`. The
+      # hosting repository is public: this job's own token can read it.
+      - name: Check the site's workflow takes this request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_REPO: ${{ vars.PAGES_REPO }}
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' "repos/${PAGES_REPO}/contents/.github/workflows/deploy.yml" \
+            > "$RUNNER_TEMP/site-deploy.yml" \
+            || { echo "::error::Couldn't read the hosting repository's deploy.yml"; exit 1; }
+          if ! yq -e '.on.workflow_dispatch.inputs | has("commit")' "$RUNNER_TEMP/site-deploy.yml" >/dev/null; then
+            echo "::error::The hosting repository's deploy.yml doesn't take a commit input; copy hosting/deploy.yml there first"
+            exit 1
+          fi
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

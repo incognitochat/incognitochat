@@ -14,9 +14,12 @@ theirs.
 
 Before building, it checks what it checked out, and stops on anything else:
 
-- a release tag is checked out by its full name, `refs/tags/vX.Y.Z`, never
-  a branch of the same name;
-- the commit, or the tag's commit, must be on `RELEASE_BRANCH`;
+- a release tag is checked out by its full name, `refs/tags/vX.Y.Z`. That
+  tag must exist, and the checkout must be a detached commit, never a
+  branch, whatever the branch is called;
+- the commit, or the tag's commit, must be on `RELEASE_BRANCH` itself,
+  among its first parents: a commit that only came in through a merge
+  doesn't count;
 - CI also sends the commit it deployed the backend from (`commit`), and the
   checkout must be exactly that commit. The input is optional, so the
   workflow also accepts a request without it.
@@ -48,6 +51,10 @@ The hosting repositories' copies are updated by hand from this one. A request
 with an input the hosting workflow doesn't declare fails, so when CI starts
 sending a new input, copy the new `deploy.yml` into both hosting repositories
 first, and only then merge the change to CI.
+
+That request is the last step of a deploy, after the backend is live. So
+before deploying anything, CI reads the hosting repository's `deploy.yml` and
+stops if it doesn't declare the `commit` input.
 
 ## Checking a live site
 
