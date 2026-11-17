@@ -63,9 +63,18 @@ type Item struct {
 func devicePK(accountID, deviceID string) string { return "D#" + accountID + "#" + deviceID }
 
 // Deliver stores an envelope once for each of the owner's devices.
+//
+// With no devices (a send to a mailbox that doesn't exist, which POST
+// /send hands an account that doesn't exist either, or to an account
+// that has no device left) it makes the same request all the same, a
+// batch write of one item, but one that deletes an item that isn't there:
+// it stores nothing, and takes the table about as long as a delivery and
+// at least a write unit, as a delivery does. So neither its time nor a
+// failure (the table throttled, say) tells a sender whether the mailbox
+// exists.
 func (s *Store) Deliver(ctx context.Context, accountID string, devices []string, mailbox string, envelope []byte, now time.Time) error {
 	expires := strconv.FormatInt(now.Add(TTL+time.Hour-time.Nanosecond).Truncate(time.Hour).Unix(), 10)
-	requests := make([]types.WriteRequest, 0, len(devices))
+	requests := make([]types.WriteRequest, 0, max(len(devices), 1))
 	for _, d := range devices {
 		requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{
 			"pk": &types.AttributeValueMemberS{Value: devicePK(accountID, d)},
@@ -73,6 +82,12 @@ func (s *Store) Deliver(ctx context.Context, accountID string, devices []string,
 			"m":  &types.AttributeValueMemberS{Value: mailbox},
 			"b":  &types.AttributeValueMemberB{Value: envelope},
 			"e":  &types.AttributeValueMemberN{Value: expires},
+		}}})
+	}
+	if len(requests) == 0 {
+		requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
+			"pk": &types.AttributeValueMemberS{Value: devicePK(accountID, ids.New())},
+			"sk": &types.AttributeValueMemberS{Value: ids.New()},
 		}}})
 	}
 	return s.write(ctx, requests)

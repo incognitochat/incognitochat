@@ -27,12 +27,14 @@ type SealResult struct {
 	Sealed string `json:"sealed"` // base64url
 }
 
-// Invoker is the Lambda client part the api function uses.
+// Invoker is the Lambda client part Client uses.
 type Invoker interface {
 	Invoke(context.Context, *lambda.InvokeInput, ...func(*lambda.Options)) (*lambda.InvokeOutput, error)
 }
 
-// Client asks the notify function, from the api function.
+// Client asks the notify function: from the api function to seal a chat
+// ID, and from the ws function for a notice after a delivery that no open
+// app took.
 type Client struct {
 	Lambda   Invoker
 	Function string

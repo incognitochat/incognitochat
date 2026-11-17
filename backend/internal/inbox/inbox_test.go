@@ -22,6 +22,35 @@ var now = time.Unix(1_800_000_000, 0)
 // limits are a page's limits for tests: as GET /inbox's, in a size.
 func limits(items, bytes int) PageLimits { return PageLimits{Items: items, Units: 300, Bytes: bytes} }
 
+// Delivering to no device (a mailbox that doesn't exist) makes the same
+// request as a delivery, at a write unit, and stores nothing.
+func TestDeliverToNoDevice(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	s := &Store{DB: meter, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone, mailbox := ids.New(), ids.New(), ids.New()
+
+	if err := s.Deliver(ctx, account, []string{phone}, mailbox, []byte{1}, now); err != nil {
+		t.Fatal(err)
+	}
+	delivery := meter.Calls()
+	meter.Reset()
+	if err := s.Deliver(ctx, ids.New(), nil, mailbox, []byte{1}, now); err != nil {
+		t.Fatal(err)
+	}
+	if calls := meter.Calls(); !slices.Equal(calls, delivery) || len(calls) != 1 {
+		t.Fatalf("delivering to no device made %v, a delivery %v", calls, delivery)
+	}
+	if u := meter.Units(s.Table); u.Write < 1 {
+		t.Fatalf("delivering to no device cost %+v", u)
+	}
+	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Table})
+	if err != nil || len(out.Items) != 1 {
+		t.Fatalf("the table holds %d items, %v", len(out.Items), err)
+	}
+}
+
 func TestDeliverListAck(t *testing.T) {
 	client := dynamotest.Client(t)
 	s := &Store{DB: client, Table: dynamotest.Table(t, client)}

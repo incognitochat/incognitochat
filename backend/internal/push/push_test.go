@@ -1,7 +1,9 @@
 package push
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,10 +14,41 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi/types"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 )
+
+type memLambda struct {
+	in []*lambda.InvokeInput
+}
+
+func (m *memLambda) Invoke(_ context.Context, in *lambda.InvokeInput, _ ...func(*lambda.Options)) (*lambda.InvokeOutput, error) {
+	m.in = append(m.in, in)
+	return &lambda.InvokeOutput{StatusCode: 202}, nil
+}
+
+// api hands a send to ws without waiting: an asynchronous invoke, the same
+// for a mailbox that doesn't exist, with an empty account.
+func TestClient(t *testing.T) {
+	l := &memLambda{}
+	c := &Client{Lambda: l, Function: "fn-ws"}
+	for _, d := range []Delivery{{Account: "acct", Quiet: false}, {Account: "acct", Quiet: true}, {}} {
+		if err := c.Push(context.Background(), d.Account, d.Quiet); err != nil {
+			t.Fatal(err)
+		}
+		in := l.in[len(l.in)-1]
+		if in.InvocationType != lambdatypes.InvocationTypeEvent || *in.FunctionName != "fn-ws" {
+			t.Fatalf("invoked %s as %q", *in.FunctionName, in.InvocationType)
+		}
+		var e Event
+		if err := json.Unmarshal(in.Payload, &e); err != nil || e.Push == nil || *e.Push != d {
+			t.Fatalf("event %s, %v", in.Payload, err)
+		}
+	}
+}
 
 type memSockets struct {
 	mu        sync.Mutex
@@ -124,7 +157,7 @@ func TestPushFanout(t *testing.T) {
 
 // Each round posts to Fanout records, however many took the last one: with
 // 4 open sockets and 14 closed records behind them, a push takes 4 rounds,
-// not 14 (each one inside POST /send).
+// not 14.
 func TestPushRoundsStayFull(t *testing.T) {
 	var conns []string
 	fail := map[string]error{}
@@ -195,7 +228,8 @@ func (l *liveAPI) took() []string {
 func TestOpenCopyKeepsGettingPushes(t *testing.T) {
 	client := dynamotest.Client(t)
 	clock := time.Unix(1_800_000_000, 0)
-	sockets := &ephemeral.Sockets{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return clock }}
+	sockets := &ephemeral.Sockets{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return clock },
+		Key: ephemeral.SocketKey(bytes.Repeat([]byte("k"), 32))}
 	api := &liveAPI{open: map[string]bool{}}
 	p := &Pusher{Sockets: sockets, API: api}
 	ctx := context.Background()

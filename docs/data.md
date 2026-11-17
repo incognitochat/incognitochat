@@ -61,25 +61,41 @@ chat and kind), so the chat list doesn't read them.
 | Attachments, encrypted, with their padded size and how many fresh upload links they were given (at most 3, when an upload is tried again) | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them. An upload is written once, with a link that only starts an upload within a minute and is given only in the 3 hours after payment, while nothing is stored: once deleted, it can't come back, except from a link given in that same minute (and that copy also expires within 30 days) |
 | Invitation codes the account created, and its invitation level | Invite-only access to links | While the account exists |
 | Two settings for everyone: whether uploads, and whether downloads, of attachments are paused (the operator's emergency switches). Nothing about any user | So the operator can pause attachments when their cost runs away | Until the operator changes them |
-| Short-lived counters (the daily ones under the keyed hash of the Telegram ID, so setting up again doesn't reset them), login nonces, spent send and media tokens (and whether one was given back), socket records (account ID and connection ID, with the minute they expire; kept from opening the app until the server finds the socket closed, the account is deleted, or the record expires, 40 minutes after it opened, though DynamoDB can take days to delete an expired one) | Rate limits, replay protection, live updates | Minutes, up to two weeks; per-minute counters until their minute ends, daily ones until an hour after the day ends (UTC); DynamoDB can take days to delete an expired one |
-| Counters of how much each device fetched in a minute, and of how much each person fetched, and confirmed that was already gone, that day. Each is kept under a keyed hash of the device (or person) and the minute (or day), which changes every minute (or day): without the server's secret key, nobody can tell whose a counter is, or that two counters are the same device's | Limits that keep one account from using up the capacity everyone shares | Per-minute ones until their minute ends, daily ones until an hour after the day ends (UTC), though DynamoDB can take days to delete an expired one |
+| Rate counters: how many messages each mailbox got in a minute, and first messages each link in an hour; how much each device fetched in a minute; and what each person (Telegram user) used in a day (tokens, mailboxes, link changes, notice setups, fetches, confirmations of messages already gone, and so on), and how often each attachment was fetched. Each is named by a keyed hash of what it counts and its window, which changes every window: without the server's secret key, nobody can tell which mailbox, link, device or person a counter is about, or that two counters are about the same one. The daily ones go by the Telegram user, so setting up again doesn't reset them | Rate limits, among them the ones that keep one account from using up the capacity everyone shares | Until their window (minute, hour or UTC day) ends |
+| Socket records: a keyed hash of the account (not its ID), the connection ID, and the minute the record expires | Live updates, while the app is open | From opening the app until the server finds the socket closed, the account is deleted, or the record expires, 40 minutes after the minute it opened |
+| Notice quiet periods: a keyed hash of the account, and the minute the period ends | At most one notice every 3 minutes | 3 minutes, rounded up to the minute |
+| Login nonces, spent send and media tokens (and whether one was given back). Nothing about whose they were | Replay protection | Minutes, up to two weeks |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 
+DynamoDB can take some days to delete an item after it expires; an expired
+one is never used again, but a copy of the table made meanwhile still holds
+it. That's why none of the short-lived records names a mailbox, link,
+account or device, or holds the keyed hash of a Telegram ID the directory
+keeps: each is named by a keyed hash, under a key that only the server
+functions that use it hold (the rate counters' only `api`; the socket
+records' `api` and `ws`; the quiet periods' only `notify`; never in the
+database). So a copy of the database can't be matched up with the
+directory, which says who owns each mailbox and link, to show which
+accounts got messages, or opened the app, when. Whoever holds those keys
+(see [security.md](security.md#what-still-leaks)) could, for the records not
+yet deleted.
+
 When a user deletes their account, all of the above goes at once. Only
-short-lived rate-limit counters are left. They expire on their own within
-about a day, though DynamoDB can take some days more to delete them, and an
-expired one is never used again. Until then, that day's counters
-still say, under the keyed hash of the Telegram ID, how much was used that
-day (for example how many send tokens were fetched), not what was sent or to
-whom. Setting up again instead replaces the old
-account: a marker and the old device's public key are kept for 90 days, so
-the old device can say it was replaced; everything else of the old account
-goes at once.
+short-lived rate counters (and a quiet period, for a few minutes) are left.
+They expire on their own within about a day, though DynamoDB can take some
+days more to delete them, and an expired one is never used again. Until
+then, that day's counters still say how much was used that day (for example
+how many send tokens were fetched), under names only the server's key ties
+to a Telegram user; not what was sent or to whom. Setting up again instead
+replaces the old account: a marker and the old device's public key are kept
+for 90 days, so the old device can say it was replaced; everything else of
+the old account goes at once.
 
 **Never stored:** the content of any message or attachment in readable form,
-who sent a message, which conversations belong together, the user's name,
-username or phone number, and IP addresses. Senders don't log in to send: they
-pay with anonymous tokens that can't be linked to their account.
+who sent a message, which conversations belong together, which mailboxes got
+messages when, the user's name, username or phone number, and IP addresses.
+Senders don't log in to send: they pay with anonymous tokens that can't be
+linked to their account.
 
 ## What Telegram gives the app
 
@@ -113,7 +129,10 @@ has no analytics or trackers.
 
 Even without stored records, someone watching the servers or Telegram live
 could link people by timing: a message arriving, then a notice, then a reply
-or a "seen". This is explained in [security.md](security.md#what-still-leaks).
+or a "seen". So could whoever holds the server's keys, from the short-lived
+records above that the database hasn't deleted yet (a few minutes to about a
+day, and DynamoDB's lag). A copy of the database alone can't. This is
+explained in [security.md](security.md#what-still-leaks).
 
 ## What users can do
 

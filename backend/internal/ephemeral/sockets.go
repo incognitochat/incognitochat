@@ -13,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/incognitochat/incognitochat/backend/internal/keyed"
 )
 
 // SocketTTL is how long a connection record lives. The app replaces its
@@ -34,7 +36,8 @@ const MaxSockets = 5
 //
 // Both limits are checked against what a connect reads before it writes,
 // so connects at the same moment all pass them: the bounds are as exact as
-// the ws function's concurrency (10) allows, a few over at worst.
+// the ws function's concurrency (20, pushes included) allows, a few over at
+// worst.
 const MaxRecords = 2 * MaxSockets
 
 // KeepRecords is how many records a connect leaves, its own included. It is
@@ -55,20 +58,24 @@ var (
 	ErrTidy = errors.New("ephemeral: socket records not tidied")
 )
 
-// SocketDB is the part of the DynamoDB client Sockets uses.
+// SocketDB is the part of the DynamoDB client Sockets uses (the ws
+// function's role allows only these, on C# keys).
 type SocketDB interface {
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
-	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 	Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 }
 
 // Sockets records which accounts have an app open, by WebSocket connection:
 //
-//	C#<account>  <connection>  a socket, until it expires (e)
+//	C#<name>  <connection>  a socket, until it expires (e)
 //
-// Nothing else is kept: no device or IP, and no exact time: the expiry is
-// SocketTTL after the minute the socket opened, rounded up to the minute.
+// The name is a keyed hash of the account (Key), not its ID, so a copy of
+// the table can't be matched with the directory: it shows that someone had
+// an app open, not who. Nothing else is kept: no device or IP, and no exact
+// time: the expiry is SocketTTL after the minute the socket opened, rounded
+// up to the minute (the limit on connects a minute, the order pushes go in
+// and which records a connect forgets all go by that minute).
 //
 // A record isn't deleted when its socket closes: $disconnect knows only the
 // connection, so it would need a second record per connect, and it isn't
@@ -80,6 +87,27 @@ type Sockets struct {
 	DB    SocketDB
 	Table string
 	Now   func() time.Time
+	// Key names the records (SocketKey).
+	Key []byte
+}
+
+const (
+	labelSocketKey  = "incognitochat/v2/socket-key"
+	labelSocketName = "incognitochat/v2/socket-name"
+)
+
+// SocketKey derives the key that names socket records from the session
+// key, which the two functions that need them hold already: ws records
+// sockets when they connect and reads the records to push, and api forgets
+// an account's when it is deleted. notify has neither. A new session key
+// gives new names: the records under the old ones aren't found any more
+// (open apps get no pushes, and a notice instead, until they replace their
+// sockets, within about half an hour), and they expire within SocketTTL.
+func SocketKey(sessionKey []byte) []byte { return keyed.Key(sessionKey, labelSocketKey) }
+
+// partition is the key of an account's records.
+func (s *Sockets) partition(account string) string {
+	return "C#" + keyed.Name(s.Key, labelSocketName, []byte(account))
 }
 
 // socketRecord is one stored connection of an account.
@@ -104,7 +132,7 @@ func (s *Sockets) records(ctx context.Context, account string, now time.Time) (l
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account)},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv(s.partition(account))},
 		ProjectionExpression:      aws.String("sk, e"),
 	})
 	for pages.HasMorePages() {
@@ -177,7 +205,7 @@ func (s *Sockets) Open(ctx context.Context, account, connection string) error {
 	}
 	if _, err := s.DB.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &s.Table,
-		Item:      map[string]types.AttributeValue{"pk": sv("C#" + account), "sk": sv(connection), "e": num(expires)},
+		Item:      map[string]types.AttributeValue{"pk": sv(s.partition(account)), "sk": sv(connection), "e": num(expires)},
 	}); err != nil {
 		return err
 	}
@@ -199,7 +227,7 @@ func (s *Sockets) Open(ctx context.Context, account, connection string) error {
 func (s *Sockets) Forget(ctx context.Context, account, connection string) error {
 	_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: &s.Table,
-		Key:       map[string]types.AttributeValue{"pk": sv("C#" + account), "sk": sv(connection)},
+		Key:       map[string]types.AttributeValue{"pk": sv(s.partition(account)), "sk": sv(connection)},
 	})
 	return err
 }
@@ -222,8 +250,7 @@ func (s *Sockets) ForgetAll(ctx context.Context, account string) error {
 // expired, newest first: about MaxRecords at most, some of them of sockets
 // that have closed (a push finds out, and forgets those). It also deletes
 // up to maxTidy expired records it reads; if that fails, it returns the
-// connections with ErrTidy. An empty account has none, at the same cost (a
-// send to an unknown mailbox asks for it).
+// connections with ErrTidy.
 func (s *Sockets) Connections(ctx context.Context, account string) ([]string, error) {
 	live, expired, err := s.records(ctx, account, s.Now())
 	if err != nil {

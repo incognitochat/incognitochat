@@ -334,8 +334,8 @@ jobs:
       - name: Smoke test – the notify function starts
         working-directory: infra
         run: |
-          # An empty account is the no-op the api sends for unknown mailboxes;
-          # it proves the function reads its parameters and starts.
+          # A notice for an empty account is a no-op; it proves the function
+          # reads its parameters and starts.
           function=$(terraform output -raw notify_function_name)
           failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
             --payload '{"notify":{"account":""}}' --query FunctionError --output text "$RUNNER_TEMP/notify.json")

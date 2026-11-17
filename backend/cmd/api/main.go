@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -65,7 +64,7 @@ func main() {
 
 func setup(ctx context.Context) (*api.Server, error) {
 	env, err := config.Env(os.Getenv,
-		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_ENDPOINT", "MEDIA_BUCKET",
+		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
 		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY")
 	if err != nil {
 		return nil, err
@@ -120,14 +119,16 @@ func setup(ctx context.Context) (*api.Server, error) {
 	}
 
 	db := dynamodb.NewFromConfig(aws)
-	wsEndpoint := env["WS_ENDPOINT"]
+	lambdaClient := awslambda.NewFromConfig(aws)
 	// Without this, presigned uploads would carry a checksum of an empty
 	// body, and the app's upload would be refused.
 	s3Client := s3.NewFromConfig(aws, func(o *s3.Options) {
 		o.RequestChecksumCalculation = awsv2.RequestChecksumCalculationWhenRequired
 	})
 	now := time.Now
-	sockets := &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now}
+	// Only for deleting an account's records: ws records sockets and
+	// pushes to them.
+	sockets := &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now, Key: ephemeral.SocketKey(sessionKey)}
 	dir := &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]}
 	return &api.Server{
 		Telegram:    initdata.NewVerifier(botID),
@@ -140,20 +141,14 @@ func setup(ctx context.Context) (*api.Server, error) {
 		InviteOnly:  config.InviteOnly(os.Getenv("INVITE_ONLY")),
 		Admins:      admins,
 		Inbox:       &inbox.Store{DB: db, Table: env["TABLE_MESSAGES"]},
-		Pause:       api.RandomPause,
 		Issuer:      tokenIssuer,
 		MediaIssuer: mediaIssuer,
 		Spent:       &ephemeral.Spent{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Notices:     &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
+		Notices:     &notices.Client{Lambda: lambdaClient, Function: env["NOTIFY_FUNCTION"]},
+		Push:        &push.Client{Lambda: lambdaClient, Function: env["WS_FUNCTION"]},
 		Media:       &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
 		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Switches:    dir,
 		Sockets:     sockets,
-		Push: &push.Pusher{
-			Sockets: sockets,
-			API: apigatewaymanagementapi.NewFromConfig(aws, func(o *apigatewaymanagementapi.Options) {
-				o.BaseEndpoint = &wsEndpoint
-			}),
-		},
 	}, nil
 }

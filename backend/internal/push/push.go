@@ -1,6 +1,11 @@
 // Package push tells an account's open apps that something arrived, through
 // their WebSocket connections (design §12). The push carries no content: the
 // app then fetches its inbox over HTTPS, so a lost push loses nothing.
+//
+// The api function doesn't push: after a send it asks the ws function to
+// (Client), without waiting, and ws pushes (Pusher) and asks for a notice
+// if no app took it. So /send answers in the same time whether or not the
+// recipient's app is open, and api can't post to sockets at all.
 package push
 
 import (
@@ -47,8 +52,8 @@ type Pusher struct {
 // (their $disconnect isn't recorded) answer gone and are forgotten, so an
 // open copy of the app isn't crowded out by others that closed. A round
 // takes as long as its slowest post, so closed sockets on record add a
-// round per Fanout of them, about MaxRecords/Fanout rounds at most. An
-// empty account looks up nothing, at about the same cost.
+// round per Fanout of them, about MaxRecords/Fanout rounds at most (all in
+// the ws function, after /send has answered).
 func (p *Pusher) Push(ctx context.Context, account string) (bool, error) {
 	delivered, _, err := p.push(ctx, account)
 	return delivered > 0, err

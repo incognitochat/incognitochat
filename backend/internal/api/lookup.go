@@ -41,7 +41,7 @@ func (s *Server) lookupAccount(ctx context.Context, req httpapi.Request) httpapi
 		return httpapi.Error(http.StatusUnauthorized, "init_data_rejected")
 	}
 	telegramHash := directory.TelegramHash(s.Pepper, launch.UserID)
-	ok, err := s.Limits.Allow(ctx, "look#"+telegramHash, LookupsPerDay, 24*time.Hour)
+	ok, err := s.allow(ctx, "look", LookupsPerDay, 24*time.Hour, telegramHash)
 	if err != nil {
 		return s.internal(route, err)
 	}

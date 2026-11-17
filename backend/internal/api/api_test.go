@@ -607,6 +607,14 @@ func (l *memLimiter) CheckAt(_ context.Context, key string, limit int, window ti
 	return !l.Full(key, limit, window), nil
 }
 
+func (l *memLimiter) UsedAt(ctx context.Context, key string, window time.Duration, _ time.Time) (int, error) {
+	return l.Used(ctx, key, window)
+}
+
+func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) int {
+	return l.Counted(key, window)
+}
+
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool

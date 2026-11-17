@@ -82,29 +82,25 @@ type Directory interface {
 }
 
 // Limiter counts uses of a key in fixed windows.
+//
+// Every method counts in the window that holds at, which the counter is
+// named by (rateName: a keyed hash of what it counts and the window), so a
+// request counts in one window however long it takes (ephemeral.Limiter).
+// Only counts the database returned refuse anything.
 type Limiter interface {
-	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
-	AllowN(ctx context.Context, key string, n, limit int, window time.Duration) (bool, error)
-	// Full reports whether key's window is known to have reached limit,
-	// without asking the database, so refusing costs nothing.
-	Full(key string, limit int, window time.Duration) bool
-	// Used reports how many uses of key the current window has counted.
-	Used(ctx context.Context, key string, window time.Duration) (int, error)
-	// Counted is the count the database last returned for key's current
-	// window to this instance, such as just now to AllowN.
-	Counted(key string, window time.Duration) int
-
-	// The At methods count in the window that holds at, which the inbox's
-	// counters are named by (rateName), so a request counts in one window
-	// however long it takes (ephemeral.Limiter). Only counts the database
-	// returned refuse anything.
-
 	// AllowNAt counts n uses if they fit within limit.
 	AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error)
 	// RefundAt takes back n uses that AllowNAt reserved and weren't used.
 	RefundAt(ctx context.Context, key string, n int, window time.Duration, at time.Time) error
-	// FullAt is Full, from memory only.
+	// FullAt reports whether key's window is known to have reached limit,
+	// from memory only, so refusing costs nothing.
 	FullAt(key string, limit int, window time.Duration, at time.Time) bool
+	// UsedAt reports how many uses the window has counted, as the database
+	// says now.
+	UsedAt(ctx context.Context, key string, window time.Duration, at time.Time) (int, error)
+	// CountedAt is the count the database last returned for the window to
+	// this instance, such as just now to AllowNAt.
+	CountedAt(key string, window time.Duration, at time.Time) int
 	// CheckAt reports whether the window is below limit, from memory, or
 	// by reading the count (at least once a minute for longer windows); if
 	// the database can't be read, from memory, with the error.
@@ -124,7 +120,7 @@ type Server struct {
 	Directory Directory
 	Nonces    session.NonceStore
 	Limits    Limiter
-	Pepper    []byte // keys the hash of Telegram user IDs, inbox item IDs (itemID) and the inbox's rate counters (rateName)
+	Pepper    []byte // keys the hash of Telegram user IDs, inbox item IDs (itemID) and the names of rate counters (rateName)
 	Log       *slog.Logger
 	Now       func() time.Time
 
@@ -135,9 +131,6 @@ type Server struct {
 
 	// Inbox stores undelivered envelopes.
 	Inbox Inbox
-	// Pause, if set, runs when a send goes to a mailbox that doesn't exist,
-	// so the answer takes about as long as a delivery (RandomPause).
-	Pause func()
 
 	// Issuer signs and checks anonymous send tokens, MediaIssuer media
 	// tokens (uploads); Spent remembers spent ones of both kinds.
@@ -145,10 +138,11 @@ type Server struct {
 	MediaIssuer Issuer
 	Spent       Spent
 
-	// Notices, if set, sends Telegram notices after deliveries.
+	// Notices, if set, seals the chat IDs Telegram notices go to.
 	Notices Notices
-	// Push, if set, tells open apps that something arrived; a Telegram
-	// notice goes out only if none took it.
+	// Push, if set, hands each send to the ws function, which tells open
+	// apps that something arrived, and asks for a Telegram notice if none
+	// took it.
 	Push Pusher
 	// Sockets, if set, holds the records of open apps' sockets; an account's
 	// go when it is deleted.
@@ -172,11 +166,14 @@ type SocketRecords interface {
 	ForgetAll(ctx context.Context, account string) error
 }
 
-// Pusher reaches an account's open apps (push.Pusher).
+// Pusher hands a send to the ws function (push.Client), without waiting:
+// ws pushes a content-free hint to the account's open apps, and asks
+// notify for a notice if none took it and quiet is false. So the api
+// function never learns, and a sender can't time, whether the recipient's
+// app is open. An empty account (a mailbox that doesn't exist) makes the
+// same request, for nobody.
 type Pusher interface {
-	// Push sends a content-free hint and reports whether any app took it.
-	// An empty account reaches nobody, at about the same cost.
-	Push(ctx context.Context, account string) (bool, error)
+	Push(ctx context.Context, account string, quiet bool) error
 }
 
 // Routes registers the API's routes.

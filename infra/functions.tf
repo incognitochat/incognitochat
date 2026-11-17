@@ -1,10 +1,15 @@
 # Four functions, one per trust boundary. Each has its own role, limited to
 # its own tables, parameters and log group, inside the permissions boundary
-# from infra/init. Only bot and notify can read the bot token; only api can
-# push to sockets and invoke notify.
+# from infra/init. Only bot and notify can read the bot token. After a send,
+# api invokes ws without waiting; only ws pushes to sockets, and invokes
+# notify for a notice if no open app took the push. api invokes notify only
+# to seal chat IDs.
 locals {
   ws_endpoint = "https://${aws_apigatewayv2_api.ws.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_apigatewayv2_stage.ws.name}"
-  notify_arn  = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-notify"
+  # Built from names, not the functions' attributes, which would make the
+  # functions depend on themselves.
+  ws_arn     = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-ws"
+  notify_arn = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-notify"
 
   functions = {
     # HTTPS API for the client.
@@ -29,8 +34,8 @@ locals {
         PARAM_ISSUER_KEY         = aws_ssm_parameter.parameter["issuer-key"].name
         PARAM_MEDIA_ISSUER_KEY   = aws_ssm_parameter.parameter["media-issuer-key"].name
         NOTIFY_FUNCTION          = "${local.prefix}-notify"
+        WS_FUNCTION              = "${local.prefix}-ws"
         MEDIA_BUCKET             = aws_s3_bucket.media.id
-        WS_ENDPOINT              = local.ws_endpoint
         INVITE_ONLY              = tostring(var.invite_only)
         ADMIN_TELEGRAM_IDS       = var.admin_telegram_ids
       }
@@ -49,24 +54,32 @@ locals {
         APP_URL = "${var.client_origins[0]}/"
       }
     }
-    # WebSocket $connect and the heartbeat ($disconnect isn't routed).
-    # The WebSocket stage's throttle bounds how often it runs.
+    # WebSocket $connect and the heartbeat ($disconnect isn't routed), and
+    # the push after each send, which api asks for without waiting. The
+    # WebSocket stage's throttle bounds how often connects run; sends are
+    # bounded by their tokens and caps. Twice notify's share: every send
+    # comes here, and only those no open app took go on to notify. Its
+    # socket records in the ephemeral table get their own, narrower
+    # statement below.
     ws = {
       timeout     = 5
-      concurrency = 10
-      tables      = ["ephemeral"]
+      concurrency = 20
+      tables      = []
       parameters  = ["session-key"]
       environment = {
         TABLE_EPHEMERAL   = aws_dynamodb_table.table["ephemeral"].name
         PARAM_SESSION_KEY = aws_ssm_parameter.parameter["session-key"].name
+        NOTIFY_FUNCTION   = "${local.prefix}-notify"
+        WS_ENDPOINT       = local.ws_endpoint
       }
     }
     # Generic "New message" notices through the bot. api invokes it to seal
-    # chat IDs, and without waiting after each delivery. Its quiet periods in
-    # the ephemeral table get their own, narrower statement below.
+    # chat IDs, and ws without waiting after a delivery no open app took.
+    # Its quiet periods in the ephemeral table get their own, narrower
+    # statement below.
     notify = {
       timeout     = 10
-      concurrency = 20
+      concurrency = 10
       tables      = ["directory"]
       parameters  = ["bot-token", "chat-key"]
       environment = {
@@ -140,15 +153,31 @@ data "aws_iam_policy_document" "fn" {
     resources = [for p in each.value.parameters : aws_ssm_parameter.parameter[p].arn]
   }
 
+  # Only ws pushes, so whether the recipient's app is open never holds up
+  # api's answer to a send. It only posts hints; it closes no connection.
   dynamic "statement" {
-    for_each = each.key == "api" ? [1] : []
+    for_each = each.key == "ws" ? [1] : []
     content {
-      sid     = "PushToSockets"
-      actions = ["execute-api:ManageConnections"]
-      resources = [
-        "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/*",
-        "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/DELETE/@connections/*",
-      ]
+      sid       = "PushToSockets"
+      actions   = ["execute-api:ManageConnections"]
+      resources = ["${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/*"]
+    }
+  }
+
+  # Socket records only (backend/internal/ephemeral, "C#" keys): ws records
+  # them on connect, reads them to push and forgets closed ones. It can't
+  # read rate counters, tokens or uploads.
+  dynamic "statement" {
+    for_each = each.key == "ws" ? [1] : []
+    content {
+      sid       = "SocketRecords"
+      actions   = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"]
+      resources = [aws_dynamodb_table.table["ephemeral"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["C#*"]
+      }
     }
   }
 
@@ -176,8 +205,31 @@ data "aws_iam_policy_document" "fn" {
     }
   }
 
+  # api hands every send to ws, without waiting.
   dynamic "statement" {
     for_each = each.key == "api" ? [1] : []
+    content {
+      sid       = "InvokeWs"
+      actions   = ["lambda:InvokeFunction"]
+      resources = [local.ws_arn]
+    }
+  }
+
+  # api asks notify to seal a chat ID (POST /notices), which only notify
+  # holds the key for; it no longer asks for notices.
+  dynamic "statement" {
+    for_each = each.key == "api" ? [1] : []
+    content {
+      sid       = "SealChatIds"
+      actions   = ["lambda:InvokeFunction"]
+      resources = [local.notify_arn]
+    }
+  }
+
+  # ws asks notify for a notice, without waiting, when no open app took a
+  # push. notify has no access to sockets or their records.
+  dynamic "statement" {
+    for_each = each.key == "ws" ? [1] : []
     content {
       sid       = "InvokeNotify"
       actions   = ["lambda:InvokeFunction"]
@@ -279,6 +331,18 @@ resource "aws_lambda_function" "fn" {
 # period started and send nothing, and a late notice is no use.
 resource "aws_lambda_function_event_invoke_config" "notify" {
   function_name                = aws_lambda_function.fn["notify"].function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
+}
+
+# The push after a send, too: tried once, or not at all if it waited a
+# minute for room to run (an open app also polls, every two minutes). A
+# retry would only push the hint again, and ask for the notice again (which
+# notify's quiet period would mostly drop). The hint carries nothing, so
+# the rare event Lambda delivers twice is harmless. The function logs its
+# failures rather than returning them.
+resource "aws_lambda_function_event_invoke_config" "ws" {
+  function_name                = aws_lambda_function.fn["ws"].function_name
   maximum_retry_attempts       = 0
   maximum_event_age_in_seconds = 60
 }

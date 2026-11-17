@@ -18,13 +18,11 @@ import (
 const NoticeSetupsPerDay = 5
 
 // Notices reaches the notify function, which alone holds the bot token and
-// the key that seals chat IDs (design §12).
+// the key that seals chat IDs (design §12). Notices themselves are asked
+// for by the ws function, after a send no open app took (Pusher).
 type Notices interface {
 	// Seal turns a Telegram chat ID into what the directory stores.
 	Seal(ctx context.Context, chat int64) ([]byte, error)
-	// Notify asks for an account's notice without waiting for it. An empty
-	// account does nothing, at the same cost.
-	Notify(ctx context.Context, account string) error
 }
 
 type noticesRequest struct {
@@ -53,7 +51,7 @@ func (s *Server) setNotices(ctx context.Context, req httpapi.Request, c caller) 
 		directory.TelegramHash(s.Pepper, launch.UserID) != c.device.TelegramHash {
 		return httpapi.Error(http.StatusUnauthorized, "init_data_rejected")
 	}
-	ok, err := s.Limits.Allow(ctx, "ntc#"+c.person(), NoticeSetupsPerDay, 24*time.Hour)
+	ok, err := s.allow(ctx, "ntc", NoticeSetupsPerDay, 24*time.Hour, c.person())
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -83,26 +81,15 @@ func PlainLaunch(startParam string) bool {
 	return startParam == "" || strings.HasPrefix(startParam, RegistrationPrefix)
 }
 
-// push tells an account's open apps about a delivery. A failure only means
-// the app finds it at its next poll, so it's logged, not returned.
-func (s *Server) push(ctx context.Context, account string) bool {
+// push hands a send to the ws function, which pushes to the account's open
+// apps and asks for a notice if none took it (Pusher). A failure only means
+// the app finds the envelope at its next sync, without a push or a notice,
+// so it's logged, not returned.
+func (s *Server) push(ctx context.Context, account string, quiet bool) {
 	if s.Push == nil {
-		return false
-	}
-	ok, err := s.Push.Push(ctx, account)
-	if err != nil {
-		s.Log.Warn("push failed", slog.String(logx.KeyRoute, "POST /send"), logx.ErrorKind(err))
-	}
-	return ok
-}
-
-// notify asks for a notice after a delivery. A failure only costs the
-// notice, so it's logged, not returned.
-func (s *Server) notify(ctx context.Context, account string) {
-	if s.Notices == nil {
 		return
 	}
-	if err := s.Notices.Notify(ctx, account); err != nil {
-		s.Log.Warn("notice request failed", slog.String(logx.KeyRoute, "POST /send"), logx.ErrorKind(err))
+	if err := s.Push.Push(ctx, account, quiet); err != nil {
+		s.Log.Warn("push request failed", slog.String(logx.KeyRoute, "POST /send"), logx.ErrorKind(err))
 	}
 }

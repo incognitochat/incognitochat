@@ -61,7 +61,7 @@ func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
 	o := h.server
 	s := Server{
 		Telegram: o.Telegram, Sessions: o.Sessions, Nonces: o.Nonces, Pepper: o.Pepper, Log: o.Log, Now: o.Now,
-		InviteOnly: o.InviteOnly, Admins: o.Admins, Pause: o.Pause, Issuer: o.Issuer, MediaIssuer: o.MediaIssuer,
+		InviteOnly: o.InviteOnly, Admins: o.Admins, Issuer: o.Issuer, MediaIssuer: o.MediaIssuer,
 		Notices: o.Notices, Push: o.Push, Sockets: o.Sockets, Media: o.Media, Uploads: o.Uploads,
 		Switches:  o.Switches,
 		Directory: &directory.Store{DB: tb.meter, Table: tb.directory},

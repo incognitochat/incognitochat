@@ -6,14 +6,22 @@
 //	S#<nonce>  S              a spent send token's nonce
 //	Q#<key>    Q              a quiet period (e.g. after a notice)
 //	R#<key>    <window start> a rate counter (c)
-//	C#<account> <connection>  a socket (sockets.go)
+//	C#<name>   <connection>   a socket (sockets.go)
+//	U#<id>     U              an upload (uploads.go)
 //
-// Socket records and notice quiet periods (Q#notice#<account>) hold an
-// account ID, neither with an exact time. A socket's record lasts from a
-// connect until a push finds the socket closed, a later connect needs the
-// place, the account is deleted, or a connect or push finds it expired (40
-// minutes after the minute it opened, rounded up to the minute; TTL itself
-// can take days, and an expired record is never used).
+// No key holds a mailbox, link, account or device ID, or the hash of a
+// Telegram ID the directory keeps: rows about one are named by a keyed
+// hash instead (internal/keyed), under a key only the functions that use
+// them hold, so a copy of the table can't be matched with the directory.
+// Rate counters (api's, named by api.Server.rateName under the Telegram-ID
+// pepper) change name with every window, and expire when it ends; socket
+// records (ws and api, SocketKey) and notice quiet periods (notify,
+// notices.QuietKey) keep one name per account, which says nothing without
+// the key. None holds an exact time. A socket's record lasts from a connect until a push finds the socket
+// closed, a later connect needs the place, the account is deleted, or a
+// connect or push finds it expired (40 minutes after the minute it opened,
+// rounded up to the minute; TTL itself can take days, and an expired
+// record is never used).
 package ephemeral
 
 import (
@@ -423,7 +431,12 @@ func (l *Limiter) Tally(ctx context.Context, key string, n, limit int, window ti
 // Counted is the count the table last returned for key's current window
 // on this instance (0 if none), such as just now to AllowN.
 func (l *Limiter) Counted(key string, window time.Duration) int {
-	return l.counted(key, l.Now().Truncate(window))
+	return l.CountedAt(key, window, l.Now())
+}
+
+// CountedAt is Counted in the window that holds at.
+func (l *Limiter) CountedAt(key string, window time.Duration, at time.Time) int {
+	return l.counted(key, at.Truncate(window))
 }
 
 // LocalAt counts n uses of key in this instance's memory only, in the
@@ -448,13 +461,10 @@ func (l *Limiter) LocalAt(key string, n, limit int, window time.Duration, at tim
 // most uses were counted before (any number if most is negative), and
 // returns the new count.
 func (l *Limiter) add(ctx context.Context, key string, n int, start time.Time, window time.Duration, most int) (*dynamodb.UpdateItemOutput, error) {
-	// A window of an hour or more is kept an hour past it, rounded up to the
-	// hour. A shorter one only to its end: per-minute counts aren't kept
-	// longer than they limit anything.
+	// A count is kept only to the end of its window: past it, it limits
+	// nothing, and nothing reads it. Windows are aligned, so the expiry
+	// says no more than the window does.
 	expires := start.Add(window)
-	if window >= time.Hour {
-		expires = start.Add(window + 2*time.Hour - time.Nanosecond).Truncate(time.Hour)
-	}
 	in := &dynamodb.UpdateItemInput{
 		TableName: &l.Table,
 		Key: map[string]types.AttributeValue{
@@ -525,7 +535,12 @@ func (l *Limiter) learn(key string, start time.Time, window time.Duration, uses 
 
 // Used reports how many uses of key the current window has counted.
 func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (int, error) {
-	start := l.Now().Truncate(window)
+	return l.UsedAt(ctx, key, window, l.Now())
+}
+
+// UsedAt is Used in the window that holds at.
+func (l *Limiter) UsedAt(ctx context.Context, key string, window time.Duration, at time.Time) (int, error) {
+	start := at.Truncate(window)
 	ctx, cancel := l.deadline(ctx)
 	defer cancel()
 	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{

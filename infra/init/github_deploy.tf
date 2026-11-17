@@ -427,10 +427,12 @@ data "aws_iam_policy_document" "lambda_boundary" {
     resources = [local.arns.ws_management]
   }
 
+  # api invokes ws after each send (which pushes) and notify to seal chat
+  # IDs; ws invokes notify for a notice. Each role allows only its own.
   statement {
-    sid       = "InvokeNotify"
+    sid       = "InvokeFunctions"
     actions   = ["lambda:InvokeFunction"]
-    resources = [local.arns.notify]
+    resources = [local.arns.notify, local.arns.ws]
   }
 
   # Encrypted attachments (presigned uploads and downloads, deletion).

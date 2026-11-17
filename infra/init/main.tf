@@ -34,6 +34,7 @@ locals {
   arns = {
     functions  = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-*"
     notify     = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-notify"
+    ws         = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-ws"
     tables     = "arn:${local.partition}:dynamodb:${local.region}:${local.account_id}:table/${local.prefix}-*"
     parameters = "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter${local.parameter_path}/*"
     # Function roles have their own prefix, so the deploy role ("<prefix>-github-deploy")
