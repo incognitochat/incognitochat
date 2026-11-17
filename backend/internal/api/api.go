@@ -85,8 +85,36 @@ type Directory interface {
 type Limiter interface {
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
 	AllowN(ctx context.Context, key string, n, limit int, window time.Duration) (bool, error)
+	// Full reports whether key's window is known to have reached limit,
+	// without asking the database, so refusing costs nothing.
+	Full(key string, limit int, window time.Duration) bool
 	// Used reports how many uses of key the current window has counted.
 	Used(ctx context.Context, key string, window time.Duration) (int, error)
+	// Counted is the count the database last returned for key's current
+	// window to this instance, such as just now to AllowN.
+	Counted(key string, window time.Duration) int
+
+	// The At methods count in the window that holds at, which the inbox's
+	// counters are named by (rateName), so a request counts in one window
+	// however long it takes (ephemeral.Limiter). Only counts the database
+	// returned refuse anything.
+
+	// AllowNAt counts n uses if they fit within limit.
+	AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error)
+	// RefundAt takes back n uses that AllowNAt reserved and weren't used.
+	RefundAt(ctx context.Context, key string, n int, window time.Duration, at time.Time) error
+	// FullAt is Full, from memory only.
+	FullAt(key string, limit int, window time.Duration, at time.Time) bool
+	// CheckAt reports whether the window is below limit, from memory, or
+	// by reading the count (at least once a minute for longer windows); if
+	// the database can't be read, from memory, with the error.
+	CheckAt(ctx context.Context, key string, limit int, window time.Duration, at time.Time) (bool, error)
+	// Tally counts n uses in batches, writing about once per batch, and
+	// reports whether the window is below limit as last written.
+	Tally(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error)
+	// LocalAt counts n uses in this instance's memory only, for when the
+	// database can't be reached, and reports whether they fit in limit.
+	LocalAt(key string, n, limit int, window time.Duration, at time.Time) bool
 }
 
 // Server holds what the handlers need.
@@ -96,7 +124,7 @@ type Server struct {
 	Directory Directory
 	Nonces    session.NonceStore
 	Limits    Limiter
-	Pepper    []byte // keys the hash of Telegram user IDs
+	Pepper    []byte // keys the hash of Telegram user IDs, inbox item IDs (itemID) and the inbox's rate counters (rateName)
 	Log       *slog.Logger
 	Now       func() time.Time
 
@@ -134,6 +162,9 @@ type Server struct {
 	// pause uploads or downloads of attachments (switches.go).
 	Switches    SwitchStore
 	switchCache switchCache
+	// paged remembers devices whose inbox needed more than a first read
+	// here lately (listInbox).
+	paged paged
 }
 
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).

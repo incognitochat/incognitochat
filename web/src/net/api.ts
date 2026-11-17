@@ -13,6 +13,7 @@ export type ErrorCode =
   | 'account_exists'
   | 'conflict'
   | 'rate_limited'
+  | 'daily_limit'
   | 'login_refused'
   | 'clock_skew'
   | 'account_replaced'
@@ -45,6 +46,7 @@ const CODES = new Set<string>([
   'account_exists',
   'conflict',
   'rate_limited',
+  'daily_limit',
   'login_refused',
   'clock_skew',
   'account_replaced',

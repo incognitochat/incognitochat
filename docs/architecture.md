@@ -205,7 +205,12 @@ secret: one person keeps the same label through the same link.
   an hour through one link.
 - **Delivery:** the server stores each envelope for the mailbox owner's device
   until it confirms it, at most 30 days. Unknown, ended and blocked mailboxes
-  get the same answer, and nothing is stored.
+  get the same answer, and nothing is stored. The device fetches a page at a
+  time, capped by size, and confirms by IDs the server signed for it, which
+  stay good for one to two hours. What its fetches read is limited per
+  minute and per person and day, and confirming messages that are already
+  gone per person and day, so no one account can use up the capacity
+  everyone shares.
 - **Push:** an open app keeps a WebSocket while it's visible. After a delivery,
   the server sends it a content-free "sync" hint, and the app fetches.
 - **Notices:** if no app took the push, the bot sends a generic "New message"

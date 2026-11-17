@@ -97,6 +97,19 @@ const MAX_PENDING_REACTIONS = 100;
 /** How many uploads are deleted from the server at once. */
 const UPLOAD_DELETE_PARALLEL = 6;
 const MAX_INBOX_PAGES = 10;
+/** After the server limits this device's inbox fetches, they pause this long, plus up to as much again (its limits are per minute). */
+const SYNC_PAUSE_MS = 30_000;
+/**
+ * How long a confirmed item's ID is remembered, so a fetch that lists it
+ * again (the server's reads lag a little) neither opens nor confirms it
+ * twice. The server gives an item the same ID within the hour it's listed in.
+ */
+const CONFIRMED_FOR_MS = 2 * 3600 * 1000;
+const MAX_CONFIRMED = 1000;
+/** How long IDs that couldn't be confirmed yet are kept to confirm later: the server takes an ID for an hour or two after it listed it. */
+const UNCONFIRMED_FOR_MS = 3600 * 1000;
+/** How many IDs may wait to be confirmed before a sync stops reading more (three pages): else what can't be confirmed yet is read again and again. */
+const MAX_PENDING = 150;
 const MAX_SEEN = 100;
 const META_BLOCKED = 'blocked-tags';
 /** When the mailboxes were last checked (healMailboxes), Unix ms. */
@@ -136,6 +149,17 @@ class NotYet extends Error {
   }
 }
 
+/** A sync failed partway, after it had stored changes: received is how many (as sync() counts them), error what stopped it. */
+export class SyncFailed extends Error {
+  constructor(
+    readonly received: number,
+    readonly error: unknown,
+  ) {
+    super('sync failed');
+    this.name = 'SyncFailed';
+  }
+}
+
 /** The day's new mailboxes are used up: no new chat can be started or answered until tomorrow. */
 export class NoMailboxes extends Error {
   constructor() {
@@ -167,6 +191,8 @@ export interface MessagingDeps {
    * it in.
    */
   onWaiting?: () => void;
+  /** Called when a pause the server asked for ends (rate_limited), so the app syncs then: pushes that came meanwhile weren't acted on. */
+  onResume?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -235,11 +261,22 @@ interface InboxItem {
   envelope: string;
 }
 
-function checkInbox(value: unknown): { items: InboxItem[]; more: boolean } {
-  const { items, more } = checkObject(value);
+/** POST /ack's answer: the IDs whose delete failed, to send again. */
+function checkAck(value: unknown): { retry: string[] } {
+  const { retry } = checkObject(value);
+  if (retry === undefined) return { retry: [] };
+  if (!Array.isArray(retry) || retry.some((id) => typeof id !== 'string')) throw new Error('bad ack');
+  return { retry: retry as string[] };
+}
+
+function checkInbox(value: unknown): { items: InboxItem[]; more: boolean; next: string | null } {
+  const { items, more, next } = checkObject(value);
   if (!Array.isArray(items) || typeof more !== 'boolean') throw new Error('bad inbox');
+  // Where the next page starts: an item's key, which goes back in the URL.
+  if (next !== undefined && (typeof next !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(next))) throw new Error('bad inbox');
   return {
     more,
+    next: typeof next === 'string' ? next : null,
     items: items.map((i: unknown) => {
       const { id, mailbox, envelope } = checkObject(i);
       if (typeof id !== 'string' || typeof mailbox !== 'string' || typeof envelope !== 'string') throw new Error('bad item');
@@ -1041,38 +1078,221 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
+   * Until when (Unix ms) the inbox isn't fetched: the server said this
+   * device fetched too much for now (rate_limited), or for today
+   * (daily_limit). And the longest that pause can be: one longer means the
+   * clock was set back since, and it's over.
+   */
+  let fetchPausedUntil = 0;
+  let fetchPauseMax = 0;
+  /** The sync for when the pause ends (onResume). */
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The walk through the inbox under way, if a sync stopped partway: where
+   * it goes on (`after`), where this pass began (`origin`, null: the
+   * start), and whether it has gone round past the end to the start again,
+   * up to `origin` (`round`).
+   */
+  let walk: { after: string | null; origin: string | null; round: boolean } | null = null;
+  /** Items confirmed lately: ID → when (Unix ms), oldest first. */
+  const confirmed = new Map<string, number>();
+  /** Pages received but not confirmed yet (the server couldn't take them then): their IDs, and when they were listed, oldest first. */
+  const unconfirmed: { ids: string[]; at: number }[] = [];
+  const pending = new Set<string>();
+
+  /**
    * Fetches, opens and stores new messages and receipts, then confirms them.
    * Returns how many changed something shown: new messages, seen receipts
    * that marked ours, ends.
+   *
+   * A sync walks the inbox a page at a time, at most MAX_INBOX_PAGES; the
+   * next one carries on where it stopped, so items behind many others (or
+   * behind old ones the server skips) are reached in the end. A walk that
+   * starts partway goes round to the start once, up to where it started,
+   * for what arrived before. What the server can't confirm now is kept and
+   * confirmed later; once MAX_PENDING wait, the walk stops, so nothing is
+   * read again and again before it's confirmed. Items that can't be taken
+   * in yet (NotYet) stay unconfirmed, and the walk goes past them.
    */
   function sync(): Promise<number> {
     return withLock('messaging-sync', async () => {
       let received = 0;
       unresolved = new Map();
       const busy = new Set<string>();
-      for (let page = 0; page < MAX_INBOX_PAGES; page++) {
-        const { items, more } = await session.call('GET', '/inbox', undefined, checkInbox);
-        if (items.length === 0) break;
-        const held = new Set<string>();
-        for (const item of items) {
+      try {
+        await confirmLater();
+        if (paused()) {
+          scheduleResume();
+          return received;
+        }
+        const w = walk ?? { after: null, origin: null, round: false };
+        // Resumed partway: this pass goes round to here.
+        if (!w.round) w.origin = w.after;
+        walk = w;
+        for (let page = 0; page < MAX_INBOX_PAGES && pending.size < MAX_PENDING; page++) {
+          const path: string = w.after ? `/inbox?after=${w.after}` : '/inbox';
+          let listed: ReturnType<typeof checkInbox>;
           try {
-            if (await receive(item, busy)) received++;
+            listed = await session.call('GET', path, undefined, checkInbox);
           } catch (err) {
-            if (!(err instanceof NotYet)) throw err;
-            held.add(item.id);
+            if (!(err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'daily_limit'))) throw err;
+            // The rest waits: the next sync goes on with this page.
+            pause(err.code === 'daily_limit');
+            return received;
+          }
+          const listedAt = now();
+          const { items, more, next } = listed;
+          // Confirmed lately, or waiting to be: listed again, nothing to do.
+          const fresh = items.filter((i) => !confirmed.has(i.id) && !pending.has(i.id));
+          const held = new Set<string>();
+          for (const item of fresh) {
+            try {
+              if (await receive(item, busy)) received++;
+            } catch (err) {
+              if (!(err instanceof NotYet)) throw err;
+              held.add(item.id);
+            }
+          }
+          // Confirmed whether or not they opened: what we can't open now we
+          // never will. Except those that can't be judged yet: they wait,
+          // unconfirmed, and the walk goes on past them (a later one takes
+          // them in).
+          const done = fresh.filter((i) => !held.has(i.id)).map((i) => i.id);
+          if (done.length > 0) await confirm(done, listedAt);
+          if (more && next) {
+            // Back where this pass began, having gone round: the rest was walked already.
+            if (w.round && w.origin !== null && next >= w.origin) {
+              walk = null;
+              break;
+            }
+            // A page can be empty and still have more after it (old envelopes the server skips).
+            w.after = next;
+          } else if (more && done.length > 0) {
+            // A server that gives no `next`: from the start again, without
+            // what was confirmed. Not for a page of only what waits, which
+            // would come again the same.
+            w.after = null;
+          } else if (w.round || w.origin === null) {
+            // The end.
+            walk = null;
+            break;
+          } else {
+            // Round to the start, for what arrived before where it began.
+            w.round = true;
+            w.after = null;
           }
         }
-        // Confirmed whether or not they opened: what we can't open now we
-        // never will. Except those that can't be judged yet: they wait, and
-        // a page of nothing else ends this sync (the next one asks again).
-        const done = items.filter((i) => !held.has(i.id)).map((i) => i.id);
-        if (done.length > 0) await session.call('POST', '/ack', { ids: done }, checkObject);
-        if (!more || done.length === 0) break;
+      } catch (err) {
+        // The next sync starts from the start, not again where this failed.
+        walk = null;
+        // What was stored before is still news.
+        throw received > 0 ? new SyncFailed(received, err) : err;
+      } finally {
+        // Once each chat that was busy is free, the app syncs again for what waits.
+        for (const id of busy) void withLock(`send:${id}`, async () => {}).then(() => deps.onWaiting?.());
       }
-      // Once each chat that was busy is free, the app syncs again for what waits.
-      for (const id of busy) void withLock(`send:${id}`, async () => {}).then(() => deps.onWaiting?.());
       return received;
     });
+  }
+
+  /**
+   * Confirms a page's IDs, listed at `at`. Those whose delete failed
+   * (`retry`) are kept for the next sync. If the request fails, they're
+   * kept too (a network error, or the server's: 5xx, 429), unless the
+   * server refused them for good (any other 4xx: IDs it no longer takes,
+   * say after its key changed): then they're dropped, and their items are
+   * listed again under new IDs. Throws what went wrong, except that refusal.
+   */
+  async function confirm(ids: string[], at: number): Promise<void> {
+    let retry: string[];
+    try {
+      ({ retry } = await session.call('POST', '/ack', { ids }, checkAck));
+    } catch (err) {
+      const forGood = err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 429;
+      if (!forGood) keep(ids, at);
+      if (forGood && err.code === 'bad_request') return;
+      throw err;
+    }
+    rememberConfirmed(ids.filter((id) => !retry.includes(id)));
+    if (retry.length > 0) keep(retry, at);
+  }
+
+  /**
+   * Confirms what earlier syncs couldn't, oldest first: only what was
+   * waiting when it started, so what fails again waits for the next sync
+   * rather than going straight back. IDs too old for the server go: their
+   * items are listed again under new ones.
+   */
+  async function confirmLater(): Promise<void> {
+    const batches = unconfirmed.splice(0);
+    for (const batch of batches) batch.ids.forEach((id) => pending.delete(id));
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]!;
+      if (batch.at < now() - UNCONFIRMED_FOR_MS) continue;
+      try {
+        await confirm(batch.ids, batch.at);
+      } catch (err) {
+        for (const rest of batches.slice(i + 1)) keep(rest.ids, rest.at);
+        throw err;
+      }
+    }
+  }
+
+  function keep(ids: string[], at: number): void {
+    unconfirmed.push({ ids, at });
+    ids.forEach((id) => pending.add(id));
+    // Bounded: the oldest go, and are listed and confirmed again later.
+    while (pending.size > MAX_CONFIRMED && unconfirmed.length > 1) dropOldest();
+  }
+
+  /** Forgets the oldest batch waiting to be confirmed. */
+  function dropOldest(): void {
+    unconfirmed.shift()?.ids.forEach((id) => pending.delete(id));
+  }
+
+  /** Pauses fetching: for a minute or so, or, past the day's limit, until the next UTC day. */
+  function pause(daily: boolean): void {
+    if (daily) {
+      fetchPausedUntil = (Math.floor(now() / DAY) + 1) * DAY + Math.random() * 60_000;
+      fetchPauseMax = DAY + 60_000;
+    } else {
+      fetchPausedUntil = now() + SYNC_PAUSE_MS * (1 + Math.random());
+      fetchPauseMax = 2 * SYNC_PAUSE_MS;
+    }
+    stop();
+    scheduleResume();
+  }
+
+  function paused(): boolean {
+    const left = fetchPausedUntil - now();
+    return left > 0 && left <= fetchPauseMax;
+  }
+
+  /** Syncs when the pause ends, for what it held back: pushes that came meanwhile weren't acted on. */
+  function scheduleResume(): void {
+    if (!deps.onResume || resumeTimer !== undefined || !paused()) return;
+    resumeTimer = setTimeout(
+      () => {
+        resumeTimer = undefined;
+        deps.onResume?.();
+      },
+      fetchPausedUntil - now(),
+    );
+  }
+
+  /** Stops the timer a pause set: the app no longer syncs (signed out, or the engine replaced). */
+  function stop(): void {
+    clearTimeout(resumeTimer);
+    resumeTimer = undefined;
+  }
+
+  function rememberConfirmed(ids: string[]): void {
+    const t = now();
+    for (const id of ids) confirmed.set(id, t);
+    for (const [id, at] of confirmed) {
+      if (at >= t - CONFIRMED_FOR_MS && confirmed.size <= MAX_CONFIRMED) break;
+      confirmed.delete(id);
+    }
   }
 
   /**
@@ -1599,7 +1819,7 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, markRead, markSeen, react, block, unblock, remove, maintain };
+  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

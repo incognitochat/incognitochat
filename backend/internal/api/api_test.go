@@ -177,25 +177,42 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 type memInbox struct {
 	mu    sync.Mutex
 	items map[string][]inbox.Item // "<account>#<device>" -> items
+	// failing are item IDs whose delete fails (Ack reports them).
+	failing map[string]bool
 }
 
 func (m *memInbox) Deliver(_ context.Context, account string, devices []string, mailbox string, env []byte, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, d := range devices {
-		m.items[account+"#"+d] = append(m.items[account+"#"+d], inbox.Item{ID: ids.New(), Mailbox: mailbox, Envelope: env})
+		m.items[account+"#"+d] = append(m.items[account+"#"+d], inbox.Item{ID: ids.New(), Mailbox: mailbox, Envelope: env, Size: len(env) + 100})
 	}
 	return nil
 }
 
-func (m *memInbox) List(_ context.Context, account, device string, limit int, _ time.Time) ([]inbox.Item, bool, error) {
+// List reads like inbox.Store.List: a first read of two, then more is
+// called if there are more; each item read costs a tenth of a read unit.
+func (m *memInbox) List(_ context.Context, account, device, after string, limits inbox.PageLimits, _ time.Time, more func() error) (inbox.Page, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	items := m.items[account+"#"+device]
-	if len(items) > limit {
-		return append([]inbox.Item(nil), items[:limit]...), true, nil
+	if after != "" {
+		i := 0
+		for i < len(items) && items[i].ID != after {
+			i++
+		}
+		items = items[min(i+1, len(items)):]
 	}
-	return append([]inbox.Item(nil), items...), false, nil
+	items = append([]inbox.Item(nil), items...)
+	m.mu.Unlock()
+	if len(items) > 2 && more != nil {
+		if err := more(); err != nil {
+			return inbox.Page{Items: items[:2], Read: 2, Units: 0.2}, err
+		}
+	}
+	if len(items) > limits.Items {
+		return inbox.Page{Items: items[:limits.Items], After: items[limits.Items-1].ID, Read: limits.Items, Units: float64(limits.Items) / 10}, nil
+	}
+	return inbox.Page{Items: items, Read: len(items), Units: float64(len(items)) / 10}, nil
 }
 
 func (m *memInbox) Clear(_ context.Context, account, device string, max int) (int, bool, error) {
@@ -207,21 +224,27 @@ func (m *memInbox) Clear(_ context.Context, account, device string, max int) (in
 	return n, len(m.items[key]) > 0, nil
 }
 
-func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string) error {
+func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string, _ int) (missing int, failed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	drop := map[string]bool{}
 	for _, id := range ackIDs {
-		drop[id] = true
+		if m.failing[id] {
+			failed = append(failed, id)
+		} else {
+			drop[id] = true
+		}
 	}
 	var kept []inbox.Item
 	for _, it := range m.items[account+"#"+device] {
-		if !drop[it.ID] {
+		if drop[it.ID] {
+			delete(drop, it.ID)
+		} else {
 			kept = append(kept, it)
 		}
 	}
 	m.items[account+"#"+device] = kept
-	return nil
+	return len(drop), failed
 }
 
 func (m *memDirectory) Levels(context.Context) (map[int]int, error) {
@@ -507,10 +530,17 @@ func (m *memDirectory) SetNotices(_ context.Context, account string, sealed []by
 type memLimiter struct {
 	mu     sync.Mutex
 	counts map[string]int
+	local  map[string]int // LocalAt's
 }
 
 func (l *memLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
+}
+
+func (l *memLimiter) Counted(key string, _ time.Duration) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key]
 }
 
 func (l *memLimiter) Used(_ context.Context, key string, _ time.Duration) (int, error) {
@@ -529,14 +559,65 @@ func (l *memLimiter) AllowN(_ context.Context, key string, n, limit int, _ time.
 	return true, nil
 }
 
+func (l *memLimiter) Full(key string, limit int, _ time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key] >= limit
+}
+
+// The At methods ignore the time: the inbox's keys name their window.
+
+func (l *memLimiter) AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, _ time.Time) (bool, error) {
+	return l.AllowN(ctx, key, n, limit, window)
+}
+
+func (l *memLimiter) Tally(_ context.Context, key string, n, limit int, _ time.Duration, _ time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts[key] += max(n, 0)
+	return l.counts[key] < limit, nil
+}
+
+func (l *memLimiter) LocalAt(key string, n, limit int, _ time.Duration, _ time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.local == nil {
+		l.local = map[string]int{}
+	}
+	if l.local[key]+n > limit {
+		return false
+	}
+	l.local[key] += n
+	return true
+}
+
+func (l *memLimiter) RefundAt(_ context.Context, key string, n int, _ time.Duration, _ time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts[key] -= max(n, 0)
+	return nil
+}
+
+func (l *memLimiter) FullAt(key string, limit int, window time.Duration, _ time.Time) bool {
+	return l.Full(key, limit, window)
+}
+
+func (l *memLimiter) CheckAt(_ context.Context, key string, limit int, window time.Duration, _ time.Time) (bool, error) {
+	return !l.Full(key, limit, window), nil
+}
+
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool
+	// calls counts Spend calls, refused ones too: each costs the table a
+	// write.
+	calls int
 }
 
 func (m *memSpent) Spend(_ context.Context, nonce []byte, _ time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.calls++
 	if m.spent[string(nonce)] {
 		return false, nil
 	}

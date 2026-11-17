@@ -50,8 +50,11 @@ func (n *Nonces) Use(ctx context.Context, nonce string, expires time.Time) (bool
 	return once(ctx, n.DB, n.Table, "N#"+nonce, "N", expires, n.Now())
 }
 
-// Spent records spent send tokens. Tokens say nothing about who spent them,
-// and neither does this.
+// Spent records spent send and media tokens. Tokens say nothing about who
+// spent them, and neither does this:
+//
+//	S#<nonce>  S  until it expires (e); given back (u), and whether it
+//	              has been given back before (r)
 //
 // It also remembers, in memory, the tokens it has seen spent, so replaying
 // one token over and over costs the table nothing after the first time.
@@ -68,7 +71,8 @@ type Spent struct {
 const maxSeen = 8192
 
 // Spend records a token's nonce until forgetAfter (when the token stops
-// being accepted anyway). It reports false if the token was spent already.
+// being accepted anyway). It reports false if the token was spent already,
+// and not given back since.
 func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
 	now := sp.Now()
@@ -78,7 +82,18 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 	if known && now.Unix() < until {
 		return false, nil
 	}
-	fresh, err := once(ctx, sp.DB, sp.Table, "S#"+key, "S", forgetAfter, now)
+	// An update, not a put, so a token given back keeps r when spent again.
+	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &sp.Table,
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		UpdateExpression:          aws.String("SET e = :e REMOVE u"),
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())},
+	})
+	fresh := err == nil
+	if conditionFailed(err) {
+		err = nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -93,13 +108,22 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 }
 
 // Unspend gives back a token that Spend just took, when what it paid for
-// didn't happen.
+// didn't happen. A token is given back once at most: spent again and
+// refused again, it stays spent. Otherwise one token could be replayed
+// against a refusal without end, each time at the table's cost.
 func (sp *Spent) Unspend(ctx context.Context, nonce []byte) error {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
-	if _, err := sp.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: &sp.Table,
-		Key:       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
-	}); err != nil {
+	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &sp.Table,
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		UpdateExpression:          aws.String("SET u = :one, r = :one"),
+		ConditionExpression:       aws.String("attribute_exists(pk) AND attribute_not_exists(r)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":one": num(1)},
+	})
+	if conditionFailed(err) {
+		return nil // given back before: it stays spent
+	}
+	if err != nil {
 		return err
 	}
 	sp.mu.Lock()
@@ -139,52 +163,322 @@ func once(ctx context.Context, db DB, table, pk, sk string, expires, now time.Ti
 	return err == nil, err
 }
 
-// Limiter counts uses of a key in fixed windows.
+// Limiter counts uses of a key in fixed windows. Windows are aligned to
+// multiples of their length since the Unix epoch (so a day is a UTC day).
+//
+// It also remembers, in memory, the count the table last returned for each
+// window, so a key known to be used up is refused without writing to the
+// table. A refused conditional write is charged like any other, so a
+// client hammering a limit it has reached would otherwise cost the table as
+// much as one within it. Only counts the table returned ever refuse: a call
+// that fails counts nothing here, so an outage can't use up a limit.
+//
+// The At methods take the time whose window counts, so a request that
+// names its counters by their window (as the inbox's do) counts in that
+// window from start to end, even when it ends in the next.
+//
+// Each call to the table has Timeout (a second if zero) and is tried at
+// most twice, so a limit can't hold up a request for long when the table
+// is struggling.
 type Limiter struct {
-	DB    DB
-	Table string
-	Now   func() time.Time
+	DB      DB
+	Table   string
+	Now     func() time.Time
+	Timeout time.Duration
+
+	mu      sync.Mutex
+	known   map[string]counted // key and window start -> the count the table last returned
+	tallies map[string]tally   // key and window start -> uses not yet written (Tally)
+	local   map[string]int     // key and window start -> uses counted here only (LocalAt)
+}
+
+type counted struct {
+	uses    int
+	until   int64 // when its window ends, Unix seconds
+	learned int64 // when the table told it, Unix seconds
+}
+
+type tally struct {
+	pending int
+	wrote   bool // whether this instance has written any yet
+}
+
+const (
+	// maxKnown bounds each in-memory map: ended windows go first, and it
+	// starts over when still full.
+	maxKnown = 16384
+	// checkFresh is how long CheckAt trusts a count below the limit, for
+	// windows longer than a minute: other instances count too, so it asks
+	// again at least this often.
+	checkFresh = 60 // seconds
+	// tallyBatch is how many uses a Tally gathers before writing them.
+	tallyBatch = 50
+)
+
+// fewerRetries tries a call to the table at most twice.
+func fewerRetries(o *dynamodb.Options) { o.RetryMaxAttempts = 2 }
+
+func (l *Limiter) deadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if l.Timeout > 0 {
+		return context.WithTimeout(ctx, l.Timeout)
+	}
+	return context.WithTimeout(ctx, time.Second)
 }
 
 // Allow counts one use of key in the current window and reports whether it
-// is within limit. Windows are aligned to multiples of window since the Unix
-// epoch (so a day is a UTC day).
+// is within limit.
 func (l *Limiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
 }
 
 // AllowN counts n uses at once, allowing them only if all fit in the limit.
 func (l *Limiter) AllowN(ctx context.Context, key string, n, limit int, window time.Duration) (bool, error) {
+	return l.AllowNAt(ctx, key, n, limit, window, l.Now())
+}
+
+// AllowNAt is AllowN in the window that holds at.
+func (l *Limiter) AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error) {
 	if n < 1 || n > limit {
 		return false, nil
 	}
-	now := l.Now()
-	start := now.Truncate(window)
-	// Kept an hour past the window; rounded up to the hour.
-	expires := start.Add(window + 2*time.Hour - time.Nanosecond).Truncate(time.Hour)
-	_, err := l.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	start := at.Truncate(window)
+	if l.counted(key, start)+n > limit {
+		return false, nil
+	}
+	out, err := l.add(ctx, key, n, start, window, limit-n)
+	if conditionFailed(err) {
+		// More than limit-n were counted already.
+		l.learn(key, start, window, max(l.counted(key, start), limit-n+1))
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	l.learn(key, start, window, countOf(out))
+	return true, nil
+}
+
+// RefundAt takes back n uses of key in the window that holds at: what a
+// request reserved (AllowNAt) and didn't use. If the table can't be
+// reached, the reservation stands.
+func (l *Limiter) RefundAt(ctx context.Context, key string, n int, window time.Duration, at time.Time) error {
+	if n < 1 {
+		return nil
+	}
+	start := at.Truncate(window)
+	out, err := l.add(ctx, key, -n, start, window, -1)
+	if err != nil {
+		return err
+	}
+	l.learn(key, start, window, countOf(out))
+	return nil
+}
+
+// Full reports whether key's current window is known to have reached
+// limit, without asking the table, so what it limits can be refused for
+// free.
+func (l *Limiter) Full(key string, limit int, window time.Duration) bool {
+	return l.FullAt(key, limit, window, l.Now())
+}
+
+// FullAt is Full in the window that holds at.
+func (l *Limiter) FullAt(key string, limit int, window time.Duration, at time.Time) bool {
+	return l.counted(key, at.Truncate(window)) >= limit
+}
+
+// CheckAt reports whether key's window that holds at is below limit. A
+// refusal the table told stands for the window. A count below the limit
+// it trusts for a window of a minute or less, and otherwise for checkFresh;
+// else it reads the count (an eventually consistent read, half a read
+// unit). So an instance doesn't serve a window that others have used up,
+// at least not for long. If the table can't be read, it answers from what
+// the table last told, and returns the error too.
+func (l *Limiter) CheckAt(ctx context.Context, key string, limit int, window time.Duration, at time.Time) (bool, error) {
+	start := at.Truncate(window)
+	if c, ok := l.memo(key, start); ok {
+		if c.uses >= limit {
+			return false, nil
+		}
+		if window <= time.Minute || l.Now().Unix()-c.learned <= checkFresh {
+			return true, nil
+		}
+	}
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
+	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: &l.Table,
 		Key: map[string]types.AttributeValue{
 			"pk": s("R#" + key),
 			"sk": s(strconv.FormatInt(start.Unix(), 10)),
 		},
-		UpdateExpression:    aws.String("ADD c :n SET e = :e"),
-		ConditionExpression: aws.String("attribute_not_exists(c) OR c <= :most"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":n":    num(int64(n)),
-			":e":    num(expires.Unix()),
-			":most": num(int64(limit - n)),
-		},
-	})
-	if conditionFailed(err) {
-		return false, nil
+		ProjectionExpression: aws.String("c"),
+	}, fewerRetries)
+	if err != nil {
+		return l.counted(key, start) < limit, err
 	}
-	return err == nil, err
+	uses := 0
+	if c, ok := out.Item["c"].(*types.AttributeValueMemberN); ok {
+		uses, _ = strconv.Atoi(c.Value)
+	}
+	l.learn(key, start, window, uses)
+	return uses < limit, nil
+}
+
+// Tally counts n uses of key in the window that holds at, in batches: it
+// gathers them here and adds them to the table's count on this instance's
+// first use in the window (so it learns the count), once there are
+// tallyBatch, and once the count may have reached limit. So counting often
+// costs the table little: a write per batch. It reports whether the window
+// is below limit, as the table last said: a count only gathered here never
+// refuses. Uses an instance gathered and never wrote (it stopped) are
+// fewer than a batch. If the table can't be reached, the uses stay
+// gathered for the next time.
+func (l *Limiter) Tally(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error) {
+	start := at.Truncate(window)
+	k := knownKey(key, start)
+	l.mu.Lock()
+	t, ok := l.tallies[k]
+	if !ok && (l.tallies == nil || len(l.tallies) >= maxKnown) {
+		l.tallies = map[string]tally{}
+	}
+	t.pending += max(n, 0)
+	due := !t.wrote || t.pending >= tallyBatch || l.known[k].uses+t.pending >= limit
+	write := 0
+	if due && t.pending > 0 {
+		write, t.pending = t.pending, 0
+	}
+	l.tallies[k] = t
+	l.mu.Unlock()
+	if write == 0 {
+		return l.counted(key, start) < limit, nil
+	}
+	out, err := l.add(ctx, key, write, start, window, -1)
+	if err != nil {
+		l.mu.Lock()
+		t := l.tallies[k]
+		t.pending += write
+		l.tallies[k] = t
+		l.mu.Unlock()
+		return l.counted(key, start) < limit, err
+	}
+	l.mu.Lock()
+	t = l.tallies[k]
+	t.wrote = true
+	l.tallies[k] = t
+	l.mu.Unlock()
+	c := countOf(out)
+	l.learn(key, start, window, c)
+	return c < limit, nil
+}
+
+// Counted is the count the table last returned for key's current window
+// on this instance (0 if none), such as just now to AllowN.
+func (l *Limiter) Counted(key string, window time.Duration) int {
+	return l.counted(key, l.Now().Truncate(window))
+}
+
+// LocalAt counts n uses of key in this instance's memory only, in the
+// window that holds at, and reports whether they fit in limit there. It is
+// for when the table can't be reached, with a limit smaller than the
+// table's: nothing else reads these counts.
+func (l *Limiter) LocalAt(key string, n, limit int, window time.Duration, at time.Time) bool {
+	k := knownKey(key, at.Truncate(window))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.local == nil || len(l.local) >= maxKnown {
+		l.local = map[string]int{}
+	}
+	if l.local[k]+n > limit {
+		return false
+	}
+	l.local[k] += n
+	return true
+}
+
+// add adds n to key's count for the window that starts at start, if at
+// most uses were counted before (any number if most is negative), and
+// returns the new count.
+func (l *Limiter) add(ctx context.Context, key string, n int, start time.Time, window time.Duration, most int) (*dynamodb.UpdateItemOutput, error) {
+	// A window of an hour or more is kept an hour past it, rounded up to the
+	// hour. A shorter one only to its end: per-minute counts aren't kept
+	// longer than they limit anything.
+	expires := start.Add(window)
+	if window >= time.Hour {
+		expires = start.Add(window + 2*time.Hour - time.Nanosecond).Truncate(time.Hour)
+	}
+	in := &dynamodb.UpdateItemInput{
+		TableName: &l.Table,
+		Key: map[string]types.AttributeValue{
+			"pk": s("R#" + key),
+			"sk": s(strconv.FormatInt(start.Unix(), 10)),
+		},
+		UpdateExpression: aws.String("ADD c :n SET e = :e"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":n": num(int64(n)),
+			":e": num(expires.Unix()),
+		},
+		ReturnValues: types.ReturnValueUpdatedNew,
+	}
+	if most >= 0 {
+		in.ConditionExpression = aws.String("attribute_not_exists(c) OR c <= :most")
+		in.ExpressionAttributeValues[":most"] = num(int64(most))
+	}
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
+	return l.DB.UpdateItem(ctx, in, fewerRetries)
+}
+
+func countOf(out *dynamodb.UpdateItemOutput) int {
+	c, ok := out.Attributes["c"].(*types.AttributeValueMemberN)
+	if !ok {
+		return 0
+	}
+	n, _ := strconv.Atoi(c.Value)
+	return n
+}
+
+func knownKey(key string, start time.Time) string {
+	return key + "@" + strconv.FormatInt(start.Unix(), 10)
+}
+
+// counted is the count the table last returned for the window of key that
+// starts at start (0 if none).
+func (l *Limiter) counted(key string, start time.Time) int {
+	c, _ := l.memo(key, start)
+	return c.uses
+}
+
+func (l *Limiter) memo(key string, start time.Time) (counted, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.known[knownKey(key, start)]
+	return c, ok
+}
+
+// learn records the count the table just told.
+func (l *Limiter) learn(key string, start time.Time, window time.Duration, uses int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	k := knownKey(key, start)
+	if _, ok := l.known[k]; !ok && len(l.known) >= maxKnown {
+		now := l.Now().Unix()
+		for k, c := range l.known {
+			if c.until <= now {
+				delete(l.known, k)
+			}
+		}
+	}
+	if l.known == nil || len(l.known) >= maxKnown {
+		l.known = map[string]counted{}
+	}
+	l.known[k] = counted{uses: uses, until: start.Add(window).Unix(), learned: l.Now().Unix()}
 }
 
 // Used reports how many uses of key the current window has counted.
 func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (int, error) {
 	start := l.Now().Truncate(window)
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
 	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: &l.Table,
 		Key: map[string]types.AttributeValue{
@@ -193,7 +487,7 @@ func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (i
 		},
 		ProjectionExpression: aws.String("c"),
 		ConsistentRead:       aws.Bool(true),
-	})
+	}, fewerRetries)
 	if err != nil {
 		return 0, err
 	}

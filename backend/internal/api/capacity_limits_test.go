@@ -1,0 +1,484 @@
+package api
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
+	"github.com/incognitochat/incognitochat/backend/internal/envelope"
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
+	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+)
+
+// IDs listed before the last hour delete nothing: the items are listed
+// again, under new IDs.
+func TestAckOldIDsCapacity(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	old := h.fill(t, owner, 5)
+	h.now = h.now.Add(2 * time.Hour)
+	owner.token = h.token(t, owner.d)
+	tb.meter.Reset()
+	status, _ := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": old}, false)
+	m, _ := tb.cost(t, "POST /ack, IDs listed two hours before")
+	if status != http.StatusOK || m.Write != 0 {
+		t.Fatalf("old IDs: %d, %v write units", status, m.Write)
+	}
+	if again := h.fill(t, owner, 0); len(again) != 5 {
+		t.Fatalf("%d items listed again, want 5", len(again))
+	}
+}
+
+// Replaying the confirmation of a page that is gone costs the table a write
+// unit per ID: a person's day allows AckMissesPerDay of those, then nothing
+// is deleted, however long it goes on.
+func TestAckReplayCapacity(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+
+	// A page confirmed, then replayed for 30 minutes, as often as allowed.
+	page := h.fill(t, owner, AckBatch)
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false); status != http.StatusOK {
+		t.Fatalf("ack: %d %v", status, out)
+	}
+	tb.meter.Reset()
+	answered := 0
+	for minute := range 30 {
+		if minute%10 == 0 {
+			owner.token = h.token(t, owner.d) // sessions last 15 minutes
+		}
+		for range 20 {
+			switch status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false); status {
+			case http.StatusOK:
+				answered++
+			case http.StatusTooManyRequests:
+			default:
+				t.Fatalf("replay: %d %v", status, out)
+			}
+		}
+		h.now = h.now.Add(time.Minute)
+	}
+	m, e := tb.cost(t, "POST /ack, a confirmed page replayed for 30 minutes")
+	t.Logf("  %d replays answered 200", answered)
+	// The misses are written in batches of at least 50.
+	if m.Write > AckMissesPerDay+AckBatch || e.Write > AckMissesPerDay/AckBatch+5 {
+		t.Fatalf("30 minutes of replays cost messages %v, ephemeral %v", m, e)
+	}
+}
+
+// Confirming one gone ID over and over costs the messages table a write
+// unit each, up to the person's day of misses, and the ephemeral table a
+// write per batch of them; past the day's misses, nothing.
+func TestAckOneIDCapacity(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	one := h.fill(t, owner, 1)
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": one}, false); status != http.StatusOK {
+		t.Fatalf("ack: %d %v", status, out)
+	}
+	tb.meter.Reset()
+	for range 1500 {
+		if status, _ := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": one}, false); status != http.StatusOK {
+			t.Fatalf("ack: %d", status)
+		}
+	}
+	m, e := tb.cost(t, "POST /ack, one gone ID, 1,500 times")
+	if m.Write > AckMissesPerDay+1 || e.Write > AckMissesPerDay/AckBatch+2 {
+		t.Fatalf("messages %v, ephemeral %v", m, e)
+	}
+}
+
+// An honest message: delivered, fetched alone (a push each), confirmed.
+// The fetch writes its minute's counter; the day is written in batches;
+// the confirmation writes nothing on the ephemeral table.
+func TestHonestMessageWrites(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false)
+	boxes := out["mailboxes"].([]any)
+	env := clientEnvelope(t)
+	const n = 100
+	var send, fetch, ack dynamotest.Units
+	tb.meter.Reset()
+	for i := range n {
+		if i%25 == 0 {
+			owner.token = h.token(t, owner.d)
+		}
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%len(boxes)], "envelope": env, "token": mintToken(t, h.now)}); status != http.StatusOK {
+			t.Fatalf("send: %d %v", status, out)
+		}
+		_, e := tb.meter.Units(tb.messages), tb.meter.Units(tb.ephemeral)
+		send.Write += e.Write
+		tb.meter.Reset()
+		status, out := h.as(t, owner, http.MethodGet, "/inbox", nil, false)
+		items, _ := out["items"].([]any)
+		if status != http.StatusOK || len(items) != 1 {
+			t.Fatalf("inbox: %d %v", status, out)
+		}
+		fetch.Write += tb.meter.Units(tb.ephemeral).Write
+		fetch.Read += tb.meter.Units(tb.ephemeral).Read
+		tb.meter.Reset()
+		id := items[0].(map[string]any)["id"].(string)
+		if status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": []string{id}}, false); status != http.StatusOK {
+			t.Fatalf("ack: %d %v", status, out)
+		}
+		ack.Write += tb.meter.Units(tb.ephemeral).Write
+		ack.Read += tb.meter.Units(tb.ephemeral).Read
+		tb.meter.Reset()
+		h.now = h.now.Add(20 * time.Second) // a message every 20 seconds
+	}
+	t.Logf("ephemeral writes per message: send %.2f, fetch %.2f, confirm %.2f (reads: fetch %.2f, confirm %.2f)",
+		send.Write/n, fetch.Write/n, ack.Write/n, fetch.Read/n, ack.Read/n)
+	if (fetch.Write+ack.Write)/n > 1.1 {
+		t.Fatalf("fetch and confirm wrote %.2f a message", (fetch.Write+ack.Write)/n)
+	}
+}
+
+// A daily limit outlives an outage of the ephemeral table: the requests
+// that failed during it count nothing, and the next is allowed.
+func TestDailyLimitAfterOutage(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	db := &switchable{DB: tb.meter, down: true}
+	h.server.Limits = &ephemeral.Limiter{DB: db, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
+	for range 50 {
+		if status, _ := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusInternalServerError {
+			t.Fatalf("during the outage: %d", status)
+		}
+	}
+	db.down = false
+	if status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
+		t.Fatalf("after it: %d %v", status, out)
+	}
+}
+
+// switchable is an ephemeral table that can be down.
+type switchable struct {
+	ephemeral.DB
+	down bool
+}
+
+func (s *switchable) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	if s.down {
+		return nil, errThrottled
+	}
+	return s.DB.GetItem(ctx, in, opts...)
+}
+
+func (s *switchable) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if s.down {
+		return nil, errThrottled
+	}
+	return s.DB.UpdateItem(ctx, in, opts...)
+}
+
+// sendLargest delivers n of the largest envelopes to m's device.
+func (h *harness) sendLargest(t *testing.T, m member, n int) {
+	t.Helper()
+	_, out := h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false)
+	boxes := out["mailboxes"].([]any)
+	largest := make([]byte, envelope.MaxLen)
+	largest[0], largest[1] = envelope.Suite, envelope.MaxWraps
+	for i := range n {
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%len(boxes)], "envelope": base64.RawURLEncoding.EncodeToString(largest), "token": mintToken(t, h.now)}); status != http.StatusOK {
+			t.Fatalf("send: %d %v", status, out)
+		}
+	}
+}
+
+// A device's read budget holds across instances: one that knows nothing of
+// the minute yet reads no more than the first two items before the
+// budget refuses it.
+func TestInboxBudgetAcrossInstances(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	h.sendLargest(t, owner, 50)
+	tb.meter.Reset()
+	pages := 0
+	for ; pages < 100; pages++ {
+		if status, _ := h.as(t, owner, http.MethodGet, "/inbox", nil, false); status == http.StatusTooManyRequests {
+			break
+		}
+	}
+	m, _ := tb.cost(t, "GET /inbox, the largest envelopes, until refused")
+	t.Logf("  %d pages served", pages)
+	if m.Read > InboxUnitsPerMinute {
+		t.Fatalf("one instance read %v units in a minute", m.Read)
+	}
+
+	served := 0
+	for range 20 {
+		tb.wire(h)
+		if status, _ := h.as(t, owner, http.MethodGet, "/inbox", nil, false); status == http.StatusOK {
+			served++
+		}
+	}
+	m, e := tb.cost(t, "  the same minute, each on a fresh instance")
+	t.Logf("  %d of 20 served", served)
+	if served > 0 || m.Read > 0 || e.Write > 0 {
+		t.Fatalf("20 fresh instances served %d pages, messages %v, ephemeral %v", served, m, e)
+	}
+}
+
+// Fetches at once, on as many instances, can't read more than the minute
+// allows: a page's worst cost is reserved, with a conditional write, before
+// it is read past its first two items.
+func TestInboxBudgetConcurrent(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	h.sendLargest(t, owner, 50)
+	const n = 40
+	routers := make([]*httpapi.Router, n)
+	for i := range routers {
+		routers[i] = tb.instance(h)
+	}
+	tb.meter.Reset()
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	for i, r := range routers {
+		wg.Go(func() { statuses[i], _ = serve(r, owner, http.MethodGet, "/inbox", nil) })
+	}
+	wg.Wait()
+	served := 0
+	for _, s := range statuses {
+		if s == http.StatusOK {
+			served++
+		}
+	}
+	m, e := tb.cost(t, "GET /inbox, the largest envelopes, 40 at once on 40 instances")
+	t.Logf("  %d of %d served", served, n)
+	// Pages within the minute, plus the first reads (two items, 5 units) of
+	// those refused.
+	if served == 0 || m.Read > InboxUnitsPerMinute+float64((n-served)*5) || e.Write > 3*n {
+		t.Fatalf("%d served, messages %v, ephemeral %v", served, m, e)
+	}
+}
+
+// A device fetched at once from 100 instances, every minute: each instance
+// starts each minute knowing nothing of it. After the first minute, those
+// instances take the page before reading anything, and every fetch that
+// cost the tables something counts against the person's day, at least
+// MinRequestUnits: so the day bounds what it all reads, and the writes of
+// the fetches refused; then it costs nothing.
+func TestInboxConcurrentEveryMinute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fill func(h *harness, m member)
+	}{
+		{"the largest envelopes", func(h *harness, m member) { h.sendLargest(t, m, 50) }},
+		{"3 small envelopes", func(h *harness, m member) { h.fill(t, m, 3) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, tb := newDeliveryTables(t)
+			owner := h.account(t, userID)
+			tc.fill(h, owner)
+			const c = 100
+			routers := make([]*httpapi.Router, c)
+			for i := range routers {
+				routers[i] = tb.instance(h)
+			}
+			var total, first, steady dynamotest.Units
+			minutes, free := 0, false
+			for ; minutes < 150 && !free; minutes++ {
+				if minutes%10 == 0 {
+					owner.token = h.token(t, owner.d)
+				}
+				tb.meter.Reset()
+				var wg sync.WaitGroup
+				for _, r := range routers {
+					wg.Go(func() { serve(r, owner, http.MethodGet, "/inbox", nil) })
+				}
+				wg.Wait()
+				m, e := tb.meter.Units(tb.messages), tb.meter.Units(tb.ephemeral)
+				total.Read += m.Read
+				total.Write += e.Write
+				if minutes == 0 {
+					first = dynamotest.Units{Read: m.Read, Write: e.Write}
+				} else if minutes <= 10 {
+					steady.Read += m.Read / 10
+					steady.Write += e.Write / 10
+				}
+				free = minutes > 0 && m.Read == 0 && e.Write == 0
+				h.now = h.now.Add(time.Minute)
+			}
+			t.Logf("first minute: %.1f R messages, %.0f W ephemeral; then about %.1f R and %.0f W a minute; %d minutes (free: %v), %.0f R and %.0f W in all",
+				first.Read, first.Write, steady.Read, steady.Write, minutes, free, total.Read, total.Write)
+			if steady.Read > InboxUnitsPerMinute || total.Read > InboxUnitsPerDay {
+				t.Fatalf("reads: %v a minute, %v in all", steady.Read, total.Read)
+			}
+			if !free {
+				t.Fatal("the day's count didn't end it")
+			}
+		})
+	}
+}
+
+// Every fetch that reads something counts, at least MinRequestUnits: an
+// inbox of a few small envelopes can't be fetched a thousand times a
+// minute.
+func TestInboxSmallFetchesCounted(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	h.fill(t, owner, 6)
+	tb.meter.Reset()
+	served := 0
+	for range 1000 {
+		if status, _ := h.as(t, owner, http.MethodGet, "/inbox", nil, false); status == http.StatusOK {
+			served++
+		}
+	}
+	m, e := tb.cost(t, "GET /inbox, 6 small envelopes, 1,000 times in a minute")
+	t.Logf("  %d served", served)
+	if served > InboxUnitsPerMinute/MinRequestUnits || m.Read > 50 || e.Write > float64(4*InboxUnitsPerMinute/MinRequestUnits) {
+		t.Fatalf("%d of 1,000 served, messages %v, ephemeral %v", served, m, e)
+	}
+}
+
+// When the ephemeral table can't be reached, fetches are limited by each
+// instance's own count, not let through.
+func TestInboxBudgetWithoutEphemeral(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	h.sendLargest(t, owner, 50)
+	h.server.Limits = &ephemeral.Limiter{DB: throttled{}, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
+	tb.meter.Reset()
+	served := 0
+	for range 100 {
+		if status, _ := h.as(t, owner, http.MethodGet, "/inbox", nil, false); status == http.StatusOK {
+			served++
+		}
+	}
+	m, _ := tb.cost(t, "GET /inbox, the largest envelopes, ephemeral table down")
+	t.Logf("  %d of 100 served", served)
+	if served != 1 || m.Read > float64(inboxPage.WorstUnits()) {
+		t.Fatalf("%d served, messages %v", served, m)
+	}
+}
+
+// throttled is an ephemeral table that refuses everything.
+type throttled struct{}
+
+var errThrottled = errors.New("throttled")
+
+func (throttled) GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	return nil, errThrottled
+}
+
+func (throttled) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	return nil, errThrottled
+}
+
+func (throttled) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	return nil, errThrottled
+}
+
+func (throttled) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	return nil, errThrottled
+}
+
+// The day's misses hold across instances that learned the count earlier:
+// they ask again after a minute, instead of going by what they knew. And a
+// replayed page misses a few items, not 50: past AckMissesPerRequest, the
+// rest are taken without deleting.
+func TestAckMissCapAcrossInstances(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	page := h.fill(t, owner, AckBatch)
+	ack := map[string]any{"ids": page}
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
+		t.Fatalf("ack: %d %v", status, out)
+	}
+	// Ten instances each replay it once, and so know the count.
+	tb.meter.Reset()
+	primed := make([]*httpapi.Router, 10)
+	for i := range primed {
+		primed[i] = tb.instance(h)
+		if status, err := serve(primed[i], owner, http.MethodPost, "/ack", ack); status != http.StatusOK || err != nil {
+			t.Fatalf("replay on instance %d: %d, %v", i, status, err)
+		}
+	}
+	m, _ := tb.cost(t, "POST /ack, a gone page replayed on 10 instances")
+	if m.Write > 10*(AckMissesPerRequest+9) {
+		t.Fatalf("10 replays deleted %v units", m.Write)
+	}
+	// Another uses up the rest of the day's.
+	for range 1000 {
+		h.as(t, owner, http.MethodPost, "/ack", ack, false)
+		if m, _ := tb.cost(t, "  a replay"); m.Write == 0 {
+			break
+		}
+	}
+	h.now = h.now.Add(2 * time.Minute)
+	owner.token = h.token(t, owner.d)
+	tb.meter.Reset()
+	for _, r := range primed {
+		if status, err := serve(r, owner, http.MethodPost, "/ack", ack); status != http.StatusOK || err != nil {
+			t.Fatalf("replay: %d, %v", status, err)
+		}
+	}
+	m, _ = tb.cost(t, "POST /ack, a gone page on 10 instances that knew the day's count")
+	if m.Write != 0 {
+		t.Fatalf("past the day's misses, 10 instances deleted %v units", m.Write)
+	}
+}
+
+// Without the ephemeral table, misses are limited per instance and minute
+// (AckLocalMissesPerMinute), not let through.
+func TestAckMissesWithoutEphemeral(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	page := h.fill(t, owner, AckBatch)
+	ack := map[string]any{"ids": page}
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
+		t.Fatalf("ack: %d %v", status, out)
+	}
+	h.server.Limits = &ephemeral.Limiter{DB: throttled{}, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
+	tb.meter.Reset()
+	for range 100 {
+		if status, _ := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
+			t.Fatalf("replay: %d", status)
+		}
+	}
+	m, _ := tb.cost(t, "POST /ack, a gone page 100 times, ephemeral table down")
+	if m.Write > AckLocalMissesPerMinute+AckMissesPerRequest+9 {
+		t.Fatalf("100 replays deleted %v units", m.Write)
+	}
+}
+
+// A confirmation that claims more than AckBatchUnits is refused, before
+// anything is deleted. A page never claims that much.
+func TestAckLargeBatchRefused(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	h.sendLargest(t, owner, 40)
+	var listed []string
+	for after, pages := "", 0; pages < 2; pages++ {
+		path := "/inbox"
+		if after != "" {
+			path += "?after=" + after
+		}
+		_, out := h.as(t, owner, http.MethodGet, path, nil, false)
+		for _, it := range out["items"].([]any) {
+			listed = append(listed, it.(map[string]any)["id"].(string))
+		}
+		after, _ = out["next"].(string)
+	}
+	tb.meter.Reset()
+	status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": listed}, false)
+	m, e := tb.cost(t, "POST /ack, two pages of the largest envelopes at once")
+	if status != http.StatusBadRequest || m.Write != 0 || e.Write != 0 {
+		t.Fatalf("%d IDs: %d %v, messages %v, ephemeral %v", len(listed), status, out, m, e)
+	}
+	// One page at a time is fine.
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": listed[:len(listed)/2]}, false); status != http.StatusOK {
+		t.Fatalf("a page: %d %v", status, out)
+	}
+}
