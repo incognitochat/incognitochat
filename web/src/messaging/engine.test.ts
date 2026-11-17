@@ -8,10 +8,11 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import { generateVaultKey } from '../crypto/vault';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
+import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
-import { countTokens, LOW_WATER } from '../account/wallet';
-import { newId } from '../protocol/message';
+import { countTokens, LOW_WATER, returnTokens, takeTokens } from '../account/wallet';
+import { MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, SyncFailed, type MessagingDeps } from './engine';
@@ -74,6 +75,7 @@ async function fakeBackend() {
   const issuer: TokenIssuer = { key, keyId: new Uint8Array(await crypto.subtle.digest('SHA-256', await crypto.subtle.exportKey('spki', pair.publicKey))) };
   const d = big(jwk.d!);
   let mediaSigned = 0;
+  let signed = 0;
 
   const mailboxes = new Map<string, string>(); // mailbox -> owner account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
@@ -84,6 +86,9 @@ async function fakeBackend() {
   const paging = { size: 0, next: true };
   const inboxFetches: string[] = [];
   const spent = new Set<string>();
+  /** How many send tokens each delivered send paid with; and how many more than its size the server asks for. */
+  const sendPayments: number[] = [];
+  const pricing = { extra: 0 };
   const seenEnvelopes: string[] = [];
   const sendHeaders: (Record<string, string> | undefined)[] = [];
   /**
@@ -145,10 +150,18 @@ async function fakeBackend() {
     async request(method, path, init, check) {
       if (method === 'POST' && path === '/send') {
         sendHeaders.push(init.headers);
-        const { mailbox, envelope, token, quiet } = JSON.parse(init.body!) as Record<string, string>;
-        quietSends.push(quiet === (true as unknown as string));
-        if (!token || spent.has(token)) throw new ApiError(401, 'invalid_token');
-        spent.add(token);
+        const { mailbox, envelope, token, tokens, quiet } = JSON.parse(init.body!) as { mailbox: string; envelope: string; token?: string; tokens?: string[]; quiet?: boolean };
+        // A token per started 2.5 KiB of envelope (pricing.extra more), all
+        // checked before any is spent, as the server does.
+        const paid = tokens ?? (token ? [token] : []);
+        const needed = sendTokensFor(fromBase64Url(envelope).length) + pricing.extra;
+        if (paid.length === 0) throw new ApiError(401, 'invalid_token');
+        if (paid.length < needed) throw new ApiError(402, 'tokens_needed', undefined, needed);
+        if (paid.length > needed) throw new ApiError(400, 'bad_request');
+        if (paid.some((t) => spent.has(t)) || new Set(paid).size !== paid.length) throw new ApiError(401, 'invalid_token');
+        quietSends.push(quiet === true);
+        paid.forEach((t) => spent.add(t));
+        sendPayments.push(paid.length);
         seenEnvelopes.push(envelope!);
         const owner = mailboxes.get(mailbox!);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: mailbox!, envelope: envelope! });
@@ -228,6 +241,7 @@ async function fakeBackend() {
         }
         if (path === '/tokens' || path === '/tokens/media') {
           if (path === '/tokens/media') mediaSigned += (b.blinded as string[]).length;
+          else signed += (b.blinded as string[]).length;
           return check({
             signatures: (b.blinded as string[]).map((x) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(x)), d, key.n), 256))),
           });
@@ -287,7 +301,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, pricing, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -482,6 +496,89 @@ describe('messaging between two people', () => {
 
     await sender.messaging.startConversation(ref, bundle, 'still reaches you');
     expect(await owner.messaging.sync()).toBe(1);
+  });
+});
+
+describe('paying for sends by size', () => {
+  async function chat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    /** Send tokens fetched and neither spent nor in a wallet: lost. */
+    const lost = async () =>
+      backend.signed() - backend.sendPayments.reduce((a, b) => a + b, 0) - (await countTokens(owner.db)) - (await countTokens(sender.db));
+    return { backend, owner, sender, conv, mine, lost };
+  }
+
+  it('pays for a long text by its size, and for anything else with one token', async () => {
+    const { backend, owner, sender, conv, mine, lost } = await chat();
+    await sender.messaging.send(conv, 'short');
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    await sender.messaging.send(conv, 'س'.repeat(MAX_TEXT_BYTES / 2));
+    expect(backend.sendPayments.slice(-3)).toEqual([1, 4, 7]);
+    expect(await owner.messaging.sync()).toBe(3);
+    await owner.messaging.markSeen(mine);
+    expect(backend.sendPayments.at(-1)).toBe(1);
+    expect(await lost()).toBe(0);
+  });
+
+  it('sends receipts for at most 50 messages, at one token each', async () => {
+    const { backend, owner, sender, conv, mine } = await chat();
+    for (let i = 0; i < 59; i++) await sender.messaging.send(conv, `m${i}`);
+    await owner.messaging.sync();
+    const before = backend.sendPayments.length;
+    await owner.messaging.markSeen(mine);
+    expect(backend.sendPayments.slice(before)).toEqual([1, 1]);
+  });
+
+  it('fetches more tokens when the wallet has fewer than a send costs', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, 2));
+    const signed = backend.signed();
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    expect(backend.signed()).toBeGreaterThan(signed);
+    // The two held back aren't in the wallet any more, nor spent.
+    expect(await lost()).toBe(held.length - 2);
+  });
+
+  it('pays what the server asks, once, and keeps the tokens of a send it refuses', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    backend.pricing.extra = 1;
+    await sender.messaging.send(conv, 'short');
+    expect(backend.sendPayments.at(-1)).toBe(2);
+    expect(await lost()).toBe(0);
+    // More than any envelope can cost: refused, the tokens kept.
+    backend.pricing.extra = 9;
+    const sends = backend.sendPayments.length;
+    await expect(sender.messaging.send(conv, 'too dear')).rejects.toMatchObject({ code: 'tokens_needed' });
+    expect(backend.sendPayments).toHaveLength(sends);
+    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ text: 'too dear', status: 'failed' });
+    expect(await lost()).toBe(0);
+  });
+
+  it('gets past the spent tokens of a send whose answer was lost', async () => {
+    const { backend, owner, sender, conv } = await chat();
+    const request = backend.api.request;
+    // Delivered, but the answer doesn't come back: its four tokens return to the wallet, spent.
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'POST' && path === '/send') {
+        backend.api.request = request;
+        await request(method, path, init, check);
+        throw new NetworkError('answer lost');
+      }
+      return request(method, path, init, check);
+    };
+    await expect(sender.messaging.send(conv, 'a'.repeat(5000))).rejects.toThrow(NetworkError);
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    await sender.messaging.send(conv, 'next');
+    expect(backend.sendPayments.at(-1)).toBe(1);
+    expect(await owner.messaging.sync()).toBe(2);
   });
 });
 

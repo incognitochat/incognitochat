@@ -30,6 +30,7 @@ export type ErrorCode =
   | 'invalid_envelope'
   | 'mailbox_limit'
   | 'invalid_token'
+  | 'tokens_needed'
   | 'uploads_paused'
   | 'downloads_paused'
   | 'in_progress'
@@ -63,6 +64,7 @@ const CODES = new Set<string>([
   'invalid_envelope',
   'mailbox_limit',
   'invalid_token',
+  'tokens_needed',
   'uploads_paused',
   'downloads_paused',
   'in_progress',
@@ -78,6 +80,8 @@ export class ApiError extends Error {
     readonly code: ErrorCode | 'unknown',
     /** With clock_skew: the server's clock, in Unix seconds. */
     readonly serverTime?: number,
+    /** With tokens_needed: how many send tokens the envelope costs. */
+    readonly needed?: number,
   ) {
     super(`API error ${status} ${code}`);
     this.name = 'ApiError';
@@ -135,12 +139,16 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
         throw new NetworkError(`unreadable response (${response.status})`);
       }
       if (!response.ok) {
-        const { error: code, now } = value && typeof value === 'object' ? (value as { error?: unknown; now?: unknown }) : {};
+        const { error: code, now, needed } = value && typeof value === 'object' ? (value as { error?: unknown; now?: unknown; needed?: unknown }) : {};
         const known = typeof code === 'string' && CODES.has(code) ? (code as ErrorCode) : 'unknown';
         // A time outside the window: the server's clock comes with it.
         if (known === 'clock_skew') {
           const serverTime = typeof now === 'number' && Number.isSafeInteger(now) && now > 0 ? now : undefined;
           throw new ApiError(response.status, known, serverTime);
+        }
+        // Too few send tokens for the envelope: how many it costs.
+        if (known === 'tokens_needed') {
+          throw new ApiError(response.status, known, undefined, typeof needed === 'number' && Number.isSafeInteger(needed) && needed > 0 ? needed : undefined);
         }
         throw new ApiError(response.status, known);
       }

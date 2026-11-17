@@ -3,6 +3,7 @@ package ephemeral
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -160,6 +161,86 @@ func TestSpentGivesBackOnce(t *testing.T) {
 	// Other tokens are unaffected.
 	if ok, err := a.Spend(ctx, []byte("another nonce, 32 bytes long....."), forget); !ok || err != nil {
 		t.Fatalf("another token: %v, %v", ok, err)
+	}
+}
+
+// Several tokens are spent all at once or not at all: a list with one
+// spent already spends none of the others, on any instance (DLV-4).
+func TestSpendAll(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	table := dynamotest.Table(t, client)
+	now := func() time.Time { return start }
+	instance := func() *Spent { return &Spent{DB: meter, Table: table, Now: now} }
+	ctx := context.Background()
+	forget := start.Add(time.Hour)
+	token := func(i int) TokenNonce {
+		return TokenNonce{Nonce: []byte(fmt.Sprintf("nonce %d, 32 bytes long........", i)), ForgetAfter: forget}
+	}
+	list := func(from, to int) []TokenNonce {
+		var out []TokenNonce
+		for i := from; i < to; i++ {
+			out = append(out, token(i))
+		}
+		return out
+	}
+	a := instance()
+	if ok, err := a.Spend(ctx, token(0).Nonce, forget); !ok || err != nil {
+		t.Fatalf("spend one: %v, %v", ok, err)
+	}
+	// One of them spent already: none of the others is, here or elsewhere.
+	b := instance()
+	if ok, err := b.SpendAll(ctx, list(0, 8)); ok || err != nil {
+		t.Fatalf("a list with a spent token: %v, %v", ok, err)
+	}
+	// This instance learned which was spent: asked again, it writes nothing.
+	meter.Reset()
+	if ok, err := b.SpendAll(ctx, list(0, 8)); ok || err != nil {
+		t.Fatalf("again: %v, %v", ok, err)
+	}
+	if u := meter.Units(table); u.Write != 0 {
+		t.Fatalf("a known refusal wrote %v", u.Write)
+	}
+	// One twice: refused before anything is written.
+	if ok, err := b.SpendAll(ctx, append(list(1, 4), token(1))); ok || err != nil {
+		t.Fatalf("a token twice: %v, %v", ok, err)
+	}
+	if ok, err := instance().SpendAll(ctx, list(1, 8)); !ok || err != nil {
+		t.Fatalf("the others, unspent: %v, %v", ok, err)
+	}
+	if u := meter.Units(table); u.Write > 2*7 {
+		t.Fatalf("spending 7 cost %v write units", u.Write)
+	}
+	// All spent now, on every instance.
+	for i := 1; i < 8; i++ {
+		if ok, err := instance().Spend(ctx, token(i).Nonce, forget); ok || err != nil {
+			t.Fatalf("token %d spent twice: %v, %v", i, ok, err)
+		}
+	}
+	// Given back, each once: they can be spent together again, once.
+	c := instance()
+	for _, tk := range list(1, 8) {
+		if err := c.Unspend(ctx, tk.Nonce); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := c.SpendAll(ctx, list(1, 8)); !ok || err != nil {
+		t.Fatalf("given back: %v, %v", ok, err)
+	}
+	for _, tk := range list(1, 8) {
+		if err := c.Unspend(ctx, tk.Nonce); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := instance().SpendAll(ctx, list(1, 8)); ok || err != nil {
+		t.Fatalf("given back twice: %v, %v", ok, err)
+	}
+	// One token goes as Spend does.
+	if ok, err := instance().SpendAll(ctx, list(20, 21)); !ok || err != nil {
+		t.Fatalf("one: %v, %v", ok, err)
+	}
+	if ok, err := instance().SpendAll(ctx, nil); ok || err != nil {
+		t.Fatalf("none: %v, %v", ok, err)
 	}
 }
 
@@ -402,6 +483,11 @@ func (c *countingDB) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*d
 func (c *countingDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	c.writes++
 	return &dynamodb.UpdateItemOutput{}, nil
+}
+
+func (c *countingDB) TransactWriteItems(_ context.Context, in *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	c.writes += len(in.TransactItems)
+	return &dynamodb.TransactWriteItemsOutput{}, nil
 }
 
 func (c *countingDB) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {

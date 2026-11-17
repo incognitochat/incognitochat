@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -59,7 +60,7 @@ func (n *Nonces) Use(ctx context.Context, nonce string, expires time.Time) (bool
 // It also remembers, in memory, the tokens it has seen spent, so replaying
 // one token over and over costs the table nothing after the first time.
 type Spent struct {
-	DB    DB
+	DB    SpentDB
 	Table string
 	Now   func() time.Time
 
@@ -67,8 +68,55 @@ type Spent struct {
 	seen map[string]int64 // spent nonce -> when its record expires (Unix seconds)
 }
 
+// SpentDB is the part of the DynamoDB client Spent uses: DB, and
+// transactions, to spend several tokens at once.
+type SpentDB interface {
+	DB
+	TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
+}
+
+// TokenNonce is a token to spend: its nonce, and when the token stops being
+// accepted anyway.
+type TokenNonce struct {
+	Nonce       []byte
+	ForgetAfter time.Time
+}
+
 // maxSeen bounds the in-memory record of spent tokens; it starts over when full.
 const maxSeen = 8192
+
+// Spending a token writes its record unless it's spent already: an update,
+// not a put, so a token given back keeps r when spent again.
+const (
+	spendUpdate    = "SET e = :e REMOVE u"
+	spendCondition = "attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"
+)
+
+func (sp *Spent) spendKey(key string) map[string]types.AttributeValue {
+	return map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")}
+}
+
+func spendValues(forgetAfter, now time.Time) map[string]types.AttributeValue {
+	return map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())}
+}
+
+// known reports whether this instance has seen the token spent.
+func (sp *Spent) known(key string, now time.Time) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	until, ok := sp.seen[key]
+	return ok && now.Unix() < until
+}
+
+// remember records, in memory, that a token is spent.
+func (sp *Spent) remember(key string, forgetAfter time.Time) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.seen == nil || len(sp.seen) >= maxSeen {
+		sp.seen = map[string]int64{}
+	}
+	sp.seen[key] = expiry(forgetAfter)
+}
 
 // Spend records a token's nonce until forgetAfter (when the token stops
 // being accepted anyway). It reports false if the token was spent already,
@@ -76,19 +124,15 @@ const maxSeen = 8192
 func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
 	now := sp.Now()
-	sp.mu.Lock()
-	until, known := sp.seen[key]
-	sp.mu.Unlock()
-	if known && now.Unix() < until {
+	if sp.known(key, now) {
 		return false, nil
 	}
-	// An update, not a put, so a token given back keeps r when spent again.
 	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &sp.Table,
-		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
-		UpdateExpression:          aws.String("SET e = :e REMOVE u"),
-		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())},
+		Key:                       sp.spendKey(key),
+		UpdateExpression:          aws.String(spendUpdate),
+		ConditionExpression:       aws.String(spendCondition),
+		ExpressionAttributeValues: spendValues(forgetAfter, now),
 	})
 	fresh := err == nil
 	if conditionFailed(err) {
@@ -98,13 +142,66 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 		return false, err
 	}
 	// Spent either way: just now, or before.
-	sp.mu.Lock()
-	if sp.seen == nil || len(sp.seen) >= maxSeen {
-		sp.seen = map[string]int64{}
-	}
-	sp.seen[key] = expiry(forgetAfter)
-	sp.mu.Unlock()
+	sp.remember(key, forgetAfter)
 	return fresh, nil
+}
+
+// SpendAll spends several tokens at once: all of them, or none. It reports
+// false, and spends none, if any was spent already and not given back
+// since, if one is in the list twice, or if another request is spending
+// one of them at this very moment. One token is spent as Spend does; more
+// in one transaction, which costs the table two write units each. A token
+// this instance has seen spent is refused before anything is written.
+func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error) {
+	if len(tokens) == 1 {
+		return sp.Spend(ctx, tokens[0].Nonce, tokens[0].ForgetAfter)
+	}
+	now := sp.Now()
+	keys := make([]string, len(tokens))
+	items := make([]types.TransactWriteItem, len(tokens))
+	for i, t := range tokens {
+		keys[i] = base64.RawURLEncoding.EncodeToString(t.Nonce)
+		if sp.known(keys[i], now) || slices.Contains(keys[:i], keys[i]) {
+			return false, nil
+		}
+		items[i] = types.TransactWriteItem{Update: &types.Update{
+			TableName:                 &sp.Table,
+			Key:                       sp.spendKey(keys[i]),
+			UpdateExpression:          aws.String(spendUpdate),
+			ConditionExpression:       aws.String(spendCondition),
+			ExpressionAttributeValues: spendValues(t.ForgetAfter, now),
+		}}
+	}
+	if len(items) == 0 {
+		return false, nil
+	}
+	_, err := sp.DB.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
+	var canceled *types.TransactionCanceledException
+	if errors.As(err, &canceled) {
+		refused := false
+		for i, r := range canceled.CancellationReasons {
+			switch aws.ToString(r.Code) {
+			case "ConditionalCheckFailed":
+				// Spent before: replaying it here costs the table nothing.
+				if i < len(keys) {
+					sp.remember(keys[i], tokens[i].ForgetAfter)
+				}
+				refused = true
+			case "TransactionConflict":
+				refused = true
+			}
+		}
+		if refused {
+			return false, nil
+		}
+	}
+	if err != nil {
+		return false, err
+	}
+	for i, t := range tokens {
+		sp.remember(keys[i], t.ForgetAfter)
+	}
+	return true, nil
 }
 
 // Unspend gives back a token that Spend just took, when what it paid for

@@ -5,7 +5,7 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { openDatabase } from '../storage/db';
-import { budgetLeft, countTokens, refillTokens, returnToken, takeToken, type TokenIssuer } from './wallet';
+import { budgetLeft, countTokens, refillTokens, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
 
 let n = 0;
 const NOW = 1_800_000_000;
@@ -111,5 +111,19 @@ describe('token wallet', () => {
     await returnToken(db, first.token, first.epoch);
     expect(await takeToken(db, NOW)).toEqual(first);
     expect(fromBase64Url((await takeToken(db, NOW))!.token).slice(34, 66)).toEqual(thisWeek);
+  });
+
+  it('takes as many as a send costs, all or none, and takes them all back', async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    const { issuer, session } = await issuerAndSession();
+    await refillTokens(db, session, issuer, 5, NOW);
+    expect(await takeTokens(db, 6, NOW)).toBeNull();
+    expect(await countTokens(db, NOW)).toBe(5);
+    const four = (await takeTokens(db, 4, NOW))!;
+    expect(new Set(four.map((t) => t.token)).size).toBe(4);
+    expect(await countTokens(db, NOW)).toBe(1);
+    await returnTokens(db, four);
+    expect(await countTokens(db, NOW)).toBe(5);
+    expect(await takeTokens(db, 4, NOW)).toEqual(four);
   });
 });

@@ -137,7 +137,7 @@ func TestDeliveryCapacity(t *testing.T) {
 	largest := make([]byte, envelope.MaxLen)
 	largest[0], largest[1] = envelope.Suite, envelope.MaxWraps
 	for i := range 50 {
-		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%2], "envelope": base64.RawURLEncoding.EncodeToString(largest), "token": mintToken(t, h.now)}); status != http.StatusOK {
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%2], "envelope": base64.RawURLEncoding.EncodeToString(largest), "tokens": mintTokens(t, h.now, envelope.MaxTokens)}); status != http.StatusOK {
 			t.Fatalf("send: %d %v", status, out)
 		}
 	}

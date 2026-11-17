@@ -192,12 +192,16 @@ secret: one person keeps the same label through the same link.
 
 ## Sending, delivery and notices
 
-- **Send tokens:** every send spends one anonymous token, without logging in.
-  Tokens are RSA blind signatures (RFC 9474, in Privacy Pass's shape): the
-  app fetches a batch while logged in (at most 1,000 a day), and the server
-  can't link a spent token to the account it signed it for. The issuer's
-  public key is published in [`web/issuer-keys.json`](../web/issuer-keys.json),
-  and the app accepts no other, so the server can't tell users apart by key.
+- **Send tokens:** every send spends anonymous tokens, without logging in:
+  one per started 2.5 KiB of envelope, so one for anything but a long text
+  ([protocol.md](protocol.md#send-tokens-and-media-tokens)). The daily
+  budget then bounds what a person's sends cost the database (each token
+  buys at most three write units), not just how many there are. Tokens are
+  RSA blind signatures (RFC 9474, in Privacy Pass's shape): the app fetches
+  a batch while logged in (at most 1,000 a day), and the server can't link
+  a spent token to the account it signed it for. The issuer's public key is
+  published in [`web/issuer-keys.json`](../web/issuer-keys.json), and the
+  app accepts no other, so the server can't tell users apart by key.
 - **Media tokens** pay for uploads the same way, one per started MiB, from a
   budget of their own (at most 500 a day, so 500 MiB), signed by a second
   issuer key.
