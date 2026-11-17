@@ -89,12 +89,22 @@ secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
-change deploys there. Each deploy checks this: after applying, it asks IAM's
-policy simulator whether each function's role, with the permissions
-boundary, allows what the functions call each other for (`api` invoking `ws`
-and `notify`, `ws` invoking `notify` and posting to sockets), and fails if
-not, or if the deploy role may not ask. Otherwise a refused call would only
-log a warning: sends would still succeed while pushes and notices stopped.
+change deploys there. Each deploy checks this with IAM's policy simulator
+(`scripts/check-function-roles.sh`), because a refused call between functions
+would only log a warning: sends would still succeed while pushes and notices
+stopped.
+
+- Before applying anything, it asks whether the permissions boundary lets
+  the existing roles make the invokes this code makes (`api` invoking `ws`
+  and `notify`, `ws` invoking `notify`), as if the roles' own policies
+  allowed them. A first deploy, with no roles yet, skips this.
+- After applying, it asks whether each function's role, its policy and the
+  boundary together, allows every call the functions make to each other
+  (those, and `ws` posting to sockets).
+
+Either fails the deploy if a call is refused, or if the deploy role may not
+ask (an older `infra/init`), and asks again a few times when IAM is slow or
+throttles.
 
 Code signing is a versioned bucket for the bundles, an AWS Signer profile,
 and a code signing config set to enforce. Every function must use the config,
@@ -168,7 +178,7 @@ anything else), so an environment comes from the repository alone.
 
 | Name | Default | What |
 |---|---|---|
-| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. |
+| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere; at most 3,000 and 1,000 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. At most 3,000 and 1,000, what one partition can take: sends to mailboxes that don't exist all read and write the same few placeholder items, which must not be throttled before the table is. |
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |

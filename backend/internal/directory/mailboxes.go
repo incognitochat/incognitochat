@@ -199,7 +199,9 @@ const placeholderKeyLen = 65
 // found). So the lookup costs as many read units, and answers about as
 // much, as one for an account with its one device. It writes the
 // placeholder when it's missing: the first time, and if TTL ever took it
-// (TTL skips expiries more than five years past, as its is).
+// (TTL skips expiries more than five years past, as its is). One partition
+// reads at most 3,000 units a second, so the table's cap stays at most
+// that (infra/variables.tf, table_max_read_units).
 func (s *Store) NoDevices(ctx context.Context, now time.Time) error {
 	_, read, err := s.devices(ctx, NoAccount, now)
 	if err != nil || read > 0 {

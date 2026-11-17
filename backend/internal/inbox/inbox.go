@@ -112,7 +112,11 @@ const placeholderExpiry = "4102444800"
 // writes for an envelope of size bytes: shaped like a delivered one, with
 // keys and attributes of the same lengths and an envelope of zeros, in a
 // partition of its own for each envelope size (there are 64 valid ones),
-// which nothing reads. Every write of it writes exactly the same item.
+// which nothing reads. Every write of it writes exactly the same item. One
+// partition takes at most 1,000 write units a second, so the table's cap
+// stays at most that (infra/variables.tf, table_max_write_units): a flood
+// of such sends is held back by the cap, as deliveries are, not by the
+// partition first.
 func placeholder(size int) map[string]types.AttributeValue {
 	var device [16]byte
 	device[12], device[13], device[14], device[15] = byte(size>>24), byte(size>>16), byte(size>>8), byte(size)

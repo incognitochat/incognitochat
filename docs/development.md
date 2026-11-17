@@ -13,7 +13,7 @@ dependencies. Deploying is in [deployment.md](deployment.md).
 | `infra/` | App Terraform for one environment: tables, the media bucket, SSM parameters, the four functions with function URLs, the WebSocket API. Applied by CI. |
 | `infra/init/` | Bootstrap Terraform, applied once per AWS account by an admin: state bucket, GitHub OIDC provider, deploy role, Lambda permissions boundary, code signing. CI can't change its own permissions. |
 | `hosting/` | The reviewed copy of the hosting repository's workflow ([verifying.md](verifying.md)). |
-| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `verify-site.sh`. |
+| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `check-function-roles.sh` (checks the functions may call each other, permissions boundary included), `verify-site.sh`. |
 | `docs/` | This documentation. |
 
 ## Checks
