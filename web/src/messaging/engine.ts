@@ -18,6 +18,7 @@
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { introMailbox, keyName, listLinks, rotateLinkKey, setLinkMailbox, type LinkRecord } from '../account/links';
 import {
+  batchFor,
   countTokens,
   LOW_WATER,
   MAX_BATCH,
@@ -122,6 +123,9 @@ const MAX_PENDING = 150;
 const MAX_SEEN = 50;
 /** The most send tokens one envelope can cost: what the largest there can be costs. */
 const MAX_SEND_TOKENS = sendTokensFor(MAX_ENVELOPE);
+/** Send tokens are fetched in the background this long after the wallet runs low, plus up to TOP_UP_SPREAD_MS more, at random. */
+const TOP_UP_MIN_MS = 10_000;
+const TOP_UP_SPREAD_MS = 80_000;
 const META_BLOCKED = 'blocked-tags';
 /** When the mailboxes were last checked (healMailboxes), Unix ms. */
 const META_MAILBOXES_CHECKED = 'mailboxes-checked';
@@ -194,6 +198,8 @@ export interface MessagingDeps {
   transfer?: Transfer;
   /** Waits ms before an upload is tried again (tests don't wait). */
   wait?: (ms: number) => Promise<void>;
+  /** Runs fn after ms, for work in the background (tests run it when they choose); returns what cancels it. */
+  later?: (fn: () => void, ms: number) => () => void;
   /** Called after send tokens were spent or fetched, so the app can say when they run low. */
   onTokens?: () => void;
   /**
@@ -302,6 +308,12 @@ export function createMessaging(deps: MessagingDeps) {
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? httpTransfer;
   const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const later =
+    deps.later ??
+    ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    });
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
 
   /**
@@ -1024,7 +1036,10 @@ export function createMessaging(deps: MessagingDeps) {
       for (;;) {
         const tokens = await nextTokens(needed);
         try {
-          const body = { mailbox, envelope: toBase64Url(envelope), tokens: tokens.map((t) => t.token), ...(quiet ? { quiet: true } : {}) };
+          // One token as `token`, which every server version takes (one from
+          // before sizes were priced refuses `tokens`); several as `tokens`.
+          const paid = tokens.length === 1 ? { token: tokens[0]!.token } : { tokens: tokens.map((t) => t.token) };
+          const body = { mailbox, envelope: toBase64Url(envelope), ...paid, ...(quiet ? { quiet: true } : {}) };
           await api.post('/send', body, checkObject);
           return;
         } catch (err) {
@@ -1038,12 +1053,13 @@ export function createMessaging(deps: MessagingDeps) {
             throw err;
           }
           // Not spent: a capped send, one that may never have arrived, or
-          // one the server prices higher than this app did.
+          // one the server prices differently from this app.
           if ((err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'tokens_needed')) || err instanceof NetworkError) {
             await returnTokens(db, tokens);
           }
-          // Pay what the server asks, once, if it's no more than an envelope can cost.
-          if (err instanceof ApiError && err.code === 'tokens_needed' && !repriced && err.needed !== undefined && err.needed > needed && err.needed <= MAX_SEND_TOKENS) {
+          // Pay what the server asks, more or less, once, if it's no more
+          // than an envelope can cost.
+          if (err instanceof ApiError && err.code === 'tokens_needed' && !repriced && err.needed !== undefined && err.needed !== needed && err.needed <= MAX_SEND_TOKENS) {
             repriced = true;
             needed = err.needed;
             continue;
@@ -1053,6 +1069,50 @@ export function createMessaging(deps: MessagingDeps) {
       }
     } finally {
       deps.onTokens?.();
+      await topUpSoon().catch(() => {});
+    }
+  }
+
+  /** Cancels the refill of send tokens waiting to run (topUpSoon), if any. */
+  let cancelTopUp: (() => void) | undefined;
+
+  /**
+   * Once fewer than LOW_WATER send tokens are left, fetches more at a random
+   * moment TOP_UP_MIN_MS to TOP_UP_MIN_MS + TOP_UP_SPREAD_MS later, not with
+   * a send: the issuer sees which account fetches when, and a fetch right
+   * before an anonymous send would say whose it was. The wallet keeps enough
+   * for two of the longest messages meanwhile.
+   */
+  async function topUpSoon(): Promise<void> {
+    const low = (await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER;
+    if (!low || cancelTopUp) return;
+    cancelTopUp = later(() => {
+      cancelTopUp = undefined;
+      void topUp().catch(() => {});
+    }, TOP_UP_MIN_MS + Math.random() * TOP_UP_SPREAD_MS);
+  }
+
+  /** Fetches a batch of send tokens if fewer than LOW_WATER are left. */
+  async function topUp(): Promise<void> {
+    if ((await countTokens(db, Math.floor(now() / 1000))) >= LOW_WATER) return;
+    await fetchSendTokens(TOKEN_BATCH);
+    deps.onTokens?.();
+  }
+
+  /**
+   * Fetches a batch of send tokens, `count` or more, or the day's last few
+   * if fewer are left (batchFor). Throws NoTokens once the day's are used up.
+   */
+  async function fetchSendTokens(count: number): Promise<void> {
+    const seconds = Math.floor(now() / 1000);
+    const batch = await batchFor(db, Math.max(TOKEN_BATCH, count), seconds);
+    if (batch < 1) throw new NoTokens();
+    try {
+      await refillTokens(db, session, issuer, batch, seconds);
+    } catch (err) {
+      // The day's tokens are used up.
+      if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
+      throw err;
     }
   }
 
@@ -1096,15 +1156,9 @@ export function createMessaging(deps: MessagingDeps) {
     let tokens = await takeTokens(db, count, seconds());
     if (!tokens) {
       // Too few: fetching right before a send is a timing hint, but the
-      // wallet is normally refilled well ahead (maintain()), with more
-      // than the longest message costs.
-      try {
-        await refillTokens(db, session, issuer, Math.max(TOKEN_BATCH, count), seconds());
-      } catch (err) {
-        // The day's tokens are used up.
-        if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
-        throw err;
-      }
+      // wallet is normally refilled well ahead (maintain(), topUpSoon()),
+      // with twice what the longest message costs.
+      await fetchSendTokens(count);
       tokens = await takeTokens(db, count, seconds());
     }
     if (!tokens) throw new NoTokens();
@@ -1293,7 +1347,7 @@ export function createMessaging(deps: MessagingDeps) {
       fetchPausedUntil = now() + SYNC_PAUSE_MS * (1 + Math.random());
       fetchPauseMax = 2 * SYNC_PAUSE_MS;
     }
-    stop();
+    clearResume();
     scheduleResume();
   }
 
@@ -1314,10 +1368,19 @@ export function createMessaging(deps: MessagingDeps) {
     );
   }
 
-  /** Stops the timer a pause set: the app no longer syncs (signed out, or the engine replaced). */
-  function stop(): void {
+  function clearResume(): void {
     clearTimeout(resumeTimer);
     resumeTimer = undefined;
+  }
+
+  /**
+   * Stops the timers a pause and a low wallet set: the app no longer syncs
+   * or sends (signed out, or the engine replaced).
+   */
+  function stop(): void {
+    clearResume();
+    cancelTopUp?.();
+    cancelTopUp = undefined;
   }
 
   function rememberConfirmed(ids: string[]): void {
@@ -1746,12 +1809,7 @@ export function createMessaging(deps: MessagingDeps) {
       async () => {
         if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
       },
-      async () => {
-        if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
-          await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
-          deps.onTokens?.();
-        }
-      },
+      topUp,
       async () => {
         if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
           await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');

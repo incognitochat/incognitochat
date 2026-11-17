@@ -626,14 +626,10 @@ func (m *memSpent) Spend(_ context.Context, nonce []byte, _ time.Time) (bool, er
 	return true, nil
 }
 
-func (m *memSpent) SpendAll(_ context.Context, tokens []ephemeral.TokenNonce) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls++
+// SpendAll spends in order up to the first spent already, as
+// ephemeral.Spent does; each token tried counts as a call.
+func (m *memSpent) SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) (bool, error) {
 	for i, t := range tokens {
-		if m.spent[string(t.Nonce)] {
-			return false, nil
-		}
 		for _, prev := range tokens[:i] {
 			if bytes.Equal(prev.Nonce, t.Nonce) {
 				return false, nil
@@ -641,9 +637,11 @@ func (m *memSpent) SpendAll(_ context.Context, tokens []ephemeral.TokenNonce) (b
 		}
 	}
 	for _, t := range tokens {
-		m.spent[string(t.Nonce)] = true
+		if fresh, _ := m.Spend(ctx, t.Nonce, t.ForgetAfter); !fresh {
+			return false, nil
+		}
 	}
-	return true, nil
+	return len(tokens) > 0, nil
 }
 
 func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {

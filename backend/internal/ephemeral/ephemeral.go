@@ -60,19 +60,12 @@ func (n *Nonces) Use(ctx context.Context, nonce string, expires time.Time) (bool
 // It also remembers, in memory, the tokens it has seen spent, so replaying
 // one token over and over costs the table nothing after the first time.
 type Spent struct {
-	DB    SpentDB
+	DB    DB
 	Table string
 	Now   func() time.Time
 
 	mu   sync.Mutex
 	seen map[string]int64 // spent nonce -> when its record expires (Unix seconds)
-}
-
-// SpentDB is the part of the DynamoDB client Spent uses: DB, and
-// transactions, to spend several tokens at once.
-type SpentDB interface {
-	DB
-	TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 }
 
 // TokenNonce is a token to spend: its nonce, and when the token stops being
@@ -84,21 +77,6 @@ type TokenNonce struct {
 
 // maxSeen bounds the in-memory record of spent tokens; it starts over when full.
 const maxSeen = 8192
-
-// Spending a token writes its record unless it's spent already: an update,
-// not a put, so a token given back keeps r when spent again.
-const (
-	spendUpdate    = "SET e = :e REMOVE u"
-	spendCondition = "attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"
-)
-
-func (sp *Spent) spendKey(key string) map[string]types.AttributeValue {
-	return map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")}
-}
-
-func spendValues(forgetAfter, now time.Time) map[string]types.AttributeValue {
-	return map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())}
-}
 
 // known reports whether this instance has seen the token spent.
 func (sp *Spent) known(key string, now time.Time) bool {
@@ -127,12 +105,13 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 	if sp.known(key, now) {
 		return false, nil
 	}
+	// An update, not a put, so a token given back keeps r when spent again.
 	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &sp.Table,
-		Key:                       sp.spendKey(key),
-		UpdateExpression:          aws.String(spendUpdate),
-		ConditionExpression:       aws.String(spendCondition),
-		ExpressionAttributeValues: spendValues(forgetAfter, now),
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		UpdateExpression:          aws.String("SET e = :e REMOVE u"),
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())},
 	})
 	fresh := err == nil
 	if conditionFailed(err) {
@@ -146,60 +125,33 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 	return fresh, nil
 }
 
-// SpendAll spends several tokens at once: all of them, or none. It reports
-// false, and spends none, if any was spent already and not given back
-// since, if one is in the list twice, or if another request is spending
-// one of them at this very moment. One token is spent as Spend does; more
-// in one transaction, which costs the table two write units each. A token
-// this instance has seen spent is refused before anything is written.
+// SpendAll spends several tokens, one at a time in the order given, as
+// Spend does, and stops at the first that was spent already (and not given
+// back since): it reports false then, and the tokens before that one stay
+// spent. So a list with a spent token in it can't keep its others for
+// another try, and a refusal costs the table one write unit, plus one for
+// each token it burned. A list with a token this instance has seen spent,
+// or with one token twice, is refused before anything is written.
+//
+// Not a transaction: DynamoDB charges a cancelled one two write units a
+// token, and spends nothing, so a list with one spent token in it would
+// cost the table that much on every try.
 func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error) {
-	if len(tokens) == 1 {
-		return sp.Spend(ctx, tokens[0].Nonce, tokens[0].ForgetAfter)
-	}
 	now := sp.Now()
 	keys := make([]string, len(tokens))
-	items := make([]types.TransactWriteItem, len(tokens))
 	for i, t := range tokens {
 		keys[i] = base64.RawURLEncoding.EncodeToString(t.Nonce)
 		if sp.known(keys[i], now) || slices.Contains(keys[:i], keys[i]) {
 			return false, nil
 		}
-		items[i] = types.TransactWriteItem{Update: &types.Update{
-			TableName:                 &sp.Table,
-			Key:                       sp.spendKey(keys[i]),
-			UpdateExpression:          aws.String(spendUpdate),
-			ConditionExpression:       aws.String(spendCondition),
-			ExpressionAttributeValues: spendValues(t.ForgetAfter, now),
-		}}
 	}
-	if len(items) == 0 {
+	if len(tokens) == 0 {
 		return false, nil
 	}
-	_, err := sp.DB.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
-	var canceled *types.TransactionCanceledException
-	if errors.As(err, &canceled) {
-		refused := false
-		for i, r := range canceled.CancellationReasons {
-			switch aws.ToString(r.Code) {
-			case "ConditionalCheckFailed":
-				// Spent before: replaying it here costs the table nothing.
-				if i < len(keys) {
-					sp.remember(keys[i], tokens[i].ForgetAfter)
-				}
-				refused = true
-			case "TransactionConflict":
-				refused = true
-			}
+	for _, t := range tokens {
+		if fresh, err := sp.Spend(ctx, t.Nonce, t.ForgetAfter); err != nil || !fresh {
+			return false, err
 		}
-		if refused {
-			return false, nil
-		}
-	}
-	if err != nil {
-		return false, err
-	}
-	for i, t := range tokens {
-		sp.remember(keys[i], t.ForgetAfter)
 	}
 	return true, nil
 }

@@ -11,7 +11,7 @@ import type { Session } from '../net/session';
 import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
-import { countTokens, LOW_WATER, returnTokens, takeTokens } from '../account/wallet';
+import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
 import { MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
@@ -86,9 +86,24 @@ async function fakeBackend() {
   const paging = { size: 0, next: true };
   const inboxFetches: string[] = [];
   const spent = new Set<string>();
-  /** How many send tokens each delivered send paid with; and how many more than its size the server asks for. */
+  /**
+   * How many send tokens each delivered send paid with, and whether as
+   * `token` or `tokens`; and how many more than its size the server asks
+   * for (fewer, if negative).
+   */
   const sendPayments: number[] = [];
+  const sendShapes: ('token' | 'tokens')[] = [];
   const pricing = { extra: 0 };
+  /** Work the apps put off for later (MessagingDeps.later), for a test to run. */
+  const later: { fn: () => void; ms: number }[] = [];
+  const schedule = (fn: () => void, ms: number) => {
+    const job = { fn, ms };
+    later.push(job);
+    return () => {
+      const i = later.indexOf(job);
+      if (i >= 0) later.splice(i, 1);
+    };
+  };
   const seenEnvelopes: string[] = [];
   const sendHeaders: (Record<string, string> | undefined)[] = [];
   /**
@@ -156,12 +171,12 @@ async function fakeBackend() {
         const paid = tokens ?? (token ? [token] : []);
         const needed = sendTokensFor(fromBase64Url(envelope).length) + pricing.extra;
         if (paid.length === 0) throw new ApiError(401, 'invalid_token');
-        if (paid.length < needed) throw new ApiError(402, 'tokens_needed', undefined, needed);
-        if (paid.length > needed) throw new ApiError(400, 'bad_request');
+        if (paid.length !== needed) throw new ApiError(402, 'tokens_needed', undefined, needed);
         if (paid.some((t) => spent.has(t)) || new Set(paid).size !== paid.length) throw new ApiError(401, 'invalid_token');
         quietSends.push(quiet === true);
         paid.forEach((t) => spent.add(t));
         sendPayments.push(paid.length);
+        sendShapes.push(tokens ? 'tokens' : 'token');
         seenEnvelopes.push(envelope!);
         const owner = mailboxes.get(mailbox!);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: mailbox!, envelope: envelope! });
@@ -301,7 +316,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, spent, sendPayments, pricing, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, sendShapes, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -319,6 +334,7 @@ async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account:
       mediaIssuer: backend.issuer,
       transfer: backend.transfer,
       wait: async (ms) => void backend.waits.push(ms),
+      later: backend.schedule,
       ...(now ? { now } : {}),
     }),
   };
@@ -520,6 +536,8 @@ describe('paying for sends by size', () => {
     await sender.messaging.send(conv, 'a'.repeat(5000));
     await sender.messaging.send(conv, 'س'.repeat(MAX_TEXT_BYTES / 2));
     expect(backend.sendPayments.slice(-3)).toEqual([1, 4, 7]);
+    // One token as `token`, which servers from before sizes were priced take too.
+    expect(backend.sendShapes.slice(-3)).toEqual(['token', 'tokens', 'tokens']);
     expect(await owner.messaging.sync()).toBe(3);
     await owner.messaging.markSeen(mine);
     expect(backend.sendPayments.at(-1)).toBe(1);
@@ -547,10 +565,15 @@ describe('paying for sends by size', () => {
     expect(await lost()).toBe(held.length - 2);
   });
 
-  it('pays what the server asks, once, and keeps the tokens of a send it refuses', async () => {
+  it('pays what the server asks, more or less, once, and keeps the tokens of a send it refuses', async () => {
     const { backend, sender, conv, lost } = await chat();
     backend.pricing.extra = 1;
     await sender.messaging.send(conv, 'short');
+    expect(backend.sendPayments.at(-1)).toBe(2);
+    expect(await lost()).toBe(0);
+    // A price cut: four for a text the server now prices at two.
+    backend.pricing.extra = -2;
+    await sender.messaging.send(conv, 'a'.repeat(5000));
     expect(backend.sendPayments.at(-1)).toBe(2);
     expect(await lost()).toBe(0);
     // More than any envelope can cost: refused, the tokens kept.
@@ -579,6 +602,41 @@ describe('paying for sends by size', () => {
     await sender.messaging.send(conv, 'next');
     expect(backend.sendPayments.at(-1)).toBe(1);
     expect(await owner.messaging.sync()).toBe(2);
+  });
+
+  it('fetches more in the background once the wallet runs low, not with a send', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, LOW_WATER + 1));
+    backend.later.length = 0;
+    const signed = backend.signed();
+    // Below LOW_WATER after this send: nothing is fetched now, a fetch is put off.
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.signed()).toBe(signed);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    // Another send meanwhile puts off no second one.
+    await sender.messaging.send(conv, 'still low');
+    expect(backend.later).toHaveLength(1);
+    expect(backend.signed()).toBe(signed);
+    // When it runs: a batch, with no send near it.
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await countTokens(sender.db)).toBeGreaterThanOrEqual(LOW_WATER));
+    expect(backend.signed()).toBeGreaterThan(signed);
+    expect(await lost()).toBe(held.length - LOW_WATER - 1);
+  });
+
+  it("asks for only the day's last few when fewer than a batch are left", async () => {
+    const { backend, sender, conv } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, 2));
+    // The server said it will sign 5 more today: a batch of 20 would be refused.
+    await rememberLeft(sender.db, 'send', 5);
+    const signed = backend.signed();
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    expect(backend.signed()).toBe(signed + 5);
   });
 });
 
@@ -1954,7 +2012,7 @@ describe('envelopes through the mailbox they belong to', () => {
 
 /** Another copy of the app on someone's device: the same storage, its own engine. */
 function copyOf(backend: Awaited<ReturnType<typeof fakeBackend>>, p: Person, extra: Partial<MessagingDeps> = {}) {
-  return createMessaging({ db: p.db, api: backend.api, session: p.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, ...extra });
+  return createMessaging({ db: p.db, api: backend.api, session: p.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, later: backend.schedule, ...extra });
 }
 
 /** A gate: reached once something comes to it, and everything waits there until released. */
@@ -2481,7 +2539,7 @@ describe('a database from before conversations had IDs of their own', () => {
     const name = `engine-v3-${n++}`;
     await asVersion3(owner.db, name, { [(await getConversation(sender.db, conv))!.wire]: [{ id: oopsId, at: Date.now() }] });
     const db = await openDatabase(name);
-    const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer });
+    const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, later: backend.schedule });
     // Its conversations keep the IDs they had: their wire IDs.
     const [answered, waiting] = [(await getConversation(sender.db, conv))!.wire, (await getConversation(other.db, unanswered))!.wire];
     expect((await listConversations(db)).map((c) => c.id).sort()).toEqual([answered, waiting].sort());

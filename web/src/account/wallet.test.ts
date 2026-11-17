@@ -5,7 +5,7 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { openDatabase } from '../storage/db';
-import { budgetLeft, countTokens, refillTokens, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
+import { batchFor, budgetLeft, countTokens, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
 
 let n = 0;
 const NOW = 1_800_000_000;
@@ -125,5 +125,15 @@ describe('token wallet', () => {
     await returnTokens(db, four);
     expect(await countTokens(db, NOW)).toBe(5);
     expect(await takeTokens(db, 4, NOW)).toEqual(four);
+  });
+
+  it("asks for no more than the server will still sign today", async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    expect(await batchFor(db, 20, NOW)).toBe(20);
+    await rememberLeft(db, 'send', 5, NOW);
+    expect(await batchFor(db, 20, NOW)).toBe(5);
+    expect(await batchFor(db, 3, NOW)).toBe(3);
+    // Another day: unknown again.
+    expect(await batchFor(db, 20, NOW + 24 * 60 * 60)).toBe(20);
   });
 });

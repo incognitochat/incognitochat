@@ -41,8 +41,18 @@ func TestSendPricedBySize(t *testing.T) {
 	seven := mintTokens(t, h.now, envelope.MaxTokens-1)
 	status, out = send(largest, map[string]any{"tokens": seven})
 	wantError(t, status, out, http.StatusPaymentRequired, "tokens_needed")
+	// Too many is answered the same way, so an app from before a price cut
+	// pays the new price.
 	status, out = send(largest, map[string]any{"tokens": append(mintTokens(t, h.now, envelope.MaxTokens), one)})
-	wantError(t, status, out, http.StatusBadRequest, "bad_request")
+	wantError(t, status, out, http.StatusPaymentRequired, "tokens_needed")
+	if out["needed"] != float64(envelope.MaxTokens) {
+		t.Fatalf("too many: %v", out)
+	}
+	status, out = send(testEnvelope(1, 512), map[string]any{"tokens": mintTokens(t, h.now, 2)})
+	wantError(t, status, out, http.StatusPaymentRequired, "tokens_needed")
+	if out["needed"] != float64(1) {
+		t.Fatalf("two for a small envelope: %v", out)
+	}
 	status, out = send(largest, map[string]any{"token": one, "tokens": seven})
 	wantError(t, status, out, http.StatusBadRequest, "bad_request")
 	if spent.calls != before || spent.count(t, append([]string{one}, seven...)) != 0 {
@@ -59,18 +69,23 @@ func TestSendPricedBySize(t *testing.T) {
 	if spent.calls != before {
 		t.Fatal("a batch with a bad token was spent")
 	}
-	// One of them spent already: refused, and the others stay unspent.
+	// One of them spent already: refused. The ones before it are burned,
+	// so they can't be sent along with a spent token again and again; the
+	// ones after it aren't tried.
 	if status, out := send(testEnvelope(1, 512), map[string]any{"tokens": []string{one}}); status != http.StatusOK {
 		t.Fatalf("small send: %d %v", status, out)
 	}
-	status, out = send(largest, map[string]any{"tokens": append(append([]string{}, seven...), one)})
+	mixed := append(append(append([]string{}, seven[:3]...), one), seven[3:]...)
+	status, out = send(largest, map[string]any{"tokens": mixed})
 	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
-	if n := spent.count(t, seven); n != 0 {
-		t.Fatalf("a batch with a spent token spent %d others", n)
+	if burned, kept := spent.count(t, seven[:3]), spent.count(t, seven[3:]); burned != 3 || kept != 0 {
+		t.Fatalf("a batch with a spent token: %d burned before it, %d after", burned, kept)
 	}
+	status, out = send(largest, map[string]any{"tokens": append(append([]string{}, seven[:3]...), mintTokens(t, h.now, 5)...)})
+	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
 
 	// With what it costs, it's delivered, and exactly that many are spent.
-	eight := append(append([]string{}, seven...), mintToken(t, h.now))
+	eight := mintTokens(t, h.now, envelope.MaxTokens)
 	if status, out := send(largest, map[string]any{"tokens": eight}); status != http.StatusOK {
 		t.Fatalf("paid send: %d %v", status, out)
 	}
@@ -105,6 +120,8 @@ type forgetful struct{ *memLimiter }
 
 func (forgetful) Full(string, int, time.Duration) bool { return false }
 
+func (forgetful) FullAt(string, int, time.Duration, time.Time) bool { return false }
+
 // A send refused by a capped mailbox the instance didn't know about gives
 // back every token it paid with (#106).
 func TestSendAtCapGivesBackEveryToken(t *testing.T) {
@@ -118,8 +135,13 @@ func TestSendAtCapGivesBackEveryToken(t *testing.T) {
 	}
 	largest := testEnvelope(envelope.MaxWraps, 16384)
 	paid := mintTokens(t, h.now, envelope.MaxTokens)
+	before := spent.calls
 	status, out := h.post(t, "/send", map[string]any{"mailbox": mailbox, "envelope": largest, "tokens": paid})
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	// Spent first (the instance didn't know the cap), then given back.
+	if spent.calls-before != envelope.MaxTokens {
+		t.Fatalf("%d tokens were spent before the cap refused the send", spent.calls-before)
+	}
 	if n := spent.count(t, paid); n != 0 {
 		t.Fatalf("%d tokens stayed spent", n)
 	}

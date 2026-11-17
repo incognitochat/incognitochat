@@ -38,8 +38,8 @@ type Issuer interface {
 // Spent remembers spent tokens.
 type Spent interface {
 	Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error)
-	// SpendAll spends several tokens at once: all of them, or none if any
-	// was spent already.
+	// SpendAll spends several tokens, in order, up to the first spent
+	// already; those before it stay spent (ephemeral.Spent.SpendAll).
 	SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) (bool, error)
 	// Unspend gives back a token Spend or SpendAll just took.
 	Unspend(ctx context.Context, nonce []byte) error
@@ -49,15 +49,15 @@ type Spent interface {
 // before any is spent, and returns them to spend, or the answer that
 // refuses them:
 //   - none at all: invalid_token, as before;
-//   - fewer than it costs (envelope.TokensFor): tokens_needed, with how
-//     many, so the app takes that many and tries again (an app from before
-//     envelopes were priced by size sends one, whatever the size);
-//   - more than it costs: bad_request;
+//   - fewer or more than it costs (envelope.TokensFor): tokens_needed, with
+//     how many, so the app takes that many and tries again (an app from
+//     before envelopes were priced by size sends one, whatever the size; an
+//     app from before a price cut sends more);
+//   - both token and tokens: bad_request;
 //   - any that isn't a valid send token of this week or last, or one twice:
 //     invalid_token.
 //
-// An app sends tokens; one from before sends one token as token, which is
-// taken the same way.
+// The app sends one token as token, and several as tokens.
 func (s *Server) sendTokens(in sendRequest, size int, now time.Time) ([]ephemeral.TokenNonce, *httpapi.Response) {
 	refuse := func(r httpapi.Response) ([]ephemeral.TokenNonce, *httpapi.Response) { return nil, &r }
 	raw := in.Tokens
@@ -71,10 +71,8 @@ func (s *Server) sendTokens(in sendRequest, size int, now time.Time) ([]ephemera
 	switch {
 	case len(raw) == 0:
 		return refuse(httpapi.Error(http.StatusUnauthorized, "invalid_token"))
-	case len(raw) < needed:
+	case len(raw) != needed:
 		return refuse(tokensNeeded(needed))
-	case len(raw) > needed:
-		return refuse(httpapi.Error(http.StatusBadRequest, "bad_request"))
 	}
 	out := make([]ephemeral.TokenNonce, len(raw))
 	for i, t := range raw {
@@ -96,8 +94,9 @@ func (s *Server) sendTokens(in sendRequest, size int, now time.Time) ([]ephemera
 	return out, nil
 }
 
-// tokensNeeded refuses a send that brought fewer tokens than its envelope
-// costs, before any is spent: 402 tokens_needed, with how many it costs.
+// tokensNeeded refuses a send that brought fewer or more tokens than its
+// envelope costs, before any is spent: 402 tokens_needed, with how many it
+// costs.
 func tokensNeeded(n int) httpapi.Response {
 	return httpapi.JSON(http.StatusPaymentRequired, map[string]any{"error": "tokens_needed", "needed": n})
 }

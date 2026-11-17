@@ -219,8 +219,9 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	if s.Limits.Full("send#"+in.Mailbox, SendsPerMailboxPerMinute, time.Minute) {
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
-	// The tokens are spent, all or none, before anything is counted, so
-	// replayed tokens can't use up a mailbox's limit.
+	// The tokens are spent before anything is counted, so replayed tokens
+	// can't use up a mailbox's limit. One spent already ends the send, and
+	// those before it stay spent.
 	fresh, err := s.Spent.SpendAll(ctx, tokens)
 	if err != nil {
 		return s.internal(route, err)
