@@ -24,6 +24,8 @@
 //	invalid_envelope                      the envelope's layout can't be valid
 //	mailbox_limit                         the account has the most mailboxes allowed
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
+//	uploads_paused                        the operator has paused uploads of attachments for now (switches.go); try later
+//	downloads_paused                      the operator has paused downloads of attachments for now (switches.go); try later
 //	in_progress                           the account is being deleted in steps; repeat the request
 //	not_found                             no such route, or no such link (revoked links included)
 //	internal                              something failed on the server
@@ -127,6 +129,11 @@ type Server struct {
 	// Media and Uploads, if set, hold encrypted attachments.
 	Media   Media
 	Uploads Uploads
+
+	// Switches, if set, holds the operator's emergency switches, which
+	// pause uploads or downloads of attachments (switches.go).
+	Switches    SwitchStore
+	switchCache switchCache
 }
 
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).
@@ -158,6 +165,8 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodGet, "/admin/levels", s.withDevice("GET /admin/levels", s.withAdmin(s.adminLevels)))
 	r.Handle(http.MethodPut, "/admin/levels", s.withSignature("PUT /admin/levels", s.withAdmin(s.adminSetLevel)))
 	r.Handle(http.MethodPost, "/admin/grant", s.withSignature("POST /admin/grant", s.withAdmin(s.adminGrant)))
+	r.Handle(http.MethodGet, "/admin/switches", s.withDevice("GET /admin/switches", s.withAdmin(s.adminSwitches)))
+	r.Handle(http.MethodPut, "/admin/switches", s.withSignature("PUT /admin/switches", s.withAdmin(s.adminSetSwitch)))
 	r.Handle(http.MethodPost, "/mailboxes", s.withDevice("POST /mailboxes", s.createMailboxes))
 	r.Handle(http.MethodPost, "/mailboxes/{id}/discard", s.withDevice("POST /mailboxes/{id}/discard", s.discardMailbox))
 	r.Handle(http.MethodPost, "/mailboxes/check", s.withDevice("POST /mailboxes/check", s.checkMailboxes))

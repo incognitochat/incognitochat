@@ -4,6 +4,7 @@ import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { locale, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import type { MessageView } from './messaging/store';
+import { canResend } from './messaging/engine';
 import type { KeepMedia, MediaSettings } from './messaging/settings';
 import { fromBase64Url } from './crypto/encoding';
 import { showableAs } from './media/prepare';
@@ -86,6 +87,7 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
   'no-tokens': 'errorNoTokens',
   'no-mailboxes': 'errorNoMailboxes',
   'rate-limited': 'errorTooFast',
+  'media-paused': 'errorMediaPaused',
   network: 'errorNetwork',
   'too-big': 'errorTooBig',
   unreadable: 'errorUnreadable',
@@ -95,6 +97,7 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
 const ADMIN_NOTICE_TEXT: Record<AdminNotice, Key> = {
   saved: 'noticeSaved',
   granted: 'noticeGranted',
+  switched: 'noticeSwitched',
   'not-member': 'noticeNotMember',
   'not-found': 'noticeLinkUnknown',
   'bad-link': 'noticeLinkUnknown',
@@ -616,6 +619,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
           canEdit={canEdit(screen, menu.value)}
+          canRetry={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value)}
+          onRetry={(m) => void app.resendMedia(m.id)}
           onEdit={(m) => {
             replying.value = null;
             editing.value = m;
@@ -983,6 +988,25 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
       <p class="muted">{tr('storageNote')}</p>
     </Page>
   );
+}
+
+/** Asks, in Telegram's own popup, before pausing or resuming uploads or downloads for everyone. */
+async function confirmSwitch(app: AppState, language: Language, which: 'uploads' | 'downloads', paused: boolean): Promise<void> {
+  const message = paused
+    ? which === 'uploads'
+      ? 'confirmPauseUploads'
+      : 'confirmPauseDownloads'
+    : which === 'uploads'
+      ? 'confirmResumeUploads'
+      : 'confirmResumeDownloads';
+  const choice = await app.popup({
+    message: t(language, message),
+    buttons: [
+      paused ? { id: 'switch', type: 'destructive', text: t(language, 'pause') } : { id: 'switch', type: 'default', text: t(language, 'resume') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'switch') await app.setSwitch(which, paused);
 }
 
 /** Asks, in Telegram's own popup, before swapping the link for a new one. */
@@ -2852,6 +2876,8 @@ function MessageMenu({
   peer,
   canDeleteForBoth,
   canEdit,
+  canRetry,
+  onRetry,
   onEdit,
   onClose,
   onReact,
@@ -2867,6 +2893,9 @@ function MessageMenu({
   /** One of ours, sent, in an open conversation: it can be deleted on their side too. */
   canDeleteForBoth: boolean;
   canEdit: boolean;
+  /** One of our attachments that wasn't sent (never uploaded): it can be sent again. */
+  canRetry: boolean;
+  onRetry: (m: MessageView) => void;
   onEdit: (m: MessageView) => void;
   onClose: () => void;
   onReact: (m: MessageView, emoji: string) => void;
@@ -2927,8 +2956,13 @@ function MessageMenu({
                 </button>
               </div>
             )}
+            {canRetry && (
+              <button type="button" class="menu-item" ref={first} onClick={act(() => onRetry(message))}>
+                {tr('tryAgain')}
+              </button>
+            )}
             {canReply && (
-              <button type="button" class="menu-item" ref={first} onClick={act(() => onReply(message))}>
+              <button type="button" class="menu-item" {...(canRetry ? {} : { ref: first })} onClick={act(() => onReply(message))}>
                 {tr('reply')}
               </button>
             )}
@@ -2936,7 +2970,7 @@ function MessageMenu({
               <button
                 type="button"
                 class="menu-item"
-                {...(canReply ? {} : { ref: first })}
+                {...(canReply || canRetry ? {} : { ref: first })}
                 onClick={act(() => void navigator.clipboard?.writeText(message.text).catch(() => {}))}
               >
                 {tr('copy')}
@@ -2947,7 +2981,7 @@ function MessageMenu({
                 {tr('edit')}
               </button>
             )}
-            <button type="button" class="menu-item danger" {...(!canReply && !message.text ? { ref: first } : {})} onClick={() => (confirming.value = true)}>
+            <button type="button" class="menu-item danger" {...(!canReply && !canRetry && !message.text ? { ref: first } : {})} onClick={() => (confirming.value = true)}>
               {tr(canDeleteForBoth ? 'delete' : 'deleteForMe')}
             </button>
           </>
@@ -3047,7 +3081,7 @@ function Invitations({ app, language, screen }: { app: AppState; language: Langu
 
 function Admin({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'admin' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
-  const { levels, busy, notice } = screen;
+  const { levels, switches, busy, notice } = screen;
   const level = useSignal('1');
   const allowance = useSignal('');
   const link = useSignal('');
@@ -3090,6 +3124,34 @@ function Admin({ app, language, screen }: { app: AppState; language: Language; s
           {tr('save')}
         </Button>
       </div>
+      <h2>{tr('adminSwitches')}</h2>
+      <p class="muted">{tr('adminSwitchesHelp')}</p>
+      {switches ? (
+        <div class="card">
+          <div class="row spread">
+            <span>{tr(switches.uploadsPaused ? 'uploadsStopped' : 'uploadsOn')}</span>
+            <Button
+              kind={switches.uploadsPaused ? 'primary' : 'danger'}
+              disabled={busy}
+              onClick={() => void confirmSwitch(app, language, 'uploads', !switches.uploadsPaused)}
+            >
+              {tr(switches.uploadsPaused ? 'resume' : 'pause')}
+            </Button>
+          </div>
+          <div class="row spread">
+            <span>{tr(switches.downloadsPaused ? 'downloadsStopped' : 'downloadsOn')}</span>
+            <Button
+              kind={switches.downloadsPaused ? 'primary' : 'danger'}
+              disabled={busy}
+              onClick={() => void confirmSwitch(app, language, 'downloads', !switches.downloadsPaused)}
+            >
+              {tr(switches.downloadsPaused ? 'resume' : 'pause')}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <p class="notice">{tr('switchesUnknown')}</p>
+      )}
       <h2>{tr('adminGrant')}</h2>
       <div class="card">
         <label class="field">

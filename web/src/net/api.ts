@@ -29,6 +29,8 @@ export type ErrorCode =
   | 'invalid_envelope'
   | 'mailbox_limit'
   | 'invalid_token'
+  | 'uploads_paused'
+  | 'downloads_paused'
   | 'in_progress'
   | 'internal'
   | 'not_found'
@@ -59,6 +61,8 @@ const CODES = new Set<string>([
   'invalid_envelope',
   'mailbox_limit',
   'invalid_token',
+  'uploads_paused',
+  'downloads_paused',
   'in_progress',
   'internal',
   'not_found',

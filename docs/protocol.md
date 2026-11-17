@@ -539,6 +539,21 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   nothing.
 - Uploads expire after 30 days. The bucket keeps no
   versions and no access logs.
+- **Paused.** The operator can pause uploads or downloads for everyone
+  (the emergency switches; [deployment.md](deployment.md#emergency-switches)).
+  While uploads are paused, `POST /media` answers `503 uploads_paused`
+  before looking at any token, so none is spent. `POST /media/{id}/upload`
+  checks the secret and the bucket as usual, so a stored upload is still
+  answered `{uploaded: true}`, and answers `503 uploads_paused` only instead
+  of a fresh URL (the try counts as one of its 3). While downloads are
+  paused, `GET /media/{id}` answers `503 downloads_paused` before counting
+  the download. A change reaches every server within about 30 seconds, and
+  a server that hasn't yet read the switches counts both as paused. The
+  app doesn't try again by itself: it puts the tokens back in its wallet and
+  marks the message not sent, saying why; Try again in its menu sends it,
+  as a new attachment, if it was never uploaded. A paused download stays to
+  fetch: the app fetches nothing by itself for two minutes, then tries again
+  when the chat next opens or a message arrives, and a tap says it's paused.
 
 ## Stickers
 
@@ -625,6 +640,21 @@ token. Clients only accept the issuer keys their build names
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.
+
+## Admin
+
+Admins are the accounts of the Telegram users in `ADMIN_TELEGRAM_IDS`
+(recognised by the keyed hash of their ID). Every admin route needs a
+logged-in admin, and every change also a device signature
+(`X-Device-Signature`); anyone else gets `403 admin_only`.
+
+| Route | Does |
+|---|---|
+| `GET /admin/levels` | `{levels: [{level, invitations}]}`: the invitation allowance of each level. |
+| `PUT /admin/levels {level, invitations}` | Sets a level's allowance (signed). |
+| `POST /admin/grant {link, invitations}` | Gives the member who owns `link` extra invitations (signed). |
+| `GET /admin/switches` | `{uploadsPaused, downloadsPaused}`: the emergency switches as stored now. |
+| `PUT /admin/switches {switch, paused}` | Pauses (`paused: true`) or resumes `"uploads"` or `"downloads"` for everyone (signed), and answers like `GET`. The server answering follows at once, the others within about 30 seconds. |
 
 ## Test vectors
 

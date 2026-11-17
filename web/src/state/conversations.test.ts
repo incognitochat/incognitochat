@@ -7,7 +7,9 @@ import { fromBase64Url, toBase64Url } from '../crypto/encoding';
 import { ApiError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
-import { listConversations } from '../messaging/store';
+import { canResend } from '../messaging/engine';
+import { listConversations, listMessages } from '../messaging/store';
+import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
 import { createApp, type Screen } from './app';
@@ -37,7 +39,10 @@ async function backend() {
   const owners = new Map<string, string>(); // mailbox -> account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
   const bundles = new Map<string, Record<string, unknown>>();
-  const state = { tokensLeft: Infinity };
+  // uploadsPaused: the operator has paused uploads; mediaSigned: media tokens signed.
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0 };
+  /** Requests to the media routes. */
+  const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
@@ -91,6 +96,7 @@ async function backend() {
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
+        if (path === '/tokens/media') state.mediaSigned += blinded.length;
         return check({ signatures: blinded.map((b) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(b)), d, key.n), 256))) });
       }
       if (path === '/send') {
@@ -99,6 +105,11 @@ async function backend() {
         const owner = owners.get(body.mailbox as string);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: body.mailbox as string, envelope: body.envelope as string });
         return check({});
+      }
+      if (path.startsWith('/media')) {
+        mediaCalls.push(`${method} ${path}`);
+        if (state.uploadsPaused && method === 'POST' && path === '/media') throw new ApiError(503, 'uploads_paused');
+        throw new ApiError(404, 'not_found');
       }
       if (path === '/inbox') return check({ items: [...inboxes.get(account)!], more: false });
       if (path === '/ack') {
@@ -109,7 +120,7 @@ async function backend() {
       throw new ApiError(404, 'not_found');
     },
   };
-  return { api, issuer, state, noticeSetups, sends };
+  return { api, issuer, state, noticeSetups, sends, mediaCalls };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
@@ -614,6 +625,39 @@ describe('conversations in the app', () => {
     // The other side still has it.
     await sender.sync();
     expect(screenOf(sender.screen.value, 'conversation').messages).toHaveLength(2);
+  });
+
+  it('says when attachments are paused, keeps the message and its tokens, and offers to send it again', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    b.state.uploadsPaused = true;
+    const voice = { file: crypto.getRandomValues(new Uint8Array(3000)), type: 'audio/mp4', length: 2, waveform: new Uint8Array([1, 2, 3]) };
+    await sender.sendVoice(voice);
+
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('media-paused');
+    const failed = conv.messages.at(-1)!;
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'voice' } });
+    expect(canResend(failed)).toBe(true);
+    expect(sender.preparing.value).toEqual([]);
+    // Asked once, and every media token fetched is still in the wallet.
+    expect(b.mediaCalls).toEqual(['POST /media']);
+    expect(await countTokens(sender.db, undefined, 'media')).toBe(b.state.mediaSigned);
+
+    // Try again while still paused: the same notice, one more request, nothing lost.
+    await sender.resendMedia(failed.id);
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: 'media-paused' });
+    expect((await listMessages(sender.db, conv.id)).at(-1)).toMatchObject({ id: failed.id, status: 'failed' });
+    expect(b.mediaCalls).toEqual(['POST /media', 'POST /media']);
+    expect(await countTokens(sender.db, undefined, 'media')).toBe(b.state.mediaSigned);
+    // Text messages go on.
+    await sender.sendMessage('still here');
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: null });
+    expect(screenOf(sender.screen.value, 'conversation').messages.at(-1)).toMatchObject({ text: 'still here', status: 'sent' });
   });
 
   it("says when the day's tokens are used up", async () => {

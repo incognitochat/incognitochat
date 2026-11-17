@@ -70,6 +70,9 @@ function fakeServer(
     levels: new Map<number, number>(),
     granted: [] as { link: string; invitations: number }[],
     deleted: false,
+    // The operator's emergency switches; switchesDown: they can't be read.
+    switches: { uploadsPaused: false, downloadsPaused: false },
+    switchesDown: false,
   };
   let nextCode = 0;
   const take = (queue: Outcome[] | undefined) => {
@@ -150,6 +153,19 @@ function fakeServer(
         needsSignature();
         state.levels.set(body.level as number, body.invitations as number);
         return check({});
+      }
+      if (path === '/admin/switches') {
+        if (!state.admin) throw new ApiError(403, 'admin_only');
+        if (state.switchesDown) throw new ApiError(500, 'internal');
+        if (method === 'PUT') {
+          needsSignature();
+          state.switches[body.switch === 'uploads' ? 'uploadsPaused' : 'downloadsPaused'] = body.paused as boolean;
+        }
+        return check({ ...state.switches });
+      }
+      if (method === 'GET' && path.startsWith('/media/')) {
+        if (state.switches.downloadsPaused) throw new ApiError(503, 'downloads_paused');
+        throw new ApiError(404, 'not_found');
       }
       if (path === '/admin/grant') {
         needsSignature();
@@ -1068,6 +1084,104 @@ describe('invitations', () => {
 
     await admin.app.home();
     expect(bridge.posted.at(-1)).toEqual({ type: 'web_app_setup_back_button', data: { is_visible: false } });
+  });
+});
+
+describe('attachments paused by the operator', () => {
+  const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+
+  it('fetches nothing more by itself while downloads are paused, says so on a tap, and tries again later', async () => {
+    const server = fakeServer();
+    server.state.switches.downloadsPaused = true;
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    // Two photos, which would download as the chat opens.
+    for (const [id, at] of [['p1', 2], ['p2', 3]] as const) {
+      await addMessage(
+        db,
+        { id, conv: 'c1', at, out: false, status: 'received', file: 'remote' },
+        { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    }
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+    await tick();
+    // One refusal, not one per photo, and quietly: no notice.
+    expect(downloads()).toEqual(['GET /media/upload-p1']);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'remote' }] });
+    // Opening it again soon after asks nothing.
+    await app.home();
+    await app.openConversation('c1');
+    await tick();
+    expect(downloads()).toHaveLength(1);
+
+    // A tap asks, and says why it didn't work.
+    await app.fetchMedia({ conv: 'c1', id: 'p2' });
+    expect(downloads()).toEqual(['GET /media/upload-p1', 'GET /media/upload-p2']);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: 'media-paused' });
+
+    // Resumed: a tap asks at once, the notice goes (here the upload has
+    // expired), and fetching by itself starts again at once too.
+    server.state.switches.downloadsPaused = false;
+    await app.fetchMedia({ conv: 'c1', id: 'p2' });
+    expect(downloads()).toHaveLength(3);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
+    await app.home();
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(4));
+    expect(downloads().at(-1)).toBe('GET /media/upload-p1');
+  });
+
+  it('fetches by itself again some minutes after downloads were paused', async () => {
+    const server = fakeServer();
+    server.state.switches.downloadsPaused = true;
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    await addMessage(
+      db,
+      { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
+      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+    server.state.switches.downloadsPaused = false;
+    await app.home();
+    await app.openConversation('c1');
+    await tick();
+    expect(downloads()).toHaveLength(1);
+    await withDeviceClockOff(3 * 60_000, async () => {
+      await app.home();
+      await app.openConversation('c1');
+      await vi.waitFor(() => expect(downloads()).toHaveLength(2));
+    });
+  });
+
+  it('lets admins pause and resume uploads and downloads for everyone, with signed requests', async () => {
+    const server = fakeServer();
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.admin();
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', switches: { uploadsPaused: false, downloadsPaused: false } });
+
+    await admin.app.setSwitch('uploads', true);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'switched', switches: { uploadsPaused: true, downloadsPaused: false } });
+    await admin.app.setSwitch('downloads', true);
+    await admin.app.setSwitch('uploads', false);
+    expect(admin.app.screen.value).toMatchObject({ notice: 'switched', switches: { uploadsPaused: false, downloadsPaused: true } });
+    expect(server.state.switches).toEqual({ uploadsPaused: false, downloadsPaused: true });
+    expect(server.calls.filter((c) => c === 'PUT /admin/switches')).toHaveLength(3);
+    expect(server.unsigned).toEqual([]);
+
+    // If they can't be read, the rest of the screen still works.
+    server.state.switchesDown = true;
+    await admin.app.home();
+    await admin.app.admin();
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', switches: null, levels: [] });
+    await admin.app.setSwitch('downloads', false);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'generic', switches: null });
   });
 });
 

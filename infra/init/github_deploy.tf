@@ -359,6 +359,38 @@ resource "aws_iam_role_policy_attachment" "deploy_edge" {
   policy_arn = aws_iam_policy.deploy_edge.arn
 }
 
+# Table items are runtime data: the app's, and the operator's settings, such
+# as the emergency switches (S#switches) and the invitation levels. A deploy
+# changes tables, never their items, so it can't overwrite a switch the
+# operator set during an incident. A policy of its own, for room.
+data "aws_iam_policy_document" "deploy_no_items" {
+  statement {
+    sid    = "NoTableItemWrites"
+    effect = "Deny"
+    actions = [
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
+      "dynamodb:PartiQLInsert",
+      "dynamodb:PartiQLUpdate",
+      "dynamodb:PartiQLDelete",
+    ]
+    resources = [local.arns.tables]
+  }
+}
+
+resource "aws_iam_policy" "deploy_no_items" {
+  name        = "${local.prefix}-github-deploy-no-items"
+  description = "Keeps deploys of the Incognito Chat app stack (${var.github_environment}) from writing table items"
+  policy      = data.aws_iam_policy_document.deploy_no_items.json
+}
+
+resource "aws_iam_role_policy_attachment" "deploy_no_items" {
+  role       = aws_iam_role.deploy.name
+  policy_arn = aws_iam_policy.deploy_no_items.arn
+}
+
 # The most any function's execution role can ever be allowed to do. Each
 # function gets a narrower policy of its own in the app stack.
 data "aws_iam_policy_document" "lambda_boundary" {

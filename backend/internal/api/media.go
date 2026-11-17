@@ -69,6 +69,11 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 	if s.Media == nil || s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
+	// Before any token is looked at, so a paused upload costs nothing: the
+	// app keeps its tokens and tries again later.
+	if s.switches(ctx, route).UploadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
+	}
 	if !media.PaddedSize(in.Size) || len(in.DeleteHash) != sha256.Size {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
@@ -124,7 +129,8 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 // nothing is stored, at most UploadRenewals times and within
 // UploadRenewalWindow of payment. Once the upload is stored the answer says
 // so ({"uploaded": true}), and the app counts its upload as done. Every
-// refusal is the same not_found.
+// refusal is the same not_found, except uploads_paused while the operator
+// has paused uploads (switches.go).
 func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/{id}/upload"
 	id := httpapi.Param(ctx, "id")
@@ -167,6 +173,12 @@ func (s *Server) renewUpload(ctx context.Context, req httpapi.Request) httpapi.R
 	if stored {
 		return httpapi.JSON(http.StatusOK, map[string]bool{"uploaded": true})
 	}
+	// Only the fresh URL waits for uploads to resume (another minute of
+	// PUTs); one stored already, whose answer was lost, is still done, so
+	// it isn't paid for twice. The try counts as one of its fresh URLs.
+	if s.switches(ctx, route).UploadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "uploads_paused")
+	}
 	url, err := s.Media.UploadURL(ctx, id, up.Size)
 	if err != nil {
 		return s.internal(route, err)
@@ -182,6 +194,10 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	id := httpapi.Param(ctx, "id")
 	if s.Media == nil || !ids.Valid(id) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	// Before anything is read or the file's downloads are counted.
+	if s.switches(ctx, route).DownloadsPaused {
+		return httpapi.Error(http.StatusServiceUnavailable, "downloads_paused")
 	}
 	if ok, err := s.Uploads.Exists(ctx, id); err != nil {
 		return s.internal(route, err)

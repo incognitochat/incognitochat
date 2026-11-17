@@ -56,6 +56,7 @@ import {
   findLinkConversation,
   forgetUploadDeletes,
   getConversation,
+  getMedia,
   getMessage,
   hasMessage,
   listConversations,
@@ -74,6 +75,8 @@ import {
   setReaction,
   setText,
   type LocalMedia,
+  type MessageBody,
+  type MessageView,
 } from './store';
 import { decryptFile, encryptFile, newFileKey, uploadSize } from '../crypto/media';
 import { httpTransfer, TransferError, type Transfer } from '../net/transfer';
@@ -196,6 +199,20 @@ function checkRenewal(value: unknown): string | 'uploaded' {
   if (uploaded === true) return 'uploaded';
   if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
   return url;
+}
+
+/** The operator has paused uploads or downloads of attachments for now: try again later, not at once. */
+export function isPaused(err: unknown): boolean {
+  return err instanceof ApiError && (err.code === 'uploads_paused' || err.code === 'downloads_paused');
+}
+
+/** Whether one of our attachments can be sent again: it failed before it was uploaded, and its file is here. */
+export function canResend(m: Pick<MessageView, 'out' | 'status' | 'file' | 'media' | 'legacyFile'>): boolean {
+  return m.out && m.status === 'failed' && m.file === 'local' && !!m.media && !m.media.id && !m.legacyFile;
+}
+
+function mediaBody(text: string, replyTo: string | undefined, media: LocalMedia): MessageBody {
+  return { text, ...(replyTo ? { replyTo } : {}), media };
 }
 
 function checkUrl(value: unknown): string {
@@ -322,14 +339,58 @@ export function createMessaging(deps: MessagingDeps) {
     if (!conversation) throw new Error('unknown conversation');
     const id = newId();
     const at = now();
-    const body = (media: LocalMedia) => ({ text: caption, ...(replyTo ? { replyTo } : {}), media });
     await putMedia(db, conv, id, out.file);
-    await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(out.media));
+    await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media));
     await onStored?.(id);
     await update(conv, (c) => ({ ...c, lastAt: at, hidden: false }));
+    await deliverMedia(conv, id, at, out, caption, replyTo, onProgress);
+  }
+
+  /**
+   * Sends one of our attachments again that failed before it was uploaded
+   * (attachments were paused, say, or the server couldn't be reached): its
+   * file is still on this device, and none of it reached the other side, so
+   * it goes like a new one, now, at the end of the conversation. One that
+   * was uploaded is left alone: its message may have arrived. Under the
+   * message's lock, so two copies of the app don't both send (and pay for)
+   * it; one that another copy sent meanwhile (or deleted) is quietly left
+   * as it is.
+   */
+  function resendMedia(
+    conv: string,
+    id: string,
+    onStored?: () => void | Promise<void>,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
+    return withLock(mediaLock(conv, id), async () => {
+      const message = await getMessage(db, conv, id);
+      if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
+      const file = await getMedia(db, conv, id);
+      if (!file) throw new Error('attachment missing');
+      const at = now();
+      const { text, replyTo, media } = message;
+      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(text, replyTo, media!));
+      await onStored?.();
+      // Only these two change, on the chat as it is then (under the send
+      // lock), so a message that arrived meanwhile isn't undone.
+      await update(conv, (c) => ({ ...c, lastAt: at, hidden: false }));
+      await deliverMedia(conv, id, at, { file, media: media! }, text, replyTo, onProgress);
+    });
+  }
+
+  /** Uploads a stored attachment and sends its message; marks it failed if either fails. */
+  async function deliverMedia(
+    conv: string,
+    id: string,
+    at: number,
+    out: Outgoing,
+    caption: string,
+    replyTo: string | undefined,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
     try {
       const media = await upload(out, onProgress);
-      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, body(media));
+      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, media));
       await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media });
       await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
@@ -367,8 +428,10 @@ export function createMessaging(deps: MessagingDeps) {
       try {
         created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
       } catch (err) {
-        // Unspent if it never arrived; otherwise the server refuses them later and they're dropped.
-        if (err instanceof NetworkError) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
+        // Unspent if it never arrived, or if uploads are paused (the server
+        // answers that before looking at them); otherwise the server refuses
+        // them later and they're dropped.
+        if (err instanceof NetworkError || isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
         throw err;
       }
       await put(created.id, created.url, body, secret, onProgress);
@@ -401,8 +464,9 @@ export function createMessaging(deps: MessagingDeps) {
         if (err instanceof TransferError && err.status === 412) return;
         // The bucket or the server out of reach (a TransferError is a
         // NetworkError too), or the server failing, uses up a try; a
-        // refusal (no fresh URL) ends it.
-        const again = err instanceof NetworkError || (err instanceof ApiError && err.status >= 500);
+        // refusal (no fresh URL) ends it, and so do paused uploads: the
+        // operator doesn't resume them within these seconds.
+        const again = err instanceof NetworkError || (err instanceof ApiError && err.status >= 500 && !isPaused(err));
         if (!again || tries >= PUT_TRIES) throw err;
       }
       url = null;
@@ -1276,7 +1340,7 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  return { startConversation, send, sendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, edit, sync, markRead, markSeen, react, block, unblock, remove, maintain };
+  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, edit, sync, markRead, markSeen, react, block, unblock, remove, maintain };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

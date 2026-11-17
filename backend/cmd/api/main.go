@@ -128,10 +128,11 @@ func setup(ctx context.Context) (*api.Server, error) {
 	})
 	now := time.Now
 	sockets := &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now}
+	dir := &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]}
 	return &api.Server{
 		Telegram:    initdata.NewVerifier(botID),
 		Sessions:    issuer,
-		Directory:   &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]},
+		Directory:   dir,
 		Nonces:      &ephemeral.Nonces{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Limits:      &ephemeral.Limiter{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Pepper:      pepper,
@@ -146,6 +147,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 		Notices:     &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
 		Media:       &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
 		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		Switches:    dir,
 		Sockets:     sockets,
 		Push: &push.Pusher{
 			Sockets: sockets,

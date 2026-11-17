@@ -14,7 +14,7 @@ import { countTokens, LOW_WATER } from '../account/wallet';
 import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
-import { createMessaging, type MessagingDeps } from './engine';
+import { canResend, createMessaging, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
@@ -88,16 +88,21 @@ async function fakeBackend() {
    * wrong: the bucket can't be reached; the upload is written but the answer
    * is lost; the URL can no longer start one; a delete races the write (409);
    * or the upload is there already (412). renewals: how the next requests
-   * for a fresh URL go: refused, out of reach, or failing on the server.
-   * bundles: link bundles are out of reach, refused (rate limited), or
-   * another link's comes back.
+   * for a fresh URL go: refused, out of reach, failing on the server, or
+   * paused. uploads and downloads: paused by the operator (the server
+   * answers so before looking at anything else). bundles: link bundles are
+   * out of reach, refused (rate limited), or another link's comes back.
    */
   const down = {
     deletes: false,
     bundles: null as null | 'unreachable' | 'busy' | 'wrong',
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
-    renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing')[],
+    renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing' | 'paused')[],
+    uploads: false,
+    downloads: false,
   };
+  /** Requests to the media routes, as "METHOD path". */
+  const mediaCalls: string[] = [];
   const quietSends: boolean[] = [];
   const uploads = new Map<string, { size: number; deleteHash: string; body: Uint8Array<ArrayBuffer> | null; renewals: number }>();
   /** Every upload URL handed out, every PUT tried, and every wait before trying again. */
@@ -144,7 +149,9 @@ async function fakeBackend() {
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: mailbox!, envelope: envelope! });
         return check({});
       }
+      if (path.startsWith('/media')) mediaCalls.push(`${method} ${path}`);
       if (method === 'POST' && path === '/media') {
+        if (down.uploads) throw new ApiError(503, 'uploads_paused');
         const { size, deleteHash, tokens } = JSON.parse(init.body!) as { size: number; deleteHash: string; tokens: string[] };
         // One media token per started MiB; send tokens don't pay for uploads.
         const media = toHex(await challenge(epochOf(Math.floor(Date.now() / 1000)), LABEL_MEDIA_TOKEN));
@@ -164,6 +171,7 @@ async function fakeBackend() {
         const hash = toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(secret))));
         const up = uploads.get(id);
         const how = down.renewals.shift();
+        if (down.uploads || how === 'paused') throw new ApiError(503, 'uploads_paused');
         if (how === 'unreachable') throw new NetworkError('unreachable');
         if (how === 'failing') throw new ApiError(500, 'internal');
         if (!up || up.deleteHash !== hash || up.renewals >= 3 || how === 'refused') throw new ApiError(404, 'not_found');
@@ -173,6 +181,7 @@ async function fakeBackend() {
         return check({ url: uploadUrls.at(-1) });
       }
       if (method === 'GET' && path.startsWith('/media/')) {
+        if (down.downloads) throw new ApiError(503, 'downloads_paused');
         const up = uploads.get(path.split('/')[2]!);
         if (!up?.body) throw new ApiError(404, 'not_found');
         return check({ url: `https://bucket.example/m/${path.split('/')[2]!}` });
@@ -263,7 +272,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -2487,5 +2496,100 @@ describe('uploading and downloading attachments', () => {
     up.body = new Uint8Array(up.size * 2);
     await expect(owner.messaging.fetchMedia(local, theirs.id)).rejects.toBeInstanceOf(WrongSize);
     expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('remote');
+  });
+});
+
+describe('attachments paused by the operator', () => {
+  async function photoChat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    const send = () => sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } }, 'a cat');
+    const mine = async () => (await listMessages(sender.db, conv)).at(-1)!;
+    /** Every media token signed for the sender is still in its wallet, or paid for exactly the uploads made. */
+    const tokensLeft = async () => backend.mediaSigned() - (await countTokens(sender.db, undefined, 'media'));
+    return { backend, owner, sender, conv, photo, send, mine, tokensLeft };
+  }
+
+  it('keeps the message unsent and its tokens, asks once, and sends it again later', async () => {
+    const { backend, owner, sender, conv, photo, send, mine, tokensLeft } = await photoChat();
+    backend.down.uploads = true;
+    await expect(send()).rejects.toMatchObject({ code: 'uploads_paused' });
+    // One request, no PUT, no waiting to try again; no token spent.
+    expect(backend.mediaCalls).toEqual(['POST /media']);
+    expect(backend.puts).toEqual([]);
+    expect(backend.waits).toEqual([]);
+    expect(await tokensLeft()).toBe(0);
+    const failed = await mine();
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', text: 'a cat', media: { t: 'photo' } });
+    expect(failed.media!.id).toBeUndefined();
+    expect(canResend(failed)).toBe(true);
+
+    // Still paused: the same, once more.
+    await expect(sender.messaging.resendMedia(conv, failed.id)).rejects.toMatchObject({ code: 'uploads_paused' });
+    expect(backend.mediaCalls).toEqual(['POST /media', 'POST /media']);
+    expect(await tokensLeft()).toBe(0);
+    expect(await mine()).toMatchObject({ id: failed.id, status: 'failed' });
+
+    // Resumed: sent as the same message, at the end, paid once, even when
+    // tried twice at once (two copies of the app): the second finds it sent
+    // and quietly does nothing.
+    backend.down.uploads = false;
+    const shown: string[] = [];
+    await Promise.all([
+      sender.messaging.resendMedia(conv, failed.id, async () => void shown.push((await mine()).status)),
+      sender.messaging.resendMedia(conv, failed.id, async () => void shown.push('again')),
+    ]);
+    expect(backend.mediaCalls).toEqual(['POST /media', 'POST /media', 'POST /media']);
+    expect(shown).toEqual(['sending']);
+    const sent = await mine();
+    expect(sent).toMatchObject({ id: failed.id, status: 'sent', file: 'local', text: 'a cat' });
+    expect(sent.at).toBeGreaterThanOrEqual(failed.at);
+    expect(canResend(sent)).toBe(false);
+    expect(await tokensLeft()).toBe(1);
+    // Nothing more to send again.
+    await sender.messaging.resendMedia(conv, failed.id);
+    expect(backend.mediaCalls).toHaveLength(3);
+
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
+    expect(theirs).toMatchObject({ id: failed.id, text: 'a cat', file: 'remote' });
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
+  });
+
+  it('stops at once when a fresh URL is refused because uploads were paused meanwhile', async () => {
+    const { backend, send, mine, tokensLeft } = await photoChat();
+    backend.down.puts.push('unreachable');
+    backend.down.renewals.push('paused');
+    await expect(send()).rejects.toMatchObject({ code: 'uploads_paused' });
+    // One wait before asking for a fresh URL, then no more tries.
+    expect(backend.puts).toHaveLength(1);
+    expect(backend.waits).toEqual([2_000]);
+    expect(backend.mediaCalls.filter((c) => c.endsWith('/upload'))).toHaveLength(1);
+    expect(await tokensLeft()).toBe(1);
+    expect(await mine()).toMatchObject({ status: 'failed' });
+    // Its message never went out, so it can be sent again; like an upload
+    // whose four tries all failed, that pays again (the app doesn't keep a
+    // paid upload it couldn't finish).
+    expect(canResend(await mine())).toBe(true);
+  });
+
+  it('leaves an attachment to fetch while downloads are paused', async () => {
+    const { backend, owner, sender, conv, photo, send } = await photoChat();
+    await send();
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
+    backend.down.downloads = true;
+    await expect(owner.messaging.fetchMedia(local, theirs.id)).rejects.toMatchObject({ code: 'downloads_paused' });
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('remote');
+    backend.down.downloads = false;
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
   });
 });

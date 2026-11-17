@@ -21,6 +21,7 @@ type memMedia struct {
 	stored    map[string]bool // uploads written to the bucket
 	lookups   int
 	lookupErr error // what looking in the bucket fails with
+	presigned int   // upload and download URLs given out
 }
 
 func (m *memMedia) Stored(_ context.Context, id string) (bool, error) {
@@ -29,10 +30,12 @@ func (m *memMedia) Stored(_ context.Context, id string) (bool, error) {
 }
 
 func (m *memMedia) UploadURL(_ context.Context, id string, size int64) (string, error) {
+	m.presigned++
 	return "https://bucket.example/m/" + id + "?put=" + strconv.FormatInt(size, 10), nil
 }
 
 func (m *memMedia) DownloadURL(_ context.Context, id string) (string, error) {
+	m.presigned++
 	return "https://bucket.example/m/" + id + "?get", nil
 }
 
