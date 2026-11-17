@@ -179,16 +179,32 @@ variable "firewall_anonymous_rate_limit" {
     condition     = var.firewall_anonymous_rate_limit >= 100
     error_message = "firewall_anonymous_rate_limit must be at least 100."
   }
+
+  validation {
+    condition     = var.firewall_anonymous_rate_limit <= var.firewall_rate_limit
+    error_message = "firewall_anonymous_rate_limit must be at most firewall_rate_limit, which counts the same requests and more."
+  }
 }
 
 variable "firewall_anonymous_total_limit" {
-  description = "Requests everyone together may make in 1 minute to the routes that need no login (edge.tf) before the firewall blocks those routes for everyone. Keep it at most 30 times table_max_read_units, so that even at a read unit each they use at most half the directory table's reads, and raise it with the caps. GitHub variable FIREWALL_ANONYMOUS_TOTAL_LIMIT"
+  description = "Requests everyone together may make in 1 minute to the routes that need no login (edge.tf) before the firewall blocks those routes for everyone. At most 30 times table_max_read_units, so that even at a read unit each they use at most half the directory table's reads; raise it with the caps. GitHub variable FIREWALL_ANONYMOUS_TOTAL_LIMIT"
   type        = number
   default     = 12000
 
   validation {
     condition     = var.firewall_anonymous_total_limit >= 1000
     error_message = "firewall_anonymous_total_limit must be at least 1000."
+  }
+
+  # Writes aren't checked here. Every login writes a nonce (one write unit
+  # on the ephemeral table), and nothing limits how often one account logs
+  # its own device in, so only this rule bounds those writes. Keeping them
+  # to half the ephemeral table's writes would take at most 30 times
+  # table_max_write_units (6,000 at the defaults); at 12,000 they could fill
+  # it (docs/deployment.md, The firewall).
+  validation {
+    condition     = var.firewall_anonymous_total_limit <= 30 * var.table_max_read_units
+    error_message = "firewall_anonymous_total_limit must be at most 30 times table_max_read_units (a minute of half the directory table's reads)."
   }
 }
 
@@ -228,10 +244,20 @@ variable "ws_throttle_rate_limit" {
   description = "Steady-state requests per second allowed on the WebSocket API. GitHub variable WS_THROTTLE_RATE_LIMIT"
   type        = number
   default     = 20
+
+  validation {
+    condition     = var.ws_throttle_rate_limit >= 1
+    error_message = "ws_throttle_rate_limit must be at least 1."
+  }
 }
 
 variable "ws_throttle_burst_limit" {
   description = "Burst of requests allowed on the WebSocket API. GitHub variable WS_THROTTLE_BURST_LIMIT"
   type        = number
   default     = 40
+
+  validation {
+    condition     = var.ws_throttle_burst_limit >= 1
+    error_message = "ws_throttle_burst_limit must be at least 1."
+  }
 }

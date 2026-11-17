@@ -256,7 +256,8 @@ const AUTO_GIF_BYTES = 10 * 1024 * 1024;
 /**
  * After the server says downloads are paused, attachments aren't fetched by
  * themselves for this long; then on the next opening or new message. A tap
- * still asks.
+ * still asks. After an automatic fetch that couldn't reach the server or was
+ * turned away, half of this to all of it.
  */
 const PAUSED_WAIT_MS = 2 * 60_000;
 
@@ -850,7 +851,9 @@ export function createApp(deps: Deps) {
   }
 
   // Until when attachments aren't fetched by themselves: the server said
-  // downloads are paused.
+  // downloads are paused, or an automatic fetch couldn't reach it or was
+  // turned away (429, the firewall's too), so the rest aren't asked for one
+  // by one meanwhile.
   let downloadsPausedUntil = 0;
 
   /**
@@ -872,6 +875,8 @@ export function createApp(deps: Deps) {
       if (isPaused(err)) {
         paused = true;
         downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS;
+      } else if (auto && (err instanceof NetworkError || (err instanceof ApiError && err.status === 429))) {
+        downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS * (0.5 + Math.random() / 2);
       }
     } finally {
       setProgress(key, null);

@@ -158,16 +158,17 @@ unset, the default in [`infra/variables.tf`](../infra/variables.tf) applies.
 |---|---|---|
 | `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400, 200 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). |
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
-| `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). |
+| `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_ANONYMOUS_TOTAL_LIMIT` | 12,000 | Requests everyone together may make in 1 minute to those routes (`anonymous-total`). At most 30 times `TABLE_MAX_READ_UNITS`. |
-| `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. |
+| `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. At least 1. |
 
 A change takes effect at the environment's next deploy: for dev, the next
 push to `main` or a manual run of CI on `main`; for production, the next
 release, or a re-run of the latest release's CI run in GitHub Actions
 (possible for 30 days; a re-run reads the variables afresh and waits for the
-reviewer's approval again). Changing a firewall limit restarts that rule's
-counts, so it may not block for up to a minute.
+reviewer's approval again). A value outside its bounds fails the deploy at
+Terraform's plan, before anything changes. Changing a firewall limit
+restarts that rule's counts, so it may not block for up to a minute.
 
 ### The token issuer keys
 
@@ -352,6 +353,16 @@ NAT64, sharing an IPv4 address with others there, as they already reach the
 socket API and the media bucket, which have no IPv6 addresses either; a
 network with IPv6 and no NAT64 can't reach the API at all.
 
+What turning IPv6 off does is documented only for DNS: CloudFront gives the
+distribution's name no IPv6 addresses. AWS's documentation doesn't say
+whether an edge refuses a request that reaches it over IPv6 anyway, from a
+client that connects to an edge's IPv6 address by hand, and this hasn't been
+tested. If edges serve such requests, one host can still spread a flood
+over many IPv6 addresses past both per-address rules: `anonymous-total`
+still bounds the routes that need no login, and nothing at the edge bounds
+the rest. A rule that blocks IPv6 addresses outright would settle it, but
+the deploy role would need to manage IP sets for it (`infra/init`).
+
 ### The firewall
 
 `FIREWALL=true` adds AWS WAF in front of CloudFront with three rate limits.
@@ -374,7 +385,9 @@ own, or, for sends, is paid with a token but has no login. Two more need no
 login and are left to `rate-per-ip`: `POST /media` spends no table capacity
 on forged media tokens, and the app sends `POST /media/{id}/delete` for
 every received attachment of a deleted chat, six at a time without a pause,
-which a low limit would cut off.
+which a low limit would cut off. A path counts if it ends like one of these
+routes once decoded and normalised (`/%73ession`, `//session` and
+`/../session` count as `/session`).
 
 - **`rate-per-ip`**: many people can share an address (a mobile carrier, a
   VPN), so the limit is far above what one person's app sends.
@@ -398,22 +411,46 @@ which a low limit would cut off.
   and logged-in requests (one directory unit each) keep the rest. The others
   need something the sender must hold first (a send token, Telegram's signed
   launch data, a device of their own), and most have limits of their own.
-  Rules run in order, and what `rate-per-ip` or `anonymous-per-ip` blocks
-  never reaches this rule, so setting it off takes about 120 addresses at
-  once, each just under 100 a minute.
+
+  Writes are bounded less well. Every login writes a nonce, one write unit
+  on the ephemeral table, and nothing limits how often one account logs its
+  own device in, so a flood of logins with one account, spread over many
+  addresses, is bounded only by this rule. Keeping it to half the ephemeral
+  table's 200 writes a second would take at most 30 times
+  `TABLE_MAX_WRITE_UNITS` a minute (6,000 at the defaults); at 12,000 such a
+  flood can fill the ephemeral table's writes. A limit on logins per device
+  (backend) would close this.
+
+  Rules run in order, and what `rate-per-ip` or `anonymous-per-ip` already
+  blocks doesn't count here: held up for minutes, setting this rule off
+  takes about 120 addresses, each just under 100 a minute. But AWS WAF
+  checks rates only about every 10 seconds and usually takes up to 30 to
+  act, and until an address is blocked, everything it sends counts here. So
+  a burst from a single host (12,000 requests in those seconds) can set it
+  off alone.
 
   While it blocks, these routes are refused for everyone, logins and sends
   included, until the rate falls: usually a minute or two after the flood
-  stops. Logged-in requests go on until their 15-minute sessions end, since
-  logging in again is one of these routes. It trades a flood that would
-  otherwise starve the tables, and with them every request, for one that
-  stops only these routes.
+  stops (60 to 90 seconds after a short burst). Logged-in requests go on
+  until their 15-minute sessions end, since logging in again is one of
+  these routes. It trades a flood that would otherwise starve the tables,
+  and with them every request, for one that stops only these routes.
 
-A blocked request gets CloudFront's 403 without CORS headers, so the app
-sees a network error and tries again later, as when it is offline. AWS WAF
-checks rates about every 10 seconds and doesn't match a limit exactly: a
-flood usually gets through for up to 30 seconds before it's blocked
-(sometimes longer, AWS says), and a block can outlast it by as long.
+A blocked request gets 429 with the API's own error,
+`{"error":"rate_limited"}`, and `Access-Control-Allow-Origin` for the app
+(the first of `CLIENT_ORIGINS`: a firewall response is fixed, while the API
+answers each origin in the list), so the app can tell being turned away from
+being offline. Either way it waits instead of asking again at once: a
+failed login waits 5 to 10 seconds, twice as long after each further
+failure up to one to two minutes; a link's keys that couldn't be fetched
+wait 5 to 10 minutes; and attachments stop being fetched by themselves for
+one to two minutes. The waits are jittered, so the apps behind one address
+don't try together and keep it blocked. A blocked CORS preflight (only
+`rate-per-ip` counts those) still looks like a network error to the app.
+
+AWS WAF checks rates about every 10 seconds and doesn't match a limit
+exactly: a flood usually gets through for up to 30 seconds before it's
+blocked (sometimes longer, AWS says), and a block can outlast it by as long.
 
 **What to watch**, in CloudWatch in us-east-1 (namespace AWS/WAFV2,
 dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:

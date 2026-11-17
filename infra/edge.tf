@@ -127,21 +127,36 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
 # and POST /media/{id}/delete, which the app sends for every received
 # attachment of a deleted chat, six at a time without a pause. Both stay
 # under rate-per-ip.
+#
+# The patterns are anchored at the end, and at the start only to a slash:
+# NORMALIZE_PATH (below) keeps back-references at the start of a path, so
+# "/../session" must count too. Another path that merely ends like one of
+# these routes counts as well, which costs nothing (the API answers it 404).
 locals {
   anonymous_routes = {
-    GET  = "^/(links|media)/[^/]+$"
-    POST = "^/(session|register|accounts/lookup|send|media/[^/]+/upload)$"
+    GET  = "(^|/)(links|media)/[^/]+$"
+    POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload)$"
   }
 
   # Two limits over the same requests: per IP address, and for everyone
   # together (CONSTANT: every matching request goes into one count). Rules
   # run in priority order and a block ends the run, so what rate-per-ip or
-  # anonymous-per-ip blocks never counts towards anonymous-total: a few busy
-  # addresses can't set it off.
+  # anonymous-per-ip already blocks doesn't count towards anonymous-total.
+  # But WAF checks rates only about every 10 seconds and usually acts within
+  # 30, so until an address is blocked its burst counts in full: one host
+  # alone can set anonymous-total off, and these routes are then refused for
+  # everyone for a minute or two.
   anonymous_limits = {
     anonymous-per-ip = { priority = 2, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300 }
     anonymous-total  = { priority = 3, key = "CONSTANT", limit = var.firewall_anonymous_total_limit, window = 60 }
   }
+
+  # A blocked request gets 429 and the API's own error, with CORS for the
+  # app (the first of client_origins; the function URL answers each of them,
+  # but a firewall response is fixed), so the app can tell being turned away
+  # from being offline, and wait. Other origins see a network error.
+  blocked_body   = "rate-limited"
+  blocked_origin = var.client_origins[0]
 }
 
 # The firewall: three rate limits. $5 a month, plus $1 per rule and $0.60
@@ -154,13 +169,10 @@ locals {
 #                     since an app sends few requests there.
 #   anonymous-total   the same routes, everyone together, over one minute:
 #                     below what the directory table can serve, so a flood
-#                     spread over many addresses can't use up the capacity
-#                     logged-in requests need. While it blocks, it blocks
-#                     those routes for everyone, logins and sends included;
-#                     requests with a session go on.
-#
-# A blocked request gets CloudFront's 403, without CORS headers: the app sees
-# a network error and tries again later.
+#                     can't use up the capacity logged-in requests need.
+#                     While it blocks, it blocks those routes for everyone,
+#                     logins and sends included; requests with a session go
+#                     on until it ends.
 resource "aws_wafv2_web_acl" "api" {
   count    = var.firewall ? 1 : 0
   provider = aws.global
@@ -180,12 +192,28 @@ resource "aws_wafv2_web_acl" "api" {
     allow {}
   }
 
+  custom_response_body {
+    key          = local.blocked_body
+    content      = jsonencode({ error = "rate_limited" })
+    content_type = "APPLICATION_JSON"
+  }
+
   rule {
     name     = "rate-per-ip"
     priority = 1
 
     action {
-      block {}
+      block {
+        custom_response {
+          response_code            = 429
+          custom_response_body_key = local.blocked_body
+
+          response_header {
+            name  = "Access-Control-Allow-Origin"
+            value = local.blocked_origin
+          }
+        }
+      }
     }
 
     statement {
@@ -211,7 +239,17 @@ resource "aws_wafv2_web_acl" "api" {
       priority = rule.value.priority
 
       action {
-        block {}
+        block {
+          custom_response {
+            response_code            = 429
+            custom_response_body_key = local.blocked_body
+
+            response_header {
+              name  = "Access-Control-Allow-Origin"
+              value = local.blocked_origin
+            }
+          }
+        }
       }
 
       statement {
@@ -247,7 +285,7 @@ resource "aws_wafv2_web_acl" "api" {
 
                     # Decoded and normalised first, so that a path written
                     # another way that could reach the same route matches
-                    # too ("/%73ession", "//session").
+                    # too ("/%73ession", "//session", "/../session").
                     statement {
                       regex_match_statement {
                         regex_string = route.value

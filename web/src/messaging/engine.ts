@@ -137,6 +137,12 @@ const ROTATE_SPREAD = 3 * DAY;
 /** How long a sender not answered yet trusts the link key it has before fetching the current one. */
 const LINK_KEY_RECHECK = 3600 * 1000;
 /**
+ * After that fetch fails, the next waits 5 to 10 minutes, not the next send:
+ * the key we have works for weeks yet, and a fetch with every send would
+ * keep an address the firewall has turned away busy.
+ */
+export const LINK_KEY_RETRY_MS = 10 * 60_000;
+/**
  * How long a conversation's former mailbox still counts once something came
  * through the current one: the other side wrote to the old one until our
  * message told them, and that may wait in the inbox for 30 days.
@@ -315,6 +321,8 @@ export function createMessaging(deps: MessagingDeps) {
       return () => clearTimeout(timer);
     });
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
+  /** When a conversation whose link-key fetch failed may fetch again (Unix ms; refreshLinkKey). */
+  const linkKeyRetryAt = new Map<string, number>();
 
   /**
    * Writes the first message to someone's link, starting a conversation.
@@ -686,7 +694,12 @@ export function createMessaging(deps: MessagingDeps) {
         c = { ...c, myKey: toBase64Url(key.publicKey), rotateAt: nextRotation() };
         await putConversation(db, c);
       }
-      if (c.role === 'sender' && c.lastReceived === null && now() - (c.linkCheckedAt ?? 0) >= LINK_KEY_RECHECK) {
+      if (
+        c.role === 'sender' &&
+        c.lastReceived === null &&
+        now() - (c.linkCheckedAt ?? 0) >= LINK_KEY_RECHECK &&
+        now() >= (linkKeyRetryAt.get(c.id) ?? -Infinity)
+      ) {
         c = await refreshLinkKey(c);
       }
       // A chat someone started through our link takes one of our mailboxes
@@ -754,7 +767,7 @@ export function createMessaging(deps: MessagingDeps) {
    * Before they've answered, we write for their link's key. Links get a new
    * key weekly and old ones are deleted later, so fetch the current one if
    * ours is more than an hour old. If that fails, the one we have still
-   * works for a while.
+   * works for a while, and the fetch waits (LINK_KEY_RETRY_MS).
    */
   async function refreshLinkKey(c: ConversationRecord): Promise<ConversationRecord> {
     try {
@@ -762,8 +775,10 @@ export function createMessaging(deps: MessagingDeps) {
       const { raw } = await verifyBundle({ id: c.link.id, fingerprint: c.link.fingerprint }, bundle, Math.floor(now() / 1000));
       c = { ...c, peerKey: toBase64Url(raw), linkCheckedAt: now() };
       await putConversation(db, c);
+      linkKeyRetryAt.delete(c.id);
     } catch {
-      // Unreachable, replaced or revoked: keep what we have.
+      // Unreachable, turned away, replaced or revoked: keep what we have.
+      linkKeyRetryAt.set(c.id, now() + LINK_KEY_RETRY_MS * (0.5 + Math.random() / 2));
     }
     return c;
   }
