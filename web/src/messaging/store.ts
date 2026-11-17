@@ -96,13 +96,14 @@ export async function putConversation(db: Database, conversation: ConversationRe
 /**
  * What a conversation remembers by keyed hashes (messaging/replay.ts):
  * applied, envelopes of theirs taken in; gone, their messages they deleted;
- * dropped, messages the user deleted here. Kept in `meta`, one item per
+ * dropped, their messages the user deleted here; mine, the user's own
+ * messages deleted here. Kept in `meta`, one item per
  * conversation and kind, apart from the conversation record: that is read
  * whenever the chat list is shown, and only the kind that changed is
  * written.
  */
-export type IdKind = 'applied' | 'gone' | 'dropped';
-export const ID_KINDS: readonly IdKind[] = ['applied', 'gone', 'dropped'];
+export type IdKind = 'applied' | 'gone' | 'dropped' | 'mine';
+export const ID_KINDS: readonly IdKind[] = ['applied', 'gone', 'dropped', 'mine'];
 export type ConversationIds = Partial<Record<IdKind, IdDays>>;
 
 function idsKey(conv: string, kind: IdKind): string {

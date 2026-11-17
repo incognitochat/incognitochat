@@ -2837,12 +2837,38 @@ describe('envelopes that come again, or late', () => {
       await sender.messaging.markSeen(conv);
       await sender.messaging.deleteHere(conv, (await listMessages(sender.db, conv)).find((m) => m.text === 'r2')!.id);
       step();
+      expect((await getConversation(sender.db, conv))!.lastMessage).toBeDefined();
       await sender.messaging.remove(conv, true);
+      // Named in the delete, so no longer kept.
+      expect((await getConversation(sender.db, conv))!.lastMessage).toBeUndefined();
       backend.inboxes.get('sender')!.push(r1);
       await sender.messaging.sync();
       await owner.messaging.sync();
       expect(await texts('sender')).toEqual([]);
       expect(await texts('owner')).toEqual([]);
+    });
+
+    it('naming their newest message they still have: not one they deleted for both sides', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const step = () => (clock += 1000);
+      const { owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      step();
+      await sender.messaging.send(conv, 'm2');
+      step();
+      await sender.messaging.send(conv, 'm3');
+      // Taken in, not opened.
+      await owner.messaging.sync();
+      step();
+      await sender.messaging.deleteForEveryone(conv, (await listMessages(sender.db, conv)).at(-1)!.id);
+      await owner.messaging.sync();
+      step();
+      await owner.messaging.remove(mine, true);
+      // Once sent, its ID and time aren't kept.
+      expect((await getConversation(owner.db, mine))!.lastMessage).toBeUndefined();
+      await sender.messaging.sync();
+      expect(await texts('owner')).toEqual([]);
+      expect(await texts('sender')).toEqual([]);
     });
 
     for (const forBoth of [false, true]) {
@@ -2911,6 +2937,20 @@ describe('envelopes that come again, or late', () => {
   });
 
   describe('a message deleted', () => {
+    it("of ours, here, is remembered apart from theirs, and a reaction to it isn't kept for later", async () => {
+      const { owner, sender, conv, mine } = await chat();
+      await owner.messaging.send(mine, 'mine');
+      await sender.messaging.sync();
+      const m = (await listMessages(sender.db, conv)).at(-1)!;
+      // Their reaction to it is on its way when the owner deletes it.
+      await sender.messaging.react(conv, m.id, '👍');
+      await owner.messaging.deleteHere(mine, m.id);
+      await owner.messaging.sync();
+      const ids = await getIds(owner.db, mine);
+      expect([ids.dropped, ids.mine?.flatMap((d) => d.tags).length]).toEqual([undefined, 1]);
+      expect((await getConversation(owner.db, mine))!.reactions ?? []).toEqual([]);
+    });
+
     it('on this device, deleted twice at once (a double tap), counts once', async () => {
       const { owner, sender, conv, mine } = await chat();
       await sender.messaging.send(conv, 'x');
@@ -3289,15 +3329,22 @@ describe('envelopes that come again, or late', () => {
         expect(day.day).toBe(Math.floor(clock / DAY));
         for (const tag of day.tags) expect(tag).toMatch(/^[A-Za-z0-9_-]{12}$/);
       }
-      // Theirs they deleted: 'one', and 'four' before it came. Deleted here: 'two', then 'hello' and 'three' with the chat.
+      // Theirs they deleted: 'one', and 'four' before it came. Deleted here: 'two', then 'hello' and 'three' with the chat; and ours, 'hi'.
       expect(kept.gone!.flatMap((d) => d.tags)).toHaveLength(2);
       expect(kept.dropped!.flatMap((d) => d.tags)).toHaveLength(3);
+      expect(kept.mine!.flatMap((d) => d.tags)).toHaveLength(1);
       expect(c.theirClear).toEqual({ upTo: c.clearedBefore, here: clock });
+
+      // Upkeep with nothing run out leaves the chat alone: it doesn't even take its lock.
+      const locks = vi.spyOn(navigator.locks, 'request');
+      await owner.messaging.maintain().catch(() => {});
+      expect(locks.mock.calls.filter(([name]) => String(name).includes(':send:'))).toEqual([]);
+      locks.mockRestore();
 
       // Once nothing they cover could still arrive, upkeep lets them go.
       clock += 31 * DAY;
       await owner.messaging.maintain().catch(() => {});
-      expect(Object.keys(await getIds(owner.db, mine)).sort()).toEqual(['applied', 'dropped', 'gone']);
+      expect(Object.keys(await getIds(owner.db, mine)).sort()).toEqual(['applied', 'dropped', 'gone', 'mine']);
       clock += 2 * DAY;
       await owner.messaging.maintain().catch(() => {});
       const after = (await getConversation(owner.db, mine))!;

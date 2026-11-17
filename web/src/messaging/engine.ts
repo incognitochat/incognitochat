@@ -48,7 +48,7 @@ import {
   type KeyEntry,
 } from './keys';
 import { dropFromPool, pooled, POOL_LOW, poolSize, refillPool, takeMailbox } from './pool';
-import { couldCome, DAY, dayOf, endOf, forgetOld, isNewer, MAX_AGE, MAX_APPLIED, MAX_DROPPED, MAX_GONE, remember, remembers, tidy } from './replay';
+import { couldCome, DAY, dayOf, endOf, forgetOld, isNewer, MAX_AGE, MAX_APPLIED, MAX_DROPPED, MAX_GONE, MAX_MINE, remember, remembers, tidy } from './replay';
 import { accountSecret, idTag, label, senderTag } from './secret';
 import {
   addMessage,
@@ -840,20 +840,29 @@ export function createMessaging(deps: MessagingDeps) {
       const { left, unread } = await clearMessages(db, conv, upTo);
       const before = await getIds(db, conv);
       let { c: kept, ids } = await tidied(c, now(), before);
+      const secret = await accountSecret(db);
       if (floor !== undefined) {
         // Never lower: their delete of the whole conversation may have cleared it further.
         const cleared = Math.max(kept.clearedBefore ?? -Infinity, floor);
         const after = (x: { at: number }) => x.at > cleared;
         const edits = kept.edits?.filter(after);
         const reactions = kept.reactions?.filter(after);
-        const { edits: _e, reactions: _r, ...rest } = kept;
-        kept = { ...rest, clearedBefore: cleared, ...(edits?.length ? { edits } : {}), ...(reactions?.length ? { reactions } : {}) };
-      } else {
-        const secret = await accountSecret(db);
+        const { edits: _e, reactions: _r, lastMessage, ...rest } = kept;
+        kept = {
+          ...rest,
+          clearedBefore: cleared,
+          ...(edits?.length ? { edits } : {}),
+          ...(reactions?.length ? { reactions } : {}),
+          // Sent: no need to keep its ID and time. One newer, which came meanwhile, stays.
+          ...(lastMessage && lastMessage.at > cleared ? { lastMessage } : {}),
+        };
+      } else if (!forBoth) {
         for (const m of going) {
           if (!m.out && couldCome(dayOf(sentAt(m)), now())) kept = drop(kept, ids, await idTag(secret, c.id, m.id), sentAt(m));
         }
       }
+      // Ours: so their reactions or edits naming one aren't kept for later.
+      for (const m of going) if (m.out && couldCome(dayOf(m.at), now())) dropMine(ids, await idTag(secret, c.id, m.id), m.at);
       // Out of the list, unless something came meanwhile.
       await saveConversation(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) }, ids, before);
     });
@@ -883,22 +892,35 @@ export function createMessaging(deps: MessagingDeps) {
       if (!c) return;
       const before = await getIds(db, conv);
       let { c: kept, ids } = await tidied(c, now(), before);
-      // It can come again until it's too old: by when it was sent.
-      kept = drop(kept, ids, await idTag(await accountSecret(db), c.id, id), sentAt(m));
+      const tag = await idTag(await accountSecret(db), c.id, id);
+      // Theirs can come again until it's too old: by when it was sent. Ours
+      // can't come again; only what names it can.
+      if (m.out) dropMine(ids, tag, m.at);
+      else kept = drop(kept, ids, tag, sentAt(m));
       if (!m.out && m.status === 'received' && kept.unread > 0) kept = { ...kept, unread: kept.unread - 1 };
       await saveConversation(db, kept, ids, before);
     });
   }
 
   /**
-   * Remembers (in ids) a message the user deleted here. Past MAX_DROPPED the
-   * oldest go, and then their messages up to the end of that day are
-   * dropped instead (droppedBefore).
+   * Remembers (in ids) a message of theirs the user deleted here. Past
+   * MAX_DROPPED the oldest go, and then their messages up to the end of that
+   * day (their clock) are dropped instead (droppedBefore).
    */
   function drop(c: ConversationRecord, ids: ConversationIds, tag: string, at: number): ConversationRecord {
     const { days, lost } = remember(ids.dropped, tag, at, MAX_DROPPED);
     ids.dropped = days;
     return lost === undefined ? c : { ...c, droppedBefore: Math.max(c.droppedBefore ?? -Infinity, endOf(lost)) };
+  }
+
+  /**
+   * Remembers (in ids) one of the user's own messages deleted here, by our
+   * clock's day: their reactions or edits naming it then aren't kept for
+   * later. Past MAX_MINE the oldest go, and nothing is dropped by time for
+   * it (our clock isn't theirs).
+   */
+  function dropMine(ids: ConversationIds, tag: string, at: number): void {
+    ids.mine = remember(ids.mine, tag, at, MAX_MINE).days;
   }
 
   /**
@@ -1207,7 +1229,7 @@ export function createMessaging(deps: MessagingDeps) {
     // what's remembered one by one) deleted here.
     const floor = Math.max(cleared, conv.droppedBefore ?? -Infinity);
     // Deleted one by one: by them, or by the user here.
-    const deleted = (t: string) => remembers(ids.gone, t) || remembers(ids.dropped, t);
+    const deleted = (t: string) => remembers(ids.gone, t) || remembers(ids.dropped, t) || remembers(ids.mine, t);
     // Shown no later than it arrived, so a fast clock can't push a message above newer ones.
     const at = Math.min(message.at, t);
     let changed = false;
@@ -1303,6 +1325,9 @@ export function createMessaging(deps: MessagingDeps) {
           await deleteMessage(db, conv.id, id);
           changed = true;
         }
+        // Gone from their side too, so a delete of ours for both sides
+        // mustn't name it: it names their newest message here instead.
+        if (conv.lastMessage?.id === id) delete conv.lastMessage;
         ids.gone = remember(ids.gone, await tagOf(id), message.at, MAX_GONE).days;
       }
     } else if (message.kind === 'reaction' && message.reaction) {
@@ -1431,7 +1456,8 @@ export function createMessaging(deps: MessagingDeps) {
     const unchanged = (c: ConversationRecord, before: ConversationIds, after: { c: ConversationRecord; ids: ConversationIds }) =>
       after.c === c && ID_KINDS.every((kind) => after.ids[kind] === before[kind]);
     for (const c of await listConversations(db)) {
-      if (unchanged(c, await getIds(db, c.id), await tidied(c, now(), await getIds(db, c.id)))) continue;
+      const kept = await getIds(db, c.id);
+      if (unchanged(c, kept, await tidied(c, now(), kept))) continue;
       await withLock(`send:${c.id}`, async () => {
         const current = await getConversation(db, c.id);
         if (!current) return;

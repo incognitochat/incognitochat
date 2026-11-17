@@ -6,9 +6,9 @@
 //
 //   - every envelope taken in is remembered (applied) until it is too old;
 //   - messages deleted one by one are remembered until they're too old:
-//     theirs they deleted (gone), and what the user deleted here (dropped),
-//     each with a budget of its own, so the other side can't push the
-//     user's deletes out;
+//     theirs they deleted (gone), theirs the user deleted here (dropped),
+//     and the user's own deleted here (mine), each with a budget of its
+//     own, so the other side can't push the user's deletes out;
 //   - a conversation cleared up to a time on their clock (clearedBefore: by
 //     their delete of the whole conversation, or ours for both sides) drops
 //     anything of theirs sent by then;
@@ -40,6 +40,12 @@ export const MAX_GONE = 1000;
  * the end of that day are dropped instead (droppedBefore).
  */
 export const MAX_DROPPED = 5000;
+/**
+ * The most of the user's own messages deleted here that a conversation
+ * remembers, so their edits and reactions naming one aren't kept for later.
+ * Past it the oldest go, and such a reaction may wait (31 days at most).
+ */
+export const MAX_MINE = 1000;
 
 /** The UTC day a time falls on. */
 export function dayOf(at: number): number {

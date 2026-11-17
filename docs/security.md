@@ -64,7 +64,10 @@ it. This is how close it gets.
   with an old "delete for both", or move an app back to the other side's
   older key or mailbox. Each app remembers, per conversation and as keyed
   hashes only, which envelopes it took in and which messages were deleted,
-  for as long as an envelope can still be taken in (31 days); takes key
+  for as long as an envelope can still be taken in (31 days); besides
+  those, the conversation keeps the time and ID of the other side's newest
+  message taken in, until a delete for both sides names it (as it keeps
+  the ID of the last envelope taken in); takes key
   and mailbox changes only from newer envelopes, by the sender's clock; and
   a "delete for both" takes only what was written before it
   ([protocol.md](protocol.md#inner-message), Replays and order). The
