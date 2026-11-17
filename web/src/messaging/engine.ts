@@ -16,7 +16,7 @@
 // as the envelope costs (one for anything but a long text).
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
-import { introMailbox, keyName, listLinks, rotateLinkKey, setLinkMailbox, type LinkRecord } from '../account/links';
+import { dropLooseLinkKeys, introMailbox, keyName, listLinks, looseLinkKeys, rotateLinkKey, setLinkMailbox, settleLinkChange, type LinkRecord } from '../account/links';
 import {
   batchFor,
   countTokens,
@@ -26,7 +26,6 @@ import {
   MEDIA_LOW_WATER,
   refillTokens,
   returnToken,
-  returnTokens,
   takeToken,
   takeTokens,
   TOKEN_BATCH,
@@ -38,7 +37,7 @@ import type { Session } from '../net/session';
 import { MAX_ENVELOPE, sendTokensFor } from '../protocol/envelope';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import { EDIT_GRACE_MS, EDIT_WINDOW_MS, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
-import { getMeta, getSealed, putMeta, type ConversationRecord, type Database } from '../storage/db';
+import { getMeta, putMeta, type ConversationRecord, type Database } from '../storage/db';
 import { withLock, withLockIfFree } from '../sync/locks';
 import {
   conversationKey,
@@ -51,6 +50,7 @@ import {
   keyFinder,
   lookupKey,
   scheduleKeyDeletion,
+  sealedMatches,
   type KeyEntry,
 } from './keys';
 import { dropFromPool, pooled, POOL_LOW, poolSize, refillPool, takeMailbox } from './pool';
@@ -504,10 +504,11 @@ export function createMessaging(deps: MessagingDeps) {
       try {
         created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
       } catch (err) {
-        // Unspent if it never arrived, or if uploads are paused (the server
-        // answers that before looking at them); otherwise the server refuses
-        // them later and they're dropped.
-        if (err instanceof NetworkError || isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
+        // Unspent if uploads are paused (the server answers that before
+        // spending any), and an upload names no mailbox, so using them for
+        // another ties nothing anyone receives to this try. Without an
+        // answer they may be spent: dropped, like those the server refused.
+        if (isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
         throw err;
       }
       await put(created.id, created.url, body, secret, onProgress);
@@ -1042,14 +1043,27 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Sends an envelope to a mailbox without logging in, paying with as many
    * send tokens as it costs (sendTokensFor).
+   *
+   * A token the server has seen with this envelope and mailbox is never
+   * shown with any other send, even if the server didn't spend it (a send
+   * refused for a cap, or one whose answer was lost): one token with two
+   * sends would let the server tie them together, and so the mailboxes one
+   * person writes to. Only trying this same send again, priced anew
+   * (tokens_needed), shows them again; the rest are dropped, and the wallet
+   * never gets them back.
    */
   async function deliver(mailbox: string, envelope: Uint8Array, quiet: boolean): Promise<void> {
     let needed = sendTokensFor(envelope.length);
     let dropped = 0;
     let repriced = false;
+    /** Tokens this send showed the server, which didn't spend them: for trying it again only. */
+    let shown: StoredToken[] = [];
     try {
       for (;;) {
-        const tokens = await nextTokens(needed);
+        // Those shown already first, then fresh ones; any shown left over (a lower price) are dropped.
+        const tokens = shown.splice(0, needed);
+        shown = [];
+        if (tokens.length < needed) tokens.push(...(await nextTokens(needed - tokens.length)));
         try {
           // One token as `token`, which every server version takes (one from
           // before sizes were priced refuses `tokens`); several as `tokens`.
@@ -1060,23 +1074,22 @@ export function createMessaging(deps: MessagingDeps) {
         } catch (err) {
           // Tokens the server refuses (one spent, or too old) are dropped, all
           // that went with them; try others. More than once, but no more
-          // than one send's worth: the tokens of a send whose answer was lost
-          // come back to the wallet together (below), spent.
+          // than one send's worth: a wallet may still hold the spent tokens
+          // of a send whose answer was lost, which an older version put back.
           if (err instanceof ApiError && err.code === 'invalid_token') {
             dropped += tokens.length;
             if (dropped <= MAX_SEND_TOKENS) continue;
             throw err;
           }
-          // Not spent: a capped send, one that may never have arrived, or
-          // one the server prices differently from this app.
-          if ((err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'tokens_needed')) || err instanceof NetworkError) {
-            await returnTokens(db, tokens);
-          }
           // Pay what the server asks, more or less, once, if it's no more
-          // than an envelope can cost.
+          // than an envelope can cost: the same envelope to the same
+          // mailbox, with the tokens it saw (none was spent) and more if
+          // needed. Otherwise, as after a cap or a lost answer, the tokens
+          // are dropped.
           if (err instanceof ApiError && err.code === 'tokens_needed' && !repriced && err.needed !== undefined && err.needed !== needed && err.needed <= MAX_SEND_TOKENS) {
             repriced = true;
             needed = err.needed;
+            shown = tokens;
             continue;
           }
           throw err;
@@ -1773,12 +1786,18 @@ export function createMessaging(deps: MessagingDeps) {
    * leave a link taking first messages through another's mailbox.
    */
   async function ownBundle(link: LinkRecord): Promise<Bundle> {
+    const bundle = await signedBundle(link);
+    const ours = bundle.keys.some((k) => link.keys.some((mine) => mine.from === k.from && (mine.pub === undefined || mine.pub === toBase64Url(k.key))));
+    if (!ours) throw new BundleMismatch('not a key of this link');
+    return bundle;
+  }
+
+  /** One of our links' bundle, signed by our link signing key (the link's fingerprint). */
+  async function signedBundle(link: LinkRecord): Promise<Bundle> {
     const bundle = await api.request('GET', `/links/${link.id}`, {}, checkBundle);
     // Checked as of its newest key's start, so a link whose keys lapsed
     // while the app was away still checks.
     await verifyBundle(link, bundle, Math.max(...bundle.keys.map((k) => k.from)));
-    const ours = bundle.keys.some((k) => link.keys.some((mine) => mine.from === k.from && (mine.pub === undefined || mine.pub === toBase64Url(k.key))));
-    if (!ours) throw new BundleMismatch('not a key of this link');
     return bundle;
   }
 
@@ -1812,9 +1831,9 @@ export function createMessaging(deps: MessagingDeps) {
    * Upkeep, run at a random moment after the app opens: tops up the mailbox
    * pool and the token wallet, so neither is fetched right before a send;
    * deletes old keys whose time has come; forgets what conversations
-   * remember of envelopes too old to come again; fills in what older
-   * versions didn't keep (links' intro mailboxes); gives the link a new key
-   * when due.
+   * remember of envelopes too old to come again; settles a link change
+   * whose answer was lost; fills in what older versions didn't keep (links'
+   * intro mailboxes and keys); gives the link a new key when due.
    */
   async function maintain(): Promise<void> {
     const steps = [
@@ -1833,6 +1852,7 @@ export function createMessaging(deps: MessagingDeps) {
       async () => {
         if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
       },
+      () => settleLinkChange(db, session, api, Math.floor(now() / 1000)),
       backfillLinks,
       backfillIntros,
       () => rotateLinkKey(db, session, Math.floor(now() / 1000)),
@@ -1888,27 +1908,34 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
-   * Links made before their intro mailbox was kept, or before keys were
-   * indexed: both come from the link's bundle. Each sealed key is matched to
-   * the public key there, so first messages to it can be opened.
+   * What older versions didn't keep, from the link's bundle: the intro
+   * mailbox of a link made before it was kept; its keys, if made before keys
+   * were indexed; and a key sealed but never indexed (an older version
+   * published a new key, and the app closed before it indexed it). Each key
+   * the bundle lists that isn't indexed is, if the key sealed here under its
+   * name is its private half, so first messages to it can be opened. A
+   * loose key it doesn't list and older than its newest can never be
+   * offered again, and goes, so it isn't asked about again.
    */
   async function backfillLinks(): Promise<void> {
     for (const link of await listLinks(db)) {
-      const indexed = await hasLinkKey(db, link.id);
-      if (link.mailbox && indexed) continue;
+      const loose = await looseLinkKeys(db, link.id);
+      if (link.mailbox && loose.length === 0 && (await hasLinkKey(db, link.id))) continue;
       let bundle: Bundle;
       try {
-        bundle = await ownBundle(link);
+        // The mailbox is taken only from a bundle listing a key we know is this link's.
+        bundle = link.mailbox ? await signedBundle(link) : await ownBundle(link);
       } catch {
         continue;
       }
-      for (const k of indexed ? [] : bundle.keys) {
-        const own = link.keys.find((mine) => mine.from === k.from);
-        if (own && (await getSealed(db, keyName(link.id, k.from)))) {
-          await indexKey(db, k.key, { name: keyName(link.id, k.from), link: { id: link.id, fingerprint: link.fingerprint, mailbox: bundle.mailbox } });
-        }
+      const mailbox = link.mailbox ?? bundle.mailbox;
+      for (const k of bundle.keys) {
+        const name = keyName(link.id, k.from);
+        if ((await hasKey(db, toBase64Url(k.key))) || !(await sealedMatches(db, name, k.key))) continue;
+        await indexKey(db, k.key, { name, link: { id: link.id, fingerprint: link.fingerprint, mailbox } });
       }
-      await setLinkMailbox(db, link.id, bundle.mailbox);
+      if (loose.length > 0) await dropLooseLinkKeys(db, link.id, loose, Math.max(...bundle.keys.map((k) => k.from)));
+      if (!link.mailbox) await setLinkMailbox(db, link.id, bundle.mailbox);
     }
   }
 

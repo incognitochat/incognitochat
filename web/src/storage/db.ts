@@ -404,6 +404,11 @@ export async function deleteSealed(db: Database, name: string): Promise<void> {
   await db.delete('vault', name);
 }
 
+/** The names of the sealed keys whose names start with prefix. */
+export async function listSealed(db: Database, prefix: string): Promise<string[]> {
+  return (await db.getAllKeys('vault', IDBKeyRange.bound(prefix, `${prefix}\uffff`))).map(String);
+}
+
 export async function getMeta<T>(db: Database, name: string): Promise<T | undefined> {
   return (await db.get('meta', name)) as T | undefined;
 }

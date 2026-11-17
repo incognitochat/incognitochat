@@ -1755,9 +1755,9 @@ export function createApp(deps: Deps) {
     react,
     block,
     writeToLink,
-    createLink: () => linkAction(() => createLink(deps.db, session!), 'created'),
+    createLink: () => linkAction(() => createLink(deps.db, session!, deps.api!), 'created'),
     /** Gives the account a new link in place of its current one. */
-    replaceLink: () => linkAction(() => replaceLink(deps.db, session!), 'replaced'),
+    replaceLink: () => linkAction(() => replaceLink(deps.db, session!, deps.api!), 'replaced'),
     revokeLink: (id: string) => linkAction(() => revokeLink(deps.db, session!, id), 'revoked'),
     /** Opens Telegram's share sheet for a link. */
     share: (url: string) => deps.bridge?.post('web_app_open_tg_link', { path_full: `/share/url?url=${encodeURIComponent(url)}` }),

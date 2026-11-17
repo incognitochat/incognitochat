@@ -199,6 +199,39 @@ keeps blocks and labels. Conversations carry on, since after the first message
 they don't go through the link; a sender the owner hasn't answered yet keeps
 writing to the old intro mailbox until the owner replies.
 
+**A lost answer.** The client picks the new link's ID, and makes and signs
+its keys, before it asks. Without an answer (a timeout, a dropped
+connection, a failure without the server's own error, or the app closing),
+the server may have made the change all the same, so the app keeps what it
+sent: the new private key, sealed and indexed before the request (first
+messages to it open whatever the server did), and a note of the request. It
+deletes them at once only when the server refuses it (a 4xx answer, which
+the server gives before changing anything). It settles the change at the next
+upkeep, and before the next create or replace, from the link's bundle
+(`GET /links/{id}`, checked like any bundle against the link signing key):
+
+- The new key is in it: the change was made, and is taken as if the answer
+  had come (a new link becomes the account's link, in place of the one it
+  replaced, whose keys stay 35 days; a new key becomes the link's, and its
+  older keys go 35 days later).
+- A new key for a link that isn't there, or isn't listed: it wasn't taken.
+  The key is kept 35 days all the same (a bundle read can lag a moment),
+  and the next rotation makes another. The app doesn't rotate while a
+  change is unsettled.
+- A new link that isn't there: when the user creates or replaces again, the
+  same request goes again, with the same ID, so the server can't make two
+  links of one. If that's refused (the ID taken, the account at its limit,
+  the link it replaces gone), the first may have been made after all, and
+  the bundle is asked once more. Upkeep doesn't send it again; it gives the
+  change up 10 minutes after it was sent, when no request can still be on
+  its way.
+- A link of that ID that isn't ours: ours wasn't made.
+
+An older app deleted the key after any failure, and could close between
+publishing a key and indexing it. Upkeep indexes a sealed key that the index
+lacks if the link's bundle lists it and the sealed key is its private half;
+one the bundle doesn't list, older than its newest key, is deleted.
+
 Invitation links use `payload = "inv" ‖ code`, the code being 8 characters from
 `abcdefghjkmnpqrstuvwxyz23456789`, shown as `abcd-efgh`.
 
@@ -540,7 +573,9 @@ key stolen later can't open envelopes someone kept from long before.
 - **A link's encryption key:** every 6 to 9 days, when the app opens, the
   owner publishes a new key (`PUT /links/{id}/keys`); the bundle then lists
   only the new key. A sender the owner hasn't answered yet fetches the bundle
-  again before writing if the key it has is over an hour old.
+  again before writing if the key it has is over an hour old. The new key is
+  indexed before it's sent, and kept if the answer is lost (Links, A lost
+  answer), so first messages to it open even if the server took it unheard.
 - **Deleting old keys:** an old conversation key is deleted 35 days after the
   other side first writes to the new one; an old link key 35 days after it is
   replaced (or after the link is). Undelivered envelopes expire after 30 days,
@@ -960,9 +995,11 @@ how many there are and every one of them before spending any:
 
 - none: `401 invalid_token`;
 - fewer or more than the envelope costs: `402 {"error": "tokens_needed",
-  "needed": <how many it costs>}`. The app puts its tokens back, takes that
-  many (fetching more if it has fewer) and sends again, once, if `needed`
-  is no more than the largest envelope costs. So an app from before the
+  "needed": <how many it costs>}`. The app sends the same envelope to the
+  same mailbox again, once, if `needed` is no more than the largest
+  envelope costs: with the tokens it sent (none was spent), as many as
+  `needed`, and fresh ones for the rest (fetching more if it has fewer);
+  those it no longer needs are dropped (below). So an app from before the
   price changes, either way, still sends;
 - both `token` and `tokens`: `400 bad_request`;
 - one that isn't a send token of this week or last, or one twice:
@@ -975,11 +1012,27 @@ some of its tokens. Fresh tokens can't be sent again and again behind a
 spent one; a refusal costs the database a write unit, plus one for each
 token it burned, and a server remembers the spent ones it meets, so the
 same list refused again costs it nothing. The app drops all the tokens
-it sent (it can't tell which was spent) and tries others; after a send
-whose answer was lost it may meet up to a whole send's worth of spent
-tokens, so it tries until it has dropped more than the largest envelope
-costs. An app from before envelopes were priced by size sends one token,
-whatever the size: an envelope over 2.5 KiB then gets `tokens_needed`.
+it sent (it can't tell which was spent) and tries others, until it has
+dropped more than the largest envelope costs: older apps put the tokens of
+a send whose answer was lost back in the wallet, so one may still hold a
+send's worth of spent ones. An app from before envelopes were priced by
+size sends one token, whatever the size: an envelope over 2.5 KiB then gets
+`tokens_needed`.
+
+**A token goes with one send.** A token the server has seen with an
+envelope and a mailbox is never sent with anything else, even when the
+server didn't spend it: one token with two sends would let the server tie
+them together, and so the mailboxes one anonymous sender writes to,
+whatever their IP addresses. Only sending the same envelope to the same
+mailbox again (after `tokens_needed`, above) uses those tokens again. After
+any other failure (a cap, `invalid_token`, an error, no answer at all) the
+app drops them and never puts them back in its wallet, so a lost answer or
+a refused send costs its tokens, as a sent one does. Media tokens likewise
+are dropped after an upload request that got no answer (they may be spent);
+the only ones that go back to the wallet are those of an upload refused
+because uploads are paused, which the server answers before spending any (an
+upload names no mailbox, so using them again ties nothing anyone receives
+to that try).
 
 The app keeps at least 14 send tokens, twice what the longest message
 costs. Once fewer are left after a send, it fetches a batch at a random
@@ -992,9 +1045,10 @@ just those.
 A token is accepted in its own week and the next, and only once: the server
 remembers spent nonces until then. A send refused by a mailbox's cap (30 a
 minute) doesn't spend its tokens, the first time: each token is given back
-only once, so one refused there again may stay spent (the app then drops
-them and takes others). A send refused by a link's cap on first messages
-(60 an hour) spends its tokens. Clients only accept the issuer keys their build names
+only once, so one refused there again may stay spent. A send refused by a
+link's cap on first messages (60 an hour) spends its tokens. The app can't
+tell the two apart (both are `rate_limited`), and drops the tokens either
+way (A token goes with one send, above). Clients only accept the issuer keys their build names
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.

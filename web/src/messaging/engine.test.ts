@@ -1,11 +1,12 @@
 import 'fake-indexeddb/auto';
 import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLink, listLinks, replaceLink, revokeLink } from '../account/links';
+import { createLink, keyName, listLinks, replaceLink, revokeLink } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
-import { generateVaultKey } from '../crypto/vault';
+import { generateCopyableAgreementKey } from '../crypto/keys';
+import { generateVaultKey, seal } from '../crypto/vault';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
 import { sendTokensFor } from '../protocol/envelope';
@@ -13,12 +14,12 @@ import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
 import { MAX_TEXT_BYTES, newId } from '../protocol/message';
-import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
+import { deleteMeta, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
-import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
+import { KEY_RETENTION_MS, scheduleKeyDeletion, unindexKeys, type KeyEntry } from './keys';
 
 // A modified app chooses its IDs: tests make it reuse some (nextIds).
 vi.mock('../protocol/message', async (importOriginal) => {
@@ -129,6 +130,11 @@ async function fakeBackend() {
   /** Requests to the media routes, as "METHOD path". */
   const mediaCalls: string[] = [];
   const quietSends: boolean[] = [];
+  /** Every send the server saw, refused or not: where to, what, and with which tokens. */
+  const sendAttempts: { mailbox: string; envelope: string; tokens: string[] }[] = [];
+  /** Who owns each link, and how many links an account may have (the real server: one). */
+  const linkOwners = new Map<string, string>();
+  const linkRules = { max: Infinity };
   const uploads = new Map<string, { size: number; deleteHash: string; body: Uint8Array<ArrayBuffer> | null; renewals: number }>();
   /** Every upload URL handed out, every PUT tried, and every wait before trying again. */
   const uploadUrls: string[] = [];
@@ -169,6 +175,7 @@ async function fakeBackend() {
         // A token per started 2.5 KiB of envelope (pricing.extra more), all
         // checked before any is spent, as the server does.
         const paid = tokens ?? (token ? [token] : []);
+        sendAttempts.push({ mailbox, envelope, tokens: paid });
         const needed = sendTokensFor(fromBase64Url(envelope).length) + pricing.extra;
         if (paid.length === 0) throw new ApiError(401, 'invalid_token');
         if (paid.length !== needed) throw new ApiError(402, 'tokens_needed', undefined, needed);
@@ -262,23 +269,32 @@ async function fakeBackend() {
           });
         }
         if (path === '/links') {
+          const id = b.id as string;
           if (b.replaces) {
             // The old link and its intro mailbox go.
             const old = bundles.get(b.replaces as string);
-            if (!old) throw new ApiError(404, 'not_found');
+            if (!old || linkOwners.get(b.replaces as string) !== account) throw new ApiError(404, 'not_found');
+            if (bundles.has(id)) throw new ApiError(409, 'conflict');
             bundles.delete(b.replaces as string);
+            linkOwners.delete(b.replaces as string);
             mailboxes.delete(old.mailbox as string);
+          } else {
+            // As the server counts: the account's limit first, then the ID.
+            if ([...linkOwners.values()].filter((a) => a === account).length >= linkRules.max) throw new ApiError(409, 'link_limit');
+            if (bundles.has(id)) throw new ApiError(409, 'conflict');
           }
           const intro = rand();
           mailboxes.set(intro, account);
-          bundles.set(b.id as string, { signingKey: b.signingKey, keys: b.keys, mailbox: intro });
-          return check({ id: b.id, mailbox: intro });
+          bundles.set(id, { signingKey: b.signingKey, keys: b.keys, mailbox: intro });
+          linkOwners.set(id, account);
+          return check({ id, mailbox: intro });
         }
         if (method === 'DELETE' && path.startsWith('/links/')) {
           // The link and its intro mailbox go.
           const old = bundles.get(path.split('/')[2]!);
           if (!old) throw new ApiError(404, 'not_found');
           bundles.delete(path.split('/')[2]!);
+          linkOwners.delete(path.split('/')[2]!);
           mailboxes.delete(old.mailbox as string);
           return check({});
         }
@@ -316,17 +332,16 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, spent, sendPayments, sendShapes, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, sendShapes, sendAttempts, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, linkOwners, linkRules, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
   const db: Database = await openDatabase(`engine-test-${n++}`);
   await putKey(db, 'vault-key', await generateVaultKey());
   const session = backend.session(account);
-  return {
-    db,
-    session,
-    messaging: createMessaging({
+  /** The app on this device, as it starts (again, after it was closed). */
+  const open = () =>
+    createMessaging({
       db,
       api: backend.api,
       session,
@@ -336,12 +351,37 @@ async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account:
       wait: async (ms) => void backend.waits.push(ms),
       later: backend.schedule,
       ...(now ? { now } : {}),
-    }),
-  };
+    });
+  return { db, session, messaging: open(), open };
+}
+
+/**
+ * The next of someone's logged-in requests that matches reaches the server,
+ * but its answer is lost on the way back (or, with `failure`, the app fails
+ * that way just after, as if it closed).
+ */
+function loseAnswer(who: { session: Session }, method: string, path: RegExp, failure: Error = new NetworkError('answer lost')): void {
+  const call = who.session.call;
+  who.session.call = async function (m, p, ...rest) {
+    if (m !== method || !path.test(p)) return call(m, p, ...rest);
+    who.session.call = call;
+    await call(m, p, ...rest);
+    throw failure;
+  } as Session['call'];
+}
+
+/** The next of someone's logged-in requests that matches fails as it is: it never reaches the server. */
+function failRequest(who: { session: Session }, method: string, path: RegExp, failure: Error): void {
+  const call = who.session.call;
+  who.session.call = async function (m, p, ...rest) {
+    if (m !== method || !path.test(p)) return call(m, p, ...rest);
+    who.session.call = call;
+    throw failure;
+  } as Session['call'];
 }
 
 async function linkOf(backend: Awaited<ReturnType<typeof fakeBackend>>, owner: Awaited<ReturnType<typeof person>>) {
-  const record = await createLink(owner.db, owner.session);
+  const record = await createLink(owner.db, owner.session, backend.api);
   const ref: LinkRef = { id: record.id, fingerprint: record.fingerprint };
   const bundle = await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle);
   return { ref, bundle };
@@ -356,6 +396,23 @@ async function across(from: Database, conv: string, to: Database): Promise<strin
   const there = (await listConversations(to)).filter((c) => c.wire === wire);
   expect(there).toHaveLength(1);
   return there[0]!.id;
+}
+
+/**
+ * Tokens the server saw with two different sends (another envelope, or
+ * another mailbox): each would tie those sends together.
+ */
+function tiedSends(backend: Awaited<ReturnType<typeof fakeBackend>>): string[] {
+  const first = new Map<string, string>();
+  const tied: string[] = [];
+  for (const { mailbox, envelope, tokens } of backend.sendAttempts) {
+    for (const t of tokens) {
+      const send = `${mailbox} ${envelope}`;
+      if ((first.get(t) ?? send) !== send) tied.push(t);
+      first.set(t, first.get(t) ?? send);
+    }
+  }
+  return tied;
 }
 
 describe('messaging between two people', () => {
@@ -565,30 +622,38 @@ describe('paying for sends by size', () => {
     expect(await lost()).toBe(held.length - 2);
   });
 
-  it('pays what the server asks, more or less, once, and keeps the tokens of a send it refuses', async () => {
+  it('pays what the server asks, more or less, once, with the tokens it saw, and drops those of a send it refuses', async () => {
     const { backend, sender, conv, lost } = await chat();
     backend.pricing.extra = 1;
     await sender.messaging.send(conv, 'short');
     expect(backend.sendPayments.at(-1)).toBe(2);
+    // Tried again, the same envelope to the same mailbox: the token it saw, and one more.
+    const [refused, paid] = backend.sendAttempts.slice(-2);
+    expect(paid).toMatchObject({ mailbox: refused!.mailbox, envelope: refused!.envelope });
+    expect(paid!.tokens.slice(0, 1)).toEqual(refused!.tokens);
     expect(await lost()).toBe(0);
-    // A price cut: four for a text the server now prices at two.
+    // A price cut: four for a text the server now prices at two, two of
+    // the four it saw; the other two go to no other send, and are lost.
     backend.pricing.extra = -2;
     await sender.messaging.send(conv, 'a'.repeat(5000));
     expect(backend.sendPayments.at(-1)).toBe(2);
-    expect(await lost()).toBe(0);
-    // More than any envelope can cost: refused, the tokens kept.
+    const [dear, cut] = backend.sendAttempts.slice(-2);
+    expect(cut!.tokens).toEqual(dear!.tokens.slice(0, 2));
+    expect(await lost()).toBe(2);
+    // More than any envelope can cost: refused, and its token dropped.
     backend.pricing.extra = 9;
     const sends = backend.sendPayments.length;
     await expect(sender.messaging.send(conv, 'too dear')).rejects.toMatchObject({ code: 'tokens_needed' });
     expect(backend.sendPayments).toHaveLength(sends);
     expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ text: 'too dear', status: 'failed' });
-    expect(await lost()).toBe(0);
+    expect(await lost()).toBe(3);
+    expect(tiedSends(backend)).toEqual([]);
   });
 
   it('gets past the spent tokens of a send whose answer was lost', async () => {
     const { backend, owner, sender, conv } = await chat();
     const request = backend.api.request;
-    // Delivered, but the answer doesn't come back: its four tokens return to the wallet, spent.
+    // Delivered, but the answer doesn't come back: its four tokens may be spent, and are dropped.
     backend.api.request = async (method, path, init, check) => {
       if (method === 'POST' && path === '/send') {
         backend.api.request = request;
@@ -599,10 +664,51 @@ describe('paying for sends by size', () => {
     };
     await expect(sender.messaging.send(conv, 'a'.repeat(5000))).rejects.toThrow(NetworkError);
     expect(backend.sendPayments.at(-1)).toBe(4);
+    const attempts = backend.sendAttempts.length;
     await sender.messaging.send(conv, 'next');
+    // At once, with a fresh token.
+    expect(backend.sendAttempts).toHaveLength(attempts + 1);
     expect(backend.sendPayments.at(-1)).toBe(1);
     expect(await owner.messaging.sync()).toBe(2);
+    expect(tiedSends(backend)).toEqual([]);
   });
+
+  for (const failure of ['capped', 'unanswered', 'lost'] as const) {
+    it(`shows the tokens of a send that was ${failure} with no other send`, async () => {
+      const { backend, owner, sender, conv, mine } = await chat();
+      // Another conversation of the sender's, to another mailbox.
+      const other = await person(backend, 'other');
+      const link = await linkOf(backend, other);
+      const elsewhere = await sender.messaging.startConversation(link.ref, link.bundle, 'hello there');
+      await owner.messaging.send(mine, 'hi back');
+      await sender.messaging.sync();
+      const request = backend.api.request;
+      backend.api.request = async (method, path, init, check) => {
+        if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
+        backend.api.request = request;
+        // Refused for the mailbox's cap (the tokens given back), never
+        // reaching the server (as far as the app can tell), or delivered
+        // with the answer lost.
+        if (failure === 'lost') {
+          await request(method, path, init, check);
+          throw new NetworkError('answer lost');
+        }
+        const { mailbox, envelope, token, tokens } = JSON.parse(init.body!) as { mailbox: string; envelope: string; token?: string; tokens?: string[] };
+        backend.sendAttempts.push({ mailbox, envelope, tokens: tokens ?? [token!] });
+        throw failure === 'capped' ? new ApiError(429, 'rate_limited') : new NetworkError('no answer');
+      };
+      await expect(sender.messaging.send(conv, 'a'.repeat(5000))).rejects.toThrow();
+      const shown = backend.sendAttempts.at(-1)!.tokens;
+      expect(shown).toHaveLength(4);
+      // The next sends, to the same mailbox and to another: fresh tokens only.
+      await sender.messaging.send(conv, 'again');
+      await sender.messaging.send(elsewhere, 'and here');
+      await sender.messaging.send(conv, 'a'.repeat(5000));
+      expect(backend.sendAttempts.slice(-3).flatMap((a) => a.tokens).filter((t) => shown.includes(t))).toEqual([]);
+      expect(tiedSends(backend)).toEqual([]);
+      expect(await countTokens(sender.db)).toBeGreaterThan(0);
+    });
+  }
 
   it('fetches more in the background once the wallet runs low, not with a send', async () => {
     const { backend, sender, conv, lost } = await chat();
@@ -815,7 +921,7 @@ describe('a replaced link', () => {
     };
     const friendLabel = await labelOf('hi, it is me');
 
-    const record = await replaceLink(owner.db, owner.session);
+    const record = await replaceLink(owner.db, owner.session, backend.api);
     expect(record.fingerprint).toBe(old.ref.fingerprint);
     expect(record.id).not.toBe(old.ref.id);
     expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([record.id]);
@@ -980,6 +1086,225 @@ describe('key rotation', () => {
     expect(backend.bundleFetches).toEqual([ref.id]);
     // Everything arrived, written with the key it had.
     expect(await owner.messaging.sync()).toBe(13);
+  });
+});
+
+describe('link changes whose answer was lost', () => {
+  const DAY = 24 * 3600 * 1000;
+  const linkKeys = async (db: Database, link: string) =>
+    Object.values((await getMeta<Record<string, KeyEntry>>(db, 'recipient-keys')) ?? {}).filter((e) => e.link?.id === link);
+  const bundleOf = (backend: Awaited<ReturnType<typeof fakeBackend>>, id: string) => backend.api.request('GET', `/links/${id}`, {}, checkBundle);
+
+  it('keep a new link key the server took, so first messages to it arrive, and take it at the next upkeep', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    loseAnswer(owner, 'PUT', /^\/links\/.+\/keys$/);
+    await expect(owner.messaging.maintain()).rejects.toThrow(NetworkError);
+    // The server took it: the bundle lists only the new key.
+    const rotated = await bundleOf(backend, ref.id);
+    expect(rotated.keys).toHaveLength(1);
+    expect(toBase64Url(rotated.keys[0]!.key)).not.toBe(toBase64Url(bundle.keys[0]!.key));
+
+    // Someone writes to it before the next upkeep: it arrives.
+    const sender = await person(backend, 'sender', () => clock);
+    await sender.messaging.startConversation(ref, rotated, 'to the new key');
+    expect(await owner.messaging.sync()).toBe(1);
+
+    // The next upkeep takes it as the link's key: no second rotation, and the old key goes in 35 days.
+    await owner.messaging.maintain();
+    expect(toBase64Url((await bundleOf(backend, ref.id)).keys[0]!.key)).toBe(toBase64Url(rotated.keys[0]!.key));
+    const [link] = await listLinks(owner.db);
+    expect(link!.keys.map((k) => k.pub)).toContain(toBase64Url(rotated.keys[0]!.key));
+    expect(link!.rotateAt).toBeGreaterThan(clock / 1000);
+    const keys = await linkKeys(owner.db, ref.id);
+    expect(keys.map((k) => [k.pub, k.deleteAfter !== undefined, k.link!.mailbox])).toEqual([
+      [toBase64Url(bundle.keys[0]!.key), true, bundle.mailbox],
+      [toBase64Url(rotated.keys[0]!.key), false, bundle.mailbox],
+    ]);
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    await (await person(backend, 'later', () => clock)).messaging.startConversation(ref, rotated, 'later');
+    expect(await owner.messaging.sync()).toBe(1);
+  });
+
+  it('keep a new link key when the app closes just after publishing it', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    loseAnswer(owner, 'PUT', /^\/links\/.+\/keys$/, new Error('closed'));
+    await expect(owner.messaging.maintain()).rejects.toThrow('closed');
+    const rotated = await bundleOf(backend, ref.id);
+    await (await person(backend, 'sender', () => clock)).messaging.startConversation(ref, rotated, 'meanwhile');
+    // Opened again: what came opens, and the upkeep settles the key.
+    const app = owner.open();
+    expect(await app.sync()).toBe(1);
+    await app.maintain();
+    expect((await listLinks(owner.db))[0]!.keys.map((k) => k.pub)).toContain(toBase64Url(rotated.keys[0]!.key));
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+  });
+
+  it('index a key an older version published but never indexed, and drop loose ones it no longer offers', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    loseAnswer(owner, 'PUT', /^\/links\/.+\/keys$/);
+    await expect(owner.messaging.maintain()).rejects.toThrow(NetworkError);
+    const rotated = await bundleOf(backend, ref.id);
+    const fresh = toBase64Url(rotated.keys[0]!.key);
+    // As an older version left it, closed between publishing and indexing:
+    // sealed, published, but not indexed, and nothing noted.
+    await deleteMeta(owner.db, 'link-change');
+    await unindexKeys(owner.db, (e) => e.pub === fresh);
+    // And a key it sealed once but never published, older than the link's.
+    const vaultKey = (await getKey(owner.db, 'vault-key'))!;
+    const stray = keyName(ref.id, bundle.keys[0]!.from - 3600);
+    await putSealed(owner.db, stray, await seal(vaultKey, (await generateCopyableAgreementKey()).privateKey, stray));
+
+    const sender = await person(backend, 'sender', () => clock);
+    await sender.messaging.startConversation(ref, rotated, 'to the key never indexed');
+    await owner.messaging.maintain();
+    expect((await linkKeys(owner.db, ref.id)).map((k) => k.pub)).toContain(fresh);
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await getSealed(owner.db, stray)).toBeUndefined();
+    // Nothing loose is left to ask about.
+    backend.bundleFetches.length = 0;
+    await owner.messaging.maintain();
+    expect(backend.bundleFetches).toEqual([]);
+  });
+
+  it('find a new link the server made at the next upkeep, instead of leaving it unknown', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    expect(await listLinks(owner.db)).toEqual([]);
+    const [ghost] = [...backend.bundles.keys()];
+    await owner.messaging.maintain();
+    const [link] = await listLinks(owner.db);
+    const bundle = await bundleOf(backend, ghost!);
+    expect(link).toMatchObject({ id: ghost, mailbox: bundle.mailbox });
+    // It works: first messages through it arrive.
+    await (await person(backend, 'sender')).messaging.startConversation({ id: link!.id, fingerprint: link!.fingerprint }, bundle, 'hi');
+    expect(await owner.messaging.sync()).toBe(1);
+  });
+
+  it('take the link the server made when asked again, rather than hit the limit', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    const [ghost] = [...backend.bundles.keys()];
+    const record = await createLink(owner.db, owner.session, backend.api);
+    expect(record.id).toBe(ghost);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([ghost]);
+    expect(backend.bundles.size).toBe(1);
+  });
+
+  it('send a new link again with the same ID, so the server never makes two', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    const ids: string[] = [];
+    const call = owner.session.call;
+    owner.session.call = async function (method, path, body, ...rest) {
+      if (path === '/links') ids.push((body as { id: string }).id);
+      return call(method, path, body, ...rest);
+    } as Session['call'];
+    // Never got there: the server has nothing.
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    expect(backend.bundles.size).toBe(0);
+    const noted = (await getMeta<{ id: string }>(owner.db, 'link-change'))!.id;
+    const first = await createLink(owner.db, owner.session, backend.api);
+    expect(first.id).toBe(noted);
+    expect(ids).toEqual([noted]);
+
+    // Made, the answer lost, and the bundle read lagging behind: sent again
+    // with the same ID, refused (the account has its link), then found.
+    await revokeLink(owner.db, owner.session, first.id);
+    ids.length = 0;
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    const request = backend.api.request;
+    let lagging = true;
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/') && lagging) {
+        lagging = false;
+        throw new ApiError(404, 'not_found');
+      }
+      return request(method, path, init, check);
+    };
+    const second = await createLink(owner.db, owner.session, backend.api);
+    expect(ids).toEqual([second.id, second.id]);
+    expect([...backend.bundles.keys()]).toEqual([second.id]);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([second.id]);
+  });
+
+  it('take a replacement the server made when asked again, keeping the old keys for 35 days', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    const old = await linkOf(backend, owner);
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(replaceLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    const [ghost] = [...backend.bundles.keys()];
+    expect(ghost).not.toBe(old.ref.id);
+    const record = await replaceLink(owner.db, owner.session, backend.api);
+    expect(record.id).toBe(ghost);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([ghost]);
+    // The old link's keys stay for what was sent to it before.
+    const keys = await linkKeys(owner.db, old.ref.id);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.deleteAfter).toBeDefined();
+    expect(await getSealed(owner.db, keys[0]!.name)).toBeDefined();
+  });
+
+  it("give up on a new link the server doesn't have, once it can't still be on its way", async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(createLink(owner.db, owner.session, backend.api, () => Math.floor(clock / 1000))).rejects.toThrow(NetworkError);
+    const change = (await getMeta<{ id: string }>(owner.db, 'link-change'))!;
+    expect(await listSealed(owner.db, `link:${change.id}:`)).toHaveLength(1);
+    await owner.messaging.maintain();
+    expect(await getMeta(owner.db, 'link-change')).toBeDefined();
+    clock += 11 * 60 * 1000;
+    await owner.messaging.maintain();
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    expect(await listSealed(owner.db, `link:${change.id}:`)).toEqual([]);
+    expect(await linkKeys(owner.db, change.id)).toEqual([]);
+  });
+
+  it('drop the new key at once when the server refuses the change', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    failRequest(owner, 'PUT', /^\/links\/.+\/keys$/, new ApiError(400, 'invalid_link'));
+    await expect(owner.messaging.maintain()).rejects.toMatchObject({ code: 'invalid_link' });
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    expect(await linkKeys(owner.db, ref.id)).toHaveLength(1);
+    expect(await listSealed(owner.db, `link:${ref.id}:key:`)).toHaveLength(1);
+    // The next upkeep rotates.
+    await owner.messaging.maintain();
+    expect(await linkKeys(owner.db, ref.id)).toHaveLength(2);
+
+    const other = await person(backend, 'other');
+    failRequest(other, 'POST', /^\/links$/, new ApiError(403, 'invitation_required'));
+    await expect(createLink(other.db, other.session, backend.api)).rejects.toMatchObject({ code: 'invitation_required' });
+    expect(await getMeta(other.db, 'link-change')).toBeUndefined();
+    expect(Object.values((await getMeta<Record<string, KeyEntry>>(other.db, 'recipient-keys')) ?? {})).toEqual([]);
+    expect(await listSealed(other.db, 'link:')).toEqual([]);
   });
 });
 
@@ -2021,7 +2346,7 @@ describe('envelopes through the mailbox they belong to', () => {
     // On their way when the link is replaced: a first message, and more from p.
     await q.messaging.startConversation(old.ref, old.bundle, 'from q');
     await p.messaging.send(fromP, 'more from p');
-    const record = await replaceLink(owner.db, owner.session);
+    const record = await replaceLink(owner.db, owner.session, backend.api);
     const next = { ref: { id: record.id, fingerprint: record.fingerprint }, bundle: await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle) };
     expect(record.mailbox).toBe(next.bundle.mailbox);
     expect(await owner.messaging.sync()).toBe(2);
@@ -2684,6 +3009,23 @@ describe('uploading and downloading attachments', () => {
     expect(await mine()).toMatchObject({ status: 'sent' });
   });
 
+  it('drops the media tokens of an upload whose answer was lost, so the next upload goes through', async () => {
+    const { backend, send, mine } = await photoChat();
+    const request = backend.api.request;
+    // Paid and stored, but the answer doesn't come back: its token is spent.
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'POST' || path !== '/media') return request(method, path, init, check);
+      backend.api.request = request;
+      await request(method, path, init, check);
+      throw new NetworkError('answer lost');
+    };
+    await expect(send()).rejects.toThrow(NetworkError);
+    expect(await mine()).toMatchObject({ status: 'failed' });
+    await send();
+    expect(await mine()).toMatchObject({ status: 'sent' });
+    expect(backend.mediaCalls.filter((c) => c === 'POST /media')).toHaveLength(2);
+  });
+
   it('counts a 412 as done, even on the first try: the URL writes only once', async () => {
     const { backend, send, mine } = await photoChat();
     backend.down.puts.push('there');
@@ -2885,7 +3227,7 @@ describe('envelopes that come again, or late', () => {
     const owner = await person(backend, 'owner', clocks.owner);
     const sender = await person(backend, 'sender', clocks.sender);
     // A link key a few hours old, so a sender whose clock runs behind can use it too.
-    const record = await createLink(owner.db, owner.session, () => Math.floor(Date.now() / 1000) - 3 * 3600);
+    const record = await createLink(owner.db, owner.session, backend.api, () => Math.floor(Date.now() / 1000) - 3 * 3600);
     const ref: LinkRef = { id: record.id, fingerprint: record.fingerprint };
     const bundle = await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
