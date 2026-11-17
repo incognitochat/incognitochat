@@ -31,6 +31,10 @@ locals {
   # SSM parameters live under this path.
   parameter_path = "/incognitochat/${var.github_environment}"
 
+  # The monthly budget, unless one is given: the same whether this stack is
+  # applied by scripts/bootstrap.sh or directly.
+  monthly_budget_usd = coalesce(var.monthly_budget_usd, var.github_environment == "production" ? 50 : 15)
+
   arns = {
     functions  = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-*"
     notify     = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-notify"

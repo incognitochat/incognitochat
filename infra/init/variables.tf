@@ -35,12 +35,12 @@ variable "github_environment" {
 }
 
 variable "monthly_budget_usd" {
-  description = "Monthly cost budget for the account, in US dollars. Alerts go out at half of it, at all of it, and when the month is forecast to pass it"
+  description = "Monthly cost budget for the account, in US dollars (default: 50 for production, 15 otherwise). Alerts go out at half of it, at all of it, and when the month is forecast to pass it"
   type        = number
-  default     = 10
+  default     = null
 
   validation {
-    condition     = var.monthly_budget_usd > 0
+    condition     = var.monthly_budget_usd == null || try(var.monthly_budget_usd > 0, false)
     error_message = "monthly_budget_usd must be positive."
   }
 }

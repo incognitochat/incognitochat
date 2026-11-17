@@ -191,6 +191,16 @@ data "aws_iam_policy_document" "deploy" {
     resources = [local.arns.lambda_roles]
   }
 
+  # After applying, the deploy asks IAM's policy simulator whether each
+  # function's role, permissions boundary included, allows what it calls
+  # the others for (deploy-environment.yml), so a boundary that wasn't
+  # updated fails the deploy instead of silently stopping pushes.
+  statement {
+    sid       = "CheckLambdaRoles"
+    actions   = ["iam:SimulatePrincipalPolicy"]
+    resources = [local.arns.lambda_roles]
+  }
+
   statement {
     sid       = "PassLambdaRolesToLambdaOnly"
     actions   = ["iam:PassRole"]

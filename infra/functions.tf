@@ -58,9 +58,11 @@ locals {
     # the push after each send, which api asks for without waiting. The
     # WebSocket stage's throttle bounds how often connects run; sends are
     # bounded by their tokens and caps. Twice notify's share: every send
-    # comes here, and only those no open app took go on to notify. Its
-    # socket records in the ephemeral table get their own, narrower
-    # statement below.
+    # comes here, and only those no open app took go on to notify. Connects
+    # and pushes share it, so a flood of sends can hold up connects (refused
+    # ones are tried again by the app, which polls meanwhile), and pushes
+    # that wait over a minute are dropped (below). Its socket records in the
+    # ephemeral table get their own, narrower statement below.
     ws = {
       timeout     = 5
       concurrency = 20
@@ -74,7 +76,8 @@ locals {
       }
     }
     # Generic "New message" notices through the bot. api invokes it to seal
-    # chat IDs, and ws without waiting after a delivery no open app took.
+    # chat IDs (POST /notices waits for that, sharing this concurrency with
+    # notices), and ws without waiting after a delivery no open app took.
     # Its quiet periods in the ephemeral table get their own, narrower
     # statement below.
     notify = {

@@ -22,7 +22,7 @@
 #        REVIEWERS=<login>[,<login>] ... GitHub users who must approve each deploy
 #                                  (when unset, the environment keeps its current ones).
 #        MONTHLY_BUDGET=<dollars> ... the account's monthly cost budget
-#                                  (default: 50 for production, 10 otherwise).
+#                                  (default: 50 for production, 15 otherwise).
 #        AUTO_APPROVE=1 ... skips Terraform's interactive approval.
 #        GITHUB_REPO=<owner>/<repo> ... overrides the repo detected by gh.
 #
@@ -33,7 +33,7 @@ set -euo pipefail
 region=${1:?usage: AWS_PROFILE=<profile> $0 <aws-region> [github-environment]}
 environment=${2:-production}
 deploy_branch=${DEPLOY_BRANCH:-main}
-if [[ $environment == production ]]; then default_budget=50; else default_budget=10; fi
+if [[ $environment == production ]]; then default_budget=50; else default_budget=15; fi
 monthly_budget=${MONTHLY_BUDGET:-$default_budget}
 environment_prefix="incognitochat-${environment}"
 if [[ -n "${DEPLOY_TAGS:-}" ]]; then

@@ -175,6 +175,8 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	return out, nil
 }
 
+func (m *memDirectory) NoDevices(context.Context, time.Time) error { return nil }
+
 type memInbox struct {
 	mu    sync.Mutex
 	items map[string][]inbox.Item // "<account>#<device>" -> items

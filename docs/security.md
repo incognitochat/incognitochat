@@ -135,11 +135,13 @@ it. This is how close it gets.
   open) happens afterwards, in another function the answer doesn't wait
   for, so how long a send takes doesn't say whether their app is open. A
   mailbox that doesn't exist (never did, or ended with a block or the
-  conversation) goes through the same reads and a write that stores
-  nothing, so neither the answer, its time nor a failure says whether a
-  sender was blocked. What's left: that stand-in write deletes an item
-  that isn't there, where a delivery writes the envelope, so for a large
-  envelope a real delivery takes the database a little longer; and "seen"
+  conversation) goes through the same reads and the same write, of the
+  same size, costing the same capacity, to placeholders that hold only
+  zeros ([data.md](data.md#on-the-server)), so neither the answer, its time
+  nor a failure says whether a sender was blocked. What's left: the
+  database finds the mailbox and a device, or the placeholders, and
+  answers a few bytes more or less; and the very first send to such a
+  mailbox in a deployment writes the placeholder device once. "Seen"
   receipts, sent when the person opens the chat, show when they read it.
 - **IP addresses.** AWS sees the IP address of every request, including
   attachment uploads and downloads. GitHub sees the IP address of every app
@@ -248,6 +250,11 @@ it. This is how close it gets.
 - **A blocked sender may still trigger a notice**: the server can't tell a
   blocked first message from any other, so the owner may be notified of a
   message their app then drops.
+- **`api` can ask for notices directly.** Its right to invoke `notify`,
+  which it needs to seal chat IDs, can't be limited to sealing, so `api`
+  (or whoever controls it) could have `notify` send any account a notice,
+  at most one every 3 minutes, skipping `ws`'s check that no open app took
+  the push. The notice is still the generic one, and says nothing more.
 - **The server says which mailbox an envelope came through.** The app
   takes an envelope in only through the mailbox it belongs to
   ([protocol.md](protocol.md#inner-message)), so a user who knows one of

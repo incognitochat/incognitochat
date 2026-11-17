@@ -74,6 +74,9 @@ type Directory interface {
 	Mailbox(ctx context.Context, id string) (directory.Mailbox, error)
 	DiscardMailbox(ctx context.Context, accountID, id string) error
 	Devices(ctx context.Context, accountID string, now time.Time) ([]string, error)
+	// NoDevices looks up the devices of an account that doesn't exist, as
+	// Devices does, at the same cost, and finds none.
+	NoDevices(ctx context.Context, now time.Time) error
 	Mailboxes(ctx context.Context, accountID string) ([]string, error)
 	MailboxCount(ctx context.Context, accountID string, now time.Time) (int, error)
 	// Delete deletes about max items of an account per call, and reports

@@ -238,6 +238,46 @@ jobs:
       - name: Check the deployed code
         run: python3 scripts/check-lambda-deploy.py backend/dist "incognitochat-${ENVIRONMENT}"
 
+      # Each function's role must allow what it calls the others for, and so
+      # must the Lambda permissions boundary, which only an admin applies
+      # (infra/init). A refused call only logs a warning: sends would still
+      # succeed while pushes and notices stopped. IAM's policy simulator
+      # evaluates the role's policy and its boundary together. The ARNs name
+      # the account: masked, and never printed.
+      - name: Check the functions may call each other
+        working-directory: infra
+        run: |
+          checks=$(terraform output -json permission_checks)
+          while read -r arn; do echo "::add-mask::${arn}"; done < <(jq -r '.[] | .role, .resource' <<<"$checks")
+          failed=0
+          while read -r name; do
+            role=$(jq -r --arg n "$name" '.[$n].role' <<<"$checks")
+            action=$(jq -r --arg n "$name" '.[$n].action' <<<"$checks")
+            resource=$(jq -r --arg n "$name" '.[$n].resource' <<<"$checks")
+            decision=""
+            # IAM takes a few seconds to show a role's new policy.
+            for _ in 1 2 3 4 5 6; do
+              if ! decision=$(aws iam simulate-principal-policy --policy-source-arn "$role" \
+                --action-names "$action" --resource-arns "$resource" \
+                --query 'EvaluationResults[0].EvalDecision' --output text 2>/dev/null); then
+                decision="not checked: the deploy role may not run the IAM policy simulator"
+                break
+              fi
+              [ "$decision" = "allowed" ] && break
+              sleep 10
+            done
+            if [ "$decision" = "allowed" ]; then
+              echo "Allowed: ${name}"
+            else
+              echo "::error::Not allowed: ${name} (${decision})"
+              failed=1
+            fi
+          done < <(jq -r 'keys[]' <<<"$checks")
+          if [ "$failed" != 0 ]; then
+            echo "::error::Apply infra/init in this environment (scripts/bootstrap.sh, docs/deployment.md): its permissions boundary or deploy role is older than this code."
+            exit 1
+          fi
+
       - name: Read endpoints
         working-directory: infra
         run: |

@@ -87,6 +87,15 @@ secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 `TF_STATE_BUCKET`, `LAMBDA_BUILDS_BUCKET`, `LAMBDA_SIGNING_PROFILE`,
 `LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`).
 
+CI never changes `infra/init` (it can't change its own permissions). When a
+change touches it, rerun the bootstrap in each environment before that
+change deploys there. Each deploy checks this: after applying, it asks IAM's
+policy simulator whether each function's role, with the permissions
+boundary, allows what the functions call each other for (`api` invoking `ws`
+and `notify`, `ws` invoking `notify` and posting to sockets), and fails if
+not, or if the deploy role may not ask. Otherwise a refused call would only
+log a warning: sends would still succeed while pushes and notices stopped.
+
 Code signing is a versioned bucket for the bundles, an AWS Signer profile,
 and a code signing config set to enforce. Every function must use the config,
 so Lambda runs only code signed by the profile. The deploy role can upload
@@ -97,7 +106,7 @@ Lambda refuses to deploy anything it signed, and replace the profile by
 rerunning the bootstrap.
 
 Alerts are a monthly cost budget (`MONTHLY_BUDGET=<dollars>` when
-bootstrapping; 50 for production and 10 otherwise by default) and a few
+bootstrapping; 50 for production and 15 otherwise by default) and a few
 alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 
 | Alert | When |

@@ -203,10 +203,11 @@ func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller
 //     ws function, which this asks the same way for every send, without
 //     waiting (Pusher).
 //
-// What differs is only what the database finds: the mailbox and a device,
-// or nothing. A link's intro mailbox also counts the link's first
-// messages; a sender knows whether it writes to one, and a link that is
-// gone says so itself (GET /links/{id}).
+// What differs is only what the database finds (the mailbox and a device,
+// or the placeholders), and the very first send to a mailbox that doesn't
+// exist, which writes the placeholder device. A link's intro mailbox also
+// counts the link's first messages; a sender knows whether it writes to
+// one, and a link that is gone says so itself (GET /links/{id}).
 func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /send"
 	var in sendRequest
@@ -279,23 +280,25 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 		}
 	}
 	// A mailbox that doesn't exist takes the same steps for an account
-	// that doesn't exist either: no devices, so a write that stores
-	// nothing, and a push to nobody.
-	owner, pushTo := mailbox.Owner, mailbox.Owner
-	if !exists {
-		owner, pushTo = ids.New(), ""
+	// that doesn't exist either: the same query for its devices, which
+	// finds none (directory.Store.NoDevices), so the same write, to a
+	// placeholder (inbox.Store.Deliver), and a push to nobody.
+	var devices []string
+	if exists {
+		devices, err = s.Directory.Devices(ctx, mailbox.Owner, now)
+	} else {
+		err = s.Directory.NoDevices(ctx, now)
 	}
-	devices, err := s.Directory.Devices(ctx, owner, now)
 	if err != nil {
 		return s.internal(route, err)
 	}
-	if err := s.Inbox.Deliver(ctx, owner, devices, in.Mailbox, env, now); err != nil {
+	if err := s.Inbox.Deliver(ctx, mailbox.Owner, devices, in.Mailbox, env, now); err != nil {
 		return s.internal(route, err)
 	}
 	// Open apps fetch at once, and a notice goes out if none is open, both
 	// from the ws function, which this doesn't wait for. Receipts are
 	// pushed too (they update check marks), but never noticed.
-	s.push(ctx, pushTo, in.Quiet)
+	s.push(ctx, mailbox.Owner, in.Quiet)
 	return accepted()
 }
 
