@@ -1244,7 +1244,12 @@ export function createMessaging(deps: MessagingDeps) {
       // it's already cleared to has nothing more to take.
       if (message.at > cleared) {
         conv.clearedBefore = message.at;
-        conv.theirClear = { upTo: message.at, here: t };
+        // Their app names in `last` the newest of ours it had: nothing of
+        // ours newer than that was theirs before the delete, whatever a
+        // receipt of theirs dated before it says (their clock may have been
+        // set back since).
+        const named = message.last ? await db.get('messages', [conv.id, message.last]) : undefined;
+        conv.theirClear = { upTo: message.at, here: t, ...(named?.out ? { ours: named.at } : {}) };
         clear = true;
       }
     } else if (message.kind === 'message' && (message.text || message.media || message.sticker)) {
@@ -1359,11 +1364,14 @@ export function createMessaging(deps: MessagingDeps) {
     // receipt) takes those too: they had them when they deleted. But never
     // one we wrote after taking the delete in (by our clock): their clock may
     // have been set back since, and then dates what they had of it before
-    // their delete. Only their delete does this, not ours.
+    // their delete. Nor, if the delete's `last` named one of ours, any of
+    // ours newer than that one: their app names the newest of ours it had,
+    // so a newer one (on its way when they deleted) reached them after it,
+    // and they keep it. Only their delete does this, not ours.
     const theirs = conv.theirClear;
     if (theirs && (clear || (had.here && message.at <= theirs.upTo))) {
-      const { upTo, here } = theirs;
-      const { left, unread, removed } = await clearMessages(db, conv.id, { theirs: upTo, oursHadBy: upTo, oursWrittenBy: here });
+      const { upTo, here, ours } = theirs;
+      const { left, unread, removed } = await clearMessages(db, conv.id, { theirs: upTo, oursHadBy: upTo, oursWrittenBy: Math.min(here, ours ?? Infinity) });
       conv.unread = unread;
       // Out of the list until either side writes again.
       if (left === 0) conv.hidden = true;

@@ -2733,7 +2733,7 @@ describe('envelopes that come again, or late', () => {
       expect(await texts('owner')).toEqual(['after']);
     });
 
-    it('a receipt from before it that comes after it takes what it shows they had', async () => {
+    it('from a sender before this version, a late receipt takes no more of ours than the delete names: a leftover, never a loss', async () => {
       let clock = Date.now();
       const now = () => clock;
       const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
@@ -2756,7 +2756,59 @@ describe('envelopes that come again, or late', () => {
       // The delete comes first, then the receipt that shows they had 'two'.
       backend.inboxes.get('owner')!.reverse();
       await owner.messaging.sync();
+      // 'two' stays here, though they had it: nothing after what the delete names is taken.
+      expect(await texts('owner')).toEqual(['two']);
+      expect(await texts('sender')).toEqual([]);
+    });
+
+    it("a receipt from before it that comes after it takes what it shows they had, when the delete names none of ours", async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'one');
+      await sender.messaging.sync();
+      clock += 1000;
+      await sender.messaging.markSeen(conv);
+      // The owner's newest envelope there is a reaction.
+      clock += 1000;
+      await owner.messaging.react(mine, (await listMessages(owner.db, mine))[0]!.id, '👍');
+      await sender.messaging.sync();
+      // They delete the owner's messages here, then (as from before the newest
+      // message was kept) the whole chat: its `last` names the reaction.
+      for (const m of (await listMessages(sender.db, conv)).filter((m) => !m.out)) await sender.messaging.deleteHere(conv, m.id);
+      const { lastMessage: _, ...before } = (await getConversation(sender.db, conv))!;
+      await putConversation(sender.db, before);
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
       expect(await texts('owner')).toEqual([]);
+    });
+
+    it('a message of ours on its way when they deleted stays on both sides, even after their clock is set back', async () => {
+      const base = Date.now();
+      let tick = 0;
+      let skew = 2 * HOUR;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
+      tick += 60_000;
+      await owner.messaging.send(mine, 'inflight');
+      const inflight = backend.inboxes.get('sender')!.pop()!;
+      tick += 60_000;
+      await sender.messaging.remove(conv, true);
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['inflight']);
+      // It reaches them after their delete: newer than the newest of ours they had, so they keep it.
+      backend.inboxes.get('sender')!.push(inflight);
+      await sender.messaging.sync();
+      expect(await texts('sender')).toEqual(['inflight']);
+      // Their clock is set right, and they open the chat: the receipt looks older than their delete.
+      skew = 0;
+      tick += 60_000;
+      await sender.messaging.markSeen(conv);
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['inflight']);
+      expect(await texts('sender')).toEqual(['inflight']);
     });
 
     it('an older one taken in after a newer one changes nothing', async () => {
@@ -2780,26 +2832,30 @@ describe('envelopes that come again, or late', () => {
   });
 
   describe('clocks set back, and both sides agreeing', () => {
-    it('after their delete and their clock set back, what we write after taking the delete in stays', async () => {
-      const base = Date.now();
-      let tick = 0;
-      let skew = 2 * HOUR;
-      const { owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
-      tick += 60_000;
-      await sender.messaging.remove(conv, true);
-      await owner.messaging.sync();
-      // Their clock is set right; everything of theirs is now dated before their delete.
-      skew = 0;
-      tick += 60_000;
-      await owner.messaging.send(mine, 'still here');
-      await sender.messaging.sync();
-      tick += 60_000;
-      // They open the chat: the receipt names the owner's new message.
-      await sender.messaging.markSeen(conv);
-      await owner.messaging.sync();
-      expect(await texts('owner')).toEqual(['still here']);
-      expect(await texts('sender')).toEqual(['still here']);
-    });
+    for (const named of ['one of ours', 'none of ours']) {
+      it(`after their delete (naming ${named}) and their clock set back, what we write after taking the delete in stays`, async () => {
+        const base = Date.now();
+        let tick = 0;
+        let skew = 2 * HOUR;
+        const { owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
+        // Their delete names 'hi'; deleted here, it names none of ours this side has.
+        if (named === 'none of ours') await owner.messaging.deleteHere(mine, (await listMessages(owner.db, mine)).find((m) => m.out)!.id);
+        tick += 60_000;
+        await sender.messaging.remove(conv, true);
+        await owner.messaging.sync();
+        // Their clock is set right; everything of theirs is now dated before their delete.
+        skew = 0;
+        tick += 60_000;
+        await owner.messaging.send(mine, 'still here');
+        await sender.messaging.sync();
+        tick += 60_000;
+        // They open the chat: the receipt names the owner's new message.
+        await sender.messaging.markSeen(conv);
+        await owner.messaging.sync();
+        expect(await texts('owner')).toEqual(['still here']);
+        expect(await texts('sender')).toEqual(['still here']);
+      });
+    }
 
     it('after we delete the chat here and their clock is set back, both sides go on', async () => {
       const base = Date.now();

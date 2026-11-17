@@ -433,32 +433,45 @@ never compares the `delete` with its own times. It deletes:
 - of its own messages, those up to the newest one the sender is known to
   have had when it deleted (its own clock against its own clock). Known
   from the `delete`'s `last`, or from a receipt, a reaction, a reply or a
-  `last` of the sender's with an `at` no later than the `delete`'s. One
-  such receipt that arrives after the `delete` still counts, but only for
-  messages it wrote before it took the `delete` in (by its own clock): if
-  the sender's clock was set back since, its later receipts look older
-  than its delete. That doesn't cover a message of the recipient's that
-  was on its way when the sender deleted: it reaches the sender after the
-  delete and stays there, but if the sender's clock was set back since,
-  anything the sender then sends naming it (a receipt, a reaction, a reply,
-  or `last` on any envelope, even a message itself dropped as sent before
-  the delete) looks older than the delete, and takes it on the recipient's
-  side. This also trusts the recipient's own clock not to go back: if it
-  ran ahead and was set right after the delete was taken in, a message
-  written since can look written before, and be taken the same way.
+  `last` of the sender's with an `at` no later than the `delete`'s; one
+  such receipt that arrives after the `delete` still counts.
 
-So both sides normally keep the same: what the sender isn't known to have
-had hadn't reached it (unless the recipient deleted the message `last`
-names, and nothing else shows it), and the sender keeps it when it
-arrives, since it drops from the other side only what its `last` covered. A `delete` with `all`
-from a version before this one names in `last` the last envelope it took
-in, often a receipt: when that isn't one of the recipient's messages, only
-the sender's receipts, reactions and replies from before the `delete` say
-what it had, and messages of the recipient's it had without any of those
-stay on the recipient's side. The other way, a version before this one
-that receives a `delete` with `all` deletes everything in the
-conversation, both sides', including what it wrote after the `delete` was
-sent.
+What such a receipt can take is bounded twice, by the recipient's own
+clock, since the sender's may have been set back since its delete and then
+dates anything it sends before the delete (a receipt, a reaction, a reply,
+or `last` on any envelope, even a message itself dropped as sent before
+the delete):
+
+- if the `delete`'s `last` names one of the recipient's messages, nothing
+  newer than that one: the sender names the newest of the recipient's
+  messages it had, so a newer one was still on its way when it deleted,
+  reached it after the delete, and stays there;
+- nothing the recipient wrote after it took the `delete` in.
+
+So both sides keep the same: what the sender wasn't known to have had
+hadn't reached it, and it keeps it when it arrives, since it drops from
+the other side only what its `last` covered. Two cases are left. A sender
+from before this version names in `last` its newest message from the
+recipient that it still has (or the last thing it took in), which may be
+older than others it had: those stay on the recipient's side though the
+sender deleted them, a leftover, never a loss (it ends once the sender's
+app is updated, on its next reload). And when `last` names none of the
+recipient's messages (a receipt, or one the recipient deleted), only the
+second bound applies: a message written before the recipient took the
+`delete` in that was still on its way to the sender can then be taken
+here after the sender's clock was set back, though the sender keeps it.
+Both bounds trust the recipient's own clock not to go back: if it ran
+ahead and was set right after the delete was taken in, a message written
+since can look written before.
+
+A `delete` with `all` from a version before this one names in `last` the
+last envelope it took in, often a receipt: when that isn't one of the
+recipient's messages, only the sender's receipts, reactions and replies
+from before the `delete` say what it had, and messages of the recipient's
+it had without any of those stay on the recipient's side. The other way,
+a version before this one that receives a `delete` with `all` deletes
+everything in the conversation, both sides', including what it wrote
+after the `delete` was sent.
 
 *Deleting the conversation on this device only* deletes everything here and
 remembers each message here, one by one (above): what comes again is
