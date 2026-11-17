@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -67,8 +68,33 @@ type Spent struct {
 	seen map[string]int64 // spent nonce -> when its record expires (Unix seconds)
 }
 
+// TokenNonce is a token to spend: its nonce, and when the token stops being
+// accepted anyway.
+type TokenNonce struct {
+	Nonce       []byte
+	ForgetAfter time.Time
+}
+
 // maxSeen bounds the in-memory record of spent tokens; it starts over when full.
 const maxSeen = 8192
+
+// known reports whether this instance has seen the token spent.
+func (sp *Spent) known(key string, now time.Time) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	until, ok := sp.seen[key]
+	return ok && now.Unix() < until
+}
+
+// remember records, in memory, that a token is spent.
+func (sp *Spent) remember(key string, forgetAfter time.Time) {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.seen == nil || len(sp.seen) >= maxSeen {
+		sp.seen = map[string]int64{}
+	}
+	sp.seen[key] = expiry(forgetAfter)
+}
 
 // Spend records a token's nonce until forgetAfter (when the token stops
 // being accepted anyway). It reports false if the token was spent already,
@@ -76,10 +102,7 @@ const maxSeen = 8192
 func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
 	now := sp.Now()
-	sp.mu.Lock()
-	until, known := sp.seen[key]
-	sp.mu.Unlock()
-	if known && now.Unix() < until {
+	if sp.known(key, now) {
 		return false, nil
 	}
 	// An update, not a put, so a token given back keeps r when spent again.
@@ -98,13 +121,39 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 		return false, err
 	}
 	// Spent either way: just now, or before.
-	sp.mu.Lock()
-	if sp.seen == nil || len(sp.seen) >= maxSeen {
-		sp.seen = map[string]int64{}
-	}
-	sp.seen[key] = expiry(forgetAfter)
-	sp.mu.Unlock()
+	sp.remember(key, forgetAfter)
 	return fresh, nil
+}
+
+// SpendAll spends several tokens, one at a time in the order given, as
+// Spend does, and stops at the first that was spent already (and not given
+// back since): it reports false then, and the tokens before that one stay
+// spent. So a list with a spent token in it can't keep its others for
+// another try, and a refusal costs the table one write unit, plus one for
+// each token it burned. A list with a token this instance has seen spent,
+// or with one token twice, is refused before anything is written.
+//
+// Not a transaction: DynamoDB charges a cancelled one two write units a
+// token, and spends nothing, so a list with one spent token in it would
+// cost the table that much on every try.
+func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error) {
+	now := sp.Now()
+	keys := make([]string, len(tokens))
+	for i, t := range tokens {
+		keys[i] = base64.RawURLEncoding.EncodeToString(t.Nonce)
+		if sp.known(keys[i], now) || slices.Contains(keys[:i], keys[i]) {
+			return false, nil
+		}
+	}
+	if len(tokens) == 0 {
+		return false, nil
+	}
+	for _, t := range tokens {
+		if fresh, err := sp.Spend(ctx, t.Nonce, t.ForgetAfter); err != nil || !fresh {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // Unspend gives back a token that Spend just took, when what it paid for

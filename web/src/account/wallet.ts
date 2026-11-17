@@ -1,7 +1,8 @@
 // The token wallets: tokens fetched while logged in and spent without
-// logging in (design §11). Send tokens pay one per message to another
-// person; media tokens pay one per started MiB of an upload, from a budget
-// of their own. Kept on the device only.
+// logging in (design §11). Send tokens pay for what goes to another person,
+// one per started 2.5 KiB of envelope (protocol/envelope.ts, sendTokensFor):
+// one for anything but a long text. Media tokens pay one per started MiB of
+// an upload, from a budget of their own. Kept on the device only.
 //
 // Tokens are fetched in batches, never right before a send: the issuer would
 // otherwise see an account fetch one and, a moment later, an anonymous send.
@@ -26,8 +27,12 @@ const KINDS: Record<TokenKind, { meta: string; lock: string; path: string; label
 export const MAX_BATCH = 50;
 /** Batch size for send tokens. */
 export const TOKEN_BATCH = 20;
-/** Refill send tokens when fewer than this many are left. */
-export const LOW_WATER = 10;
+/**
+ * Refill send tokens when fewer than this many are left: twice what the
+ * longest message costs (7), so a refill in the background is almost always
+ * done before a send finds the wallet short.
+ */
+export const LOW_WATER = 14;
 /** Batch size for media tokens: more than the largest upload costs (26). */
 export const MEDIA_BATCH = 30;
 /** Refill media tokens when fewer than the largest upload costs are left. */
@@ -54,14 +59,30 @@ export async function rememberLeft(db: Database, kind: TokenKind, left: number, 
   await putMeta(db, LEFT_META[kind], { day: Math.floor(now / DAY_SECONDS), left });
 }
 
+/** How many more tokens of a kind the server said it will sign today; null if it hasn't said today. */
+async function signableToday(db: Database, now: number, kind: TokenKind): Promise<number | null> {
+  const value = await getMeta<{ day?: unknown; left?: unknown }>(db, LEFT_META[kind]);
+  if (!value || value.day !== Math.floor(now / DAY_SECONDS) || !Number.isSafeInteger(value.left)) return null;
+  return value.left as number;
+}
+
 /**
  * How many tokens of a kind can still be spent today: those here plus what
  * the server will still sign. Null until the server has said so today.
  */
 export async function budgetLeft(db: Database, now = nowSeconds(), kind: TokenKind = 'send'): Promise<number | null> {
-  const value = await getMeta<{ day?: unknown; left?: unknown }>(db, LEFT_META[kind]);
-  if (!value || value.day !== Math.floor(now / DAY_SECONDS) || !Number.isSafeInteger(value.left)) return null;
-  return (value.left as number) + (await countTokens(db, now, kind));
+  const left = await signableToday(db, now, kind);
+  return left === null ? null : left + (await countTokens(db, now, kind));
+}
+
+/**
+ * How many tokens to ask for: `wanted`, but no more than the server said it
+ * will still sign today. It signs a batch whole or not at all, so the day's
+ * last few come only in a batch that small.
+ */
+export async function batchFor(db: Database, wanted: number, now = nowSeconds(), kind: TokenKind = 'send'): Promise<number> {
+  const left = await signableToday(db, now, kind);
+  return left === null ? wanted : Math.min(wanted, left);
 }
 
 async function stored(db: Database, kind: TokenKind): Promise<StoredToken[]> {
@@ -122,19 +143,32 @@ export function refillTokens(
   });
 }
 
-/** Takes one token to spend (the oldest still accepted), or null if none are left. */
-export function takeToken(db: Database, now = nowSeconds(), kind: TokenKind = 'send'): Promise<StoredToken | null> {
+/**
+ * Takes `count` tokens to spend (the oldest still accepted), all or none:
+ * null if fewer are left.
+ */
+export function takeTokens(db: Database, count: number, now = nowSeconds(), kind: TokenKind = 'send'): Promise<StoredToken[] | null> {
   return withLock(KINDS[kind].lock, async () => {
     const tokens = usable(await stored(db, kind), now).sort((a, b) => a.epoch - b.epoch);
-    const next = tokens.shift();
+    const taken = tokens.length >= count ? tokens.splice(0, count) : null;
     await putMeta(db, KINDS[kind].meta, tokens);
-    return next ?? null;
+    return taken;
   });
 }
 
-/** Puts back a token that wasn't spent (the send failed before reaching the server). */
-export function returnToken(db: Database, token: string, epoch: number, kind: TokenKind = 'send'): Promise<void> {
+/** Takes one token to spend (the oldest still accepted), or null if none are left. */
+export async function takeToken(db: Database, now = nowSeconds(), kind: TokenKind = 'send'): Promise<StoredToken | null> {
+  return (await takeTokens(db, 1, now, kind))?.[0] ?? null;
+}
+
+/** Puts back tokens that weren't spent (the send failed before reaching the server, or was refused before any was spent). */
+export function returnTokens(db: Database, tokens: StoredToken[], kind: TokenKind = 'send'): Promise<void> {
   return withLock(KINDS[kind].lock, async () => {
-    await putMeta(db, KINDS[kind].meta, [{ token, epoch }, ...(await stored(db, kind))]);
+    await putMeta(db, KINDS[kind].meta, [...tokens, ...(await stored(db, kind))]);
   });
+}
+
+/** Puts back a token that wasn't spent. */
+export function returnToken(db: Database, token: string, epoch: number, kind: TokenKind = 'send'): Promise<void> {
+  return returnTokens(db, [{ token, epoch }], kind);
 }

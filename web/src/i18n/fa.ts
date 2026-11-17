@@ -223,7 +223,7 @@ export const fa = {
   usageTotal: 'در کل',
   usageResets: 'ساعت {time} از نو شروع می‌شود ({in}).',
   usageMessages: 'پیام‌ها',
-  usageMessagesNote: 'رسید دیدن، واکنش، ویرایش و حذف هم حساب می‌شوند.',
+  usageMessagesNote: 'رسید دیدن، واکنش، ویرایش و حذف هم حساب می‌شوند. متن خیلی بلند چند پیام حساب می‌شود.',
   usageFiles: 'فایل‌ها',
   usageFilesNote: 'آنچه می‌فرستید حساب می‌شود، نه آنچه دریافت می‌کنید.',
   usageNewChats: 'گفت‌وگوهای تازه',

@@ -62,11 +62,12 @@ func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
 	s := Server{
 		Telegram: o.Telegram, Sessions: o.Sessions, Nonces: o.Nonces, Pepper: o.Pepper, Log: o.Log, Now: o.Now,
 		InviteOnly: o.InviteOnly, Admins: o.Admins, Pause: o.Pause, Issuer: o.Issuer, MediaIssuer: o.MediaIssuer,
-		Spent: o.Spent, Notices: o.Notices, Push: o.Push, Sockets: o.Sockets, Media: o.Media, Uploads: o.Uploads,
+		Notices: o.Notices, Push: o.Push, Sockets: o.Sockets, Media: o.Media, Uploads: o.Uploads,
 		Switches:  o.Switches,
 		Directory: &directory.Store{DB: tb.meter, Table: tb.directory},
 		Inbox:     &inbox.Store{DB: tb.meter, Table: tb.messages},
 		Limits:    &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now, Timeout: testTimeout},
+		Spent:     &ephemeral.Spent{DB: tb.meter, Table: tb.ephemeral, Now: now},
 	}
 	r := httpapi.NewRouter()
 	s.Routes(r)
@@ -137,7 +138,7 @@ func TestDeliveryCapacity(t *testing.T) {
 	largest := make([]byte, envelope.MaxLen)
 	largest[0], largest[1] = envelope.Suite, envelope.MaxWraps
 	for i := range 50 {
-		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%2], "envelope": base64.RawURLEncoding.EncodeToString(largest), "token": mintToken(t, h.now)}); status != http.StatusOK {
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": boxes[i%2], "envelope": base64.RawURLEncoding.EncodeToString(largest), "tokens": mintTokens(t, h.now, envelope.MaxTokens)}); status != http.StatusOK {
 			t.Fatalf("send: %d %v", status, out)
 		}
 	}

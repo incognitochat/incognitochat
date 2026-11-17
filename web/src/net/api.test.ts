@@ -63,6 +63,17 @@ describe('api', () => {
     expect(((await other.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError).serverTime).toBeUndefined();
   });
 
+  it('reads how many send tokens an envelope costs from a tokens_needed answer', async () => {
+    const needed = createApi('https://api.example', fake(402, '{"error":"tokens_needed","needed":4}'));
+    expect(await needed.post('/send', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ status: 402, code: 'tokens_needed', needed: 4 });
+    for (const n of ['"4"', '0', '-1', '1.5', 'null']) {
+      const odd = createApi('https://api.example', fake(402, `{"error":"tokens_needed","needed":${n}}`));
+      const err = (await odd.post('/send', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError;
+      expect(err.code).toBe('tokens_needed');
+      expect(err.needed).toBeUndefined();
+    }
+  });
+
   it('reports unreachable servers and unexpected bodies as NetworkError', async () => {
     const down = createApi('https://api.example', async () => {
       throw new TypeError('Failed to fetch');

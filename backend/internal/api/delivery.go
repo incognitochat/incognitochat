@@ -58,7 +58,8 @@ const (
 	// largest envelopes take about 2.8 each, so about 18,000 of them, read
 	// once each (the app confirms what it reads before reading on, and
 	// stops reading once three pages wait to be confirmed). One sender's
-	// day of tokens spent on the largest envelopes is 1,000 of them.
+	// day of tokens buys 125 of the largest envelopes (8 tokens each), or
+	// 1,000 of 2.5 KiB: some 300 read units either way.
 	InboxUnitsPerDay = 50_000
 	// MinRequestUnits is the least one counted fetch counts against its
 	// minute, whatever it read: each writes its counter, so a device
@@ -113,7 +114,12 @@ type Inbox interface {
 type sendRequest struct {
 	Mailbox  string `json:"mailbox"`
 	Envelope string `json:"envelope"` // base64url
-	Token    string `json:"token"`    // base64url, an anonymous send token
+	// Tokens are anonymous send tokens (base64url), as many as the
+	// envelope costs (envelope.TokensFor).
+	Tokens []string `json:"tokens"`
+	// Token is the one token of an app from before envelopes were priced
+	// by size: the same as Tokens with one.
+	Token string `json:"token"`
 	// Quiet sends trigger no Telegram notice (seen receipts).
 	Quiet bool `json:"quiet"`
 }
@@ -180,8 +186,10 @@ func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller
 
 // send delivers an envelope to a mailbox's owner, without logging in: the
 // server learns the recipient (to deliver) but not the sender. Each send
-// spends one anonymous token (tokens.go), which can't be linked to the
-// account it was issued to. Unknown,
+// spends anonymous tokens (tokens.go), which can't be linked to the
+// account they were issued to: one per started 2.5 KiB of envelope
+// (envelope.TokensFor), so the daily budget bounds what a person's sends
+// cost the messages table, not just how many there are. Unknown,
 // discarded and blocked mailboxes get the same answer, in similar time, and
 // nothing is stored for them.
 func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response {
@@ -201,22 +209,20 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 		return httpapi.Error(http.StatusBadRequest, "invalid_envelope")
 	}
 	now := s.Now()
-	token, err := base64.RawURLEncoding.Strict().DecodeString(in.Token)
-	if err != nil {
-		return httpapi.Error(http.StatusUnauthorized, "invalid_token")
+	// Every token is checked, and their number, before any is spent.
+	tokens, refused := s.sendTokens(in, len(env), now)
+	if refused != nil {
+		return *refused
 	}
-	nonce, forgetAfter, err := s.Issuer.Check(token, now)
-	if err != nil {
-		return httpapi.Error(http.StatusUnauthorized, "invalid_token")
-	}
-	// A mailbox known to be at its cap is refused before the token is
-	// spent: retrying, or replaying one token at it, costs the table nothing.
+	// A mailbox known to be at its cap is refused before the tokens are
+	// spent: retrying, or replaying tokens at it, costs the table nothing.
 	if s.Limits.Full("send#"+in.Mailbox, SendsPerMailboxPerMinute, time.Minute) {
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
-	// The token is spent before anything is counted, so a replayed token
-	// can't use up a mailbox's limit.
-	fresh, err := s.Spent.Spend(ctx, nonce, forgetAfter)
+	// The tokens are spent before anything is counted, so replayed tokens
+	// can't use up a mailbox's limit. One spent already ends the send, and
+	// those before it stay spent.
+	fresh, err := s.Spent.SpendAll(ctx, tokens)
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -228,9 +234,9 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 		return s.internal(route, err)
 	}
 	if !ok {
-		// The sender gets the token back, the first time, and can try
-		// again later (ephemeral.Spent.Unspend).
-		if err := s.Spent.Unspend(ctx, nonce); err != nil {
+		// The sender gets the tokens back, each the first time, and can
+		// try again later (ephemeral.Spent.Unspend).
+		if err := s.unspendAll(ctx, tokens); err != nil {
 			return s.internal(route, err)
 		}
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")

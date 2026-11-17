@@ -548,12 +548,14 @@ each mailbox's owner, to deliver, but not who writes to it.
   (`POST /mailboxes`, up to 10 a request, 100 a day and 4,000 in all per
   account) and take one when a conversation needs it, so creating one never
   happens right before a send.
-- `POST /send {mailbox, envelope, token, quiet?}` needs no login, only a send
-  token. The server checks the envelope's layout and the caps, then stores the
-  envelope once for each of the owner's devices. Unknown and discarded
-  mailboxes get the same `200 {}`, after a similar pause, and nothing is
-  stored. `quiet` sends (seen receipts, reactions, edits, deletes and key
-  updates) trigger no notice.
+- `POST /send {mailbox, envelope, token | tokens, quiet?}` needs no login,
+  only send tokens: as many as the envelope costs, one per started 2.5 KiB
+  (Send tokens, below), so one for all but long texts. The server checks
+  the envelope's layout, the tokens and the caps, then stores the envelope
+  once for each of the owner's devices. Unknown and discarded mailboxes get
+  the same `200 {}`, after a similar pause, and nothing is stored. `quiet`
+  sends (seen receipts, reactions, edits, deletes and key updates) trigger
+  no notice.
 - `GET /inbox` returns a page of a device's undelivered envelopes in no
   meaningful order, each with the mailbox it came through
   (`{id, mailbox, envelope}`): the app takes an envelope in only through the
@@ -594,7 +596,7 @@ each mailbox's owner, to deliver, but not who writes to it.
   - A confirmation may claim at most 300 write units (a small envelope is
     one, a larger one one per started KiB): a page never claims more.
     Confirming envelopes that are there isn't otherwise limited: they were
-    delivered, and their senders paid for that with tokens. Confirming
+    delivered, and their senders paid for that with tokens, by size. Confirming
     envelopes that aren't there (any more), or with IDs too old, is limited
     per person to 1,000 a day (UTC), as many as a day's send tokens; past
     that, confirmations delete nothing until the next day, and the
@@ -819,9 +821,10 @@ receipts, though not whose. Telegram learns when someone gets messages, in
 
 ## Send tokens and media tokens
 
-Every `POST /send` spends one anonymous send token, and every upload one
-media token per started MiB, so the server can limit both without learning
-who sends. Tokens are RSA blind signatures (RFC 9474,
+Every `POST /send` spends anonymous send tokens, one per started 2.5 KiB of
+envelope, and every upload one media token per started MiB, so the server
+can limit both, by what they cost it, without learning who sends. Tokens
+are RSA blind signatures (RFC 9474,
 RSABSSA-SHA384-PSS-Deterministic) in the shape of Privacy Pass token type 2
 (RFC 9578):
 
@@ -840,7 +843,7 @@ sees the tokens it signs:
 
 | Kind | Route | A request | A day (UTC) |
 |---|---|---|---|
-| Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes) |
+| Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes), by size (below) |
 | Media tokens | `POST /tokens/media` | at most 50 | 500: 500 MiB of uploads |
 
 Each answer also says `left`: how many more of that kind the person may
@@ -855,12 +858,65 @@ The two kinds have different issuer keys. A blind signer can't see what it
 signs, so only a key of its own gives a kind its own daily budget; a token
 of one kind is refused where the other is asked for.
 
+**What a send costs.** An envelope of `n` bytes costs `ceil(n / 2560)` send
+tokens, at least one. Storing it costs the database a write unit per
+started KiB, as much again to delete it, and reading it a read unit per
+8 KiB, so a token buys at most three write units however the envelope is
+made up, and a person's day of tokens at most about 3,000. The app's
+envelopes (one wrap):
+
+| Inner message padded to | Envelope | What it holds | Tokens |
+|---|---|---|---|
+| 512 | 663 bytes | short texts, stickers, receipts for a few messages, reactions, deletes, key updates, short edits | 1 |
+| 2048 | 2,199 bytes | texts up to about 1,700 bytes (about 850 Persian letters), attachments, receipts for up to 68 messages | 1 |
+| 8192 | 8,343 bytes | texts up to about 7,800 bytes | 4 |
+| 16384 | 16,535 bytes | texts up to 12,000 bytes | 7 |
+
+The largest envelope there can be (16 wraps, 18,350 bytes) costs 8. The
+app names at most 50 messages in one receipt, so a receipt costs one.
+
+A send pays with one token as `token`, or several as a list, `tokens`
+(`token` is taken like `tokens` with one; the app sends one as `token`,
+which servers from before sizes were priced take too). The server checks
+how many there are and every one of them before spending any:
+
+- none: `401 invalid_token`;
+- fewer or more than the envelope costs: `402 {"error": "tokens_needed",
+  "needed": <how many it costs>}`. The app puts its tokens back, takes that
+  many (fetching more if it has fewer) and sends again, once, if `needed`
+  is no more than the largest envelope costs. So an app from before the
+  price changes, either way, still sends;
+- both `token` and `tokens`: `400 bad_request`;
+- one that isn't a send token of this week or last, or one twice:
+  `401 invalid_token`.
+
+It then spends them one at a time, in the order given, and stops at the
+first one spent already: the send is refused (`invalid_token`), and the
+tokens before that one **stay spent**, so a refused list may have spent
+some of its tokens. Fresh tokens can't be sent again and again behind a
+spent one; a refusal costs the database a write unit, plus one for each
+token it burned, and a server remembers the spent ones it meets, so the
+same list refused again costs it nothing. The app drops all the tokens
+it sent (it can't tell which was spent) and tries others; after a send
+whose answer was lost it may meet up to a whole send's worth of spent
+tokens, so it tries until it has dropped more than the largest envelope
+costs. An app from before envelopes were priced by size sends one token,
+whatever the size: an envelope over 2.5 KiB then gets `tokens_needed`.
+
+The app keeps at least 14 send tokens, twice what the longest message
+costs. Once fewer are left after a send, it fetches a batch at a random
+moment 10 to 90 seconds later, not with the send, since the issuer sees
+which account fetches when. A send that finds the wallet short fetches
+right then, as a last resort. The server signs a batch whole or not at all,
+so when it has said fewer than a batch are left today, the app asks for
+just those.
+
 A token is accepted in its own week and the next, and only once: the server
 remembers spent nonces until then. A send refused by a mailbox's cap (30 a
-minute) doesn't spend its token, the first time: a token is given back only
-once, so one refused there again may stay spent (the app then drops it and
-takes another). A send refused by a link's cap on first messages (60 an
-hour) spends its token. Clients only accept the issuer keys their build names
+minute) doesn't spend its tokens, the first time: each token is given back
+only once, so one refused there again may stay spent (the app then drops
+them and takes others). A send refused by a link's cap on first messages
+(60 an hour) spends its tokens. Clients only accept the issuer keys their build names
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.
@@ -893,3 +949,4 @@ logged-in admin, and every change also a device signature
 | Envelope layout (sealed by the client) | `backend/internal/envelope/testdata` |
 | Blind RSA (RFC 9474 Appendix A, PSS-Deterministic) | `web/src/crypto/blindrsa-vectors.json`, `backend/internal/tokens/testdata` |
 | Send-token challenge | `backend/internal/tokens`, `web/src/protocol/token.test.ts` |
+| Send tokens an envelope costs | `backend/internal/envelope`, `web/src/protocol/envelope.test.ts` |

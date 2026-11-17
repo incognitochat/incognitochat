@@ -12,11 +12,13 @@
 // written for a link's key, through that link's intro mailbox; one written
 // for a conversation's key, through our mailbox for that conversation.
 //
-// Sends carry no login: they go to POST /send with an anonymous token.
+// Sends carry no login: they go to POST /send with anonymous tokens, as many
+// as the envelope costs (one for anything but a long text).
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { introMailbox, keyName, listLinks, rotateLinkKey, setLinkMailbox, type LinkRecord } from '../account/links';
 import {
+  batchFor,
   countTokens,
   LOW_WATER,
   MAX_BATCH,
@@ -24,12 +26,16 @@ import {
   MEDIA_LOW_WATER,
   refillTokens,
   returnToken,
+  returnTokens,
   takeToken,
+  takeTokens,
+  TOKEN_BATCH,
   type StoredToken,
   type TokenIssuer,
 } from '../account/wallet';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
+import { MAX_ENVELOPE, sendTokensFor } from '../protocol/envelope';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import { EDIT_GRACE_MS, EDIT_WINDOW_MS, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
 import { getMeta, getSealed, putMeta, type ConversationRecord, type Database } from '../storage/db';
@@ -110,7 +116,16 @@ const MAX_CONFIRMED = 1000;
 const UNCONFIRMED_FOR_MS = 3600 * 1000;
 /** How many IDs may wait to be confirmed before a sync stops reading more (three pages): else what can't be confirmed yet is read again and again. */
 const MAX_PENDING = 150;
-const MAX_SEEN = 100;
+/**
+ * The most messages one receipt names: the protocol takes 100, but 50 keep
+ * a receipt in the smaller envelopes, at one send token (68 would fit).
+ */
+const MAX_SEEN = 50;
+/** The most send tokens one envelope can cost: what the largest there can be costs. */
+const MAX_SEND_TOKENS = sendTokensFor(MAX_ENVELOPE);
+/** Send tokens are fetched in the background this long after the wallet runs low, plus up to TOP_UP_SPREAD_MS more, at random. */
+const TOP_UP_MIN_MS = 10_000;
+const TOP_UP_SPREAD_MS = 80_000;
 const META_BLOCKED = 'blocked-tags';
 /** When the mailboxes were last checked (healMailboxes), Unix ms. */
 const META_MAILBOXES_CHECKED = 'mailboxes-checked';
@@ -183,6 +198,8 @@ export interface MessagingDeps {
   transfer?: Transfer;
   /** Waits ms before an upload is tried again (tests don't wait). */
   wait?: (ms: number) => Promise<void>;
+  /** Runs fn after ms, for work in the background (tests run it when they choose); returns what cancels it. */
+  later?: (fn: () => void, ms: number) => () => void;
   /** Called after send tokens were spent or fetched, so the app can say when they run low. */
   onTokens?: () => void;
   /**
@@ -291,6 +308,12 @@ export function createMessaging(deps: MessagingDeps) {
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? httpTransfer;
   const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const later =
+    deps.later ??
+    ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    });
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
 
   /**
@@ -1001,27 +1024,95 @@ export function createMessaging(deps: MessagingDeps) {
     });
   }
 
-  /** Sends an envelope to a mailbox with a token, without logging in. */
+  /**
+   * Sends an envelope to a mailbox without logging in, paying with as many
+   * send tokens as it costs (sendTokensFor).
+   */
   async function deliver(mailbox: string, envelope: Uint8Array, quiet: boolean): Promise<void> {
+    let needed = sendTokensFor(envelope.length);
+    let dropped = 0;
+    let repriced = false;
     try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const token = await nextToken();
+      for (;;) {
+        const tokens = await nextTokens(needed);
         try {
-          const body = { mailbox, envelope: toBase64Url(envelope), token: token.token, ...(quiet ? { quiet: true } : {}) };
+          // One token as `token`, which every server version takes (one from
+          // before sizes were priced refuses `tokens`); several as `tokens`.
+          const paid = tokens.length === 1 ? { token: tokens[0]!.token } : { tokens: tokens.map((t) => t.token) };
+          const body = { mailbox, envelope: toBase64Url(envelope), ...paid, ...(quiet ? { quiet: true } : {}) };
           await api.post('/send', body, checkObject);
           return;
         } catch (err) {
-          // A token the server refuses (spent, or too old) is dropped; try another.
-          if (err instanceof ApiError && err.code === 'invalid_token' && attempt === 0) continue;
-          // Not spent: a capped send, or one that may never have arrived.
-          if ((err instanceof ApiError && err.code === 'rate_limited') || err instanceof NetworkError) {
-            await returnToken(db, token.token, token.epoch);
+          // Tokens the server refuses (one spent, or too old) are dropped, all
+          // that went with them; try others. More than once, but no more
+          // than one send's worth: the tokens of a send whose answer was lost
+          // come back to the wallet together (below), spent.
+          if (err instanceof ApiError && err.code === 'invalid_token') {
+            dropped += tokens.length;
+            if (dropped <= MAX_SEND_TOKENS) continue;
+            throw err;
+          }
+          // Not spent: a capped send, one that may never have arrived, or
+          // one the server prices differently from this app.
+          if ((err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'tokens_needed')) || err instanceof NetworkError) {
+            await returnTokens(db, tokens);
+          }
+          // Pay what the server asks, more or less, once, if it's no more
+          // than an envelope can cost.
+          if (err instanceof ApiError && err.code === 'tokens_needed' && !repriced && err.needed !== undefined && err.needed !== needed && err.needed <= MAX_SEND_TOKENS) {
+            repriced = true;
+            needed = err.needed;
+            continue;
           }
           throw err;
         }
       }
     } finally {
       deps.onTokens?.();
+      await topUpSoon().catch(() => {});
+    }
+  }
+
+  /** Cancels the refill of send tokens waiting to run (topUpSoon), if any. */
+  let cancelTopUp: (() => void) | undefined;
+
+  /**
+   * Once fewer than LOW_WATER send tokens are left, fetches more at a random
+   * moment TOP_UP_MIN_MS to TOP_UP_MIN_MS + TOP_UP_SPREAD_MS later, not with
+   * a send: the issuer sees which account fetches when, and a fetch right
+   * before an anonymous send would say whose it was. The wallet keeps enough
+   * for two of the longest messages meanwhile.
+   */
+  async function topUpSoon(): Promise<void> {
+    const low = (await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER;
+    if (!low || cancelTopUp) return;
+    cancelTopUp = later(() => {
+      cancelTopUp = undefined;
+      void topUp().catch(() => {});
+    }, TOP_UP_MIN_MS + Math.random() * TOP_UP_SPREAD_MS);
+  }
+
+  /** Fetches a batch of send tokens if fewer than LOW_WATER are left. */
+  async function topUp(): Promise<void> {
+    if ((await countTokens(db, Math.floor(now() / 1000))) >= LOW_WATER) return;
+    await fetchSendTokens(TOKEN_BATCH);
+    deps.onTokens?.();
+  }
+
+  /**
+   * Fetches a batch of send tokens, `count` or more, or the day's last few
+   * if fewer are left (batchFor). Throws NoTokens once the day's are used up.
+   */
+  async function fetchSendTokens(count: number): Promise<void> {
+    const seconds = Math.floor(now() / 1000);
+    const batch = await batchFor(db, Math.max(TOKEN_BATCH, count), seconds);
+    if (batch < 1) throw new NoTokens();
+    try {
+      await refillTokens(db, session, issuer, batch, seconds);
+    } catch (err) {
+      // The day's tokens are used up.
+      if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
+      throw err;
     }
   }
 
@@ -1059,22 +1150,19 @@ export function createMessaging(deps: MessagingDeps) {
     return taken;
   }
 
-  async function nextToken(): Promise<StoredToken> {
-    let token = await takeToken(db, Math.floor(now() / 1000));
-    if (!token) {
-      // Out of tokens: fetching right before a send is a timing hint, but
-      // the wallet is normally refilled well ahead (maintain()).
-      try {
-        await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
-      } catch (err) {
-        // The day's tokens are used up.
-        if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
-        throw err;
-      }
-      token = await takeToken(db, Math.floor(now() / 1000));
+  /** Takes the send tokens a send costs, fetching more if the wallet has fewer. */
+  async function nextTokens(count: number): Promise<StoredToken[]> {
+    const seconds = () => Math.floor(now() / 1000);
+    let tokens = await takeTokens(db, count, seconds());
+    if (!tokens) {
+      // Too few: fetching right before a send is a timing hint, but the
+      // wallet is normally refilled well ahead (maintain(), topUpSoon()),
+      // with twice what the longest message costs.
+      await fetchSendTokens(count);
+      tokens = await takeTokens(db, count, seconds());
     }
-    if (!token) throw new NoTokens();
-    return token;
+    if (!tokens) throw new NoTokens();
+    return tokens;
   }
 
   /**
@@ -1259,7 +1347,7 @@ export function createMessaging(deps: MessagingDeps) {
       fetchPausedUntil = now() + SYNC_PAUSE_MS * (1 + Math.random());
       fetchPauseMax = 2 * SYNC_PAUSE_MS;
     }
-    stop();
+    clearResume();
     scheduleResume();
   }
 
@@ -1280,10 +1368,19 @@ export function createMessaging(deps: MessagingDeps) {
     );
   }
 
-  /** Stops the timer a pause set: the app no longer syncs (signed out, or the engine replaced). */
-  function stop(): void {
+  function clearResume(): void {
     clearTimeout(resumeTimer);
     resumeTimer = undefined;
+  }
+
+  /**
+   * Stops the timers a pause and a low wallet set: the app no longer syncs
+   * or sends (signed out, or the engine replaced).
+   */
+  function stop(): void {
+    clearResume();
+    cancelTopUp?.();
+    cancelTopUp = undefined;
   }
 
   function rememberConfirmed(ids: string[]): void {
@@ -1712,12 +1809,7 @@ export function createMessaging(deps: MessagingDeps) {
       async () => {
         if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
       },
-      async () => {
-        if ((await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER) {
-          await refillTokens(db, session, issuer, undefined, Math.floor(now() / 1000));
-          deps.onTokens?.();
-        }
-      },
+      topUp,
       async () => {
         if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
           await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');

@@ -8,10 +8,11 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import { generateVaultKey } from '../crypto/vault';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
+import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
-import { countTokens, LOW_WATER } from '../account/wallet';
-import { newId } from '../protocol/message';
+import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
+import { MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, SyncFailed, type MessagingDeps } from './engine';
@@ -74,6 +75,7 @@ async function fakeBackend() {
   const issuer: TokenIssuer = { key, keyId: new Uint8Array(await crypto.subtle.digest('SHA-256', await crypto.subtle.exportKey('spki', pair.publicKey))) };
   const d = big(jwk.d!);
   let mediaSigned = 0;
+  let signed = 0;
 
   const mailboxes = new Map<string, string>(); // mailbox -> owner account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
@@ -84,6 +86,24 @@ async function fakeBackend() {
   const paging = { size: 0, next: true };
   const inboxFetches: string[] = [];
   const spent = new Set<string>();
+  /**
+   * How many send tokens each delivered send paid with, and whether as
+   * `token` or `tokens`; and how many more than its size the server asks
+   * for (fewer, if negative).
+   */
+  const sendPayments: number[] = [];
+  const sendShapes: ('token' | 'tokens')[] = [];
+  const pricing = { extra: 0 };
+  /** Work the apps put off for later (MessagingDeps.later), for a test to run. */
+  const later: { fn: () => void; ms: number }[] = [];
+  const schedule = (fn: () => void, ms: number) => {
+    const job = { fn, ms };
+    later.push(job);
+    return () => {
+      const i = later.indexOf(job);
+      if (i >= 0) later.splice(i, 1);
+    };
+  };
   const seenEnvelopes: string[] = [];
   const sendHeaders: (Record<string, string> | undefined)[] = [];
   /**
@@ -145,10 +165,18 @@ async function fakeBackend() {
     async request(method, path, init, check) {
       if (method === 'POST' && path === '/send') {
         sendHeaders.push(init.headers);
-        const { mailbox, envelope, token, quiet } = JSON.parse(init.body!) as Record<string, string>;
-        quietSends.push(quiet === (true as unknown as string));
-        if (!token || spent.has(token)) throw new ApiError(401, 'invalid_token');
-        spent.add(token);
+        const { mailbox, envelope, token, tokens, quiet } = JSON.parse(init.body!) as { mailbox: string; envelope: string; token?: string; tokens?: string[]; quiet?: boolean };
+        // A token per started 2.5 KiB of envelope (pricing.extra more), all
+        // checked before any is spent, as the server does.
+        const paid = tokens ?? (token ? [token] : []);
+        const needed = sendTokensFor(fromBase64Url(envelope).length) + pricing.extra;
+        if (paid.length === 0) throw new ApiError(401, 'invalid_token');
+        if (paid.length !== needed) throw new ApiError(402, 'tokens_needed', undefined, needed);
+        if (paid.some((t) => spent.has(t)) || new Set(paid).size !== paid.length) throw new ApiError(401, 'invalid_token');
+        quietSends.push(quiet === true);
+        paid.forEach((t) => spent.add(t));
+        sendPayments.push(paid.length);
+        sendShapes.push(tokens ? 'tokens' : 'token');
         seenEnvelopes.push(envelope!);
         const owner = mailboxes.get(mailbox!);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: mailbox!, envelope: envelope! });
@@ -228,6 +256,7 @@ async function fakeBackend() {
         }
         if (path === '/tokens' || path === '/tokens/media') {
           if (path === '/tokens/media') mediaSigned += (b.blinded as string[]).length;
+          else signed += (b.blinded as string[]).length;
           return check({
             signatures: (b.blinded as string[]).map((x) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(x)), d, key.n), 256))),
           });
@@ -287,7 +316,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, sendShapes, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -305,6 +334,7 @@ async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account:
       mediaIssuer: backend.issuer,
       transfer: backend.transfer,
       wait: async (ms) => void backend.waits.push(ms),
+      later: backend.schedule,
       ...(now ? { now } : {}),
     }),
   };
@@ -482,6 +512,131 @@ describe('messaging between two people', () => {
 
     await sender.messaging.startConversation(ref, bundle, 'still reaches you');
     expect(await owner.messaging.sync()).toBe(1);
+  });
+});
+
+describe('paying for sends by size', () => {
+  async function chat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    /** Send tokens fetched and neither spent nor in a wallet: lost. */
+    const lost = async () =>
+      backend.signed() - backend.sendPayments.reduce((a, b) => a + b, 0) - (await countTokens(owner.db)) - (await countTokens(sender.db));
+    return { backend, owner, sender, conv, mine, lost };
+  }
+
+  it('pays for a long text by its size, and for anything else with one token', async () => {
+    const { backend, owner, sender, conv, mine, lost } = await chat();
+    await sender.messaging.send(conv, 'short');
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    await sender.messaging.send(conv, 'س'.repeat(MAX_TEXT_BYTES / 2));
+    expect(backend.sendPayments.slice(-3)).toEqual([1, 4, 7]);
+    // One token as `token`, which servers from before sizes were priced take too.
+    expect(backend.sendShapes.slice(-3)).toEqual(['token', 'tokens', 'tokens']);
+    expect(await owner.messaging.sync()).toBe(3);
+    await owner.messaging.markSeen(mine);
+    expect(backend.sendPayments.at(-1)).toBe(1);
+    expect(await lost()).toBe(0);
+  });
+
+  it('sends receipts for at most 50 messages, at one token each', async () => {
+    const { backend, owner, sender, conv, mine } = await chat();
+    for (let i = 0; i < 59; i++) await sender.messaging.send(conv, `m${i}`);
+    await owner.messaging.sync();
+    const before = backend.sendPayments.length;
+    await owner.messaging.markSeen(mine);
+    expect(backend.sendPayments.slice(before)).toEqual([1, 1]);
+  });
+
+  it('fetches more tokens when the wallet has fewer than a send costs', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, 2));
+    const signed = backend.signed();
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    expect(backend.signed()).toBeGreaterThan(signed);
+    // The two held back aren't in the wallet any more, nor spent.
+    expect(await lost()).toBe(held.length - 2);
+  });
+
+  it('pays what the server asks, more or less, once, and keeps the tokens of a send it refuses', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    backend.pricing.extra = 1;
+    await sender.messaging.send(conv, 'short');
+    expect(backend.sendPayments.at(-1)).toBe(2);
+    expect(await lost()).toBe(0);
+    // A price cut: four for a text the server now prices at two.
+    backend.pricing.extra = -2;
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.sendPayments.at(-1)).toBe(2);
+    expect(await lost()).toBe(0);
+    // More than any envelope can cost: refused, the tokens kept.
+    backend.pricing.extra = 9;
+    const sends = backend.sendPayments.length;
+    await expect(sender.messaging.send(conv, 'too dear')).rejects.toMatchObject({ code: 'tokens_needed' });
+    expect(backend.sendPayments).toHaveLength(sends);
+    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ text: 'too dear', status: 'failed' });
+    expect(await lost()).toBe(0);
+  });
+
+  it('gets past the spent tokens of a send whose answer was lost', async () => {
+    const { backend, owner, sender, conv } = await chat();
+    const request = backend.api.request;
+    // Delivered, but the answer doesn't come back: its four tokens return to the wallet, spent.
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'POST' && path === '/send') {
+        backend.api.request = request;
+        await request(method, path, init, check);
+        throw new NetworkError('answer lost');
+      }
+      return request(method, path, init, check);
+    };
+    await expect(sender.messaging.send(conv, 'a'.repeat(5000))).rejects.toThrow(NetworkError);
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    await sender.messaging.send(conv, 'next');
+    expect(backend.sendPayments.at(-1)).toBe(1);
+    expect(await owner.messaging.sync()).toBe(2);
+  });
+
+  it('fetches more in the background once the wallet runs low, not with a send', async () => {
+    const { backend, sender, conv, lost } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, LOW_WATER + 1));
+    backend.later.length = 0;
+    const signed = backend.signed();
+    // Below LOW_WATER after this send: nothing is fetched now, a fetch is put off.
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.signed()).toBe(signed);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    // Another send meanwhile puts off no second one.
+    await sender.messaging.send(conv, 'still low');
+    expect(backend.later).toHaveLength(1);
+    expect(backend.signed()).toBe(signed);
+    // When it runs: a batch, with no send near it.
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await countTokens(sender.db)).toBeGreaterThanOrEqual(LOW_WATER));
+    expect(backend.signed()).toBeGreaterThan(signed);
+    expect(await lost()).toBe(held.length - LOW_WATER - 1);
+  });
+
+  it("asks for only the day's last few when fewer than a batch are left", async () => {
+    const { backend, sender, conv } = await chat();
+    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    await returnTokens(sender.db, held.slice(0, 2));
+    // The server said it will sign 5 more today: a batch of 20 would be refused.
+    await rememberLeft(sender.db, 'send', 5);
+    const signed = backend.signed();
+    await sender.messaging.send(conv, 'a'.repeat(5000));
+    expect(backend.sendPayments.at(-1)).toBe(4);
+    expect(backend.signed()).toBe(signed + 5);
   });
 });
 
@@ -1857,7 +2012,7 @@ describe('envelopes through the mailbox they belong to', () => {
 
 /** Another copy of the app on someone's device: the same storage, its own engine. */
 function copyOf(backend: Awaited<ReturnType<typeof fakeBackend>>, p: Person, extra: Partial<MessagingDeps> = {}) {
-  return createMessaging({ db: p.db, api: backend.api, session: p.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, ...extra });
+  return createMessaging({ db: p.db, api: backend.api, session: p.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, wait: async () => {}, later: backend.schedule, ...extra });
 }
 
 /** A gate: reached once something comes to it, and everything waits there until released. */
@@ -2384,7 +2539,7 @@ describe('a database from before conversations had IDs of their own', () => {
     const name = `engine-v3-${n++}`;
     await asVersion3(owner.db, name, { [(await getConversation(sender.db, conv))!.wire]: [{ id: oopsId, at: Date.now() }] });
     const db = await openDatabase(name);
-    const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer });
+    const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer, later: backend.schedule });
     // Its conversations keep the IDs they had: their wire IDs.
     const [answered, waiting] = [(await getConversation(sender.db, conv))!.wire, (await getConversation(other.db, unanswered))!.wire];
     expect((await listConversations(db)).map((c) => c.id).sort()).toEqual([answered, waiting].sort());

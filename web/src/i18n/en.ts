@@ -222,7 +222,7 @@ export const en = {
   usageTotal: 'In total',
   usageResets: 'Starts over at {time}, {in}.',
   usageMessages: 'Messages',
-  usageMessagesNote: 'Seen receipts, reactions, edits and deletes count too.',
+  usageMessagesNote: 'Seen receipts, reactions, edits and deletes count too. A very long text counts as several.',
   usageFiles: 'Files',
   usageFilesNote: 'Counts what you send, not what you receive.',
   usageNewChats: 'New chats',

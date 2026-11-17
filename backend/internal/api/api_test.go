@@ -26,6 +26,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/devicelist"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/inbox"
@@ -625,11 +626,47 @@ func (m *memSpent) Spend(_ context.Context, nonce []byte, _ time.Time) (bool, er
 	return true, nil
 }
 
+// SpendAll spends in order up to the first spent already, as
+// ephemeral.Spent does; each token tried counts as a call.
+func (m *memSpent) SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) (bool, error) {
+	for i, t := range tokens {
+		for _, prev := range tokens[:i] {
+			if bytes.Equal(prev.Nonce, t.Nonce) {
+				return false, nil
+			}
+		}
+	}
+	for _, t := range tokens {
+		if fresh, _ := m.Spend(ctx, t.Nonce, t.ForgetAfter); !fresh {
+			return false, nil
+		}
+	}
+	return len(tokens) > 0, nil
+}
+
 func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.spent, string(nonce))
 	return nil
+}
+
+// count is how many of tokens are spent.
+func (m *memSpent) count(t *testing.T, tokens []string) int {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, token := range tokens {
+		raw, err := base64.RawURLEncoding.DecodeString(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.spent[string(raw[2:34])] {
+			n++
+		}
+	}
+	return n
 }
 
 // testIssuer and testMediaIssuer are one issuer key of each kind for the
@@ -657,6 +694,16 @@ func newTestIssuer(label string) *tokens.Issuer {
 func mintToken(t *testing.T, now time.Time) string {
 	t.Helper()
 	return mint(t, testIssuer(), tokens.LabelSend, now)
+}
+
+// mintTokens makes n send tokens.
+func mintTokens(t *testing.T, now time.Time, n int) []string {
+	t.Helper()
+	out := make([]string, n)
+	for i := range out {
+		out[i] = mintToken(t, now)
+	}
+	return out
 }
 
 // mintMediaToken makes a media token, which pays for uploads.

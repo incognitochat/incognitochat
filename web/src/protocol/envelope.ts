@@ -34,6 +34,19 @@ export const MAX_INNER = LARGEST - 4;
 /** The largest envelope there can be. */
 export const MAX_ENVELOPE = 2 + MAX_WRAPS * WRAP_LENGTH + NONCE_LENGTH + LARGEST + TAG_LENGTH;
 
+/**
+ * How much envelope one send token pays for (docs/protocol.md, Send tokens):
+ * a started 2.5 KiB. With one wrap, an inner message padded to 512 or 2048
+ * bytes (every receipt, reaction, delete, key update, attachment, and text
+ * up to about 1,700 bytes) costs one; 8192, four; 16384, seven.
+ */
+export const TOKEN_BYTES = 2560;
+
+/** How many send tokens an envelope of this many bytes costs. */
+export function sendTokensFor(envelopeLength: number): number {
+  return Math.max(Math.ceil(envelopeLength / TOKEN_BYTES), 1);
+}
+
 export class EnvelopeError extends Error {
   constructor(reason: string) {
     super(`envelope: ${reason}`);

@@ -3,6 +3,7 @@ package ephemeral
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -160,6 +161,120 @@ func TestSpentGivesBackOnce(t *testing.T) {
 	// Other tokens are unaffected.
 	if ok, err := a.Spend(ctx, []byte("another nonce, 32 bytes long....."), forget); !ok || err != nil {
 		t.Fatalf("another token: %v, %v", ok, err)
+	}
+}
+
+// Several tokens are spent one at a time, in order, up to the first spent
+// already: those before it stay spent, so a list with a spent token in it
+// can't be tried again and again with the same others, and a refusal
+// costs one write unit plus one for each token it burned (DLV-4).
+func TestSpendAll(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	table := dynamotest.Table(t, client)
+	now := func() time.Time { return start }
+	instance := func() *Spent { return &Spent{DB: meter, Table: table, Now: now} }
+	ctx := context.Background()
+	forget := start.Add(time.Hour)
+	token := func(i int) TokenNonce {
+		return TokenNonce{Nonce: []byte(fmt.Sprintf("nonce %d, 32 bytes long........", i)), ForgetAfter: forget}
+	}
+	list := func(from, to int) []TokenNonce {
+		var out []TokenNonce
+		for i := from; i < to; i++ {
+			out = append(out, token(i))
+		}
+		return out
+	}
+	writes := func() float64 {
+		w := meter.Units(table).Write
+		meter.Reset()
+		return w
+	}
+	if ok, err := instance().Spend(ctx, token(0).Nonce, forget); !ok || err != nil {
+		t.Fatalf("spend one: %v, %v", ok, err)
+	}
+	// The spent one first: refused at once, for one write unit, and the
+	// others aren't touched.
+	writes()
+	b := instance()
+	if ok, err := b.SpendAll(ctx, list(0, 8)); ok || err != nil {
+		t.Fatalf("a spent token first: %v, %v", ok, err)
+	}
+	if w := writes(); w != 1 {
+		t.Fatalf("refusing it cost %v write units", w)
+	}
+	// This instance learned it was spent: asked again, it writes nothing.
+	if ok, err := b.SpendAll(ctx, list(0, 8)); ok || err != nil {
+		t.Fatalf("again: %v, %v", ok, err)
+	}
+	if w := writes(); w != 0 {
+		t.Fatalf("a known refusal wrote %v", w)
+	}
+	// One twice: refused before anything is written.
+	if ok, err := instance().SpendAll(ctx, append(list(1, 4), token(1))); ok || err != nil {
+		t.Fatalf("a token twice: %v, %v", ok, err)
+	}
+	if w := writes(); w != 0 {
+		t.Fatalf("a token twice wrote %v", w)
+	}
+	// The spent one last, on another instance: the three before it are
+	// burned (a write unit each, plus one for the refusal); none can be
+	// used again, anywhere.
+	fillers := list(1, 4)
+	if ok, err := instance().SpendAll(ctx, append(append([]TokenNonce{}, fillers...), token(0))); ok || err != nil {
+		t.Fatalf("a spent token last: %v, %v", ok, err)
+	}
+	if w := writes(); w != 4 {
+		t.Fatalf("refusing it cost %v write units, want 4", w)
+	}
+	if ok, err := instance().SpendAll(ctx, append(append([]TokenNonce{}, fillers...), token(9))); ok || err != nil {
+		t.Fatalf("the burned fillers again: %v, %v", ok, err)
+	}
+	if ok, err := instance().Spend(ctx, token(9).Nonce, forget); !ok || err != nil {
+		t.Fatalf("a token after a burned one was spent: %v, %v", ok, err)
+	}
+	// Seven fresh ones: spent, a write unit each.
+	writes()
+	if ok, err := instance().SpendAll(ctx, list(1+10, 8+10)); !ok || err != nil {
+		t.Fatalf("seven fresh: %v, %v", ok, err)
+	}
+	if w := writes(); w != 7 {
+		t.Fatalf("spending 7 cost %v write units", w)
+	}
+	if ok, err := instance().SpendAll(ctx, list(4, 8)); !ok || err != nil {
+		t.Fatalf("the rest: %v, %v", ok, err)
+	}
+	// All spent now, on every instance.
+	for i := 1; i < 8; i++ {
+		if ok, err := instance().Spend(ctx, token(i).Nonce, forget); ok || err != nil {
+			t.Fatalf("token %d spent twice: %v, %v", i, ok, err)
+		}
+	}
+	// Given back, each once: they can be spent together again, once.
+	c := instance()
+	for _, tk := range list(1, 8) {
+		if err := c.Unspend(ctx, tk.Nonce); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := c.SpendAll(ctx, list(1, 8)); !ok || err != nil {
+		t.Fatalf("given back: %v, %v", ok, err)
+	}
+	for _, tk := range list(1, 8) {
+		if err := c.Unspend(ctx, tk.Nonce); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, err := instance().SpendAll(ctx, list(1, 8)); ok || err != nil {
+		t.Fatalf("given back twice: %v, %v", ok, err)
+	}
+	// One token goes as Spend does.
+	if ok, err := instance().SpendAll(ctx, list(20, 21)); !ok || err != nil {
+		t.Fatalf("one: %v, %v", ok, err)
+	}
+	if ok, err := instance().SpendAll(ctx, nil); ok || err != nil {
+		t.Fatalf("none: %v, %v", ok, err)
 	}
 }
 
