@@ -8,8 +8,8 @@ import { generateVaultKey, seal, unseal } from '../crypto/vault';
 import {
   addMessage,
   clearMedia,
+  clearMessages,
   deleteMessage,
-  deleteMessages,
   findLinkConversation,
   getMedia,
   getMessage,
@@ -25,6 +25,8 @@ import { DB_VERSION, getKey, getKeyPair, getMeta, getSealed, openDatabase, putKe
 
 let n = 0;
 const fresh = () => openDatabase(`test-${n++}`);
+/** Deletes all of a conversation's messages, as deleting the whole conversation does. */
+const deleteMessages = (db: Database, conv: string) => clearMessages(db, conv, { theirs: Infinity, ours: Infinity });
 
 describe('storage', () => {
   it('keeps a non-extractable key pair usable after reopening', async () => {

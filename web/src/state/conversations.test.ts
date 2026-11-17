@@ -625,6 +625,10 @@ describe('conversations in the app', () => {
     // The other side still has it.
     await sender.sync();
     expect(screenOf(sender.screen.value, 'conversation').messages).toHaveLength(2);
+    // Delivered again (a server that kept it), it stays deleted here.
+    await b.api.post('/send', b.sends[0]!, (v) => v);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['the answer']);
   });
 
   it('says when attachments are paused, keeps the message and its tokens, and offers to send it again', async () => {

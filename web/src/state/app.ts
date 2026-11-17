@@ -38,7 +38,7 @@ import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
 import { createMessaging, isPaused, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
-import { clearMedia, deleteMessage, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
+import { clearMedia, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
 import type { Recording, RoundRecording } from '../media/record';
@@ -1562,13 +1562,14 @@ export function createApp(deps: Deps) {
     preparing,
     /** The Telegram app's platform, e.g. "ios", "android", "tdesktop". */
     platform: deps.launch.platform,
-    /** Deletes one message from this device (the other side keeps theirs). */
+    /**
+     * Deletes one message from this device (the other side keeps theirs).
+     * One of theirs stays deleted if it's delivered again.
+     */
     deleteMessage: async (id: string) => {
       const current = screen.value;
-      if (current.kind !== 'conversation') return;
-      const message = current.messages.find((m) => m.id === id);
-      if (message) await messaging?.discardUploads([message]);
-      await deleteMessage(deps.db, current.id, id);
+      if (current.kind !== 'conversation' || !messaging) return;
+      await messaging.deleteHere(current.id, id);
       deps.broadcast({ type: 'data-changed' });
       const now = currentScreen();
       if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, messages: await listMessages(deps.db, current.id) };

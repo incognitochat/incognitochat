@@ -24,9 +24,24 @@ A change to what the code stores updates this page in the same change.
 Keys, conversations, their history, attachments received or sent, labels, and
 blocks. History and attachments are encrypted under a key that can't leave the
 device. None of it leaves the device in readable form. It's deleted when the
-user deletes a conversation, deletes the account or sets up again, or when
-Telegram or the phone clears the app's storage. Attachments can also be
+user deletes the account or sets up again, or when Telegram or the phone
+clears the app's storage. Deleting a conversation deletes its history and
+attachments; its record (keys and mailboxes included) stays, out of the list,
+so it can come back if either side writes again. Attachments can also be
 cleared on their own (Data and storage), and their messages stay.
+
+So that a message delivered again, or late, can't undo anything (bring back
+something deleted, wipe newer history, or move the app back to an older key
+or mailbox), each conversation also keeps, without any content:
+
+| What | How long |
+|---|---|
+| Which of the other side's envelopes it took in: a keyed hash of each one's ID (made with the account's secret, so it can't be matched to the ID, on the other person's device say, without that), with only the day it was sent; at most 2,000 | Until 31 days after that day ends (removed at the next upkeep, or the next time something arrives in that chat) |
+| Which messages were deleted one by one: keyed hashes the same way, with the day; at most 1,000 | The same |
+| The time, by the other side's clock, up to which the conversation was cleared (deleted on this device, or for both sides) | 31 days |
+| The time, by the other side's clock, and keyed hash of the newest envelope it took in | While the conversation is kept |
+| For a received message, when it was sent by the other side's clock, if that's later than when it arrived; for a sent one, the earliest time (their clock) something of theirs showed they had it | With the message |
+| A reaction that arrived before its message, sealed like message text | Until the message arrives, or 31 days |
 
 ## On the server
 

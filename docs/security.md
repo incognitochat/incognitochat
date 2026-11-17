@@ -39,7 +39,7 @@ device.
 |---|---|---|
 | A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments. No content, no senders, no conversation pairs. |
 | The operator or AWS account holder, passively | Read the database, logs and settings | The same. |
-| The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can't read content or forge messages, as long as the app itself isn't swapped. |
+| The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | The bot-token holder | Everything Telegram's bot APIs allow | Who uses the bot, when notices go out. No content. Can send look-alike notices that open a look-alike page, which has none of the user's keys. |
 | The BotFather owner | Change the Mini App's address | Can point the app at a malicious page, for everyone or for chosen people. The largest remaining risk; see below. |
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
@@ -59,6 +59,18 @@ it. This is how close it gets.
 - Read anyone's messages or attachments.
 - Learn from stored data who wrote to whom, or who an anonymous sender is.
 - Forge messages or slip them into a conversation.
+- Undo what happened in a conversation by delivering old envelopes again,
+  or out of order: bring back a deleted message or chat, wipe later history
+  with an old "delete for both", or move an app back to the other side's
+  older key or mailbox. Each app remembers, per conversation and as keyed
+  hashes only, which envelopes it took in and which messages were deleted,
+  for as long as an envelope can still be taken in (31 days); takes key
+  and mailbox changes only from newer envelopes, by the sender's clock; and
+  a "delete for both" takes only what was written before it
+  ([protocol.md](protocol.md#inner-message), Replays and order). The
+  operator can still hold an envelope back and deliver it late, within
+  those 31 days, as it can drop it; delivered late, it does what it would
+  have done on time, nothing more.
 - Swap someone's keys unnoticed: every link carries its key's fingerprint, and
   the app checks it.
 - Collect logins and signed requests dated far ahead, to replay them later:
