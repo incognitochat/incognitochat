@@ -10,7 +10,7 @@
 
 import { concat, randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import type { Media, Sticker } from '../protocol/message';
-import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type MessageRecord } from '../storage/db';
+import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type IdDays, type MessageRecord } from '../storage/db';
 import { withLock } from '../sync/locks';
 
 const STORAGE_KEY = 'storage-key';
@@ -91,6 +91,61 @@ export async function findLinkConversation(db: Database, link: string, wire: str
 
 export async function putConversation(db: Database, conversation: ConversationRecord): Promise<void> {
   await db.put('conversations', conversation);
+}
+
+/**
+ * What a conversation remembers by keyed hashes (messaging/replay.ts):
+ * applied, envelopes of theirs taken in; gone, their messages they deleted;
+ * dropped, messages the user deleted here. Kept in `meta`, one item per
+ * conversation and kind, apart from the conversation record: that is read
+ * whenever the chat list is shown, and only the kind that changed is
+ * written.
+ */
+export type IdKind = 'applied' | 'gone' | 'dropped';
+export const ID_KINDS: readonly IdKind[] = ['applied', 'gone', 'dropped'];
+export type ConversationIds = Partial<Record<IdKind, IdDays>>;
+
+function idsKey(conv: string, kind: IdKind): string {
+  return `ids:${kind}:${conv}`;
+}
+
+/** What a conversation remembers by keyed hashes, of every kind. */
+export async function getIds(db: Database, conv: string): Promise<ConversationIds> {
+  const out: ConversationIds = {};
+  for (const kind of ID_KINDS) {
+    const days = (await db.get('meta', idsKey(conv, kind))) as IdDays | undefined;
+    if (days) out[kind] = days;
+  }
+  return out;
+}
+
+/**
+ * Writes a conversation and, in the same transaction, the kinds of what it
+ * remembers by keyed hashes that changed from `before` (by identity): all
+ * of it happens, or none.
+ */
+export async function saveConversation(db: Database, conversation: ConversationRecord, ids: ConversationIds = {}, before: ConversationIds = ids): Promise<void> {
+  const tx = db.transaction(['conversations', 'meta'], 'readwrite');
+  await tx.objectStore('conversations').put(conversation);
+  for (const kind of ID_KINDS) {
+    if (ids[kind] === before[kind]) continue;
+    const days = ids[kind];
+    if (days && days.length > 0) await tx.objectStore('meta').put(days, idsKey(conversation.id, kind));
+    else await tx.objectStore('meta').delete(idsKey(conversation.id, kind));
+  }
+  await tx.done;
+}
+
+/** Their newest message here, by when they sent it (sentAt): for a conversation from before lastMessage was kept. */
+export async function newestTheirs(db: Database, conv: string): Promise<{ at: number; id: string } | undefined> {
+  const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
+  let newest: { at: number; id: string } | undefined;
+  for (const m of await db.getAllFromIndex('messages', 'byConversation', range)) {
+    if (m.out) continue;
+    const at = sentAt(m);
+    if (!newest || at > newest.at || (at === newest.at && m.id > newest.id)) newest = { at, id: m.id };
+  }
+  return newest;
 }
 
 /** Conversations, newest activity first. */
@@ -355,22 +410,24 @@ export function sentAt(m: Pick<MessageRecord, 'at' | 'sent'>): number {
  * Deletes part of a conversation from this device, with the files, in one
  * transaction: their messages sent up to `theirs` (their clock, sentAt), and
  * ours up to `ours` (our clock) or, if later, up to the newest of ours they
- * had by `oursHadBy` (their clock, MessageRecord.had). Returns how many
- * messages are left, how many of theirs are unread, and how many went.
+ * had by `oursHadBy` (their clock, MessageRecord.had) among those we wrote
+ * by `oursWrittenBy` (our clock). Returns how many messages are left, how
+ * many of theirs are unread, and how many went.
  */
 export async function clearMessages(
   db: Database,
   conv: string,
-  upTo: { theirs: number; ours?: number; oursHadBy?: number },
+  upTo: { theirs: number; ours?: number; oursHadBy?: number; oursWrittenBy?: number },
 ): Promise<{ left: number; unread: number; removed: number }> {
   const tx = db.transaction(['messages', 'media'], 'readwrite');
   const index = tx.objectStore('messages').index('byConversation');
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
   let ours = upTo.ours ?? -Infinity;
   if (upTo.oursHadBy !== undefined) {
+    const writtenBy = upTo.oursWrittenBy ?? Infinity;
     for (let cursor = await index.openCursor(range); cursor; cursor = await cursor.continue()) {
       const m = cursor.value;
-      if (m.out && m.had !== undefined && m.had <= upTo.oursHadBy) ours = Math.max(ours, m.at);
+      if (m.out && m.at <= writtenBy && m.had !== undefined && m.had <= upTo.oursHadBy) ours = Math.max(ours, m.at);
     }
   }
   let left = 0;

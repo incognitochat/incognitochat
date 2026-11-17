@@ -124,21 +124,14 @@ export interface ConversationRecord {
    */
   newest?: { at: number; tag: string };
   /**
-   * Envelopes of theirs taken in, of any kind: keyed hashes of their IDs
-   * (idTag), never the IDs, grouped by the UTC day of their `at`. One that
-   * comes again (a stale read, another copy of the app, a server delivering
-   * it twice) is dropped. A day goes once nothing from it can still arrive
-   * (31 days after it ends), and the oldest go first past MAX_APPLIED.
+   * The newest of their messages taken in (shown), by its `at` (their
+   * clock), with its ID: deleting the conversation for both sides names it
+   * as `last`, so their app deletes exactly the messages of its own we had,
+   * and clears this side up to its time. Kept even once deleted here.
+   * Missing in conversations from before it was kept; their newest message
+   * here stands in.
    */
-  applied?: IdDays;
-  /**
-   * Messages deleted on this device one by one (theirs by a delete from
-   * them, whether the message had arrived or not; either side's by us):
-   * keyed hashes of their IDs, by the UTC day of their latest possible `at`.
-   * Such a message is dropped if it comes, and edits and reactions for it
-   * aren't kept for later. A day goes once nothing from it can still arrive.
-   */
-  gone?: IdDays;
+  lastMessage?: { at: number; id: string };
   /** Deleted on this device: out of the list, with no messages, until a new one comes or goes. */
   hidden?: boolean;
   /** Unix ms when our conversation key is next replaced (weekly, jittered per conversation). */
@@ -146,20 +139,36 @@ export interface ConversationRecord {
   /** For a sender not answered yet: Unix ms when the link's current key was last fetched. */
   linkCheckedAt?: number;
   /**
-   * Kept by versions before `gone`: their messages they deleted for both
-   * sides before those arrived, by ID, with when. Still read, and moved
-   * into `gone` (as keyed hashes) the next time the conversation is written.
+   * Kept by versions before IDs were remembered as keyed hashes: their
+   * messages they deleted for both sides before those arrived, by ID, with
+   * when. Still read, and moved into their deletes (messaging/store.ts,
+   * `gone`) when something comes, when the conversation is deleted, or at
+   * upkeep.
    */
   deleted?: { id: string; at: number }[];
   /**
-   * Everything of theirs sent up to this time (their clock) is gone here:
-   * they deleted the whole conversation for both sides then, or we deleted
-   * it (this is then their newest message we had). Anything of theirs sent
-   * by then that arrives later is dropped, and so is a whole-conversation
-   * delete of theirs from no later. Forgotten once nothing that old can
-   * still arrive (31 days).
+   * The conversation was cleared for both sides up to this time (their
+   * clock): by their delete of the whole conversation, or by ours (then the
+   * time of their newest message we had, lastMessage). Anything of theirs
+   * sent by then that arrives later is dropped, and so is a whole-
+   * conversation delete of theirs from no later. Forgotten once nothing
+   * that old can still arrive (31 days).
    */
   clearedBefore?: number;
+  /**
+   * Their latest delete of the whole conversation: its `at` (their clock),
+   * and when we took it in (our clock). Something of theirs from by then
+   * that comes later and shows they had more of ours takes those too, but
+   * never one we wrote after taking the delete in. Forgotten with it.
+   */
+  theirClear?: { upTo: number; here: number };
+  /**
+   * Their messages sent up to this time (their clock) are dropped: set only
+   * if the user deleted more of them here than are remembered one by one
+   * (replay.ts, MAX_DROPPED), to the end of the day the oldest went from.
+   * Forgotten after 31 days.
+   */
+  droppedBefore?: number;
   /** Edits of their messages that came before the messages did, sealed under the storage key (messaging/store.ts). */
   edits?: { id: string; at: number; sealed: Uint8Array<ArrayBuffer> }[];
   /**

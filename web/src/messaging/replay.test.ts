@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ConversationRecord } from '../storage/db';
-import { DAY, isNewer, MAX_AGE, remember, remembers, tidy } from './replay';
+import type { ConversationRecord, IdDays } from '../storage/db';
+import { DAY, forgetOld, isNewer, MAX_AGE, remember, remembers, tidy } from './replay';
 
 const base: ConversationRecord = {
   id: 'c',
@@ -29,29 +29,37 @@ describe('what a conversation remembers against repeats', () => {
     expect(isNewer(5, 'a', { at: 5, tag: 'a' })).toBe(false);
   });
 
-  it('keeps each tag once, by day, and lets the oldest go first past the cap', () => {
-    let days = remember(undefined, 'x', 2 * DAY + 5, 3);
-    days = remember(days, 'x', 2 * DAY + 9, 3);
-    days = remember(days, 'y', 1 * DAY, 3);
-    days = remember(days, 'z', 3 * DAY, 3);
+  it('keeps each tag once, by day, and lets the oldest day go first past the cap, saying which', () => {
+    let days: IdDays | undefined;
+    for (const [tag, at] of [['x', 2 * DAY + 5], ['x', 2 * DAY + 9], ['y', 1 * DAY], ['z', 3 * DAY]] as const) {
+      const r = remember(days, tag, at, 3);
+      expect(r.lost).toBeUndefined();
+      days = r.days;
+    }
     expect(days).toEqual([
       { day: 1, tags: ['y'] },
       { day: 2, tags: ['x'] },
       { day: 3, tags: ['z'] },
     ]);
-    days = remember(days, 'w', 3 * DAY, 3);
-    expect(days.map((d) => d.day)).toEqual([2, 3]);
-    expect(remembers(days, 'y')).toBe(false);
-    expect(['x', 'z', 'w'].every((t) => remembers(days, t))).toBe(true);
+    // Once known, the same array: nothing to write.
+    expect(remember(days, 'x', 2 * DAY, 3).days).toBe(days);
+    // Full: a newer one pushes out the oldest day's, and says that day isn't covered any more.
+    const pushed = remember(days, 'w', 3 * DAY, 3);
+    expect(pushed).toEqual({ days: [{ day: 2, tags: ['x'] }, { day: 3, tags: ['z', 'w'] }], lost: 1 });
+    expect(remembers(pushed.days, 'y')).toBe(false);
+    // Full, and the new one is from the oldest day (or older): it's the one left out.
+    expect(remember(pushed.days, 'v', 2 * DAY, 3)).toEqual({ days: pushed.days, lost: 2 });
+    expect(remember(pushed.days, 'u', 0, 3)).toEqual({ days: pushed.days, lost: 0 });
   });
 
   it('forgets a day only once nothing from it can be taken in, and a clear once nothing that old can', () => {
-    const c: ConversationRecord = { ...base, applied: remember(undefined, 'x', 10 * DAY + 1, 10), clearedBefore: 10 * DAY + 1 };
+    const days = remember(undefined, 'x', 10 * DAY + 1, 10).days;
+    expect(forgetOld(days, 11 * DAY + MAX_AGE)).toBe(days);
+    expect(forgetOld(days, 11 * DAY + MAX_AGE + 1)).toBeUndefined();
+    const c: ConversationRecord = { ...base, clearedBefore: 10 * DAY + 1, theirClear: { upTo: 10 * DAY + 1, here: 10 * DAY + 5 }, droppedBefore: 10 * DAY + 1 };
     // Something sent at the clear is still taken in until MAX_AGE after it.
     expect(tidy(c, 10 * DAY + 1 + MAX_AGE)).toBe(c);
-    expect(tidy(c, 10 * DAY + 2 + MAX_AGE).clearedBefore).toBeUndefined();
-    // An envelope from the end of that day is still taken in until MAX_AGE after it.
-    expect(tidy(c, 11 * DAY + MAX_AGE).applied).toEqual(c.applied);
-    expect(tidy(c, 11 * DAY + MAX_AGE + 1).applied).toBeUndefined();
+    const later = tidy(c, 10 * DAY + 2 + MAX_AGE);
+    expect([later.clearedBefore, later.theirClear, later.droppedBefore]).toEqual([undefined, undefined, undefined]);
   });
 });

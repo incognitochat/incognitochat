@@ -37,11 +37,15 @@ or mailbox), each conversation also keeps, without any content:
 | What | How long |
 |---|---|
 | Which of the other side's envelopes it took in: a keyed hash of each one's ID (made with the account's secret, so it can't be matched to the ID, on the other person's device say, without that), with only the day it was sent; at most 2,000 | Until 31 days after that day ends (removed at the next upkeep, or the next time something arrives in that chat) |
-| Which messages were deleted one by one: keyed hashes the same way, with the day; at most 1,000 | The same |
-| The time, by the other side's clock, up to which the conversation was cleared (deleted on this device, or for both sides) | 31 days |
-| The time, by the other side's clock, and keyed hash of the newest envelope it took in | While the conversation is kept |
+| Which messages were deleted one by one: theirs they deleted (at most 1,000), and those the user deleted here, singly or with the whole chat (at most 5,000); keyed hashes the same way, with the day | The same |
+| The time, by the other side's clock, up to which the conversation was cleared for both sides, and for their delete, when this device took it in | 31 days |
+| Only if the user deleted more than 5,000 of their messages in a month: the end of the day up to which their messages are dropped | 31 days |
+| The time, by the other side's clock, and keyed hash of the newest envelope it took in; the time and ID of their newest message it took in | While the conversation is kept |
 | For a received message, when it was sent by the other side's clock, if that's later than when it arrived; for a sent one, the earliest time (their clock) something of theirs showed they had it | With the message |
 | A reaction that arrived before its message, sealed like message text | Until the message arrives, or 31 days |
+
+The keyed hashes are kept apart from the conversation itself (one item per
+chat and kind), so the chat list doesn't read them.
 
 ## On the server
 

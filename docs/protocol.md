@@ -330,8 +330,8 @@ arrives before it (delivery has no set order), until it's too old to come
 stays out of the list until one arrives. With `all`, the recipient deletes
 the conversation as it was when the sender deleted it, both sides'
 messages, as in Telegram: the sender's messages sent by the `delete`'s
-`at`, and its own up to the newest the sender had then (Replays and order:
-the two clocks are never compared). Anything written after it, by either
+`at`, and its own up to the newest one the sender had then (Replays and
+order: the two clocks are never compared). Anything written after it, by either
 side, stays, whatever order it all arrives in. Messages from that side sent
 by then that arrive later are dropped. If nothing is left, it leaves the
 list until either side writes again. Like blocks, this relies on the
@@ -374,21 +374,31 @@ rest is the recipient's bookkeeping, per conversation and content-free:
 - *Envelopes taken in*, of every kind: a keyed hash of each one's `id`, the
   first 9 bytes of `HMAC-SHA256(account secret,
   Message("incognitochat/v2/local-id-tag", this device's ID for the
-  conversation, id))`, grouped by the UTC day of its `at`.
-  One that comes again is dropped before it changes anything. A day is
-  forgotten once nothing from it can still be taken in (31 days after the
-  day ends); at most 2,000 are kept, the oldest going first.
-- *Messages deleted* one by one (by a `delete`, or by the user, of either
-  side's): keyed hashes the same way, by the day of the message's `at` (for
-  one not here yet, the `delete`'s `at`, which is later), at most 1,000.
-  Such a message is dropped if it comes, and an edit or reaction for it
-  isn't kept for later.
+  conversation, id))`, grouped by the UTC day of its `at`. One that comes
+  again is dropped before it changes anything. A day is forgotten once
+  nothing from it can still be taken in (31 days after the day ends); at
+  most 2,000 are kept, the oldest day going first (when the record is
+  full, a new one from that day or older is the one left out).
+- *Messages deleted one by one*, keyed hashes the same way, in two records
+  with budgets of their own, so the other side can't push out the user's:
+  their messages they deleted (`delete`; by the day of the message's `at`,
+  or the `delete`'s, which is later, for one not here yet; at most 1,000),
+  and messages the user deleted on this device, singly or with the whole
+  conversation (at most 5,000). Such a message is dropped if it comes, and
+  an edit or reaction for it isn't kept for later. If the user's record
+  overflows, their messages up to the end of the day the oldest went from
+  are dropped instead, for 31 days.
 - *Cleared up to*: a time on the other side's clock up to which everything
-  of theirs is gone: their `delete` with `all`, or, when the user deletes
-  the conversation (on this device or for both), their newest message
-  here. Anything of theirs sent by then is dropped, and so is a `delete`
-  with `all` from no later. Forgotten after 31 days.
-- *The newest envelope taken in* from them: its `at` and keyed hash.
+  of theirs is gone for both sides: their `delete` with `all`, or ours
+  (then the time of their newest message ever taken in). Anything of
+  theirs sent by then is dropped, and so is a `delete` with `all` from no
+  later. Forgotten after 31 days.
+- *The newest envelope taken in* from them (its `at` and keyed hash), and
+  *the newest of their messages taken in* (its `at` and ID).
+
+These live apart from the conversation record (the chat list reads that),
+one item per conversation and kind, and only the kind that changes is
+written.
 
 The record of envelopes taken in is the first check, but not the only one:
 each kind changes nothing when it comes a second time even without it (once
@@ -404,37 +414,60 @@ newest taken in: by `at`, and in the same millisecond by the larger keyed
 hash, so every copy of the app ends on the same one whatever the order. An
 older one coming late or again can't move the recipient back to an older
 key or mailbox. A conversation from before this was kept starts from the
-message it last took in.
+newest of the other side's messages it has.
 
-*Deleting the whole conversation, and clocks.* `at` is the sender's clock,
-and the two sides' clocks may differ, so a `delete` with `all` is never
-compared with the recipient's own times. The recipient deletes:
+*Deleting the whole conversation for both sides.* The deleting app names in
+`last` the newest of the other side's messages it ever took in (also one it
+has since deleted on its own side), deletes theirs up to that one and its
+own up to the `delete`'s `at`, and from then on drops whatever of theirs is
+sent by that time. Anything that arrives meanwhile stays. `at` is the
+sender's clock, and the two sides' clocks may differ, so the recipient
+never compares the `delete` with its own times. It deletes:
 
 - the sender's messages with `at` up to the `delete`'s `at` (their clock
   against their clock);
 - of its own messages, those up to the newest one the sender is known to
   have had when it deleted (its own clock against its own clock). Known
-  from the `delete`'s `last`, which names the newest of the recipient's
-  messages the sender had, or from a receipt, a reaction, a reply or a
+  from the `delete`'s `last`, or from a receipt, a reaction, a reply or a
   `last` of the sender's with an `at` no later than the `delete`'s. One
-  such receipt that arrives after the `delete` still counts.
+  such receipt that arrives after the `delete` still counts, but only for
+  messages it wrote before it took the `delete` in (by its own clock): if
+  the sender's clock was set back since, its later receipts look older
+  than its delete.
 
-What the sender isn't known to have had stays: as far as the recipient can
-tell it hadn't reached the sender, which keeps it too when it arrives,
-since the deleting app drops what comes from the other side only up to
-their newest message it had, the one it names. A sender whose clock is set back sends envelopes that look
-older than what came before: its key or mailbox change is taken up once
-its clock passes the newest time already taken in, at most about a day
-later (envelopes dated further ahead are dropped), and a whole-conversation
-delete it sends then takes its own messages only up to the time it gives.
+So both sides normally keep the same: what the sender isn't known to have
+had hadn't reached it (unless the recipient deleted the message `last`
+names, and nothing else shows it), and the sender keeps it when it
+arrives, since it drops from the other side only what its `last` covered. A `delete` with `all`
+from a version before this one names in `last` the last envelope it took
+in, often a receipt: when that isn't one of the recipient's messages, only
+the sender's receipts, reactions and replies from before the `delete` say
+what it had, and messages of the recipient's it had without any of those
+stay on the recipient's side.
 
-Deleting the conversation on this device clears it up to the other side's
-newest message here and deletes everything; what they sent before that
-which comes late or again is dropped, anything newer brings it back.
+*Deleting the conversation on this device only* deletes everything here and
+remembers each of the other side's messages here, one by one (above): what
+comes again is dropped, but nothing is dropped by its time, so anything of
+theirs not taken in yet still arrives and brings the conversation back.
+
+*Clocks set back.* A sender whose clock ran ahead and is set right sends
+envelopes that look older than what came before. Its key or mailbox change
+is taken up only once its clock passes the newest time already taken in,
+at most about a day later (envelopes dated further ahead are dropped);
+meanwhile the recipient writes to its older key, which it still has, and to
+its older mailbox: if that one was discarded (an unblock moves to a new
+one), what the recipient sends then is lost. And once a conversation is
+cleared for both sides up to a time on the other side's clock (their
+delete's own `at`, or, for a delete we sent, the time of their newest
+message we had), their messages dated up to it are dropped: if their clock
+ran ahead and was set right, their new messages are dropped until it
+passes that time. Deleting on this device only drops nothing by time.
+
 Deletes that versions before this one kept by ID (for messages not here
-yet) become keyed hashes the next time the conversation is written, or at
-upkeep. Messages deleted before this version have no record: until they're
-31 days old, a server that kept them could still deliver them again.
+yet) become keyed hashes when something next comes in that conversation,
+when the conversation or a message in it is deleted, or at upkeep.
+Messages deleted before this version have no record: until they're 31 days
+old, a server that kept them could still deliver them again.
 
 **Who writes with which key.** A first message through a link comes from a
 fresh conversation key of the sender and is written for the link's current
