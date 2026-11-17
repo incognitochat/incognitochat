@@ -16,6 +16,12 @@ locals {
     # Socket connections, rate counters, login nonces, spent tokens.
     ephemeral = {}
   }
+
+  # Each table's caps, a second (variables.tf): the GitHub variables if
+  # set, otherwise by environment.
+  production            = var.environment == "production"
+  table_max_read_units  = coalesce(var.table_max_read_units, local.production ? 400 : 200)
+  table_max_write_units = coalesce(var.table_max_write_units, local.production ? 200 : 100)
 }
 
 resource "aws_dynamodb_table" "table" {
@@ -47,7 +53,7 @@ resource "aws_dynamodb_table" "table" {
   }
 
   on_demand_throughput {
-    max_read_request_units  = var.table_max_read_units
-    max_write_request_units = var.table_max_write_units
+    max_read_request_units  = local.table_max_read_units
+    max_write_request_units = local.table_max_write_units
   }
 }

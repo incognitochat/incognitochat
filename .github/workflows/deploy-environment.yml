@@ -205,7 +205,7 @@ jobs:
           TABLE_MAX_WRITE_UNITS: ${{ vars.TABLE_MAX_WRITE_UNITS }}
           FIREWALL_RATE_LIMIT: ${{ vars.FIREWALL_RATE_LIMIT }}
           FIREWALL_ANONYMOUS_RATE_LIMIT: ${{ vars.FIREWALL_ANONYMOUS_RATE_LIMIT }}
-          FIREWALL_ANONYMOUS_TOTAL_LIMIT: ${{ vars.FIREWALL_ANONYMOUS_TOTAL_LIMIT }}
+          FIREWALL_LOOKUPS_TOTAL_LIMIT: ${{ vars.FIREWALL_LOOKUPS_TOTAL_LIMIT }}
           WS_THROTTLE_RATE_LIMIT: ${{ vars.WS_THROTTLE_RATE_LIMIT }}
           WS_THROTTLE_BURST_LIMIT: ${{ vars.WS_THROTTLE_BURST_LIMIT }}
         # Refreshed resources are printed with their IDs (such as the media
@@ -213,7 +213,7 @@ jobs:
         run: |
           set -o pipefail
           for name in TABLE_MAX_READ_UNITS TABLE_MAX_WRITE_UNITS FIREWALL_RATE_LIMIT FIREWALL_ANONYMOUS_RATE_LIMIT \
-            FIREWALL_ANONYMOUS_TOTAL_LIMIT WS_THROTTLE_RATE_LIMIT WS_THROTTLE_BURST_LIMIT; do
+            FIREWALL_LOOKUPS_TOTAL_LIMIT WS_THROTTLE_RATE_LIMIT WS_THROTTLE_BURST_LIMIT; do
             if [ -n "${!name}" ]; then
               export "TF_VAR_${name,,}=${!name}"
             fi

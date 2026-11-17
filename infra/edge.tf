@@ -119,14 +119,23 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
   source_arn    = aws_cloudfront_distribution.api.arn
 }
 
-# The routes that need no login (backend/internal/api/api.go), by method, as
-# patterns on the path. Each reads a table before any limit of its own (a
-# login with a random device, a link or upload with a random ID), or is paid
-# with a token but has no login (sends). Not here, though they need no login
-# either: POST /media, which spends no table capacity on forged media tokens,
-# and POST /media/{id}/delete, which the app sends for every received
-# attachment of a deleted chat, six at a time without a pause. Both stay
-# under rate-per-ip.
+# Routes, by method, as patterns on the path (backend/internal/api/api.go).
+#
+#   anonymous_routes  the routes that need no login and read a table before
+#                     any limit of their own (a login with a random device,
+#                     a link or upload with a random ID), or are paid with a
+#                     token but have no login (sends). Not here, though they
+#                     need no login either: POST /media, which spends no
+#                     table capacity on forged media tokens, and
+#                     POST /media/{id}/delete, which the app sends for every
+#                     received attachment of a deleted chat, six at a time
+#                     without a pause; both stay under rate-per-ip.
+#   lookup_routes     lookups of links and uploads by ID, which anyone can
+#                     make with random IDs: a link's bundle, a download URL,
+#                     a fresh upload URL, a delete. Never logins,
+#                     registrations, account lookups or sends, so blocking
+#                     these for everyone can't stop anyone logging in or
+#                     sending.
 #
 # The patterns are anchored at the end, and at the start only to a slash:
 # NORMALIZE_PATH (below) keeps back-references at the start of a path, so
@@ -137,18 +146,27 @@ locals {
     GET  = "(^|/)(links|media)/[^/]+$"
     POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload)$"
   }
+  lookup_routes = {
+    GET  = "(^|/)(links|media)/[^/]+$"
+    POST = "(^|/)media/[^/]+/(upload|delete)$"
+  }
 
-  # Two limits over the same requests: per IP address, and for everyone
-  # together (CONSTANT: every matching request goes into one count). Rules
-  # run in priority order and a block ends the run, so what rate-per-ip or
-  # anonymous-per-ip already blocks doesn't count towards anonymous-total.
-  # But WAF checks rates only about every 10 seconds and usually acts within
-  # 30, so until an address is blocked its burst counts in full: one host
-  # alone can set anonymous-total off, and these routes are then refused for
-  # everyone for a minute or two.
-  anonymous_limits = {
-    anonymous-per-ip = { priority = 2, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300 }
-    anonymous-total  = { priority = 3, key = "CONSTANT", limit = var.firewall_anonymous_total_limit, window = 60 }
+  # Unset, 30 times the tables' read cap. A lookup with a random ID writes
+  # nothing and reads at most one unit (a fresh upload URL's strongly
+  # consistent read; the other three half a unit), so at this rate lookups
+  # use at most half a table's reads. They write only with the IDs of
+  # uploads paid for with media tokens, a few times each.
+  lookups_total_limit = coalesce(var.firewall_lookups_total_limit, 30 * local.table_max_read_units)
+
+  # Rules run in priority order and a block ends the run, so what an earlier
+  # rule already blocks doesn't count towards a later one. But WAF checks
+  # rates only about every 10 seconds and usually acts within 30, so until
+  # an address is blocked its burst counts in full: one host alone can set
+  # lookups-total off, and lookups are then refused for everyone for a
+  # minute or two.
+  limits = {
+    anonymous-per-ip = { priority = 2, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300, routes = local.anonymous_routes }
+    lookups-total    = { priority = 3, key = "CONSTANT", limit = local.lookups_total_limit, window = 60, routes = local.lookup_routes }
   }
 
   # A blocked request gets 429 and the API's own error, with CORS for the
@@ -166,13 +184,15 @@ locals {
 #                     address (a mobile carrier, a VPN), so the limit is far
 #                     above what one person's app sends.
 #   anonymous-per-ip  the routes that need no login, per IP address: lower,
-#                     since an app sends few requests there.
-#   anonymous-total   the same routes, everyone together, over one minute:
-#                     below what the directory table can serve, so a flood
-#                     can't use up the capacity logged-in requests need.
-#                     While it blocks, it blocks those routes for everyone,
-#                     logins and sends included; requests with a session go
-#                     on until it ends.
+#                     since an app sends few requests there. Logins, sends,
+#                     registrations and account lookups have only this and
+#                     rate-per-ip.
+#   lookups-total     lookups by ID, everyone together (CONSTANT: every
+#                     matching request goes into one count), over one
+#                     minute: at most half what a table can serve, so a
+#                     flood of random IDs can't use up the capacity
+#                     everything else needs. While it blocks, only these
+#                     lookups are refused, for everyone.
 resource "aws_wafv2_web_acl" "api" {
   count    = var.firewall ? 1 : 0
   provider = aws.global
@@ -186,6 +206,11 @@ resource "aws_wafv2_web_acl" "api" {
   # with this, Terraform updates the distribution before it deletes this.
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = local.lookups_total_limit <= 30 * local.table_max_read_units
+      error_message = "firewall_lookups_total_limit must be at most 30 times the tables' read cap (a minute of half a table's reads)."
+    }
   }
 
   default_action {
@@ -232,7 +257,7 @@ resource "aws_wafv2_web_acl" "api" {
   }
 
   dynamic "rule" {
-    for_each = local.anonymous_limits
+    for_each = local.limits
 
     content {
       name     = rule.key
@@ -261,7 +286,7 @@ resource "aws_wafv2_web_acl" "api" {
           scope_down_statement {
             or_statement {
               dynamic "statement" {
-                for_each = local.anonymous_routes
+                for_each = rule.value.routes
                 iterator = route
 
                 content {

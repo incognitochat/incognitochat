@@ -186,25 +186,14 @@ variable "firewall_anonymous_rate_limit" {
   }
 }
 
-variable "firewall_anonymous_total_limit" {
-  description = "Requests everyone together may make in 1 minute to the routes that need no login (edge.tf) before the firewall blocks those routes for everyone. At most 30 times table_max_read_units, so that even at a read unit each they use at most half the directory table's reads; raise it with the caps. GitHub variable FIREWALL_ANONYMOUS_TOTAL_LIMIT"
+variable "firewall_lookups_total_limit" {
+  description = "Requests everyone together may make in 1 minute to look up links and uploads by ID (edge.tf) before the firewall blocks those lookups for everyone. Unset (null), 30 times the tables' read cap (12,000 in production): each lookup takes at most one read unit, so at most half a table's reads. Set, it must be at most that. GitHub variable FIREWALL_LOOKUPS_TOTAL_LIMIT"
   type        = number
-  default     = 12000
+  default     = null
 
   validation {
-    condition     = var.firewall_anonymous_total_limit >= 1000
-    error_message = "firewall_anonymous_total_limit must be at least 1000."
-  }
-
-  # Writes aren't checked here. Every login writes a nonce (one write unit
-  # on the ephemeral table), and nothing limits how often one account logs
-  # its own device in, so only this rule bounds those writes. Keeping them
-  # to half the ephemeral table's writes would take at most 30 times
-  # table_max_write_units (6,000 at the defaults); at 12,000 they could fill
-  # it (docs/deployment.md, The firewall).
-  validation {
-    condition     = var.firewall_anonymous_total_limit <= 30 * var.table_max_read_units
-    error_message = "firewall_anonymous_total_limit must be at most 30 times table_max_read_units (a minute of half the directory table's reads)."
+    condition     = coalesce(var.firewall_lookups_total_limit, 1000) >= 1000
+    error_message = "firewall_lookups_total_limit must be at least 1000."
   }
 }
 
@@ -214,28 +203,32 @@ variable "reserve_concurrency" {
   default     = false
 }
 
-# A table refuses requests past its caps, at no cost (the table-throttles
-# alarms in infra/init fire), so the caps bound the bill: at eu-west-1's
-# on-demand prices, a table held at both caps all day costs about $17, all
-# three about $51 a day (docs/deployment.md, Cost guards).
+# The tables' caps (tables.tf). Unset, they depend on the environment, so
+# that nothing needs setting by hand: 400 reads and 200 writes a second in
+# production, 200 and 100 elsewhere (dev has no firewall and a small
+# budget). A table refuses requests past its caps, at no cost (the
+# table-throttles alarms in infra/init fire), so the caps bound the bill: at
+# eu-west-1's on-demand prices, all three tables held at both caps cost
+# about $51 a day in production, $26 elsewhere (docs/deployment.md, Cost
+# guards).
 variable "table_max_read_units" {
-  description = "Per-table cap on on-demand read request units per second, a cost guard. GitHub variable TABLE_MAX_READ_UNITS"
+  description = "Per-table cap on on-demand read request units per second, a cost guard. Unset (null), 400 in production and 200 elsewhere. GitHub variable TABLE_MAX_READ_UNITS"
   type        = number
-  default     = 400
+  default     = null
 
   validation {
-    condition     = var.table_max_read_units >= 1
+    condition     = coalesce(var.table_max_read_units, 1) >= 1
     error_message = "table_max_read_units must be at least 1."
   }
 }
 
 variable "table_max_write_units" {
-  description = "Per-table cap on on-demand write request units per second, a cost guard. GitHub variable TABLE_MAX_WRITE_UNITS"
+  description = "Per-table cap on on-demand write request units per second, a cost guard. Unset (null), 200 in production and 100 elsewhere. GitHub variable TABLE_MAX_WRITE_UNITS"
   type        = number
-  default     = 200
+  default     = null
 
   validation {
-    condition     = var.table_max_write_units >= 1
+    condition     = coalesce(var.table_max_write_units, 1) >= 1
     error_message = "table_max_write_units must be at least 1."
   }
 }

@@ -151,15 +151,18 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
 | `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
 
-The limits below can be tuned without a code change. Each is optional:
-unset, the default in [`infra/variables.tf`](../infra/variables.tf) applies.
+The limits below can be tuned without a code change, but none needs
+setting: unset, each takes its default from
+[`infra/variables.tf`](../infra/variables.tf), and where an environment
+needs other values, the defaults depend on its name (`production`, or
+anything else), so an environment comes from the repository alone.
 
 | Name | Default | What |
 |---|---|---|
-| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400, 200 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). |
+| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. |
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
-| `FIREWALL_ANONYMOUS_TOTAL_LIMIT` | 12,000 | Requests everyone together may make in 1 minute to those routes (`anonymous-total`). At most 30 times `TABLE_MAX_READ_UNITS`. |
+| `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |
 | `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. At least 1. |
 
 A change takes effect at the environment's next deploy: for dev, the next
@@ -219,26 +222,32 @@ it needs: only `bot` and `notify` can read the bot token.
 ## Cost guards
 
 The tables are on-demand, each capped at 400 read and 200 write request
-units a second (`TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS`). Past a cap
-a table refuses requests, which cost nothing, and its `<table>-table-throttles`
-alarm fires. The caps bound the tables' bill: at eu-west-1's on-demand prices
-($0.1415 per million read units, $0.705 per million write units), a table
-held at both caps all day costs about $17 ($4.89 for reads, $12.18 for
-writes), and all three about **$51 a day**, $2.13 an hour: about
-production's default monthly budget ($50) every day. The throttle alarms
-fire as soon as a table refuses requests; the budget's within a day, since
-billing data lags by hours.
+units a second in production, and at 200 and 100 in any other environment
+(`TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS`). Past a cap a table
+refuses requests, which cost nothing, and its `<table>-table-throttles`
+alarm fires. The caps bound the tables' bill. At eu-west-1's on-demand
+prices ($0.1415 per million read units, $0.705 per million write units):
+
+| | One table at both caps, a day | All three, a day |
+|---|---|---|
+| Production (400, 200) | about $17 ($4.89 reads, $12.18 writes) | about **$51** ($2.13 an hour), about production's default monthly budget ($50) every day |
+| Elsewhere (200, 100) | about $8.50 ($2.45 reads, $6.09 writes) | about **$26** ($1.07 an hour), about 2.5 times dev's default monthly budget ($10) every day |
+
+The throttle alarms fire as soon as a table refuses requests; the budget's
+within a day, since billing data lags by hours.
 
 The caps are also the service's ceiling: every logged-in request reads the
-directory (one unit), and every delivered message takes about three write
-units on the ephemeral table, so the default caps carry at most about 400
-logged-in requests and 66 messages a second (fewer large ones: storing an
-envelope takes a write unit per KB on the messages table). Watch each table's
-`ConsumedReadCapacityUnits` and `ConsumedWriteCapacityUnits` (namespace
-AWS/DynamoDB, dimension TableName, `<prefix>-<table>`; the sum over a minute
-divided by 60 is the rate). Raise the caps once real use regularly passes
-half of them, and `FIREWALL_ANONYMOUS_TOTAL_LIMIT` with them
-([the firewall](#the-firewall)).
+directory (one unit), and every small delivered message takes about three
+write units on the ephemeral table, so production's caps carry at most
+about 400 logged-in requests and 66 messages a second, and other
+environments' half that (fewer large messages: they cost more send tokens,
+and storing an envelope takes a write unit per KB on the messages table).
+Watch each table's `ConsumedReadCapacityUnits` and
+`ConsumedWriteCapacityUnits` (namespace AWS/DynamoDB, dimension TableName,
+`<prefix>-<table>`; the sum over a minute divided by 60 is the rate). Raise
+the caps once real use regularly passes half of them; unless
+`FIREWALL_LOOKUPS_TOTAL_LIMIT` is set, the firewall's limit on lookups
+follows ([the firewall](#the-firewall)).
 
 The WebSocket API is throttled (`WS_THROTTLE_RATE_LIMIT`,
 `WS_THROTTLE_BURST_LIMIT`), and nothing runs when idle. Logs are kept 7
@@ -358,10 +367,10 @@ distribution's name no IPv6 addresses. AWS's documentation doesn't say
 whether an edge refuses a request that reaches it over IPv6 anyway, from a
 client that connects to an edge's IPv6 address by hand, and this hasn't been
 tested. If edges serve such requests, one host can still spread a flood
-over many IPv6 addresses past both per-address rules: `anonymous-total`
-still bounds the routes that need no login, and nothing at the edge bounds
-the rest. A rule that blocks IPv6 addresses outright would settle it, but
-the deploy role would need to manage IP sets for it (`infra/init`).
+over many IPv6 addresses past both per-address rules: `lookups-total` still
+bounds lookups by ID, and nothing at the edge bounds the rest. A rule that
+blocks IPv6 addresses outright would settle it, but the deploy role would
+need to manage IP sets for it (`infra/init`).
 
 ### The firewall
 
@@ -376,18 +385,27 @@ plus requests.
 |---|---|---|---|
 | `rate-per-ip` | every request, per IP address | 2,000 in 5 minutes | `FIREWALL_RATE_LIMIT` |
 | `anonymous-per-ip` | requests to the routes that need no login, per IP address | 500 in 5 minutes | `FIREWALL_ANONYMOUS_RATE_LIMIT` |
-| `anonymous-total` | requests to the routes that need no login, everyone together | 12,000 in 1 minute | `FIREWALL_ANONYMOUS_TOTAL_LIMIT` |
+| `lookups-total` | lookups of links and uploads by ID, everyone together | 12,000 in 1 minute (30 times the read cap) | `FIREWALL_LOOKUPS_TOTAL_LIMIT` |
 
-The routes that need no login are `POST /session`, `POST /register`,
-`POST /accounts/lookup`, `POST /send`, `GET /links/{id}`, `GET /media/{id}`
-and `POST /media/{id}/upload`: each reads a table before any limit of its
-own, or, for sends, is paid with a token but has no login. Two more need no
-login and are left to `rate-per-ip`: `POST /media` spends no table capacity
-on forged media tokens, and the app sends `POST /media/{id}/delete` for
-every received attachment of a deleted chat, six at a time without a pause,
-which a low limit would cut off. A path counts if it ends like one of these
-routes once decoded and normalised (`/%73ession`, `//session` and
-`/../session` count as `/session`).
+The routes that need no login, which `anonymous-per-ip` counts, are
+`POST /session`, `POST /register`, `POST /accounts/lookup`, `POST /send`,
+`GET /links/{id}`, `GET /media/{id}` and `POST /media/{id}/upload`: each
+reads a table before any limit of its own, or, for sends, is paid with a
+token but has no login. Two more need no login and are left to
+`rate-per-ip`: `POST /media` spends no table capacity on forged media
+tokens, and the app sends `POST /media/{id}/delete` for every received
+attachment of a deleted chat, six at a time without a pause, which a low
+limit would cut off.
+
+The lookups by ID, which `lookups-total` counts, are `GET /links/{id}` (a
+link's bundle), `GET /media/{id}` (a download URL), `POST /media/{id}/upload`
+(a fresh upload URL) and `POST /media/{id}/delete`: anyone can make them
+with random IDs. It never counts logins, registrations, account lookups or
+sends.
+
+A path counts if it ends like one of these routes once decoded and
+normalised (`/%73ession`, `//session` and `/../session` count as
+`/session`).
 
 - **`rate-per-ip`**: many people can share an address (a mobile carrier, a
   VPN), so the limit is far above what one person's app sends.
@@ -401,40 +419,44 @@ routes once decoded and normalised (`/%73ession`, `//session` and
   or three people that busy, or fifteen or so ordinary ones, behind one
   address. Past it, only these routes are blocked for that address; requests
   with a session go on.
-- **`anonymous-total`**: everyone's requests to these routes, over one minute
-  so that a block ends soon after a flood does. 12,000 a minute is 200 a
-  second; keep it at most 30 times `TABLE_MAX_READ_UNITS`. Requests that
-  need nothing (a login of a random device, a random link or upload ID) take
-  at most half a read unit each from the directory, or one from the
-  ephemeral table, so a flood of them at this limit uses at most a quarter
-  of the directory's 400 reads a second and half of the ephemeral table's,
-  and logged-in requests (one directory unit each) keep the rest. The others
-  need something the sender must hold first (a send token, Telegram's signed
-  launch data, a device of their own), and most have limits of their own.
 
-  Writes are bounded less well. Every login writes a nonce, one write unit
-  on the ephemeral table, and nothing limits how often one account logs its
-  own device in, so a flood of logins with one account, spread over many
-  addresses, is bounded only by this rule. Keeping it to half the ephemeral
-  table's 200 writes a second would take at most 30 times
-  `TABLE_MAX_WRITE_UNITS` a minute (6,000 at the defaults); at 12,000 such a
-  flood can fill the ephemeral table's writes. A limit on logins per device
-  (backend) would close this.
+  Logins, registrations, account lookups and sends have only the per-address
+  rules, so a flood of them spread over many addresses is bounded only by
+  the tables' caps. The cheapest: an account logging its own device in again
+  and again writes a login nonce each time, one write unit on the ephemeral
+  table, and nothing limits that per device; filling production's 200 writes
+  a second that way takes about 120 addresses, each just under 500 in 5
+  minutes. Logins of random devices read half a directory unit each and
+  write nothing; filling its 400 reads a second takes about 480 addresses.
+  A limit on logins per device (backend) would close the first.
+- **`lookups-total`**: everyone's lookups by ID, over one minute so that a
+  block ends soon after a flood does. With a random ID, a lookup writes
+  nothing and reads half a unit (a link's bundle from the directory; a
+  download URL or a delete from the ephemeral table, eventually consistent)
+  or, for a fresh upload URL, one unit (strongly consistent, ephemeral). So
+  at 30 times the read cap a minute (12,000 in production, 200 a second) a
+  flood of them uses at most half the ephemeral table's reads and a quarter
+  of the directory's, and everything else keeps the rest. They write only
+  with the IDs of uploads paid for with media tokens, a few times each (5
+  downloads a day, 3 fresh URLs, one delete). Unless
+  `FIREWALL_LOOKUPS_TOTAL_LIMIT` is set, the limit follows the read cap, and
+  it may never be set above it (the deploy's plan fails).
 
   Rules run in order, and what `rate-per-ip` or `anonymous-per-ip` already
-  blocks doesn't count here: held up for minutes, setting this rule off
-  takes about 120 addresses, each just under 100 a minute. But AWS WAF
-  checks rates only about every 10 seconds and usually takes up to 30 to
-  act, and until an address is blocked, everything it sends counts here. So
-  a burst from a single host (12,000 requests in those seconds) can set it
-  off alone.
+  blocks doesn't count here. Held up for minutes, setting it off takes about
+  30 addresses (deletes are limited per address only by `rate-per-ip`, 400 a
+  minute). But AWS WAF checks rates only about every 10 seconds and usually
+  takes up to 30 to act, and until an address is blocked, everything it
+  sends counts here, so a burst from a single host can set it off alone.
 
-  While it blocks, these routes are refused for everyone, logins and sends
-  included, until the rate falls: usually a minute or two after the flood
-  stops (60 to 90 seconds after a short burst). Logged-in requests go on
-  until their 15-minute sessions end, since logging in again is one of
-  these routes. It trades a flood that would otherwise starve the tables,
-  and with them every request, for one that stops only these routes.
+  While it blocks, only lookups by ID are refused, for everyone, until the
+  rate falls: usually a minute or two after the flood stops (60 to 90
+  seconds after a short burst). Links don't open (the app says to try
+  later); attachments don't download (fetching by itself pauses); an upload
+  whose first PUT failed can't get a fresh URL, so it shows as not sent and
+  Try again pays for it again; uploads to delete wait for the app's next
+  start or upkeep.
+  Logins, sends and everything with a session go on.
 
 A blocked request gets 429 with the API's own error,
 `{"error":"rate_limited"}`, and `Access-Control-Allow-Origin` for the app
@@ -455,7 +477,7 @@ blocked (sometimes longer, AWS says), and a block can outlast it by as long.
 **What to watch**, in CloudWatch in us-east-1 (namespace AWS/WAFV2,
 dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:
 `<prefix>-api-rate-per-ip`, `<prefix>-api-anonymous-per-ip`,
-`<prefix>-api-anonymous-total`): `BlockedRequests` for each rule, and
+`<prefix>-api-lookups-total`): `BlockedRequests` for each rule, and
 `AllowedRequests` with Rule `ALL`. The metrics are free; no alarm watches
 them yet.
 
@@ -463,7 +485,8 @@ them yet.
   that recur every day while the tables are far below their caps, and
   `AllowedRequests` looks like ordinary use, may be people behind a shared
   address: raise `FIREWALL_ANONYMOUS_RATE_LIMIT`.
-- `anonymous-total` blocking at all means the routes were refused for
-  everyone for a while. With the tables near their caps it was a flood, or
-  real growth: if it's growth, raise the caps and this limit together.
+- `lookups-total` blocking at all means lookups were refused for everyone
+  for a while. With the ephemeral or directory table's reads near their
+  caps it was a flood, or real growth: if it's growth, raise the caps (the
+  limit follows).
 - `rate-per-ip` as before.

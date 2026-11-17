@@ -61,6 +61,14 @@ func (u *Uploads) Exists(ctx context.Context, id string) (bool, error) {
 	return ok, err
 }
 
+// Lookup is Get, eventually consistent, at half the cost: for deletes,
+// which anyone can ask for with a random ID. A stale read only compares an
+// old copy of a delete secret's hash that never changes; an upload recorded
+// in about the last second may not show yet.
+func (u *Uploads) Lookup(ctx context.Context, id string) (Upload, bool, error) {
+	return u.get(ctx, id, false)
+}
+
 func (u *Uploads) get(ctx context.Context, id string, consistent bool) (Upload, bool, error) {
 	out, err := u.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      &u.Table,

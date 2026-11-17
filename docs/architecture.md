@@ -326,15 +326,17 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - No precise timestamps: keys are random IDs, and times are rounded.
 - Point-in-time recovery stays off, so deleted data can't be restored.
 - Limits: each table takes at most 400 read and 200 write units a second
-  and refuses the rest, which caps the bill (about $51 a day with all three
-  at their caps). In production a firewall in front of the API's CloudFront
-  limits requests per IP address (2,000 in 5 minutes), and on the routes
-  that need no login (logins, registrations, sends, and lookups of
-  accounts, links and attachments) both per address (500 in 5 minutes) and
-  for everyone together (12,000 a minute, below what the directory can
-  serve), so a flood there can't use up what logged-in requests need. The
-  API answers over IPv4 only, since the firewall would count each IPv6
-  address on its own ([deployment.md](deployment.md#the-firewall)).
+  in production (200 and 100 elsewhere) and refuses the rest, which caps
+  the bill (about $51 a day in production with all three at their caps).
+  In production a firewall in front of the API's CloudFront limits
+  requests per IP address: 2,000 in 5 minutes, and 500 on the routes that
+  need no login (logins, registrations, sends, and lookups of accounts,
+  links and attachments). Lookups of links and attachments by ID, which
+  anyone can make with random IDs, are also limited for everyone together
+  (12,000 a minute, at most half what a table can serve); logins and sends
+  never are, so a flood of lookups can't stop them. The API answers over
+  IPv4 only, since the firewall would count each IPv6 address on its own
+  ([deployment.md](deployment.md#the-firewall)).
 - Secrets live in SSM, written through Terraform's write-only arguments, so they
   never land in Terraform state. Each function's role reads only its own.
 - Logs: warnings and errors only, kept 7 days. IDs, IP addresses, user agents
