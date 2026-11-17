@@ -14,7 +14,7 @@ import { countTokens, LOW_WATER } from '../account/wallet';
 import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
-import { canResend, createMessaging, type MessagingDeps } from './engine';
+import { canResend, createMessaging, SyncFailed, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
@@ -80,6 +80,9 @@ async function fakeBackend() {
   const bundles = new Map<string, Record<string, unknown>>();
   /** The link IDs whose bundles were asked for, in order. */
   const bundleFetches: string[] = [];
+  /** The inbox in pages of size (0: all at once), in the order delivered, with `next` or without; and every fetch's path. */
+  const paging = { size: 0, next: true };
+  const inboxFetches: string[] = [];
   const spent = new Set<string>();
   const seenEnvelopes: string[] = [];
   const sendHeaders: (Record<string, string> | undefined)[] = [];
@@ -92,6 +95,7 @@ async function fakeBackend() {
    * paused. uploads and downloads: paused by the operator (the server
    * answers so before looking at anything else). bundles: link bundles are
    * out of reach, refused (rate limited), or another link's comes back.
+   * acks: confirmations can't reach the server.
    */
   const down = {
     deletes: false,
@@ -100,6 +104,7 @@ async function fakeBackend() {
     renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing' | 'paused')[],
     uploads: false,
     downloads: false,
+    acks: false,
   };
   /** Requests to the media routes, as "METHOD path". */
   const mediaCalls: string[] = [];
@@ -260,9 +265,19 @@ async function fakeBackend() {
           mailboxes.delete(id);
           return check({});
         }
-        if (method === 'GET' && path === '/inbox') return check({ items: [...inboxes.get(account)!], more: false });
+        if (method === 'GET' && (path === '/inbox' || path.startsWith('/inbox?'))) {
+          inboxFetches.push(path);
+          const all = [...inboxes.get(account)!];
+          if (paging.size === 0) return check({ items: all, more: false });
+          const after = new URLSearchParams(path.split('?')[1] ?? '').get('after');
+          const rest = after ? all.slice(all.findIndex((i) => i.id === after) + 1) : all;
+          const items = rest.slice(0, paging.size);
+          const more = rest.length > items.length;
+          return check({ items, more, ...(more && paging.next ? { next: items[items.length - 1]!.id } : {}) });
+        }
         if (path === '/mailboxes/check') return check({ missing: (b.ids as string[]).filter((id) => mailboxes.get(id) !== account) });
         if (path === '/ack') {
+          if (down.acks) throw new NetworkError('down');
           const done = new Set(b.ids as string[]);
           inboxes.set(account, inboxes.get(account)!.filter((i) => !done.has(i.id)));
           return check({});
@@ -272,7 +287,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -314,6 +329,23 @@ async function across(from: Database, conv: string, to: Database): Promise<strin
 }
 
 describe('messaging between two people', () => {
+  it('keeps the count of what a sync stored before it failed', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    // Stored, then the confirmation fails: the app still has news to show.
+    backend.down.acks = true;
+    const failed = await owner.messaging.sync().catch((err: unknown) => err);
+    expect(failed).toBeInstanceOf(SyncFailed);
+    expect(failed).toMatchObject({ received: 1, error: expect.any(NetworkError) });
+    // Listed again later: known already, and confirmed.
+    backend.down.acks = false;
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(backend.inboxes.get('owner')).toEqual([]);
+  });
+
   it('starts through a link, then talks on per-conversation keys and mailboxes', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
@@ -2173,6 +2205,45 @@ describe('links from before their intro mailbox was kept', () => {
       expect(backend.inboxes.get('owner')).toEqual([]);
     });
   }
+
+  /** Two first messages through the link held back (its bundle out of reach), then the friend's: the owner, and how to hold them. */
+  async function heldThenFriend() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [friend, p, q] = [await person(backend, 'friend'), await person(backend, 'p'), await person(backend, 'q')];
+    const { ref, bundle } = await linkOf(backend, owner);
+    const known = await friend.messaging.startConversation(ref, bundle, 'hi');
+    await owner.messaging.sync();
+    await owner.messaging.send(await across(friend.db, known, owner.db), 'hello friend');
+    await friend.messaging.sync();
+    await asBefore(owner.db);
+    await p.messaging.startConversation(ref, bundle, 'from p');
+    await q.messaging.startConversation(ref, bundle, 'from q');
+    await friend.messaging.send(known, 'still here');
+    backend.down.bundles = 'unreachable';
+    backend.paging.size = 1;
+    backend.inboxFetches.length = 0;
+    return { backend, owner };
+  }
+
+  it('walk past pages of only what it holds back, and take in what is behind them', async () => {
+    const { backend, owner } = await heldThenFriend();
+    expect(await owner.messaging.sync()).toBe(1);
+    // The two held back stay, unconfirmed; the friend's is confirmed.
+    expect(backend.inboxes.get('owner')).toHaveLength(2);
+    expect(backend.inboxFetches).toHaveLength(3);
+    backend.down.bundles = null;
+    expect(await owner.messaging.sync()).toBe(2);
+    expect(backend.inboxes.get('owner')).toEqual([]);
+  });
+
+  it('not fetch again and again a page of only what it holds back from a server without `next`', async () => {
+    const { backend, owner } = await heldThenFriend();
+    backend.paging.next = false;
+    await owner.messaging.sync();
+    expect(backend.inboxFetches).toEqual(['/inbox']);
+    expect(backend.inboxes.get('owner')).toHaveLength(3);
+  });
 
   it('ask once per sync for a link gone from the server, and take nothing through it', async () => {
     const backend = await fakeBackend();

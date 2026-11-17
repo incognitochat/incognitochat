@@ -37,7 +37,7 @@ import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
-import { createMessaging, isPaused, NoMailboxes, NoTokens, type Messaging, type Outgoing } from '../messaging/engine';
+import { createMessaging, isPaused, NoMailboxes, NoTokens, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
 import { clearMedia, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
@@ -294,6 +294,12 @@ export function createApp(deps: Deps) {
   let backgroundStarted = false;
   // Stops the inbox poll and the push socket (the account was deleted).
   let stopBackground = (): void => {};
+  /** Stops messaging and everything started for it: the poll, the socket, a sync waiting out a server's pause. */
+  function stopMessaging(): void {
+    stopBackground();
+    messaging?.stop();
+    messaging = null;
+  }
   // The link last checked and found genuine, to write to.
   let openedLink: { ref: LinkRef; bundle: Bundle } | null = null;
   // "Seen" goes out only while the user is using the app: from a tap that
@@ -435,8 +441,7 @@ export function createApp(deps: Deps) {
   function showSignedOut(reason: SignedOutReason, offline = false): void {
     signedOut = reason;
     readOnly.value = true;
-    stopBackground();
-    messaging = null;
+    stopMessaging();
     backButton(false);
     screen.value = { kind: 'signed-out', reason, busy: false, offline };
   }
@@ -447,8 +452,7 @@ export function createApp(deps: Deps) {
    * nothing is signed until the user sets the clock.
    */
   function showClockOff(again: () => Promise<void>): void {
-    stopBackground();
-    messaging = null;
+    stopMessaging();
     backButton(false);
     fail('clock', again);
   }
@@ -479,6 +483,10 @@ export function createApp(deps: Deps) {
           ...(mediaIssuer ? { mediaIssuer } : {}),
           onTokens: () => void refreshBudget(),
           onWaiting: () => void sync(),
+          // Only while the app syncs in the background (not signed out).
+          onResume: () => {
+            if (backgroundStarted) void sync();
+          },
         });
       } catch {
         // Without a usable issuer key the app still works, but can't send.
@@ -533,15 +541,38 @@ export function createApp(deps: Deps) {
     };
   }
 
+  /** The sync under way, and whether another was asked for meanwhile: pushes, polls and showing the app ask often, so one runs and one waits, no more. */
+  let syncing: Promise<void> | null = null;
+  let syncAgain = false;
+
   /** Fetches new messages; refreshes the screen if any arrived. */
-  async function sync(): Promise<void> {
+  function sync(): Promise<void> {
+    if (syncing) {
+      syncAgain = true;
+      return syncing;
+    }
+    syncing = (async () => {
+      try {
+        do {
+          syncAgain = false;
+          await syncOnce();
+        } while (syncAgain);
+      } finally {
+        syncing = null;
+      }
+    })();
+    return syncing;
+  }
+
+  async function syncOnce(): Promise<void> {
     if (!messaging) return;
     let received = 0;
     try {
       received = await messaging.sync();
     } catch (err) {
-      handleGone(err);
-      return;
+      // What it stored before failing is still shown.
+      if (err instanceof SyncFailed) received = err.received;
+      if (handleGone(err instanceof SyncFailed ? err.error : err)) return;
     }
     if (received > 0) {
       deps.broadcast({ type: 'data-changed' });
@@ -1190,8 +1221,7 @@ export function createApp(deps: Deps) {
         return;
       }
     }
-    stopBackground();
-    messaging = null;
+    stopMessaging();
     await wipe(deps.db);
     deps.broadcast({ type: 'account-changed' });
     backButton(false);

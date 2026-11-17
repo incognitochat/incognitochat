@@ -73,6 +73,8 @@ function fakeServer(
     // The operator's emergency switches; switchesDown: they can't be read.
     switches: { uploadsPaused: false, downloadsPaused: false },
     switchesDown: false,
+    // Fetches of the (empty) inbox wait for this, if set.
+    inboxGate: null as Promise<void> | null,
   };
   let nextCode = 0;
   const take = (queue: Outcome[] | undefined) => {
@@ -93,6 +95,10 @@ function fakeServer(
       const skew = signature ? clockSkew(signature.split('.')[0]) : null;
       if (skew) throw skew;
       if (path === '/accounts/lookup') return check({ exists: outcomes.elsewhere === true });
+      if (method === 'GET' && path.startsWith('/inbox')) {
+        await state.inboxGate;
+        return check({ items: [], more: false });
+      }
       if (path === '/register') {
         take(outcomes.register);
         return check({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.p.m', expires: serverSeconds() + 900 });
@@ -647,6 +653,24 @@ describe('when the server stops taking this device', () => {
     await app.readChats();
     expect(home(app.screen.value)).toMatchObject({ signedOut: 'replaced', conversations: [{ id: 'c1' }] });
     expect(await listMessages(db, 'c1')).toHaveLength(1);
+  });
+});
+
+describe('syncing', () => {
+  it('runs one sync at a time, and one more for all asked for meanwhile', async () => {
+    const server = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { app } = await registered(server.api, { issuer });
+    const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+    const before = inbox();
+    let open!: () => void;
+    server.state.inboxGate = new Promise((resolve) => (open = resolve));
+    // Pushes arriving while a sync runs.
+    const syncs = [app.sync(), app.sync(), app.sync(), app.sync(), app.sync()];
+    await vi.waitFor(() => expect(inbox()).toBe(before + 1));
+    open();
+    await Promise.all(syncs);
+    expect(inbox()).toBe(before + 2);
   });
 });
 

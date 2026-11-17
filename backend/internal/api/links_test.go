@@ -8,7 +8,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,7 +118,13 @@ func (h *harness) callAt(t *testing.T, d *device, token, method, path string, bo
 		}
 	}
 	var req httpapi.Request
-	req.RawPath = path
+	req.RawPath, req.RawQueryString, _ = strings.Cut(path, "?")
+	if query, err := url.ParseQuery(req.RawQueryString); err == nil && len(query) > 0 {
+		req.QueryStringParameters = map[string]string{}
+		for k := range query {
+			req.QueryStringParameters[k] = query.Get(k)
+		}
+	}
 	req.RequestContext.HTTP.Method = method
 	req.Headers = map[string]string{"content-type": "application/json"}
 	if token != "" {
@@ -125,7 +133,7 @@ func (h *harness) callAt(t *testing.T, d *device, token, method, path string, bo
 	req.Body = string(raw)
 	if sign {
 		signed := session.SignedRequest{
-			AccountID: d.account, DeviceID: d.id, Method: method, Path: path, Body: raw,
+			AccountID: d.account, DeviceID: d.id, Method: method, Path: req.RawPath, Body: raw,
 			Timestamp: signedAt.Unix(), Nonce: b64(randomBytes(t, 16)),
 		}
 		sig := signP1363(t, d.dsk, devicesig.Message(devicesig.LabelRequest, session.RequestParts(signed)...))

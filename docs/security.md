@@ -158,6 +158,17 @@ it. This is how close it gets.
   If the person already does, the app says so and waits for a tap on Open,
   and warns that opening the chat right away could give them away. Someone
   who opens it at once anyway can still be recognised by the timing.
+- **Rate counters.** So that no account can use up the database's shared
+  capacity, the server counts what each device fetches in a minute, and
+  what each person fetched, and confirmed that was already gone, that
+  day. Each counter is named by a keyed hash of the device (or
+  person) and its minute (or day), so the name changes every window, and it
+  expires when its window ends (the daily ones an hour later). A copy of
+  the database can't tell whose a counter is, or string one device's
+  minutes together into a record of when it fetched its messages, to set
+  against when its mailboxes received them. Whoever holds the server's key
+  could, for the counters the database hasn't deleted yet (DynamoDB
+  deletes expired items within a few days, usually much sooner).
 - **Who invited whom** can be guessed from when an invitation code is used.
   An invitation link only asks; it's used when the person taps Join.
 - **Activity and volume:** roughly how many mailboxes and messages an account

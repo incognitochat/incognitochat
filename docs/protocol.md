@@ -554,10 +554,68 @@ each mailbox's owner, to deliver, but not who writes to it.
   mailboxes get the same `200 {}`, after a similar pause, and nothing is
   stored. `quiet` sends (seen receipts, reactions, edits, deletes and key
   updates) trigger no notice.
-- `GET /inbox` returns a device's undelivered envelopes in no meaningful order,
-  each with the mailbox it came through (`{id, mailbox, envelope}`): the app
-  takes an envelope in only through the mailbox it belongs to (Inner message);
-  `POST /ack {ids}` deletes the ones it has stored. Undelivered envelopes expire
+- `GET /inbox` returns a page of a device's undelivered envelopes in no
+  meaningful order, each with the mailbox it came through
+  (`{id, mailbox, envelope}`): the app takes an envelope in only through the
+  mailbox it belongs to (Inner message). A page holds at most 50, about
+  128 KiB as stored, and no more than a minute's confirmations (below) can
+  take, so a page of the largest envelopes holds 15. If there are more, it
+  says so (`more`) and where the next page starts (`next`, for
+  `GET /inbox?after=<next>`); a page can be empty and still have more after
+  it, past envelopes that expired.
+  `POST /ack {ids}` deletes the ones the device has stored, at most 50 at
+  once, by the IDs `GET /inbox` gave them. Each such ID carries a MAC by the
+  server, for that device, over the envelope's key, what deleting it costs
+  and the hour it was listed in. IDs the server didn't hand out, and a batch
+  that claims more than a minute's confirmations, are refused
+  (`bad_request`) before anything is deleted. An ID is good in the hour it
+  was listed in and the next (one to two hours); an older one is taken but
+  deletes nothing, and the envelope is listed again under a new one. Listed
+  again within the hour, an envelope has the same ID, so the app skips what
+  it has just confirmed (the server's reads can lag a moment). If some
+  deletes fail, the answer lists their IDs (`retry`), and the app sends only
+  those again.
+- **Limits on fetching and confirming.** The database charges for what each
+  fetch reads and each delete writes, even of an envelope that isn't there,
+  out of capacity everyone shares.
+  - Each device's fetches may read 300 read units a minute (one unit is
+    8 KiB: about 2 MiB as stored). A fetch that reads nothing, such as of an
+    empty inbox, isn't counted; one whose first read (two envelopes) is all
+    there is counts what it read, at least 10; one that reads on first takes
+    what a page can cost at most (57 units) from the minute, before reading
+    on, and gives back what it didn't use. An instance of the server that
+    knows nothing of the device's minute yet reads its count first, so a
+    fetch the minute has no room for reads nothing. So a device's fetches
+    read at most 300 units a minute, plus the first two envelopes (at most
+    5 units) of each fetch that starts, on an instance that hasn't heard
+    yet, while the minute still has room, and is then refused. Past the
+    minute, the server answers `rate_limited`.
+  - Each person's (Telegram user's) fetches may read 50,000 units a UTC day,
+    counted by what they read (in batches of about 50 units on each
+    instance). Past it, the server answers `daily_limit`, with
+    `Retry-After` until the day ends.
+  - A confirmation may claim at most 300 write units (a small envelope is
+    one, a larger one one per started KiB): a page never claims more.
+    Confirming envelopes that are there isn't otherwise limited: they were
+    delivered, and their senders paid for that with tokens. Confirming
+    envelopes that aren't there (any more), or with IDs too old, is limited
+    per person to 1,000 a day (UTC), as many as a day's send tokens; past
+    that, confirmations delete nothing until the next day, and the
+    envelopes are listed and confirmed again then.
+  - If the server can't reach its counters, each of its instances lets a
+    device read one page a minute.
+
+  The app syncs one at a time, and once more for whatever asked meanwhile
+  (pushes, polls, being shown). It reads at most 10 pages a sync, and the
+  next sync carries on where it stopped (from the start after an error).
+  What it couldn't confirm it keeps and sends again later; once three
+  pages wait, it stops reading until they are confirmed. Told
+  `rate_limited`, it waits 30 to 60 seconds and then syncs, from the page
+  it was refused at, whether or not a push came meanwhile; told
+  `daily_limit`, it waits until the next UTC day. A pause longer than that
+  (the device's clock was set back) is over. An envelope the app can't
+  take in yet (its chat is busy, or its link can't be asked now) stays
+  unconfirmed, and the walk goes past it. Undelivered envelopes expire
   after 30 days.
 - **Push:** an open app keeps a WebSocket (`new WebSocket(url, ["v1", token])`,
   the session token as the second subprotocol, never in a URL). After a
@@ -789,8 +847,11 @@ signs, so only a key of its own gives a kind its own daily budget; a token
 of one kind is refused where the other is asked for.
 
 A token is accepted in its own week and the next, and only once: the server
-remembers spent nonces until then. A send refused for a cap doesn't spend its
-token. Clients only accept the issuer keys their build names
+remembers spent nonces until then. A send refused by a mailbox's cap (30 a
+minute) doesn't spend its token, the first time: a token is given back only
+once, so one refused there again may stay spent (the app then drops it and
+takes another). A send refused by a link's cap on first messages (60 an
+hour) spends its token. Clients only accept the issuer keys their build names
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.
