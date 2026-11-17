@@ -145,11 +145,29 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `notify` 20, `ws` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
-| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, limiting requests per IP address (2,000 in 5 minutes). Off by default: it costs a few dollars a month. |
+| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
 | `SECRETS_VERSION` | variable | Raise it to replace the generated secrets (session key, Telegram-ID pepper, webhook secret). Replacing the pepper starts every account over. |
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
 | `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
+
+The limits below can be tuned without a code change. Each is optional:
+unset, the default in [`infra/variables.tf`](../infra/variables.tf) applies.
+
+| Name | Default | What |
+|---|---|---|
+| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400, 200 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). |
+| `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
+| `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). |
+| `FIREWALL_ANONYMOUS_TOTAL_LIMIT` | 12,000 | Requests everyone together may make in 1 minute to those routes (`anonymous-total`). At most 30 times `TABLE_MAX_READ_UNITS`. |
+| `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. |
+
+A change takes effect at the environment's next deploy: for dev, the next
+push to `main` or a manual run of CI on `main`; for production, the next
+release, or a re-run of the latest release's CI run in GitHub Actions
+(possible for 30 days; a re-run reads the variables afresh and waits for the
+reviewer's approval again). Changing a firewall limit restarts that rule's
+counts, so it may not block for up to a minute.
 
 ### The token issuer keys
 
@@ -199,10 +217,32 @@ it needs: only `bot` and `notify` can read the bot token.
 
 ## Cost guards
 
-The tables are on-demand with per-table caps on read and write units, the
-WebSocket API is throttled, and nothing runs when idle. Logs are kept 7 days.
-A budget and alarms watch the account, and each function can be given its
-own share of concurrency (`RESERVE_CONCURRENCY`), both above.
+The tables are on-demand, each capped at 400 read and 200 write request
+units a second (`TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS`). Past a cap
+a table refuses requests, which cost nothing, and its `<table>-table-throttles`
+alarm fires. The caps bound the tables' bill: at eu-west-1's on-demand prices
+($0.1415 per million read units, $0.705 per million write units), a table
+held at both caps all day costs about $17 ($4.89 for reads, $12.18 for
+writes), and all three about **$51 a day**, $2.13 an hour: about
+production's default monthly budget ($50) every day. The throttle alarms
+fire as soon as a table refuses requests; the budget's within a day, since
+billing data lags by hours.
+
+The caps are also the service's ceiling: every logged-in request reads the
+directory (one unit), and every delivered message takes about three write
+units on the ephemeral table, so the default caps carry at most about 400
+logged-in requests and 66 messages a second (fewer large ones: storing an
+envelope takes a write unit per KB on the messages table). Watch each table's
+`ConsumedReadCapacityUnits` and `ConsumedWriteCapacityUnits` (namespace
+AWS/DynamoDB, dimension TableName, `<prefix>-<table>`; the sum over a minute
+divided by 60 is the rate). Raise the caps once real use regularly passes
+half of them, and `FIREWALL_ANONYMOUS_TOTAL_LIMIT` with them
+([the firewall](#the-firewall)).
+
+The WebSocket API is throttled (`WS_THROTTLE_RATE_LIMIT`,
+`WS_THROTTLE_BURST_LIMIT`), and nothing runs when idle. Logs are kept 7
+days. A budget and alarms watch the account, and each function can be given
+its own share of concurrency (`RESERVE_CONCURRENCY`), both above.
 
 ## Emergency switches
 
@@ -289,9 +329,9 @@ The switches aren't flipped automatically by the alarms.
 ## CloudFront in front of the API
 
 A CloudFront distribution stands in front of the `api` function URL
-(`infra/edge.tf`), so floods can be limited per IP address before they reach
-Lambda. It caches nothing and logs nothing. `API_ACCESS` moves the app
-behind it one step at a time:
+(`infra/edge.tf`), so floods can be limited before they reach Lambda. It
+caches nothing and logs nothing. `API_ACCESS` moves the app behind it one
+step at a time:
 
 1. `direct` (default): the app calls the function URL. The distribution
    exists but isn't used; its address is the `api_cloudfront_url` output, to
@@ -304,9 +344,89 @@ behind it one step at a time:
    CloudFront adds, and refuses everyone else without running the function.
    The deploy checks that it does.
 
-`FIREWALL=true` adds AWS WAF in front of CloudFront with one rule: at most
-2,000 requests in 5 minutes from one IP address (`firewall_rate_limit`).
-Many people can share an address (a mobile carrier, a VPN), so the limit is
-far above what one person's app sends. It keeps no sampled requests, which
-would hold addresses. It only protects the API once `API_ACCESS` is
-`cloudfront-only`: before that, the function URL can be called around it.
+The distribution answers over IPv4 only. The firewall counts each IPv6
+address on its own, and one server can have a /64 of them (2^64 addresses),
+so over IPv6 its per-address limits would hold no one. Devices with both use
+IPv4. Devices on networks with IPv6 alone reach it through their network's
+NAT64, sharing an IPv4 address with others there, as they already reach the
+socket API and the media bucket, which have no IPv6 addresses either; a
+network with IPv6 and no NAT64 can't reach the API at all.
+
+### The firewall
+
+`FIREWALL=true` adds AWS WAF in front of CloudFront with three rate limits.
+It only protects the API once `API_ACCESS` is `cloudfront-only`: before that,
+the function URL can be called around it. It keeps no sampled requests,
+which would hold addresses. It costs $5 a month, $1 a month per rule, and
+$0.60 per million requests it looks at, blocked ones included: $8 a month
+plus requests.
+
+| Rule | Counts | Limit | Variable |
+|---|---|---|---|
+| `rate-per-ip` | every request, per IP address | 2,000 in 5 minutes | `FIREWALL_RATE_LIMIT` |
+| `anonymous-per-ip` | requests to the routes that need no login, per IP address | 500 in 5 minutes | `FIREWALL_ANONYMOUS_RATE_LIMIT` |
+| `anonymous-total` | requests to the routes that need no login, everyone together | 12,000 in 1 minute | `FIREWALL_ANONYMOUS_TOTAL_LIMIT` |
+
+The routes that need no login are `POST /session`, `POST /register`,
+`POST /accounts/lookup`, `POST /send`, `GET /links/{id}`, `GET /media/{id}`
+and `POST /media/{id}/upload`: each reads a table before any limit of its
+own, or, for sends, is paid with a token but has no login. Two more need no
+login and are left to `rate-per-ip`: `POST /media` spends no table capacity
+on forged media tokens, and the app sends `POST /media/{id}/delete` for
+every received attachment of a deleted chat, six at a time without a pause,
+which a low limit would cut off.
+
+- **`rate-per-ip`**: many people can share an address (a mobile carrier, a
+  VPN), so the limit is far above what one person's app sends.
+- **`anonymous-per-ip`**: an app sends few requests to these routes. A login
+  lasts 15 minutes; a link's keys are fetched when it is opened, and at most
+  hourly while writing to a link that hasn't answered; photos are fetched one
+  at a time. Most of it is sends: each message, reaction, edit and "seen"
+  receipt is one, and the server takes at most 30 a minute for one mailbox.
+  Someone chatting fast sends about 25 a minute, so at most about 150 to 200
+  in 5 minutes all told; most people send under 30. 500 leaves room for two
+  or three people that busy, or fifteen or so ordinary ones, behind one
+  address. Past it, only these routes are blocked for that address; requests
+  with a session go on.
+- **`anonymous-total`**: everyone's requests to these routes, over one minute
+  so that a block ends soon after a flood does. 12,000 a minute is 200 a
+  second; keep it at most 30 times `TABLE_MAX_READ_UNITS`. Requests that
+  need nothing (a login of a random device, a random link or upload ID) take
+  at most half a read unit each from the directory, or one from the
+  ephemeral table, so a flood of them at this limit uses at most a quarter
+  of the directory's 400 reads a second and half of the ephemeral table's,
+  and logged-in requests (one directory unit each) keep the rest. The others
+  need something the sender must hold first (a send token, Telegram's signed
+  launch data, a device of their own), and most have limits of their own.
+  Rules run in order, and what `rate-per-ip` or `anonymous-per-ip` blocks
+  never reaches this rule, so setting it off takes about 120 addresses at
+  once, each just under 100 a minute.
+
+  While it blocks, these routes are refused for everyone, logins and sends
+  included, until the rate falls: usually a minute or two after the flood
+  stops. Logged-in requests go on until their 15-minute sessions end, since
+  logging in again is one of these routes. It trades a flood that would
+  otherwise starve the tables, and with them every request, for one that
+  stops only these routes.
+
+A blocked request gets CloudFront's 403 without CORS headers, so the app
+sees a network error and tries again later, as when it is offline. AWS WAF
+checks rates about every 10 seconds and doesn't match a limit exactly: a
+flood usually gets through for up to 30 seconds before it's blocked
+(sometimes longer, AWS says), and a block can outlast it by as long.
+
+**What to watch**, in CloudWatch in us-east-1 (namespace AWS/WAFV2,
+dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:
+`<prefix>-api-rate-per-ip`, `<prefix>-api-anonymous-per-ip`,
+`<prefix>-api-anonymous-total`): `BlockedRequests` for each rule, and
+`AllowedRequests` with Rule `ALL`. The metrics are free; no alarm watches
+them yet.
+
+- `anonymous-per-ip` blocking now and then is one busy address. Blocks
+  that recur every day while the tables are far below their caps, and
+  `AllowedRequests` looks like ordinary use, may be people behind a shared
+  address: raise `FIREWALL_ANONYMOUS_RATE_LIMIT`.
+- `anonymous-total` blocking at all means the routes were refused for
+  everyone for a while. With the tables near their caps it was a flood, or
+  real growth: if it's growth, raise the caps and this limit together.
+- `rate-per-ip` as before.

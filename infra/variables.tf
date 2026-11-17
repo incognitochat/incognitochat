@@ -154,13 +154,13 @@ variable "api_access" {
 }
 
 variable "firewall" {
-  description = "Put a firewall (AWS WAF) in front of CloudFront, limiting requests per IP address. Costs a few dollars a month"
+  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login (edge.tf). About $8 a month, plus $0.60 per million requests"
   type        = bool
   default     = false
 }
 
 variable "firewall_rate_limit" {
-  description = "Requests one IP address may make in 5 minutes before the firewall blocks it. Many people can share an address (a carrier, a VPN)"
+  description = "Requests one IP address may make in 5 minutes, to any route, before the firewall blocks it. Many people can share an address (a carrier, a VPN). GitHub variable FIREWALL_RATE_LIMIT"
   type        = number
   default     = 2000
 
@@ -170,32 +170,68 @@ variable "firewall_rate_limit" {
   }
 }
 
+variable "firewall_anonymous_rate_limit" {
+  description = "Requests one IP address may make in 5 minutes to the routes that need no login (edge.tf) before the firewall blocks it from those routes. GitHub variable FIREWALL_ANONYMOUS_RATE_LIMIT"
+  type        = number
+  default     = 500
+
+  validation {
+    condition     = var.firewall_anonymous_rate_limit >= 100
+    error_message = "firewall_anonymous_rate_limit must be at least 100."
+  }
+}
+
+variable "firewall_anonymous_total_limit" {
+  description = "Requests everyone together may make in 1 minute to the routes that need no login (edge.tf) before the firewall blocks those routes for everyone. Keep it at most 30 times table_max_read_units, so that even at a read unit each they use at most half the directory table's reads, and raise it with the caps. GitHub variable FIREWALL_ANONYMOUS_TOTAL_LIMIT"
+  type        = number
+  default     = 12000
+
+  validation {
+    condition     = var.firewall_anonymous_total_limit >= 1000
+    error_message = "firewall_anonymous_total_limit must be at least 1000."
+  }
+}
+
 variable "reserve_concurrency" {
   description = "Reserve each function's share of the account's concurrent executions (infra/functions.tf), a guard against floods. Needs a Lambda concurrency quota of at least 235: AWS keeps 100 unreserved, and new accounts start at 10"
   type        = bool
   default     = false
 }
 
+# A table refuses requests past its caps, at no cost (the table-throttles
+# alarms in infra/init fire), so the caps bound the bill: at eu-west-1's
+# on-demand prices, a table held at both caps all day costs about $17, all
+# three about $51 a day (docs/deployment.md, Cost guards).
 variable "table_max_read_units" {
-  description = "Per-table cap on on-demand read request units per second, a cost guard"
+  description = "Per-table cap on on-demand read request units per second, a cost guard. GitHub variable TABLE_MAX_READ_UNITS"
   type        = number
-  default     = 200
+  default     = 400
+
+  validation {
+    condition     = var.table_max_read_units >= 1
+    error_message = "table_max_read_units must be at least 1."
+  }
 }
 
 variable "table_max_write_units" {
-  description = "Per-table cap on on-demand write request units per second, a cost guard"
+  description = "Per-table cap on on-demand write request units per second, a cost guard. GitHub variable TABLE_MAX_WRITE_UNITS"
   type        = number
-  default     = 100
+  default     = 200
+
+  validation {
+    condition     = var.table_max_write_units >= 1
+    error_message = "table_max_write_units must be at least 1."
+  }
 }
 
 variable "ws_throttle_rate_limit" {
-  description = "Steady-state requests per second allowed on the WebSocket API"
+  description = "Steady-state requests per second allowed on the WebSocket API. GitHub variable WS_THROTTLE_RATE_LIMIT"
   type        = number
   default     = 20
 }
 
 variable "ws_throttle_burst_limit" {
-  description = "Burst of requests allowed on the WebSocket API"
+  description = "Burst of requests allowed on the WebSocket API. GitHub variable WS_THROTTLE_BURST_LIMIT"
   type        = number
   default     = 40
 }
