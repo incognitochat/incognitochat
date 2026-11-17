@@ -197,10 +197,27 @@ jobs:
           TF_VAR_lambda_builds_bucket: ${{ secrets.LAMBDA_BUILDS_BUCKET }}
           TF_VAR_lambda_signing_profile: ${{ secrets.LAMBDA_SIGNING_PROFILE }}
           TF_VAR_lambda_code_signing_config_arn: ${{ secrets.LAMBDA_CODE_SIGNING_CONFIG }}
+          # Limits, tunable without a code change (docs/deployment.md). Each
+          # goes to Terraform as TF_VAR_<lower-case name> only when it is set:
+          # an empty value isn't a number, and unset, infra/variables.tf's
+          # default applies.
+          TABLE_MAX_READ_UNITS: ${{ vars.TABLE_MAX_READ_UNITS }}
+          TABLE_MAX_WRITE_UNITS: ${{ vars.TABLE_MAX_WRITE_UNITS }}
+          FIREWALL_RATE_LIMIT: ${{ vars.FIREWALL_RATE_LIMIT }}
+          FIREWALL_ANONYMOUS_RATE_LIMIT: ${{ vars.FIREWALL_ANONYMOUS_RATE_LIMIT }}
+          FIREWALL_LOOKUPS_TOTAL_LIMIT: ${{ vars.FIREWALL_LOOKUPS_TOTAL_LIMIT }}
+          WS_THROTTLE_RATE_LIMIT: ${{ vars.WS_THROTTLE_RATE_LIMIT }}
+          WS_THROTTLE_BURST_LIMIT: ${{ vars.WS_THROTTLE_BURST_LIMIT }}
         # Refreshed resources are printed with their IDs (such as the media
         # bucket's name): hidden, as in apply.
         run: |
           set -o pipefail
+          for name in TABLE_MAX_READ_UNITS TABLE_MAX_WRITE_UNITS FIREWALL_RATE_LIMIT FIREWALL_ANONYMOUS_RATE_LIMIT \
+            FIREWALL_LOOKUPS_TOTAL_LIMIT WS_THROTTLE_RATE_LIMIT WS_THROTTLE_BURST_LIMIT; do
+            if [ -n "${!name}" ]; then
+              export "TF_VAR_${name,,}=${!name}"
+            fi
+          done
           terraform plan -no-color -out=tfplan | sed -E 's/\[id=[^]]*\]/[id=***]/'
 
       - name: Terraform apply

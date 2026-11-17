@@ -45,6 +45,8 @@ type Uploads interface {
 	Get(ctx context.Context, id string) (ephemeral.Upload, bool, error)
 	// Exists is Get for downloads: eventually consistent.
 	Exists(ctx context.Context, id string) (bool, error)
+	// Lookup is Get for deletes: eventually consistent.
+	Lookup(ctx context.Context, id string) (ephemeral.Upload, bool, error)
 	Renew(ctx context.Context, id string, most int, expiresAfter time.Time) (bool, error)
 	Delete(ctx context.Context, id string) error
 }
@@ -232,7 +234,11 @@ func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.
 	if s.Media == nil || !ids.Valid(id) || len(in.Secret) == 0 {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	up, ok, err := s.Uploads.Get(ctx, id)
+	// Eventually consistent, at half the cost: anyone can ask with random
+	// IDs. A stale read is safe, since the hash it compares never changes,
+	// and an upload recorded in about the last second, which may not show
+	// yet, isn't one a recipient has the message for.
+	up, ok, err := s.Uploads.Lookup(ctx, id)
 	if err != nil {
 		return s.internal(route, err)
 	}

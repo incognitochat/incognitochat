@@ -31,9 +31,18 @@ func TestUploads(t *testing.T) {
 	if err != nil || !ok || !bytes.Equal(got.DeleteHash, hash) || got.Size != 1234 {
 		t.Fatalf("Get = %+v %v %v", got, ok, err)
 	}
+	if looked, ok, err := u.Lookup(ctx, "up1"); err != nil || !ok || !bytes.Equal(looked.DeleteHash, hash) || !looked.Expires.Equal(got.Expires) {
+		t.Fatalf("Lookup = %+v %v %v", looked, ok, err)
+	}
+	if _, ok, err := u.Lookup(ctx, "up2"); ok || err != nil {
+		t.Fatalf("Lookup of none = %v %v", ok, err)
+	}
 	clock = clock.Add(time.Hour)
 	if _, ok, _ := u.Get(ctx, "up1"); ok {
 		t.Fatal("expired upload still there")
+	}
+	if _, ok, _ := u.Lookup(ctx, "up1"); ok {
+		t.Fatal("Lookup: expired upload still there")
 	}
 	if err := u.Delete(ctx, "up1"); err != nil {
 		t.Fatal(err)

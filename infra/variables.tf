@@ -154,13 +154,13 @@ variable "api_access" {
 }
 
 variable "firewall" {
-  description = "Put a firewall (AWS WAF) in front of CloudFront, limiting requests per IP address. Costs a few dollars a month"
+  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login (edge.tf). About $8 a month, plus $0.60 per million requests"
   type        = bool
   default     = false
 }
 
 variable "firewall_rate_limit" {
-  description = "Requests one IP address may make in 5 minutes before the firewall blocks it. Many people can share an address (a carrier, a VPN)"
+  description = "Requests one IP address may make in 5 minutes, to any route, before the firewall blocks it. Many people can share an address (a carrier, a VPN). GitHub variable FIREWALL_RATE_LIMIT"
   type        = number
   default     = 2000
 
@@ -170,32 +170,87 @@ variable "firewall_rate_limit" {
   }
 }
 
+variable "firewall_anonymous_rate_limit" {
+  description = "Requests one IP address may make in 5 minutes to the routes that need no login (edge.tf) before the firewall blocks it from those routes. GitHub variable FIREWALL_ANONYMOUS_RATE_LIMIT"
+  type        = number
+  default     = 500
+
+  validation {
+    condition     = var.firewall_anonymous_rate_limit >= 100
+    error_message = "firewall_anonymous_rate_limit must be at least 100."
+  }
+
+  validation {
+    condition     = var.firewall_anonymous_rate_limit <= var.firewall_rate_limit
+    error_message = "firewall_anonymous_rate_limit must be at most firewall_rate_limit, which counts the same requests and more."
+  }
+}
+
+variable "firewall_lookups_total_limit" {
+  description = "Requests everyone together may make in 1 minute to look up links and uploads by ID (edge.tf) before the firewall blocks those lookups for everyone. Unset (null), 30 times the tables' read cap (12,000 in production): each lookup takes at most one read unit, so at most half a table's reads. Set, it must be at most that. GitHub variable FIREWALL_LOOKUPS_TOTAL_LIMIT"
+  type        = number
+  default     = null
+
+  validation {
+    condition     = coalesce(var.firewall_lookups_total_limit, 1000) >= 1000
+    error_message = "firewall_lookups_total_limit must be at least 1000."
+  }
+}
+
 variable "reserve_concurrency" {
   description = "Reserve each function's share of the account's concurrent executions (infra/functions.tf), a guard against floods. Needs a Lambda concurrency quota of at least 235: AWS keeps 100 unreserved, and new accounts start at 10"
   type        = bool
   default     = false
 }
 
+# The tables' caps (tables.tf). Unset, they depend on the environment, so
+# that nothing needs setting by hand: 400 reads and 200 writes a second in
+# production, 200 and 100 elsewhere (dev has no firewall and a small
+# budget). A table refuses requests past its caps, at no cost (the
+# table-throttles alarms in infra/init fire), so the caps bound the bill: at
+# eu-west-1's on-demand prices, all three tables held at both caps cost
+# about $51 a day in production, $26 elsewhere (docs/deployment.md, Cost
+# guards).
 variable "table_max_read_units" {
-  description = "Per-table cap on on-demand read request units per second, a cost guard"
+  description = "Per-table cap on on-demand read request units per second, a cost guard. Unset (null), 400 in production and 200 elsewhere. GitHub variable TABLE_MAX_READ_UNITS"
   type        = number
-  default     = 200
+  default     = null
+
+  validation {
+    condition     = coalesce(var.table_max_read_units, 1) >= 1
+    error_message = "table_max_read_units must be at least 1."
+  }
 }
 
 variable "table_max_write_units" {
-  description = "Per-table cap on on-demand write request units per second, a cost guard"
+  description = "Per-table cap on on-demand write request units per second, a cost guard. Unset (null), 200 in production and 100 elsewhere. GitHub variable TABLE_MAX_WRITE_UNITS"
   type        = number
-  default     = 100
+  default     = null
+
+  validation {
+    condition     = coalesce(var.table_max_write_units, 1) >= 1
+    error_message = "table_max_write_units must be at least 1."
+  }
 }
 
 variable "ws_throttle_rate_limit" {
-  description = "Steady-state requests per second allowed on the WebSocket API"
+  description = "Steady-state requests per second allowed on the WebSocket API. GitHub variable WS_THROTTLE_RATE_LIMIT"
   type        = number
   default     = 20
+
+  validation {
+    condition     = var.ws_throttle_rate_limit >= 1
+    error_message = "ws_throttle_rate_limit must be at least 1."
+  }
 }
 
 variable "ws_throttle_burst_limit" {
-  description = "Burst of requests allowed on the WebSocket API"
+  description = "Burst of requests allowed on the WebSocket API. GitHub variable WS_THROTTLE_BURST_LIMIT"
   type        = number
   default     = 40
+
+  validation {
+    condition     = var.ws_throttle_burst_limit >= 1
+    error_message = "ws_throttle_burst_limit must be at least 1."
+  }
 }
