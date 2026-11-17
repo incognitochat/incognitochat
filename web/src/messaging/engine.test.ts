@@ -15,7 +15,7 @@ import { newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, type MessagingDeps } from './engine';
-import { clearMedia, getConversation, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation } from './store';
+import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
 
@@ -952,7 +952,9 @@ describe('deleting for both sides', () => {
     expect(await listMessages(owner.db, mine)).toEqual([]);
     const c = await getConversation(owner.db, mine);
     expect(c?.hidden).toBe(true);
-    expect(c?.deleted?.map((d) => d.id)).toEqual([hello!.id]);
+    // Remembered by a keyed hash, not its ID.
+    expect((await getIds(owner.db, mine)).gone?.flatMap((d) => d.tags)).toHaveLength(1);
+    expect(JSON.stringify(c)).not.toContain(hello!.id);
     expect((await listConversations(owner.db)).filter((x) => !x.hidden)).toEqual([]);
   });
 
@@ -1471,8 +1473,15 @@ async function sendVia(who: Person, conv: string, mailbox: string, text: string)
 
 /** What a device keeps about its chats and keys: taking in an envelope would change some of it. */
 async function state(db: Database) {
-  const chats = await Promise.all((await listConversations(db)).map(async (c) => ({ ...c, messages: await listMessages(db, c.id) })));
+  const chats = await Promise.all((await listConversations(db)).map(async (c) => ({ ...c, messages: await listMessages(db, c.id), ids: await getIds(db, c.id) })));
   return { chats, keys: await getMeta(db, 'recipient-keys'), links: await getMeta(db, 'links') };
+}
+
+/** Forgets one kind of what a chat remembers by keyed hashes: as when it was let go (past its cap), or kept by an older version. */
+async function forgetIds(db: Database, conv: string, kind: IdKind): Promise<void> {
+  const before = await getIds(db, conv);
+  const { [kind]: _, ...rest } = before;
+  await saveConversation(db, (await getConversation(db, conv))!, rest, before);
 }
 
 describe('envelopes through a mailbox they do not belong to', () => {
@@ -2233,8 +2242,10 @@ describe('links from before their intro mailbox was kept', () => {
 /**
  * A copy of a device's database as version 3 of the app kept it: each
  * conversation under its wire ID, messages and attachments by message ID.
+ * Deletes that overtook their messages were kept by ID then (`deleted`, by
+ * wire ID here), not as keyed hashes; nor was anything kept against replays.
  */
-async function asVersion3(db: Database, name: string): Promise<void> {
+async function asVersion3(db: Database, name: string, deleted: Record<string, { id: string; at: number }[]> = {}): Promise<void> {
   const conversations = await db.getAll('conversations');
   const wire = new Map(conversations.map((c) => [c.id, c.wire]));
   const v3 = await openDB(name, 3, {
@@ -2247,6 +2258,7 @@ async function asVersion3(db: Database, name: string): Promise<void> {
   for (const k of await db.getAllKeys('keys')) await v3.put('keys', await db.get('keys', k), k);
   for (const k of await db.getAllKeys('vault')) await v3.put('vault', await db.get('vault', k), k);
   for (const k of await db.getAllKeys('meta')) {
+    if (String(k).startsWith('ids:')) continue;
     let value = await db.get('meta', k);
     // Nor did it keep links' intro mailboxes.
     if (k === 'recipient-keys') {
@@ -2261,8 +2273,10 @@ async function asVersion3(db: Database, name: string): Promise<void> {
     if (k === 'links') value = (value as Record<string, unknown>[]).map(({ mailbox: _, ...l }) => l);
     await v3.put('meta', value, k);
   }
-  for (const { wire: id, firstKey: _, introUntil: __, formerMailboxes: ___, ...c } of conversations) await v3.put('conversations', { ...c, id });
-  for (const { legacyFile: _, ...m } of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
+  for (const { wire: id, firstKey: _, introUntil: __, formerMailboxes: ___, newest: _n, lastMessage: _l, ...c } of conversations) {
+    await v3.put('conversations', { ...c, id, ...(deleted[id] ? { deleted: deleted[id] } : {}) });
+  }
+  for (const { legacyFile: _, sent: _s, had: _h, ...m } of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
   for (const key of await db.getAllKeys('media')) await v3.put('media', await db.get('media', key), typeof key === 'string' ? key : key[1]);
   v3.close();
 }
@@ -2287,7 +2301,8 @@ describe('a database from before conversations had IDs of their own', () => {
     await sender.messaging.edit(conv, (await listMessages(sender.db, conv)).at(-1)!.id, 'hello again');
     await sender.messaging.send(conv, 'oops');
     const oops = inbox.pop()!;
-    await sender.messaging.deleteForEveryone(conv, (await listMessages(sender.db, conv)).at(-1)!.id);
+    const oopsId = (await listMessages(sender.db, conv)).at(-1)!.id;
+    await sender.messaging.deleteForEveryone(conv, oopsId);
     // And one not answered yet.
     const unanswered = await other.messaging.startConversation(ref, bundle, 'hey');
     expect(await owner.messaging.sync()).toBe(2);
@@ -2296,7 +2311,7 @@ describe('a database from before conversations had IDs of their own', () => {
 
     // The same device as version 3 kept it, opened by this version.
     const name = `engine-v3-${n++}`;
-    await asVersion3(owner.db, name);
+    await asVersion3(owner.db, name, { [(await getConversation(sender.db, conv))!.wire]: [{ id: oopsId, at: Date.now() }] });
     const db = await openDatabase(name);
     const after = createMessaging({ db, api: backend.api, session: owner.session, issuer: backend.issuer, mediaIssuer: backend.issuer, transfer: backend.transfer });
     // Its conversations keep the IDs they had: their wire IDs.
@@ -2310,6 +2325,9 @@ describe('a database from before conversations had IDs of their own', () => {
     // What was still on its way arrives: the edited message edited, the deleted one not at all.
     backend.inboxes.get('owner')!.push(typo, oops);
     expect(await after.sync()).toBe(1);
+    // The delete kept by ID is kept as a keyed hash from now on.
+    const upgraded = (await getConversation(db, answered))!;
+    expect([upgraded.deleted, (await getIds(db, answered)).gone?.flatMap((d) => d.tags).length]).toEqual([undefined, 1]);
     expect((await listMessages(db, answered)).map((m) => [m.text, m.edited !== undefined])).toEqual([
       ['hello', false],
       ['hi', false],
@@ -2591,5 +2609,803 @@ describe('attachments paused by the operator', () => {
     backend.down.downloads = false;
     expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
     expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
+  });
+});
+
+describe('envelopes that come again, or late', () => {
+  // The inbox gives envelopes in no set order, a stale read can give one
+  // already taken in, and a server can keep any and deliver it again. None
+  // of that may undo what was done since: wipe later history, bring back
+  // what was deleted, or move us back to an older key or mailbox.
+  const HOUR = 3600 * 1000;
+
+  /** A chat both sides have written in: 'hello' from the sender, 'hi' from the owner. */
+  async function chat(clocks: { owner?: () => number; sender?: () => number } = {}) {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner', clocks.owner);
+    const sender = await person(backend, 'sender', clocks.sender);
+    // A link key a few hours old, so a sender whose clock runs behind can use it too.
+    const record = await createLink(owner.db, owner.session, () => Math.floor(Date.now() / 1000) - 3 * 3600);
+    const ref: LinkRef = { id: record.id, fingerprint: record.fingerprint };
+    const bundle = await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    /** Delivers an envelope to someone again, through their mailbox for this chat (or another). */
+    const again = async (to: 'owner' | 'sender', envelope: string, mailbox?: string) => {
+      const c = to === 'owner' ? (await getConversation(owner.db, mine))! : (await getConversation(sender.db, conv))!;
+      backend.inboxes.get(to)!.push({ id: rand(), mailbox: mailbox ?? c.myMailbox!, envelope });
+    };
+    const texts = async (who: 'owner' | 'sender') =>
+      (await listMessages(who === 'owner' ? owner.db : sender.db, who === 'owner' ? mine : conv)).map((m) => m.text);
+    /** The envelope sent last, by anyone. */
+    const last = () => backend.seenEnvelopes.at(-1)!;
+    return { backend, owner, sender, conv, mine, bundle, again, texts, last };
+  }
+
+  describe('a whole chat deleted for both sides', () => {
+    it('delivered again after later messages, leaves them', async () => {
+      const { owner, sender, conv, mine, again, texts, last } = await chat();
+      await sender.messaging.remove(conv, true);
+      const wipe = last();
+      expect(await owner.messaging.sync()).toBe(1);
+      expect(await texts('owner')).toEqual([]);
+      await sender.messaging.send(conv, 'new start');
+      await owner.messaging.sync();
+      await owner.messaging.send(mine, 'welcome back');
+      await sender.messaging.sync();
+
+      await again('owner', wipe);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['new start', 'welcome back']);
+      expect((await getConversation(owner.db, mine))!.hidden).toBe(false);
+    });
+
+    it('arriving after later messages from either side, leaves those', async () => {
+      const { backend, owner, sender, conv, mine, texts } = await chat();
+      await sender.messaging.remove(conv, true);
+      await sender.messaging.send(conv, 'sorry, fresh start');
+      // Before the owner has seen either, the owner writes too.
+      await owner.messaging.send(mine, 'are you there?');
+      // Their later message comes first.
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      expect((await texts('owner')).sort()).toEqual(['are you there?', 'sorry, fresh start']);
+      const c = (await getConversation(owner.db, mine))!;
+      expect([c.hidden, c.unread]).toEqual([false, 1]);
+      // Their side agrees: the owner's message written after it stays there too.
+      await sender.messaging.sync();
+      expect((await texts('sender')).sort()).toEqual(['are you there?', 'sorry, fresh start']);
+    });
+
+    it('when their clock runs ahead, what either side wrote after it stays', async () => {
+      const base = Date.now();
+      let tick = 0;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + 2 * HOUR });
+      tick += 60_000;
+      await sender.messaging.remove(conv, true);
+      // A minute after it on the real clock (two hours before it on theirs), the owner writes...
+      tick += 60_000;
+      await owner.messaging.send(mine, 'still here?');
+      // ...and so do they.
+      tick += 60_000;
+      await sender.messaging.send(conv, 'sorry');
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      expect((await texts('owner')).sort()).toEqual(['sorry', 'still here?']);
+    });
+
+    it('when their clock runs behind, what they had of ours goes too, and what came after stays', async () => {
+      const base = Date.now();
+      let tick = 0;
+      const { owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick - 2 * HOUR });
+      tick += 60_000;
+      await owner.messaging.send(mine, 'did you get this?');
+      await sender.messaging.sync();
+      tick += 60_000;
+      await sender.messaging.remove(conv, true);
+      tick += 60_000;
+      await owner.messaging.send(mine, 'after');
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['after']);
+      // Their side: the same.
+      await sender.messaging.sync();
+      expect(await texts('sender')).toEqual(['after']);
+    });
+
+    it("names the newest of the other side's messages it had, so their app takes exactly that much of its own", async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'yours?');
+      // The owner's newest envelope there is a reaction, not a message.
+      clock += 1000;
+      await owner.messaging.react(mine, (await listMessages(owner.db, mine))[0]!.id, '👍');
+      await sender.messaging.sync();
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      clock += 1000;
+      await owner.messaging.send(mine, 'after');
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['after']);
+    });
+
+    it('from a sender before this version, a late receipt takes no more of ours than the delete names: a leftover, never a loss', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'one');
+      clock += 1000;
+      await owner.messaging.send(mine, 'two');
+      await sender.messaging.sync();
+      // They read both, delete the second here only, then the whole chat for both.
+      clock += 1000;
+      await sender.messaging.markSeen(conv);
+      await sender.messaging.deleteHere(conv, (await listMessages(sender.db, conv)).at(-1)!.id);
+      // As a conversation from before the newest message taken in was kept:
+      // the delete names 'one', their newest message from the owner left
+      // there, and only the receipt shows they had 'two'.
+      const { lastMessage: _, ...before } = (await getConversation(sender.db, conv))!;
+      await putConversation(sender.db, before);
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      // The delete comes first, then the receipt that shows they had 'two'.
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      // 'two' stays here, though they had it: nothing after what the delete names is taken.
+      expect(await texts('owner')).toEqual(['two']);
+      expect(await texts('sender')).toEqual([]);
+    });
+
+    it("a receipt from before it that comes after it takes what it shows they had, when the delete names none of ours", async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'one');
+      await sender.messaging.sync();
+      clock += 1000;
+      await sender.messaging.markSeen(conv);
+      // The owner's newest envelope there is a reaction.
+      clock += 1000;
+      await owner.messaging.react(mine, (await listMessages(owner.db, mine))[0]!.id, '👍');
+      await sender.messaging.sync();
+      // They delete the owner's messages here, then (as from before the newest
+      // message was kept) the whole chat: its `last` names the reaction.
+      for (const m of (await listMessages(sender.db, conv)).filter((m) => !m.out)) await sender.messaging.deleteHere(conv, m.id);
+      const { lastMessage: _, ...before } = (await getConversation(sender.db, conv))!;
+      await putConversation(sender.db, before);
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual([]);
+    });
+
+    it('a message of ours on its way when they deleted stays on both sides, even after their clock is set back', async () => {
+      const base = Date.now();
+      let tick = 0;
+      let skew = 2 * HOUR;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
+      tick += 60_000;
+      await owner.messaging.send(mine, 'inflight');
+      const inflight = backend.inboxes.get('sender')!.pop()!;
+      tick += 60_000;
+      await sender.messaging.remove(conv, true);
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['inflight']);
+      // It reaches them after their delete: newer than the newest of ours they had, so they keep it.
+      backend.inboxes.get('sender')!.push(inflight);
+      await sender.messaging.sync();
+      expect(await texts('sender')).toEqual(['inflight']);
+      // Their clock is set right, and they open the chat: the receipt looks older than their delete.
+      skew = 0;
+      tick += 60_000;
+      await sender.messaging.markSeen(conv);
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['inflight']);
+      expect(await texts('sender')).toEqual(['inflight']);
+    });
+
+    it('an older one taken in after a newer one changes nothing', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      clock += 1000;
+      await sender.messaging.send(conv, 'between');
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      clock += 1000;
+      await sender.messaging.send(conv, 'after both');
+      // The newest delete first, then the message after it, then the rest.
+      const [first, between, second, after] = backend.inboxes.get('owner')!.splice(0);
+      backend.inboxes.get('owner')!.push(second!, after!, first!, between!);
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['after both']);
+    });
+  });
+
+  describe('clocks set back, and both sides agreeing', () => {
+    for (const named of ['one of ours', 'none of ours']) {
+      it(`after their delete (naming ${named}) and their clock set back, what we write after taking the delete in stays`, async () => {
+        const base = Date.now();
+        let tick = 0;
+        let skew = 2 * HOUR;
+        const { owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
+        // Their delete names 'hi'; deleted here, it names none of ours this side has.
+        if (named === 'none of ours') await owner.messaging.deleteHere(mine, (await listMessages(owner.db, mine)).find((m) => m.out)!.id);
+        tick += 60_000;
+        await sender.messaging.remove(conv, true);
+        await owner.messaging.sync();
+        // Their clock is set right; everything of theirs is now dated before their delete.
+        skew = 0;
+        tick += 60_000;
+        await owner.messaging.send(mine, 'still here');
+        await sender.messaging.sync();
+        tick += 60_000;
+        // They open the chat: the receipt names the owner's new message.
+        await sender.messaging.markSeen(conv);
+        await owner.messaging.sync();
+        expect(await texts('owner')).toEqual(['still here']);
+        expect(await texts('sender')).toEqual(['still here']);
+      });
+    }
+
+    it('after we delete the chat here and their clock is set back, both sides go on', async () => {
+      const base = Date.now();
+      let tick = 0;
+      let skew = 2 * HOUR;
+      const { owner, sender, conv, mine, texts } = await chat({ owner: () => base + tick, sender: () => base + tick + skew });
+      tick += 60_000;
+      await owner.messaging.remove(mine);
+      skew = 0;
+      tick += 60_000;
+      await owner.messaging.send(mine, 'me again');
+      await sender.messaging.sync();
+      tick += 60_000;
+      await sender.messaging.markSeen(conv);
+      tick += 60_000;
+      await sender.messaging.send(conv, 'you again');
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['me again', 'you again']);
+    });
+
+    it('naming the newest of their messages ever taken in, both sides keep the same', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const step = () => (clock += 1000);
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      step();
+      await owner.messaging.send(mine, 'r1');
+      // r1 is held up on its way.
+      const r1 = backend.inboxes.get('sender')!.pop()!;
+      step();
+      await owner.messaging.send(mine, 'r2');
+      await sender.messaging.sync();
+      // They read r2, delete it on their side only, then the whole chat for both.
+      step();
+      await sender.messaging.markSeen(conv);
+      await sender.messaging.deleteHere(conv, (await listMessages(sender.db, conv)).find((m) => m.text === 'r2')!.id);
+      step();
+      expect((await getConversation(sender.db, conv))!.lastMessage).toBeDefined();
+      await sender.messaging.remove(conv, true);
+      // Named in the delete, so no longer kept.
+      expect((await getConversation(sender.db, conv))!.lastMessage).toBeUndefined();
+      backend.inboxes.get('sender')!.push(r1);
+      await sender.messaging.sync();
+      await owner.messaging.sync();
+      expect(await texts('sender')).toEqual([]);
+      expect(await texts('owner')).toEqual([]);
+    });
+
+    it('naming their newest message they still have: not one they deleted for both sides', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const step = () => (clock += 1000);
+      const { owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      step();
+      await sender.messaging.send(conv, 'm2');
+      step();
+      await sender.messaging.send(conv, 'm3');
+      // Taken in, not opened.
+      await owner.messaging.sync();
+      step();
+      await sender.messaging.deleteForEveryone(conv, (await listMessages(sender.db, conv)).at(-1)!.id);
+      await owner.messaging.sync();
+      step();
+      await owner.messaging.remove(mine, true);
+      // Once sent, its ID and time aren't kept.
+      expect((await getConversation(owner.db, mine))!.lastMessage).toBeUndefined();
+      await sender.messaging.sync();
+      expect(await texts('owner')).toEqual([]);
+      expect(await texts('sender')).toEqual([]);
+    });
+
+    for (const forBoth of [false, true]) {
+      it(`deleting the chat ${forBoth ? 'for both sides' : 'here'} keeps an edit waiting for a message still on its way`, async () => {
+        let clock = Date.now();
+        const now = () => clock;
+        const step = () => (clock += 1000);
+        const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+        step();
+        await sender.messaging.send(conv, 'm5');
+        const m5 = backend.inboxes.get('owner')!.pop()!;
+        step();
+        await sender.messaging.edit(conv, (await listMessages(sender.db, conv)).at(-1)!.id, 'm5 edited');
+        await owner.messaging.sync();
+        step();
+        await owner.messaging.remove(mine, forBoth);
+        backend.inboxes.get('owner')!.push(m5);
+        await owner.messaging.sync();
+        expect(await texts('owner')).toEqual(['m5 edited']);
+        if (forBoth) {
+          await sender.messaging.sync();
+          expect(await texts('sender')).toEqual(['m5 edited']);
+        }
+      });
+    }
+
+    it('our delete for both sides after theirs keeps the later time it was cleared to', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const step = () => (clock += 1000);
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      step();
+      await sender.messaging.send(conv, 'm1');
+      step();
+      await sender.messaging.send(conv, 'm2');
+      // m2 is held up on its way.
+      const m2 = backend.inboxes.get('owner')!.pop()!;
+      step();
+      await sender.messaging.remove(conv, true);
+      await owner.messaging.sync();
+      step();
+      await owner.messaging.remove(mine, true);
+      // Sent before their delete: dropped, though it's newer than the newest of theirs we had.
+      backend.inboxes.get('owner')!.push(m2);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual([]);
+    });
+
+    it('our delete for both sides leaves the chat in the list if something came meanwhile', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      const sending = holdSends(backend);
+      const removing = owner.messaging.remove(mine, true);
+      await sending.reached;
+      // While its delete goes out, the owner writes again (from another copy of the app, say).
+      clock += 1000;
+      const writing = owner.messaging.send(mine, 'meanwhile');
+      await waitingFor(`send:${mine}`);
+      sending.release();
+      await Promise.all([removing, writing]);
+      expect(await texts('owner')).toEqual(['meanwhile']);
+      expect((await getConversation(owner.db, mine))!.hidden).toBe(false);
+    });
+  });
+
+  describe('a message deleted', () => {
+    it("of ours, here, is remembered apart from theirs, and a reaction to it isn't kept for later", async () => {
+      const { owner, sender, conv, mine } = await chat();
+      await owner.messaging.send(mine, 'mine');
+      await sender.messaging.sync();
+      const m = (await listMessages(sender.db, conv)).at(-1)!;
+      // Their reaction to it is on its way when the owner deletes it.
+      await sender.messaging.react(conv, m.id, '👍');
+      await owner.messaging.deleteHere(mine, m.id);
+      await owner.messaging.sync();
+      const ids = await getIds(owner.db, mine);
+      expect([ids.dropped, ids.mine?.flatMap((d) => d.tags).length]).toEqual([undefined, 1]);
+      expect((await getConversation(owner.db, mine))!.reactions ?? []).toEqual([]);
+    });
+
+    it('on this device, deleted twice at once (a double tap), counts once', async () => {
+      const { owner, sender, conv, mine } = await chat();
+      await sender.messaging.send(conv, 'x');
+      await sender.messaging.send(conv, 'y');
+      await owner.messaging.sync();
+      expect((await getConversation(owner.db, mine))!.unread).toBe(3);
+      const x = (await listMessages(owner.db, mine)).find((m) => m.text === 'x')!;
+      await Promise.all([owner.messaging.deleteHere(mine, x.id), owner.messaging.deleteHere(mine, x.id)]);
+      expect((await getConversation(owner.db, mine))!.unread).toBe(2);
+    });
+
+    it('for both sides stays deleted when it, an edit or a reaction comes again', async () => {
+      const { owner, sender, conv, mine, again, texts, last } = await chat();
+      await sender.messaging.send(conv, 'regret this');
+      const regret = last();
+      await owner.messaging.sync();
+      const m = (await listMessages(sender.db, conv)).at(-1)!;
+      await sender.messaging.edit(conv, m.id, 'regret this a lot');
+      const edit = last();
+      await sender.messaging.react(conv, m.id, '🔥');
+      const reaction = last();
+      expect(await owner.messaging.sync()).toBe(2);
+      const record = (await sender.db.get('messages', [conv, m.id]))!;
+      await sender.messaging.deleteForEveryone(conv, m.id);
+      expect(await owner.messaging.sync()).toBe(1);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+
+      for (const e of [edit, reaction, regret, edit]) await again('owner', e);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+
+      // A modified app editing or reacting to it afterwards: nothing comes back, nothing is kept for later.
+      await sender.db.put('messages', record);
+      await sender.messaging.edit(conv, m.id, 'back from the dead');
+      await sender.messaging.react(conv, m.id, '😈');
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+    });
+
+    it('on this device only stays deleted when it comes again', async () => {
+      const { owner, sender, conv, mine, again, texts, last } = await chat();
+      await sender.messaging.send(conv, 'forget this');
+      const env = last();
+      await owner.messaging.sync();
+      const m = (await listMessages(owner.db, mine)).at(-1)!;
+      await owner.messaging.deleteHere(mine, m.id);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      await again('owner', env);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      // Its tombstone alone is enough, with nothing remembered of having taken it in.
+      await forgetIds(owner.db, mine, 'applied');
+      await again('owner', env);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      // And what's remembered of having taken it in alone, with the tombstone gone (past its cap, say).
+      await forgetIds(owner.db, mine, 'dropped');
+      await again('owner', env);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['hello', 'hi']);
+      // The other side keeps theirs.
+      expect(await texts('sender')).toEqual(['hello', 'hi', 'forget this']);
+    });
+  });
+
+  describe('a deleted chat', () => {
+    for (const forBoth of [false, true]) {
+      it(`${forBoth ? 'for both sides' : 'on this device'} doesn't come back when its envelopes come again`, async () => {
+        const { backend, owner, sender, conv, mine, bundle, again, texts, last } = await chat();
+        const [hello, hi] = backend.seenEnvelopes.filter((_, i) => !backend.quietSends[i]);
+        await sender.messaging.send(conv, 'later');
+        const later = last();
+        await owner.messaging.sync();
+        await owner.messaging.remove(mine, forBoth);
+        await sender.messaging.sync();
+
+        // The first message again through the link, the later one through the owner's mailbox.
+        await again('owner', hello!, bundle.mailbox);
+        await again('owner', later);
+        expect(await owner.messaging.sync()).toBe(0);
+        expect(await texts('owner')).toEqual([]);
+        expect((await listConversations(owner.db)).map((c) => [c.id, c.hidden])).toEqual([[mine, true]]);
+        if (forBoth) {
+          // Their side doesn't get the owner's reply back either.
+          await again('sender', hi!);
+          expect(await sender.messaging.sync()).toBe(0);
+          expect(await texts('sender')).toEqual([]);
+        }
+        // Nor with nothing remembered of having taken them in: what was
+        // deleted is cleared up to their newest message here.
+        await forgetIds(owner.db, mine, 'applied');
+        await again('owner', hello!, bundle.mailbox);
+        await again('owner', later);
+        expect(await owner.messaging.sync()).toBe(0);
+        expect(await texts('owner')).toEqual([]);
+
+        // Something new still brings it back, with only that.
+        await sender.messaging.send(conv, 'still there?');
+        expect(await owner.messaging.sync()).toBe(1);
+        expect(await texts('owner')).toEqual(['still there?']);
+        expect((await getConversation(owner.db, mine))!.hidden).toBe(false);
+      });
+    }
+  });
+
+  describe('which key and mailbox they use', () => {
+    it("an older envelope taken in after a newer one doesn't move us back to their older key", async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine, again, last } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'one');
+      const one = last();
+      // Due for a new key: it comes with the next message.
+      clock += 10 * DAY;
+      await owner.messaging.send(mine, 'two');
+      const after = (await getConversation(owner.db, mine))!;
+      const two = (await listMessages(owner.db, mine)).at(-1)!;
+      backend.inboxes.get('sender')!.reverse();
+      expect(await sender.messaging.sync()).toBe(2);
+      const c = (await getConversation(sender.db, conv))!;
+      expect([c.peerKey, c.lastReceived]).toEqual([after.myKey, two.id]);
+      // The older one again: still nothing changes.
+      await again('sender', one);
+      expect(await sender.messaging.sync()).toBe(0);
+      expect(await getConversation(sender.db, conv)).toEqual(c);
+    });
+
+    it("an older envelope taken in after a newer one doesn't send us back to their older mailbox", async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine, texts } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.send(mine, 'x');
+      clock += 1000;
+      await owner.messaging.block(mine);
+      clock += 1000;
+      await owner.messaging.unblock(mine);
+      const moved = (await getConversation(owner.db, mine))!.myMailbox;
+      // The key update telling them of the new mailbox comes before the older message.
+      backend.inboxes.get('sender')!.reverse();
+      await sender.messaging.sync();
+      expect((await getConversation(sender.db, conv))!.sendTo).toBe(moved);
+      await sender.messaging.send(conv, 'still here');
+      expect(await owner.messaging.sync()).toBe(1);
+      expect((await texts('owner')).slice(-2)).toEqual(['x', 'still here']);
+    });
+  });
+
+  describe('edits', () => {
+    it('an older edit never replaces a newer one, in whatever order they and the message come', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [2, 1, 0], [1, 2, 0], [2, 0, 1]]) {
+        const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
+        clock += 1000;
+        await sender.messaging.send(conv, 'helo');
+        const m = (await listMessages(sender.db, conv)).at(-1)!;
+        clock += 1000;
+        await sender.messaging.edit(conv, m.id, 'hello');
+        clock += 1000;
+        await sender.messaging.edit(conv, m.id, 'hello there');
+        const items = backend.inboxes.get('owner')!.splice(0);
+        backend.inboxes.get('owner')!.push(...order.map((i) => items[i]!));
+        await owner.messaging.sync();
+        expect(await getMessage(owner.db, mine, m.id)).toMatchObject({ text: 'hello there', edited: clock });
+        expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+      }
+    });
+  });
+
+  describe('two copies of the app', () => {
+    it('a delete one took in, read again by the other from a stale inbox, wipes nothing newer', async () => {
+      const { backend, owner, sender, conv, again, texts, last } = await chat();
+      const tab = copyOf(backend, owner);
+      await sender.messaging.remove(conv, true);
+      const wipe = last();
+      await owner.messaging.sync();
+      await sender.messaging.send(conv, 'new start');
+      const fresh = last();
+      await owner.messaging.sync();
+      // The other copy reads a page from before both were confirmed.
+      await again('owner', wipe);
+      await again('owner', fresh);
+      expect(await tab.sync()).toBe(0);
+      expect(await texts('owner')).toEqual(['new start']);
+    });
+
+    it('both taking in the same envelopes end where one would', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
+      const tab = copyOf(backend, owner, { now });
+      const step = () => (clock += 1000);
+      step();
+      await sender.messaging.send(conv, 'a');
+      step();
+      await sender.messaging.send(conv, 'b');
+      const [a, b] = (await listMessages(sender.db, conv)).slice(-2);
+      step();
+      await sender.messaging.react(conv, a!.id, '👍');
+      step();
+      await sender.messaging.edit(conv, a!.id, 'a!');
+      step();
+      await sender.messaging.deleteForEveryone(conv, b!.id);
+      step();
+      await owner.messaging.markSeen(mine);
+      await sender.messaging.sync();
+      step();
+      await sender.messaging.send(conv, 'c');
+      const items = [...backend.inboxes.get('owner')!];
+      await owner.messaging.sync();
+      const once = await state(owner.db);
+      // The other copy gets the same items again, in another order.
+      backend.inboxes.get('owner')!.push(...items.reverse().map((i) => ({ ...i, id: rand() })));
+      expect(await tab.sync()).toBe(0);
+      expect(await state(owner.db)).toEqual(once);
+    });
+  });
+
+  describe('repeats as a matter of course', () => {
+    /** What the device keeps, without the record of envelopes taken in. */
+    async function apartFromApplied(db: Database) {
+      const s = await state(db);
+      return { ...s, chats: s.chats.map((c) => ({ ...c, ids: { ...c.ids, applied: undefined } })) };
+    }
+    /** Forgets which envelopes were taken in, as when the record let them go (it's capped) or another copy took them. */
+    async function forgetApplied(db: Database, conv: string) {
+      await forgetIds(db, conv, 'applied');
+    }
+
+    it('every kind taken in again changes nothing, whatever the order, even with no record of having taken it in', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const step = () => (clock += 1000);
+      const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
+      step();
+      await sender.messaging.send(conv, 'a');
+      step();
+      await sender.messaging.send(conv, 'b');
+      const [a, b] = (await listMessages(sender.db, conv)).slice(-2);
+      step();
+      await sender.messaging.react(conv, a!.id, '👍');
+      step();
+      await sender.messaging.edit(conv, a!.id, 'a!');
+      step();
+      await sender.messaging.react(conv, a!.id, '😮');
+      step();
+      await sender.messaging.deleteForEveryone(conv, b!.id);
+      step();
+      await owner.messaging.send(mine, 'to you');
+      await sender.messaging.sync();
+      step();
+      await sender.messaging.markSeen(conv);
+      step();
+      await sender.messaging.react(conv, (await listMessages(sender.db, conv)).at(-1)!.id, '❤️');
+      const first = backend.inboxes.get('owner')!.splice(0);
+      backend.inboxes.get('owner')!.push(...first);
+      await owner.messaging.sync();
+      const once = await apartFromApplied(owner.db);
+      expect(once.chats[0]!.messages.slice(-2).map((m) => [m.text, m.reactions?.theirs?.e])).toEqual([
+        ['a!', '😮'],
+        ['to you', '❤️'],
+      ]);
+      expect(once.chats[0]!.messages.find((m) => m.text === 'to you')!.status).toBe('seen');
+
+      await forgetApplied(owner.db, mine);
+      backend.inboxes.get('owner')!.push(...[...first].reverse().map((i) => ({ ...i, id: rand() })));
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await apartFromApplied(owner.db)).toEqual(once);
+
+      // Then the whole chat goes for both sides, and they start again.
+      step();
+      await sender.messaging.remove(conv, true);
+      step();
+      await sender.messaging.send(conv, 'c');
+      const second = backend.inboxes.get('owner')!.splice(0);
+      backend.inboxes.get('owner')!.push(...second);
+      await owner.messaging.sync();
+      const cleared = await apartFromApplied(owner.db);
+      expect(cleared.chats[0]!.messages.map((m) => m.text)).toEqual(['c']);
+      await forgetApplied(owner.db, mine);
+      backend.inboxes.get('owner')!.push(...[...first, ...second].reverse().map((i) => ({ ...i, id: rand() })));
+      expect(await owner.messaging.sync()).toBe(0);
+      expect(await apartFromApplied(owner.db)).toEqual(cleared);
+    });
+
+    it('a reaction that comes before its message is shown once the message comes', async () => {
+      const { backend, owner, sender, conv, mine, again, last } = await chat();
+      await sender.messaging.send(conv, 'look');
+      const look = (await listMessages(sender.db, conv)).at(-1)!;
+      await sender.messaging.react(conv, look.id, '🔥');
+      const reaction = last();
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      expect((await getMessage(owner.db, mine, look.id))!.reactions?.theirs?.e).toBe('🔥');
+      expect((await getConversation(owner.db, mine))!.reactions ?? []).toEqual([]);
+      // Taken back, then the first one again: it stays taken back.
+      await sender.messaging.react(conv, look.id, '');
+      await owner.messaging.sync();
+      await again('owner', reaction);
+      expect(await owner.messaging.sync()).toBe(0);
+      expect((await getMessage(owner.db, mine, look.id))!.reactions?.theirs?.e).toBe('');
+    });
+
+    it('a conversation from before the newest was kept starts from the last message it took in', async () => {
+      let clock = Date.now();
+      const now = () => clock;
+      const { owner, sender, conv, mine, again, last } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await owner.messaging.react(mine, (await listMessages(owner.db, mine))[0]!.id, '👍');
+      const old = last();
+      clock += 10 * DAY;
+      await owner.messaging.send(mine, 'with a new key');
+      // The last envelope taken in is a reaction: older versions named that as lastReceived.
+      clock += 1000;
+      await owner.messaging.react(mine, (await listMessages(owner.db, mine))[0]!.id, '🎉');
+      await sender.messaging.sync();
+      const current = (await getConversation(owner.db, mine))!.myKey;
+      const lastIn = (await getConversation(sender.db, conv))!.lastReceived;
+      expect((await listMessages(sender.db, conv)).some((m) => m.id === lastIn)).toBe(false);
+      expect((await getConversation(sender.db, conv))!.peerKey).toBe(current);
+      // As an older version kept it: nothing about the newest, nothing about what was taken in.
+      const { newest: _, ...before } = (await getConversation(sender.db, conv))!;
+      await putConversation(sender.db, before);
+      await forgetIds(sender.db, conv, 'applied');
+      await again('sender', old);
+      await sender.messaging.sync();
+      expect((await getConversation(sender.db, conv))!.peerKey).toBe(current);
+    });
+  });
+
+  describe('what is kept to tell', () => {
+    it('is keyed hashes and days, never IDs or exact times, and goes once nothing it covers can still arrive', async () => {
+      // Midday, so everything below falls on one day.
+      let clock = Math.floor(Date.now() / DAY) * DAY + 12 * HOUR;
+      const now = () => clock;
+      const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
+      clock += 1000;
+      await sender.messaging.send(conv, 'one');
+      clock += 1000;
+      await sender.messaging.send(conv, 'two');
+      clock += 1000;
+      await sender.messaging.send(conv, 'three');
+      await owner.messaging.sync();
+      const ids = (await listMessages(sender.db, conv)).map((m) => m.id);
+      const [one, two] = ids.slice(-3);
+      clock += 1000;
+      await sender.messaging.deleteForEveryone(conv, one!);
+      await owner.messaging.sync();
+      await owner.messaging.deleteHere(mine, two!);
+      // A delete for one that hasn't come yet is kept the same way.
+      clock += 1000;
+      await sender.messaging.send(conv, 'four');
+      const four = (await listMessages(sender.db, conv)).at(-1)!.id;
+      await sender.messaging.deleteForEveryone(conv, four);
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      await owner.messaging.remove(mine);
+      // Then they delete the whole conversation for both sides too.
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      await owner.messaging.sync();
+
+      const c = (await getConversation(owner.db, mine))!;
+      const kept = await getIds(owner.db, mine);
+      // Not on the conversation record, which the chat list reads every time.
+      expect(Object.keys(c).filter((k) => ['applied', 'gone', 'dropped'].includes(k))).toEqual([]);
+      const text = JSON.stringify({ kept, newest: c.newest });
+      for (const id of [...ids, four]) expect(text).not.toContain(id);
+      expect(c.deleted).toBeUndefined();
+      for (const day of [...kept.applied!, ...kept.gone!, ...kept.dropped!]) {
+        expect(Object.keys(day).sort()).toEqual(['day', 'tags']);
+        expect(day.day).toBe(Math.floor(clock / DAY));
+        for (const tag of day.tags) expect(tag).toMatch(/^[A-Za-z0-9_-]{12}$/);
+      }
+      // Theirs they deleted: 'one', and 'four' before it came. Deleted here: 'two', then 'hello' and 'three' with the chat; and ours, 'hi'.
+      expect(kept.gone!.flatMap((d) => d.tags)).toHaveLength(2);
+      expect(kept.dropped!.flatMap((d) => d.tags)).toHaveLength(3);
+      expect(kept.mine!.flatMap((d) => d.tags)).toHaveLength(1);
+      expect(c.theirClear).toEqual({ upTo: c.clearedBefore, here: clock });
+
+      // Upkeep with nothing run out leaves the chat alone: it doesn't even take its lock.
+      const locks = vi.spyOn(navigator.locks, 'request');
+      await owner.messaging.maintain().catch(() => {});
+      expect(locks.mock.calls.filter(([name]) => String(name).includes(':send:'))).toEqual([]);
+      locks.mockRestore();
+
+      // Once nothing they cover could still arrive, upkeep lets them go.
+      clock += 31 * DAY;
+      await owner.messaging.maintain().catch(() => {});
+      expect(Object.keys(await getIds(owner.db, mine)).sort()).toEqual(['applied', 'dropped', 'gone', 'mine']);
+      clock += 2 * DAY;
+      await owner.messaging.maintain().catch(() => {});
+      const after = (await getConversation(owner.db, mine))!;
+      expect(await getIds(owner.db, mine)).toEqual({});
+      expect([after.clearedBefore, after.theirClear, after.droppedBefore]).toEqual([undefined, undefined, undefined]);
+    });
   });
 });

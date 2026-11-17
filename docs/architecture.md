@@ -174,6 +174,18 @@ secret: one person keeps the same label through the same link.
   Your own messages' text and captions can be edited; they show as edited. Blocks are silent: the blocked side's sends
   still look accepted, and new conversations from the same person through the
   same link are dropped by their sender tag.
+- **Repeats and order:** envelopes arrive in any order, and the same one can
+  come more than once (an out-of-date inbox read, two copies of the app, a
+  server that delivers it again). Each conversation remembers, as keyed
+  hashes with only the day, which envelopes it took in and which messages
+  were deleted, for the 31 days an envelope can still be taken in, so
+  nothing that comes again or late undoes what came after it. Even without
+  that record each kind is harmless the second time: edits and reactions
+  keep the newest, receipts only mark. Only the newest envelope (by the
+  sender's clock) changes the key and mailbox used to write back. Deleting
+  a whole conversation for both sides takes only what was written before
+  it, comparing each side's messages with that side's own clock
+  ([protocol.md](protocol.md#inner-message), Replays and order).
 - **Key rotation:** conversation and link encryption keys are replaced every
   6 to 9 days, each on its own random schedule, and old private keys are
   deleted 35 days later.

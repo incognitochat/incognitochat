@@ -110,8 +110,28 @@ export interface ConversationRecord {
    * one is the only one with its wire ID on its link.
    */
   firstKey?: string;
-  /** The ID of the last message received from them. */
+  /**
+   * The ID of the newest envelope of theirs taken in (newest by its `at`,
+   * as `newest` orders them), named as `last` in what we send.
+   */
   lastReceived: string | null;
+  /**
+   * The newest envelope of theirs taken in: its `at` (their clock) and its
+   * keyed hash (idTag), which breaks ties. Only an envelope newer than this
+   * changes peerKey, sendTo and lastReceived, so one that comes late or
+   * again can't move us back to an older key or mailbox. Missing in
+   * conversations from before it was kept, until something comes.
+   */
+  newest?: { at: number; tag: string };
+  /**
+   * The newest of their messages taken in (shown), by its `at` (their
+   * clock), with its ID: deleting the conversation for both sides names it
+   * as `last`, so their app deletes exactly the messages of its own we had,
+   * and clears this side up to its time. Kept even once deleted here.
+   * Missing in conversations from before it was kept; their newest message
+   * here stands in.
+   */
+  lastMessage?: { at: number; id: string };
   /** Deleted on this device: out of the list, with no messages, until a new one comes or goes. */
   hidden?: boolean;
   /** Unix ms when our conversation key is next replaced (weekly, jittered per conversation). */
@@ -119,19 +139,54 @@ export interface ConversationRecord {
   /** For a sender not answered yet: Unix ms when the link's current key was last fetched. */
   linkCheckedAt?: number;
   /**
-   * Their messages they deleted for both sides before they arrived here
-   * (deliveries come in no set order), with when: dropped if they come, and
-   * forgotten once they could no longer be waiting (31 days).
+   * Kept by versions before IDs were remembered as keyed hashes: their
+   * messages they deleted for both sides before those arrived, by ID, with
+   * when. Still read, and moved into their deletes (messaging/store.ts,
+   * `gone`) when something comes, when the conversation is deleted, or at
+   * upkeep.
    */
   deleted?: { id: string; at: number }[];
   /**
-   * They deleted the whole conversation for both sides at this time (their
-   * clock): anything of theirs sent before it that arrives later is dropped.
+   * The conversation was cleared for both sides up to this time (their
+   * clock): by their delete of the whole conversation, or by ours (then the
+   * time of their newest message we had, lastMessage). Anything of theirs
+   * sent by then that arrives later is dropped, and so is a whole-
+   * conversation delete of theirs from no later. Forgotten once nothing
+   * that old can still arrive (31 days).
    */
   clearedBefore?: number;
+  /**
+   * Their latest delete of the whole conversation: its `at` (their clock),
+   * when we took it in (our clock), and, if its `last` named one of our
+   * messages, that message's time (our clock). Something of theirs from by
+   * then that shows they had more of ours takes those too, but never one we
+   * wrote after taking the delete in, nor one newer than the message `last`
+   * named: their app names the newest of ours it had. Forgotten with it.
+   */
+  theirClear?: { upTo: number; here: number; ours?: number };
+  /**
+   * Their messages sent up to this time (their clock) are dropped: set only
+   * if the user deleted more of them here than are remembered one by one
+   * (replay.ts, MAX_DROPPED), to the end of the day the oldest went from.
+   * Forgotten after 31 days.
+   */
+  droppedBefore?: number;
   /** Edits of their messages that came before the messages did, sealed under the storage key (messaging/store.ts). */
   edits?: { id: string; at: number; sealed: Uint8Array<ArrayBuffer> }[];
+  /**
+   * Their reactions to messages that weren't here yet (one of theirs still
+   * on its way), sealed under the storage key, by the message's keyed hash
+   * (idTag): applied when it comes. The newest per message.
+   */
+  reactions?: { tag: string; at: number; sealed: Uint8Array<ArrayBuffer> }[];
 }
+
+/**
+ * IDs remembered without keeping them: keyed hashes (messaging/secret.ts,
+ * idTag), by the UTC day (Unix ms / 86,400,000, rounded down) that decides
+ * when they can be forgotten. Oldest day first.
+ */
+export type IdDays = { day: number; tags: string[] }[];
 
 /** A message, as kept on the device. Only its text is sealed; times and status are local metadata. */
 export interface MessageRecord {
@@ -141,6 +196,19 @@ export interface MessageRecord {
   conv: string;
   /** Unix ms shown: the sender's time, but never later than when it arrived. */
   at: number;
+  /**
+   * Theirs: when they sent it, by their clock (its `at` on the wire), where
+   * that's later than `at` (their clock runs ahead of ours). A delete of the
+   * whole conversation, also timed by their clock, is compared with this.
+   */
+  sent?: number;
+  /**
+   * Ours: the earliest time, by their clock, that something of theirs showed
+   * they had it (a receipt, a reaction or a reply to it, or `last` naming
+   * it). A delete of the whole conversation of theirs from then on takes it,
+   * and our older messages, here too.
+   */
+  had?: number;
   out: boolean;
   /** Ours: sending, sent, failed, then seen once they open it. Theirs: received, then read once we told them. */
   status: 'sending' | 'sent' | 'failed' | 'seen' | 'received' | 'read';

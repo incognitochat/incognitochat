@@ -10,7 +10,7 @@
 
 import { concat, randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import type { Media, Sticker } from '../protocol/message';
-import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type MessageRecord } from '../storage/db';
+import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type IdDays, type MessageRecord } from '../storage/db';
 import { withLock } from '../sync/locks';
 
 const STORAGE_KEY = 'storage-key';
@@ -91,6 +91,62 @@ export async function findLinkConversation(db: Database, link: string, wire: str
 
 export async function putConversation(db: Database, conversation: ConversationRecord): Promise<void> {
   await db.put('conversations', conversation);
+}
+
+/**
+ * What a conversation remembers by keyed hashes (messaging/replay.ts):
+ * applied, envelopes of theirs taken in; gone, their messages they deleted;
+ * dropped, their messages the user deleted here; mine, the user's own
+ * messages deleted here. Kept in `meta`, one item per
+ * conversation and kind, apart from the conversation record: that is read
+ * whenever the chat list is shown, and only the kind that changed is
+ * written.
+ */
+export type IdKind = 'applied' | 'gone' | 'dropped' | 'mine';
+export const ID_KINDS: readonly IdKind[] = ['applied', 'gone', 'dropped', 'mine'];
+export type ConversationIds = Partial<Record<IdKind, IdDays>>;
+
+function idsKey(conv: string, kind: IdKind): string {
+  return `ids:${kind}:${conv}`;
+}
+
+/** What a conversation remembers by keyed hashes, of every kind. */
+export async function getIds(db: Database, conv: string): Promise<ConversationIds> {
+  const out: ConversationIds = {};
+  for (const kind of ID_KINDS) {
+    const days = (await db.get('meta', idsKey(conv, kind))) as IdDays | undefined;
+    if (days) out[kind] = days;
+  }
+  return out;
+}
+
+/**
+ * Writes a conversation and, in the same transaction, the kinds of what it
+ * remembers by keyed hashes that changed from `before` (by identity): all
+ * of it happens, or none.
+ */
+export async function saveConversation(db: Database, conversation: ConversationRecord, ids: ConversationIds = {}, before: ConversationIds = ids): Promise<void> {
+  const tx = db.transaction(['conversations', 'meta'], 'readwrite');
+  await tx.objectStore('conversations').put(conversation);
+  for (const kind of ID_KINDS) {
+    if (ids[kind] === before[kind]) continue;
+    const days = ids[kind];
+    if (days && days.length > 0) await tx.objectStore('meta').put(days, idsKey(conversation.id, kind));
+    else await tx.objectStore('meta').delete(idsKey(conversation.id, kind));
+  }
+  await tx.done;
+}
+
+/** Their newest message here, by when they sent it (sentAt): for a conversation from before lastMessage was kept. */
+export async function newestTheirs(db: Database, conv: string): Promise<{ at: number; id: string } | undefined> {
+  const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
+  let newest: { at: number; id: string } | undefined;
+  for (const m of await db.getAllFromIndex('messages', 'byConversation', range)) {
+    if (m.out) continue;
+    const at = sentAt(m);
+    if (!newest || at > newest.at || (at === newest.at && m.id > newest.id)) newest = { at, id: m.id };
+  }
+  return newest;
 }
 
 /** Conversations, newest activity first. */
@@ -292,11 +348,42 @@ export async function openPendingEdit(db: Database, id: string, sealed: Uint8Arr
   return (await openBody(db, `edit:${id}`, sealed)).text;
 }
 
-/** Marks one of our messages in a conversation as seen, if it was sent; returns whether it did. */
-export function markOwnSeen(db: Database, conv: string, id: string): Promise<boolean> {
-  return updateMessage(db, conv, id, (record) =>
-    record.out && (record.status === 'sent' || record.status === 'sending') ? { ...record, status: 'seen' } : null,
-  );
+/** A reaction that came before its message (by the message's ID tag), sealed under the storage key, until the message comes. */
+export async function sealPendingReaction(db: Database, tag: string, e: string): Promise<Uint8Array<ArrayBuffer>> {
+  return sealBody(db, `reaction:${tag}`, { text: e });
+}
+
+export async function openPendingReaction(db: Database, tag: string, sealed: Uint8Array<ArrayBuffer>): Promise<string> {
+  return (await openBody(db, `reaction:${tag}`, sealed)).text;
+}
+
+/**
+ * Notes that the other side had these messages of ours by `at` (their
+ * clock): a receipt, a reaction or a reply named them, or `last` did. Those
+ * in `read` they have read, so a sent one shows as seen (and stays so: a
+ * receipt only ever marks). Their messages, and IDs not here, change
+ * nothing. Returns how many now show as seen, and whether any named is one
+ * of ours that's here.
+ */
+export async function noteHad(db: Database, conv: string, ids: string[], at: number, read: ReadonlySet<string>): Promise<{ seen: number; here: boolean }> {
+  if (ids.length === 0) return { seen: 0, here: false };
+  const tx = db.transaction('messages', 'readwrite');
+  let seen = 0;
+  let here = false;
+  for (const id of new Set(ids)) {
+    const record = await tx.store.get([conv, id]);
+    if (!record?.out) continue;
+    here = true;
+    let next = record;
+    if (record.had === undefined || at < record.had) next = { ...next, had: at };
+    if (read.has(id) && (record.status === 'sent' || record.status === 'sending')) {
+      next = { ...next, status: 'seen' };
+      seen++;
+    }
+    if (next !== record) await tx.store.put(next);
+  }
+  await tx.done;
+  return { seen, here };
 }
 
 /** One message of a conversation with its text, if it's on this device. */
@@ -315,16 +402,51 @@ export async function listMessages(db: Database, conv: string): Promise<MessageV
   );
 }
 
-/** Deletes a conversation's messages from this device. */
-export async function deleteMessages(db: Database, conv: string): Promise<void> {
+/** When one of their messages was sent, by their clock (MessageRecord.sent). */
+export function sentAt(m: Pick<MessageRecord, 'at' | 'sent'>): number {
+  return m.sent ?? m.at;
+}
+
+/**
+ * Deletes part of a conversation from this device, with the files, in one
+ * transaction: their messages sent up to `theirs` (their clock, sentAt), and
+ * ours up to `ours` (our clock) or, if later, up to the newest of ours they
+ * had by `oursHadBy` (their clock, MessageRecord.had) among those we wrote
+ * by `oursWrittenBy` (our clock). Returns how many messages are left, how
+ * many of theirs are unread, and how many went.
+ */
+export async function clearMessages(
+  db: Database,
+  conv: string,
+  upTo: { theirs: number; ours?: number; oursHadBy?: number; oursWrittenBy?: number },
+): Promise<{ left: number; unread: number; removed: number }> {
   const tx = db.transaction(['messages', 'media'], 'readwrite');
-  const messages = tx.objectStore('messages');
+  const index = tx.objectStore('messages').index('byConversation');
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
-  for (let cursor = await messages.index('byConversation').openCursor(range); cursor; cursor = await cursor.continue()) {
-    for (const key of fileKeys(conv, cursor.value.id, cursor.value)) await tx.objectStore('media').delete(key);
-    await cursor.delete();
+  let ours = upTo.ours ?? -Infinity;
+  if (upTo.oursHadBy !== undefined) {
+    const writtenBy = upTo.oursWrittenBy ?? Infinity;
+    for (let cursor = await index.openCursor(range); cursor; cursor = await cursor.continue()) {
+      const m = cursor.value;
+      if (m.out && m.at <= writtenBy && m.had !== undefined && m.had <= upTo.oursHadBy) ours = Math.max(ours, m.at);
+    }
+  }
+  let left = 0;
+  let unread = 0;
+  let removed = 0;
+  for (let cursor = await index.openCursor(range); cursor; cursor = await cursor.continue()) {
+    const m = cursor.value;
+    if (m.out ? m.at <= ours : sentAt(m) <= upTo.theirs) {
+      for (const key of fileKeys(conv, m.id, m)) await tx.objectStore('media').delete(key);
+      await cursor.delete();
+      removed++;
+    } else {
+      left++;
+      if (!m.out && m.status === 'received') unread++;
+    }
   }
   await tx.done;
+  return { left, unread, removed };
 }
 
 // Uploads to delete from the server, kept until done, so deleting survives
