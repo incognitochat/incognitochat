@@ -90,6 +90,9 @@ type Limiter interface {
 	Full(key string, limit int, window time.Duration) bool
 	// Used reports how many uses of key the current window has counted.
 	Used(ctx context.Context, key string, window time.Duration) (int, error)
+	// Counted is the count the database last returned for key's current
+	// window to this instance, such as just now to AllowN.
+	Counted(key string, window time.Duration) int
 
 	// The At methods count in the window that holds at, which the inbox's
 	// counters are named by (rateName), so a request counts in one window
@@ -159,6 +162,9 @@ type Server struct {
 	// pause uploads or downloads of attachments (switches.go).
 	Switches    SwitchStore
 	switchCache switchCache
+	// paged remembers devices whose inbox needed more than a first read
+	// here lately (listInbox).
+	paged paged
 }
 
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).

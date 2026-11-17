@@ -52,10 +52,10 @@ func TestDeliverListAck(t *testing.T) {
 
 	// Confirming on the phone leaves the laptop's copies alone, and says
 	// how many of the IDs had nothing to delete.
-	if missing, failed := s.Ack(ctx, account, phone, []string{all[0].ID, all[1].ID, ids.New()}); missing != 1 || failed != nil {
+	if missing, failed := s.Ack(ctx, account, phone, []string{all[0].ID, all[1].ID, ids.New()}, 0); missing != 1 || failed != nil {
 		t.Fatalf("Ack = %d, %v", missing, failed)
 	}
-	if missing, failed := s.Ack(ctx, account, phone, []string{all[0].ID}); missing != 1 || failed != nil {
+	if missing, failed := s.Ack(ctx, account, phone, []string{all[0].ID}, 0); missing != 1 || failed != nil {
 		t.Fatalf("Ack again = %d, %v", missing, failed)
 	}
 	if left := list(t, s, account, phone, now); len(left) != 1 || !bytes.Equal(left[0].Envelope, all[2].Envelope) {
@@ -114,7 +114,7 @@ func (c *counting) DeleteItem(ctx context.Context, in *dynamodb.DeleteItemInput,
 // A page is capped by size, and reading it costs about its size: an inbox
 // full of the largest envelopes no longer costs 50 of them a fetch (226 read
 // units, more than the table's whole cap). Its reads ask for at least
-// minStep items, so small ones take few reads; near the cap, a page ends
+// MinStep items, so small ones take few reads; near the cap, a page ends
 // rather than read one item at a time; and it never claims more than
 // limits.Units to confirm.
 func TestListSteps(t *testing.T) {
@@ -162,11 +162,11 @@ func TestListSteps(t *testing.T) {
 		if read > float64(page.WorstUnits()) || got.Units != read {
 			t.Fatalf("%s: read %.1f units (page says %.1f), worst %d", tc.name, read, got.Units, page.WorstUnits())
 		}
-		if q.limits[0] != probeItems {
+		if q.limits[0] != ProbeItems {
 			t.Fatalf("%s: a first read of %d", tc.name, q.limits[0])
 		}
 		for _, n := range q.limits[1 : len(q.limits)-1] {
-			if n < minStep {
+			if n < MinStep {
 				t.Fatalf("%s: a read of %d items (%v)", tc.name, n, q.limits)
 			}
 		}
@@ -228,7 +228,7 @@ func TestListMore(t *testing.T) {
 	stop := errors.New("no")
 	q.limits = nil
 	page, err := s.List(ctx, account, three, "", limits(50, 128<<10), now, func() error { return stop })
-	if !errors.Is(err, stop) || len(page.Items) != probeItems || len(q.limits) != 1 {
+	if !errors.Is(err, stop) || len(page.Items) != ProbeItems || len(q.limits) != 1 {
 		t.Fatalf("stopped: %+v, %v, %d reads", page, err, len(q.limits))
 	}
 }
@@ -251,7 +251,7 @@ func TestAckReportsFailed(t *testing.T) {
 		keys[i] = it.ID
 	}
 	db.failing[keys[1]], db.failing[keys[3]] = true, true
-	missing, failed := s.Ack(ctx, account, phone, keys)
+	missing, failed := s.Ack(ctx, account, phone, keys, 0)
 	slices.Sort(failed)
 	want := []string{keys[1], keys[3]}
 	slices.Sort(want)
@@ -260,11 +260,30 @@ func TestAckReportsFailed(t *testing.T) {
 	}
 	// Tried again, only those: nothing missing.
 	db.failing = nil
-	if missing, failed := s.Ack(ctx, account, phone, want); missing != 0 || failed != nil {
+	if missing, failed := s.Ack(ctx, account, phone, want, 0); missing != 0 || failed != nil {
 		t.Fatalf("again: %d, %v", missing, failed)
 	}
 	if left := list(t, s, account, phone, now); len(left) != 0 {
 		t.Fatalf("%d left", len(left))
+	}
+}
+
+// Once maxMissing weren't there, Ack starts no more deletes: a replayed
+// batch of gone items costs the table a few write units, not 50.
+func TestAckStopsAfterMisses(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	s := &Store{DB: meter, Table: dynamotest.Table(t, client)}
+	gone := make([]string, 50)
+	for i := range gone {
+		gone[i] = ids.New()
+	}
+	missing, failed := s.Ack(context.Background(), ids.New(), ids.New(), gone, 5)
+	if missing < 5 || missing > 5+ackParallel-1 || failed != nil {
+		t.Fatalf("Ack = %d missing, %v failed", missing, failed)
+	}
+	if w := meter.Units(s.Table).Write; w > float64(missing) {
+		t.Fatalf("%v write units for %d misses", w, missing)
 	}
 }
 
@@ -287,7 +306,7 @@ func TestAckDeadline(t *testing.T) {
 	}
 	db.slow = true
 	began := time.Now()
-	missing, failed := s.Ack(ctx, account, phone, keys)
+	missing, failed := s.Ack(ctx, account, phone, keys, 0)
 	if d := time.Since(began); d > time.Second || missing != 0 || len(failed) != len(keys) {
 		t.Fatalf("Ack took %v: %d missing, %d failed", d, missing, len(failed))
 	}

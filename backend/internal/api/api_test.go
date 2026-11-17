@@ -224,7 +224,7 @@ func (m *memInbox) Clear(_ context.Context, account, device string, max int) (in
 	return n, len(m.items[key]) > 0, nil
 }
 
-func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string) (missing int, failed []string) {
+func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string, _ int) (missing int, failed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	drop := map[string]bool{}
@@ -535,6 +535,12 @@ type memLimiter struct {
 
 func (l *memLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
+}
+
+func (l *memLimiter) Counted(key string, _ time.Duration) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key]
 }
 
 func (l *memLimiter) Used(_ context.Context, key string, _ time.Duration) (int, error) {

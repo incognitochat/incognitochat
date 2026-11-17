@@ -261,6 +261,66 @@ func TestInboxBudgetConcurrent(t *testing.T) {
 	}
 }
 
+// A device fetched at once from 100 instances, every minute: each instance
+// starts each minute knowing nothing of it. After the first minute, those
+// instances take the page before reading anything, and every fetch that
+// cost the tables something counts against the person's day, at least
+// MinRequestUnits: so the day bounds what it all reads, and the writes of
+// the fetches refused; then it costs nothing.
+func TestInboxConcurrentEveryMinute(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fill func(h *harness, m member)
+	}{
+		{"the largest envelopes", func(h *harness, m member) { h.sendLargest(t, m, 50) }},
+		{"3 small envelopes", func(h *harness, m member) { h.fill(t, m, 3) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, tb := newDeliveryTables(t)
+			owner := h.account(t, userID)
+			tc.fill(h, owner)
+			const c = 100
+			routers := make([]*httpapi.Router, c)
+			for i := range routers {
+				routers[i] = tb.instance(h)
+			}
+			var total, first, steady dynamotest.Units
+			minutes, free := 0, false
+			for ; minutes < 150 && !free; minutes++ {
+				if minutes%10 == 0 {
+					owner.token = h.token(t, owner.d)
+				}
+				tb.meter.Reset()
+				var wg sync.WaitGroup
+				for _, r := range routers {
+					wg.Go(func() { serve(r, owner, http.MethodGet, "/inbox", nil) })
+				}
+				wg.Wait()
+				m, e := tb.meter.Units(tb.messages), tb.meter.Units(tb.ephemeral)
+				total.Read += m.Read
+				total.Write += e.Write
+				if minutes == 0 {
+					first = dynamotest.Units{Read: m.Read, Write: e.Write}
+				} else if minutes <= 10 {
+					steady.Read += m.Read / 10
+					steady.Write += e.Write / 10
+				}
+				free = minutes > 0 && m.Read == 0 && e.Write == 0
+				h.now = h.now.Add(time.Minute)
+			}
+			t.Logf("first minute: %.1f R messages, %.0f W ephemeral; then about %.1f R and %.0f W a minute; %d minutes (free: %v), %.0f R and %.0f W in all",
+				first.Read, first.Write, steady.Read, steady.Write, minutes, free, total.Read, total.Write)
+			if steady.Read > InboxUnitsPerMinute || total.Read > InboxUnitsPerDay {
+				t.Fatalf("reads: %v a minute, %v in all", steady.Read, total.Read)
+			}
+			if !free {
+				t.Fatal("the day's count didn't end it")
+			}
+		})
+	}
+}
+
 // Every fetch that reads something counts, at least MinRequestUnits: an
 // inbox of a few small envelopes can't be fetched a thousand times a
 // minute.
@@ -325,7 +385,9 @@ func (throttled) DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(
 }
 
 // The day's misses hold across instances that learned the count earlier:
-// they ask again after a minute, instead of going by what they knew.
+// they ask again after a minute, instead of going by what they knew. And a
+// replayed page misses a few items, not 50: past AckMissesPerRequest, the
+// rest are taken without deleting.
 func TestAckMissCapAcrossInstances(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)
@@ -334,48 +396,65 @@ func TestAckMissCapAcrossInstances(t *testing.T) {
 	if status, out := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
 		t.Fatalf("ack: %d %v", status, out)
 	}
-	// Ten instances each replay it once (500 misses), and so know the count.
+	// Ten instances each replay it once, and so know the count.
+	tb.meter.Reset()
 	primed := make([]*httpapi.Router, 10)
 	for i := range primed {
 		primed[i] = tb.instance(h)
 		if status, err := serve(primed[i], owner, http.MethodPost, "/ack", ack); status != http.StatusOK || err != nil {
 			t.Fatalf("replay on instance %d: %d, %v", i, status, err)
 		}
-		if i%5 == 4 {
-			h.now = h.now.Add(time.Minute) // a minute's confirmations
-		}
+	}
+	m, _ := tb.cost(t, "POST /ack, a gone page replayed on 10 instances")
+	if m.Write > 10*(AckMissesPerRequest+9) {
+		t.Fatalf("10 replays deleted %v units", m.Write)
 	}
 	// Another uses up the rest of the day's.
-	for misses := 500; misses < AckMissesPerDay; {
-		switch status, _ := h.as(t, owner, http.MethodPost, "/ack", ack, false); status {
-		case http.StatusOK:
-			misses += AckBatch
-		case http.StatusTooManyRequests:
-			h.now = h.now.Add(time.Minute)
-		default:
-			t.Fatalf("replay: %d", status)
+	for range 1000 {
+		h.as(t, owner, http.MethodPost, "/ack", ack, false)
+		if m, _ := tb.cost(t, "  a replay"); m.Write == 0 {
+			break
 		}
 	}
-	h.now = h.now.Add(time.Minute)
+	h.now = h.now.Add(2 * time.Minute)
 	owner.token = h.token(t, owner.d)
 	tb.meter.Reset()
-	for i, r := range primed {
+	for _, r := range primed {
 		if status, err := serve(r, owner, http.MethodPost, "/ack", ack); status != http.StatusOK || err != nil {
 			t.Fatalf("replay: %d, %v", status, err)
 		}
-		if i%5 == 4 {
-			h.now = h.now.Add(time.Minute) // within the minute's confirmations
-		}
 	}
-	m, _ := tb.cost(t, "POST /ack, a gone page on 10 instances that knew the day's count")
+	m, _ = tb.cost(t, "POST /ack, a gone page on 10 instances that knew the day's count")
 	if m.Write != 0 {
 		t.Fatalf("past the day's misses, 10 instances deleted %v units", m.Write)
 	}
 }
 
-// A confirmation that claims more than a minute's confirmations is refused:
-// it would delete more than the minute allows. A page never claims that
-// much.
+// Without the ephemeral table, misses are limited per instance and minute
+// (AckLocalMissesPerMinute), not let through.
+func TestAckMissesWithoutEphemeral(t *testing.T) {
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	page := h.fill(t, owner, AckBatch)
+	ack := map[string]any{"ids": page}
+	if status, out := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
+		t.Fatalf("ack: %d %v", status, out)
+	}
+	h.server.Limits = &ephemeral.Limiter{DB: throttled{}, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
+	tb.meter.Reset()
+	for range 100 {
+		if status, _ := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
+			t.Fatalf("replay: %d", status)
+		}
+	}
+	m, _ := tb.cost(t, "POST /ack, a gone page 100 times, ephemeral table down")
+	if m.Write > AckLocalMissesPerMinute+AckMissesPerRequest+9 {
+		t.Fatalf("100 replays deleted %v units", m.Write)
+	}
+}
+
+// A confirmation that claims more than AckBatchUnits is refused, before
+// anything is deleted. A page never claims that much.
 func TestAckLargeBatchRefused(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)

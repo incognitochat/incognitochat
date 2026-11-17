@@ -283,6 +283,15 @@ func TestLimiterTally(t *testing.T) {
 	if used, _ := l.Used(ctx, "j", day); used != 2001 {
 		t.Fatalf("Used = %d, want 2001", used)
 	}
+	// A first write that failed is tried again with the next use, not a
+	// batch later.
+	again := &Limiter{DB: failingDB{}, Table: table, Now: func() time.Time { return start }}
+	again.Tally(ctx, "i", 1, 1000, day, start)
+	again.DB = meter
+	again.Tally(ctx, "i", 1, 1000, day, start)
+	if used, _ := l.Used(ctx, "i", day); used != 2 || again.Counted("i", day) != 2 {
+		t.Fatalf("Used = %d, Counted = %d; want 2", used, again.Counted("i", day))
+	}
 }
 
 // Check answers from memory, and an instance that knows nothing of a

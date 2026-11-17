@@ -83,13 +83,13 @@ func (s *Store) Deliver(ctx context.Context, accountID string, devices []string,
 var MaxItemSize = envelope.MaxLen + 256
 
 const (
-	// probeItems is what List's first read asks for: enough to tell an
+	// ProbeItems is what List's first read asks for: enough to tell an
 	// inbox of one item, the usual one, from one that has more.
-	probeItems = 2
-	// minStep is the fewest items one of List's later reads asks for while
+	ProbeItems = 2
+	// MinStep is the fewest items one of List's later reads asks for while
 	// the page still has room for an item of MaxItemSize, so a page of
 	// small items takes a few reads, not one per few items.
-	minStep = 16
+	MinStep = 16
 	// maxReads bounds the reads of one page, and so what their rounding up
 	// costs: a page of 50 small items takes 5.
 	maxReads = 12
@@ -106,14 +106,17 @@ type PageLimits struct {
 	Items, Units int
 	// Bytes is about the most a page reads, as stored.
 	Bytes int
+	// First, if set, is what the first read asks for instead of
+	// ProbeItems, for a caller that took what the page may cost already.
+	First int
 }
 
 // WorstUnits is the most read units a page within these limits can take:
 // List's reads stop once an item of MaxItemSize would no longer fit in
-// Bytes, so they read at most Bytes and minStep-1 of the largest items,
+// Bytes, so they read at most Bytes and MinStep-1 of the largest items,
 // each read rounded up to 4 KiB, at half a unit (eventually consistent).
 func (p PageLimits) WorstUnits() int {
-	bytes := p.Bytes + (minStep-1)*MaxItemSize
+	bytes := p.Bytes + (MinStep-1)*MaxItemSize
 	return (bytes+8191)/8192 + (maxReads+1)/2
 }
 
@@ -134,12 +137,12 @@ var ErrStop = errors.New("inbox: page stopped")
 // List returns a page of a device's undelivered envelopes, in no
 // meaningful order (random IDs), from after (the start if empty), within
 // limits. Reading is charged by the size of what is read, so the page is
-// read in steps. The first reads probeItems; if that isn't all, List calls
+// read in steps. The first reads ProbeItems; if that isn't all, List calls
 // more (if not nil) before reading on, so a caller can take what the rest
 // may cost first, and returns its error, with what was read, if it fails.
 // Each later step asks for as many items as what is left of limits.Bytes
 // could take even if every item were as big as can be, but at least
-// minStep; the page ends once an item that big would no longer fit, or
+// MinStep; the page ends once an item that big would no longer fit, or
 // after maxReads. So no page reads more than limits.WorstUnits. Items past
 // limits.Units are left for the next page. Expired items, not yet removed
 // by TTL, count towards limits.Bytes but aren't returned, so a page can be
@@ -158,7 +161,11 @@ func (s *Store) List(ctx context.Context, accountID, deviceID, after string, lim
 	}
 	var page Page
 	read, units, prev := 0, 0, after
-	limit := min(probeItems, limits.Items)
+	limit := ProbeItems
+	if limits.First > 0 {
+		limit = limits.First
+	}
+	limit = min(limit, limits.Items)
 	for reads := 1; ; reads++ {
 		out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 			TableName:              &s.Table,
@@ -220,7 +227,7 @@ func (s *Store) List(ctx context.Context, accountID, deviceID, after string, lim
 			}
 			return page, nil
 		}
-		limit = min(limits.Items-len(page.Items), max((limits.Bytes-read)/MaxItemSize, minStep))
+		limit = min(limits.Items-len(page.Items), max((limits.Bytes-read)/MaxItemSize, MinStep))
 	}
 }
 
@@ -245,10 +252,12 @@ func itemSize(item map[string]types.AttributeValue) int {
 // Ack deletes a device's items that it has stored. It reports how many of
 // them weren't there (deleted already, or never stored), and the IDs of
 // those it couldn't delete (an error, such as throttling), to try again.
+// Once maxMissing (if above 0) weren't there, it starts no more deletes:
+// with ackParallel at a time, at most maxMissing+ackParallel-1 miss.
 // Each delete is conditional on the item being there: that costs what an
 // unconditional delete does (a write unit for a missing item), and tells
 // which were missing, which a batch delete doesn't.
-func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []string) (missing int, failed []string) {
+func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []string, maxMissing int) (missing int, failed []string) {
 	pk := devicePK(accountID, deviceID)
 	timeout := s.AckTimeout
 	if timeout <= 0 {
@@ -262,8 +271,15 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 	)
 	slots := make(chan struct{}, ackParallel)
 	for _, id := range itemIDs {
-		wg.Add(1)
 		slots <- struct{}{}
+		mu.Lock()
+		enough := maxMissing > 0 && missing >= maxMissing
+		mu.Unlock()
+		if enough {
+			<-slots
+			break
+		}
+		wg.Add(1)
 		go func() {
 			defer func() { <-slots; wg.Done() }()
 			_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{

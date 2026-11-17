@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
@@ -75,6 +76,17 @@ const (
 	// Confirming items that are there isn't limited: they were delivered,
 	// and senders paid for that with tokens.
 	AckMissesPerDay = TokensPerDay
+	// AckMissesPerRequest is how many items that weren't there stop a
+	// confirmation from starting more deletes: the rest are taken without
+	// deleting (they're listed again later). Honest confirmations almost
+	// never miss; with 10 deletes at a time, a request misses at most 14,
+	// so instances that each let one more request through past the day's
+	// misses add little.
+	AckMissesPerRequest = 5
+	// AckLocalMissesPerMinute limits, per person and instance, the misses
+	// confirmations may make in a minute while the ephemeral table can't be
+	// reached to count them.
+	AckLocalMissesPerMinute = 50
 	// ItemIDHours is how long an item ID from GET /inbox is good for: the
 	// hour it was listed in, and the next. Older ones are confirmed without
 	// deleting anything, and count as misses, so replaying a confirmation
@@ -89,9 +101,10 @@ type Inbox interface {
 	// empty), within limits; once its first read shows there is more, it
 	// calls more before reading on (inbox.Store.List).
 	List(ctx context.Context, accountID, deviceID, after string, limits inbox.PageLimits, now time.Time, more func() error) (inbox.Page, error)
-	// Ack deletes a device's items. It reports how many weren't there, and
-	// which it couldn't delete.
-	Ack(ctx context.Context, accountID, deviceID string, itemIDs []string) (missing int, failed []string)
+	// Ack deletes a device's items, starting no more once maxMissing weren't
+	// there. It reports how many weren't there, and which it couldn't
+	// delete.
+	Ack(ctx context.Context, accountID, deviceID string, itemIDs []string, maxMissing int) (missing int, failed []string)
 	// Clear deletes up to max of a device's items; it reports how many, and
 	// whether more may be left.
 	Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error)
@@ -350,15 +363,20 @@ var errLimited = errors.New("api: rate limited")
 //   - Before its first read, a fetch on an instance that knows nothing of
 //     the device's minute yet reads its count (half a read unit on the
 //     ephemeral table), so one that has no room for a page reads nothing.
-//     Fetches that start at once while it has room each read their first
-//     two items before any is refused.
-//   - The day is counted by the units read, in batches (Limiter.Tally), and
-//     refused with daily_limit, and when it ends (Retry-After).
+//     A device that needed a page on this instance lately (paged) takes the
+//     next page before reading anything. Otherwise fetches that start at
+//     once, each on an instance new to the minute, each read their first
+//     two items before most are refused.
+//   - The day is counted by the units read, and a refused fetch that read
+//     or wrote anything by at least MinRequestUnits, in batches
+//     (Limiter.Tally), so the day bounds even what refused fetches cost;
+//     each instance asks for its count at least once a minute (CheckAt).
+//     Past it, daily_limit, with when it ends (Retry-After).
 //
 // If the ephemeral table can't be reached, each instance allows a device
-// one page's worth a minute on its own count: failing closed would turn
-// trouble with the ephemeral table into an inbox outage for everyone, and
-// failing open would drop the limits.
+// one page's worth a minute on its own count, uncounted for the day:
+// failing closed would turn trouble with the ephemeral table into an inbox
+// outage for everyone, and failing open would drop the limits.
 func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "GET /inbox"
 	after := req.QueryStringParameters["after"]
@@ -369,7 +387,11 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 	now := s.Now()
 	minute := s.rateName("inbox", now, time.Minute, c.AccountID, c.DeviceID)
 	day := s.rateName("inboxday", now, 24*time.Hour, c.person())
-	if s.Limits.FullAt(day, InboxUnitsPerDay, 24*time.Hour, now) {
+	// The day as the table told this instance at most a minute ago: other
+	// instances count it too.
+	dayOK, err := s.Limits.CheckAt(ctx, day, InboxUnitsPerDay, 24*time.Hour, now)
+	s.rateFailed(route, err)
+	if !dayOK {
 		return dailyLimited(now)
 	}
 	worst := inboxPage.WorstUnits()
@@ -377,6 +399,17 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 	local := err != nil
 	s.rateFailed(route, err)
 	if !room {
+		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+	}
+	// refused answers a fetch the minute had no room for, once it cost the
+	// tables something (what it read, or a refused write): that counts
+	// against the person's day, at least MinRequestUnits, so the day bounds
+	// even fetches that are refused.
+	refused := func(read float64) httpapi.Response {
+		if !local {
+			_, err := s.Limits.Tally(ctx, day, max(int(math.Ceil(read)), MinRequestUnits), InboxUnitsPerDay, 24*time.Hour, now)
+			s.rateFailed(route, err)
+		}
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
 	// take counts n against the device's minute, or, once the table can't
@@ -394,11 +427,23 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 		reserved = s.Limits.LocalAt(minute, worst, worst, time.Minute, now)
 		return reserved
 	}
-	// Without the table, the page is taken before anything is read.
-	if local && !take(worst) {
-		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+	// Without the table, or for a device that lately needed more than a
+	// first read here, the page is taken before anything is read: fetches
+	// that start at once, each on an instance new to the minute, then
+	// read nothing before most are refused.
+	limits := inboxPage
+	device := c.AccountID + "#" + c.DeviceID
+	if local || s.paged.recent(device, now) {
+		if !take(worst) {
+			if local {
+				return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+			}
+			return refused(0)
+		}
+		reserved = true
+		limits.First = inbox.MinStep
 	}
-	page, err := s.Inbox.List(ctx, c.AccountID, c.DeviceID, after, inboxPage, now, func() error {
+	page, err := s.Inbox.List(ctx, c.AccountID, c.DeviceID, after, limits, now, func() error {
 		if reserved {
 			return nil
 		}
@@ -408,8 +453,13 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 		reserved = true
 		return nil
 	})
+	if errors.Is(err, errLimited) || page.Read > inbox.ProbeItems || page.After != "" {
+		s.paged.mark(device, now)
+	} else {
+		s.paged.forget(device)
+	}
 	if errors.Is(err, errLimited) {
-		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+		return refused(page.Units)
 	}
 	if err != nil {
 		return s.internal(route, err)
@@ -421,7 +471,7 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 		case reserved && !local && worst-used >= refundAtLeast:
 			s.rateFailed(route, s.Limits.RefundAt(ctx, minute, worst-used, time.Minute, now))
 		case !reserved && !take(used):
-			return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+			return refused(page.Units)
 		}
 		_, err := s.Limits.Tally(ctx, day, max(read, 1), InboxUnitsPerDay, 24*time.Hour, now)
 		s.rateFailed(route, err)
@@ -439,6 +489,40 @@ func (s *Server) listInbox(ctx context.Context, req httpapi.Request, c caller) h
 		resp["next"] = page.After
 	}
 	return httpapi.JSON(http.StatusOK, resp)
+}
+
+// paged remembers, on this instance and for a few minutes, the devices
+// whose last fetch here needed more than a first read: their next fetch
+// takes a page from the minute before reading anything. Device IDs stay in
+// this instance's memory only.
+type paged struct {
+	mu   sync.Mutex
+	last map[string]int64 // device -> when, Unix seconds
+}
+
+// pagedFor is how long a device stays remembered.
+const pagedFor = 5 * 60 // seconds
+
+func (p *paged) recent(device string, now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at, ok := p.last[device]
+	return ok && now.Unix()-at < pagedFor
+}
+
+func (p *paged) mark(device string, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last == nil || len(p.last) >= 16384 {
+		p.last = map[string]int64{}
+	}
+	p.last[device] = now.Unix()
+}
+
+func (p *paged) forget(device string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.last, device)
 }
 
 // dailyLimited answers a request past a daily limit: daily_limit, distinct
@@ -467,7 +551,12 @@ func (s *Server) rateFailed(route string, err error) {
 //   - IDs listed before the last hour (ItemIDHours) delete nothing, and
 //     count as items that weren't there;
 //   - items that weren't there count against the person's day
-//     (AckMissesPerDay), past which nothing is deleted.
+//     (AckMissesPerDay), past which nothing is deleted;
+//   - a confirmation starts no more deletes once AckMissesPerRequest
+//     missed: the rest are taken without deleting, so instances that let a
+//     request through past the day (each at most one) add little;
+//   - while the ephemeral table can't be reached to count them, misses are
+//     limited per instance and minute (AckLocalMissesPerMinute).
 //
 // Deleting items that are there isn't otherwise limited: they were
 // delivered, and their senders paid for that with tokens. So an honest
@@ -525,23 +614,31 @@ func (s *Server) ack(ctx context.Context, req httpapi.Request, c caller) httpapi
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	// Past the day's misses (as the table last told, at most a minute
-	// ago), taken without deleting or counting anything.
+	// ago), or past this instance's own count of them while the table
+	// can't be reached, taken without deleting or counting anything.
 	day := s.rateName("ackmiss", now, 24*time.Hour, c.person())
 	ok, err := s.Limits.CheckAt(ctx, day, AckMissesPerDay, 24*time.Hour, now)
+	degraded := err != nil
 	s.rateFailed(route, err)
-	if !ok {
+	if !ok || !s.Limits.LocalAt(day, 0, AckLocalMissesPerMinute-1, time.Minute, now) {
 		return httpapi.JSON(http.StatusOK, map[string]string{})
 	}
 	missing, failed := 0, []string(nil)
 	if len(keys) > 0 {
-		missing, failed = s.Inbox.Ack(ctx, c.AccountID, c.DeviceID, keys)
+		missing, failed = s.Inbox.Ack(ctx, c.AccountID, c.DeviceID, keys, AckMissesPerRequest)
 		if len(failed) == len(keys) {
 			return s.internal(route, errors.New("inbox: no delete succeeded"))
 		}
 	}
 	if misses := missing + stale; misses > 0 {
-		_, err := s.Limits.Tally(ctx, day, misses, AckMissesPerDay, 24*time.Hour, now)
-		s.rateFailed(route, err)
+		if !degraded {
+			_, err = s.Limits.Tally(ctx, day, misses, AckMissesPerDay, 24*time.Hour, now)
+			degraded = err != nil
+			s.rateFailed(route, err)
+		}
+		if degraded {
+			s.Limits.LocalAt(day, misses, math.MaxInt32, time.Minute, now)
+		}
 	}
 	if len(failed) > 0 {
 		retry := make([]string, len(failed))

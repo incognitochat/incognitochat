@@ -97,7 +97,7 @@ const MAX_PENDING_REACTIONS = 100;
 /** How many uploads are deleted from the server at once. */
 const UPLOAD_DELETE_PARALLEL = 6;
 const MAX_INBOX_PAGES = 10;
-/** After the server limits this device's inbox fetches (or confirmations), they pause this long, plus up to as much again (its limits are per minute). */
+/** After the server limits this device's inbox fetches, they pause this long, plus up to as much again (its limits are per minute). */
 const SYNC_PAUSE_MS = 30_000;
 /**
  * How long a confirmed item's ID is remembered, so a fetch that lists it
@@ -1120,7 +1120,7 @@ export function createMessaging(deps: MessagingDeps) {
       unresolved = new Map();
       const busy = new Set<string>();
       try {
-        let confirming = await confirmLater();
+        await confirmLater();
         if (paused()) {
           scheduleResume();
           return received;
@@ -1158,10 +1158,7 @@ export function createMessaging(deps: MessagingDeps) {
           // unconfirmed, and the walk goes on past them (a later one takes
           // them in).
           const done = fresh.filter((i) => !held.has(i.id)).map((i) => i.id);
-          if (done.length > 0) {
-            if (confirming) confirming = await confirm(done, listedAt);
-            else keep(done, listedAt);
-          }
+          if (done.length > 0) await confirm(done, listedAt);
           if (more && next) {
             // Back where this pass began, having gone round: the rest was walked already.
             if (w.round && w.origin !== null && next >= w.origin) {
@@ -1198,66 +1195,58 @@ export function createMessaging(deps: MessagingDeps) {
     });
   }
 
-  /** Confirms IDs; returns what to send again (their deletes failed), or null if the server can't take any now. */
-  async function ack(ids: string[]): Promise<string[] | null> {
-    try {
-      return (await session.call('POST', '/ack', { ids }, checkAck)).retry;
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'rate_limited') return null;
-      throw err;
-    }
-  }
-
   /**
-   * Confirms a page's IDs, listed at `at`. What isn't confirmed, whatever
-   * went wrong, is kept to confirm later. Returns whether to go on
-   * confirming in this sync.
+   * Confirms a page's IDs, listed at `at`. Those whose delete failed
+   * (`retry`) are kept for the next sync. If the request fails, they're
+   * kept too (a network error, or the server's: 5xx, 429), unless the
+   * server refused them for good (any other 4xx: IDs it no longer takes,
+   * say after its key changed): then they're dropped, and their items are
+   * listed again under new IDs. Throws what went wrong, except that refusal.
    */
-  async function confirm(ids: string[], at: number): Promise<boolean> {
-    let retry: string[] | null;
+  async function confirm(ids: string[], at: number): Promise<void> {
+    let retry: string[];
     try {
-      retry = await ack(ids);
+      ({ retry } = await session.call('POST', '/ack', { ids }, checkAck));
     } catch (err) {
-      keep(ids, at);
+      const forGood = err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 429;
+      if (!forGood) keep(ids, at);
+      if (forGood && err.code === 'bad_request') return;
       throw err;
-    }
-    if (retry === null) {
-      keep(ids, at);
-      return false;
     }
     rememberConfirmed(ids.filter((id) => !retry.includes(id)));
     if (retry.length > 0) keep(retry, at);
-    return true;
   }
 
   /**
-   * Confirms what earlier syncs couldn't, oldest first; a batch goes only
-   * once confirmed, or once its IDs are too old for the server (their items
-   * are listed again under new ones). Returns whether to go on confirming
-   * in this sync.
+   * Confirms what earlier syncs couldn't, oldest first: only what was
+   * waiting when it started, so what fails again waits for the next sync
+   * rather than going straight back. IDs too old for the server go: their
+   * items are listed again under new ones.
    */
-  async function confirmLater(): Promise<boolean> {
-    while (unconfirmed.length > 0) {
-      const batch = unconfirmed[0]!;
-      if (batch.at >= now() - UNCONFIRMED_FOR_MS) {
-        const retry = await ack(batch.ids);
-        if (retry === null) return false;
-        rememberConfirmed(batch.ids.filter((id) => !retry.includes(id)));
-        drop();
-        if (retry.length > 0) keep(retry, batch.at);
-      } else drop();
+  async function confirmLater(): Promise<void> {
+    const batches = unconfirmed.splice(0);
+    for (const batch of batches) batch.ids.forEach((id) => pending.delete(id));
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i]!;
+      if (batch.at < now() - UNCONFIRMED_FOR_MS) continue;
+      try {
+        await confirm(batch.ids, batch.at);
+      } catch (err) {
+        for (const rest of batches.slice(i + 1)) keep(rest.ids, rest.at);
+        throw err;
+      }
     }
-    return true;
   }
 
   function keep(ids: string[], at: number): void {
     unconfirmed.push({ ids, at });
     ids.forEach((id) => pending.add(id));
     // Bounded: the oldest go, and are listed and confirmed again later.
-    while (pending.size > MAX_CONFIRMED && unconfirmed.length > 1) drop();
+    while (pending.size > MAX_CONFIRMED && unconfirmed.length > 1) dropOldest();
   }
 
-  function drop(): void {
+  /** Forgets the oldest batch waiting to be confirmed. */
+  function dropOldest(): void {
     unconfirmed.shift()?.ids.forEach((id) => pending.delete(id));
   }
 

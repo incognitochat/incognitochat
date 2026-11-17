@@ -345,7 +345,7 @@ func (l *Limiter) Tally(ctx context.Context, key string, n, limit int, window ti
 	due := !t.wrote || t.pending >= tallyBatch || l.known[k].uses+t.pending >= limit
 	write := 0
 	if due && t.pending > 0 {
-		write, t.pending, t.wrote = t.pending, 0, true
+		write, t.pending = t.pending, 0
 	}
 	l.tallies[k] = t
 	l.mu.Unlock()
@@ -361,9 +361,20 @@ func (l *Limiter) Tally(ctx context.Context, key string, n, limit int, window ti
 		l.mu.Unlock()
 		return l.counted(key, start) < limit, err
 	}
+	l.mu.Lock()
+	t = l.tallies[k]
+	t.wrote = true
+	l.tallies[k] = t
+	l.mu.Unlock()
 	c := countOf(out)
 	l.learn(key, start, window, c)
 	return c < limit, nil
+}
+
+// Counted is the count the table last returned for key's current window
+// on this instance (0 if none), such as just now to AllowN.
+func (l *Limiter) Counted(key string, window time.Duration) int {
+	return l.counted(key, l.Now().Truncate(window))
 }
 
 // LocalAt counts n uses of key in this instance's memory only, in the

@@ -36,13 +36,18 @@ func newDeliveryTables(t *testing.T) (*harness, *deliveryTables) {
 	return h, tb
 }
 
+// testTimeout is the limiter's timeout in these tests: DynamoDB Local can
+// take more than a second under 100 requests at once, which would make
+// the limits fall back to each instance's own count.
+const testTimeout = 10 * time.Second
+
 // wire gives h's server fresh stores on the tables, with nothing in
 // memory: another instance of the function.
 func (tb *deliveryTables) wire(h *harness) {
 	now := func() time.Time { return h.now }
 	h.server.Directory = &directory.Store{DB: tb.meter, Table: tb.directory}
 	h.server.Inbox = &inbox.Store{DB: tb.meter, Table: tb.messages}
-	h.server.Limits = &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now}
+	h.server.Limits = &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now, Timeout: testTimeout}
 	h.server.Nonces = &ephemeral.Nonces{DB: tb.meter, Table: tb.ephemeral, Now: now}
 	h.server.Spent = &ephemeral.Spent{DB: tb.meter, Table: tb.ephemeral, Now: now}
 	h.router = httpapi.NewRouter()
@@ -61,7 +66,7 @@ func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
 		Switches:  o.Switches,
 		Directory: &directory.Store{DB: tb.meter, Table: tb.directory},
 		Inbox:     &inbox.Store{DB: tb.meter, Table: tb.messages},
-		Limits:    &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now},
+		Limits:    &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now, Timeout: testTimeout},
 	}
 	r := httpapi.NewRouter()
 	s.Routes(r)
@@ -105,10 +110,11 @@ func TestDeliveryCapacity(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)
 
-	// An empty inbox: polling writes nothing.
+	// An empty inbox: polling writes nothing; a fresh instance reads the
+	// day's and the minute's counts once.
 	tb.meter.Reset()
 	h.as(t, owner, http.MethodGet, "/inbox", nil, false)
-	if m, e := tb.cost(t, "GET /inbox, empty"); m.Read > 0.5 || e.Write != 0 || e.Read > 0.5 {
+	if m, e := tb.cost(t, "GET /inbox, empty"); m.Read > 0.5 || e.Write != 0 || e.Read > 1 {
 		t.Fatal("polling an empty inbox costs too much")
 	}
 
@@ -124,8 +130,8 @@ func TestDeliveryCapacity(t *testing.T) {
 		}
 	}
 
-	// 50 of the largest envelopes waiting: a page claims at most a minute of
-	// confirmations (15 of them).
+	// 50 of the largest envelopes waiting: a page claims at most
+	// AckBatchUnits to confirm (15 of them).
 	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false)
 	boxes := out["mailboxes"].([]any)
 	largest := make([]byte, envelope.MaxLen)

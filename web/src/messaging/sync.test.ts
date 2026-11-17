@@ -47,35 +47,33 @@ describe('inbox sync', () => {
     expect(calls).toEqual(['GET /inbox', `GET /inbox?after=${key('a')}`, 'POST /ack one', `GET /inbox?after=${key('b')}`, 'POST /ack two']);
   });
 
-  it('pauses after the server limits fetching or confirming, then carries on', async () => {
+  it('pauses after the server limits fetching, then carries on', async () => {
     const limited = new ApiError(429, 'rate_limited');
-    const { calls, messaging, wait } = await scripted([{ items: [item('one')], more: false }, limited, { items: [item('one')], more: false }], [limited]);
-    // Confirming refused: no error for the app, and it's confirmed later.
+    const { calls, messaging, wait } = await scripted([{ items: [item('one')], more: false }, limited, { items: [item('one')], more: false }]);
     expect(await messaging.sync()).toBe(0);
-    expect(calls).toEqual(['GET /inbox', 'POST /ack one']);
-    // The next sync confirms it first, then fetches, until that's refused.
+    // Refused: no error for the app.
     await messaging.sync();
-    expect(calls.slice(2)).toEqual(['POST /ack one', 'GET /inbox']);
+    expect(calls).toEqual(['GET /inbox', 'POST /ack one', 'GET /inbox']);
     wait(20_000);
     await messaging.sync();
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
     wait(45_000);
     await messaging.sync();
     // Listed again, it's not confirmed twice.
-    expect(calls.slice(4)).toEqual(['GET /inbox']);
+    expect(calls.slice(3)).toEqual(['GET /inbox']);
   });
 
-  it('keeps fetching while confirming is limited, and confirms later', async () => {
-    const limited = new ApiError(429, 'rate_limited');
-    const { calls, messaging, wait } = await scripted(
+  it('drops a confirmation the server refuses for good, and goes on', async () => {
+    // Say its key changed: the IDs it handed out before are refused (400).
+    const { calls, messaging } = await scripted(
       [{ items: [item('one')], more: true, next: key('b') }, { items: [item('two')], more: false }, { items: [], more: false }],
-      [limited],
+      [new ApiError(400, 'bad_request')],
     );
     await messaging.sync();
-    expect(calls).toEqual(['GET /inbox', 'POST /ack one', `GET /inbox?after=${key('b')}`]);
-    wait(61_000);
+    expect(calls).toEqual(['GET /inbox', 'POST /ack one', `GET /inbox?after=${key('b')}`, 'POST /ack two']);
+    // Not sent again: the item comes again under a new ID.
     await messaging.sync();
-    expect(calls.slice(3)).toEqual(['POST /ack one', 'POST /ack two', 'GET /inbox']);
+    expect(calls.slice(4)).toEqual(['GET /inbox']);
   });
 
   it('sends again only the IDs the server could not delete', async () => {
@@ -84,6 +82,18 @@ describe('inbox sync', () => {
     await messaging.sync();
     // Listed again meanwhile: not confirmed twice.
     expect(calls).toEqual(['GET /inbox', 'POST /ack one,two', 'POST /ack two', 'GET /inbox']);
+  });
+
+  it('sends what fails again once a sync, not straight back', async () => {
+    // The server keeps failing the same delete.
+    const { calls, messaging } = await scripted(
+      [{ items: [item('one')], more: false }, { items: [], more: false }, { items: [], more: false }],
+      [{ retry: ['one'] }, { retry: ['one'] }, { retry: ['one'] }],
+    );
+    await messaging.sync();
+    await messaging.sync();
+    await messaging.sync();
+    expect(calls).toEqual(['GET /inbox', 'POST /ack one', 'POST /ack one', 'GET /inbox', 'POST /ack one', 'GET /inbox']);
   });
 
   it('starts from the start after an error where it was', async () => {
@@ -96,13 +106,12 @@ describe('inbox sync', () => {
     expect(calls.slice(10)).toEqual([`GET /inbox?after=${key('j')}`, 'GET /inbox']);
   });
 
-  it('keeps what it could not confirm, whatever went wrong, until it is confirmed', async () => {
-    const limited = new ApiError(429, 'rate_limited');
+  it('keeps what a failing server could not confirm, until it is confirmed', async () => {
     const { calls, messaging } = await scripted(
       [{ items: [item('one')], more: false }, { items: [], more: false }],
-      [limited, new ApiError(500, 'internal'), {}],
+      [new ApiError(503, 'internal'), new ApiError(500, 'internal'), {}],
     );
-    await messaging.sync();
+    await expect(messaging.sync()).rejects.toThrow(ApiError);
     // Sent again, and failing: kept still.
     await expect(messaging.sync()).rejects.toThrow(ApiError);
     await messaging.sync();
@@ -117,11 +126,12 @@ describe('inbox sync', () => {
   });
 
   it('stops reading once three pages wait to be confirmed', async () => {
-    const page = (p: string) => ({ items: Array.from({ length: 50 }, (_, i) => item(`${p}${i}`)), more: true, next: key(p) });
-    const { calls, messaging } = await scripted([page('a'), page('b'), page('c'), page('d')], [new ApiError(429, 'rate_limited')]);
+    const ids = (p: string) => Array.from({ length: 50 }, (_, i) => `${p}${i}`);
+    const page = (p: string) => ({ items: ids(p).map(item), more: true, next: key(p) });
+    // Every delete fails, for now.
+    const { calls, messaging } = await scripted([page('a'), page('b'), page('c'), page('d')], ['a', 'b', 'c'].map((p) => ({ retry: ids(p) })));
     await messaging.sync();
     expect(calls.filter((c) => c.startsWith('GET'))).toHaveLength(3);
-    expect(calls.filter((c) => c.startsWith('POST'))).toHaveLength(1);
   });
 
   it('waits until the next day once the day is used up', async () => {
