@@ -202,6 +202,36 @@ func (q *Quiet) Start(ctx context.Context, key string, until time.Time) (bool, e
 	return once(ctx, q.DB, q.Table, "Q#"+key, "Q", until, q.Now())
 }
 
+// Move moves the end of the quiet period Start began for key until from,
+// to until. An until that has passed ends it: it is stored as the minute
+// that has begun, since no row holds an exact time. A period that isn't
+// that one (none, or another begun after it ran out) is left alone.
+//
+// So whoever starts a short period while it acts can, before it runs out,
+// keep it for longer once the action worked, or end it if it didn't,
+// without moving a period someone else started. Once only: after it ended,
+// another may start with the same end.
+func (q *Quiet) Move(ctx context.Context, key string, from, until time.Time) error {
+	e := expiry(until)
+	if now := q.Now(); !until.After(now) {
+		e = now.Truncate(time.Minute).Unix()
+	}
+	_, err := q.DB.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &q.Table,
+		Item: map[string]types.AttributeValue{
+			"pk": s("Q#" + key),
+			"sk": s("Q"),
+			"e":  num(e),
+		},
+		ConditionExpression:       aws.String("e = :from"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":from": num(expiry(from))},
+	})
+	if conditionFailed(err) {
+		return nil
+	}
+	return err
+}
+
 // once writes an item unless a live one exists, and reports whether it did.
 func once(ctx context.Context, db DB, table, pk, sk string, expires, now time.Time) (bool, error) {
 	_, err := db.PutItem(ctx, &dynamodb.PutItemInput{

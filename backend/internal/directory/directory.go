@@ -691,6 +691,11 @@ func roundUp(t time.Time) int64 {
 // else can read; the language for the notice (lg); the last notice's message
 // ID, to delete it when a new one is sent (nm); and whether Telegram refused
 // the last notice, meaning notices are off for this user (no).
+//
+// The notify function may touch nothing else (infra/functions.tf): it reads
+// cid, lg, nm and no, naming them, and writes nm and no, with conditions on
+// the key alone and nothing returned. Notices, NoticeSent and NoticesOff are
+// its calls, and must stay within that.
 
 // NoticeTarget is what the notify function needs about an account.
 type NoticeTarget struct {
@@ -720,10 +725,17 @@ func (s *Store) SetNotices(ctx context.Context, accountID string, sealedChat []b
 
 // Notices returns an account's notice settings. ErrNotFound if it has none.
 func (s *Store) Notices(ctx context.Context, accountID string) (NoticeTarget, error) {
-	it, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
+	out, err := s.DB.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName:                &s.Table,
+		Key:                      key(accountPK(accountID), skAccount),
+		ProjectionExpression:     aws.String("cid, lg, nm, #no"),
+		ExpressionAttributeNames: map[string]string{"#no": "no"},
+		ConsistentRead:           aws.Bool(true),
+	})
 	if err != nil {
 		return NoticeTarget{}, err
 	}
+	it := out.Item
 	sealed, ok := bin(it, "cid")
 	if !ok {
 		return NoticeTarget{}, ErrNotFound
@@ -733,13 +745,15 @@ func (s *Store) Notices(ctx context.Context, accountID string) (NoticeTarget, er
 	return NoticeTarget{SealedChat: sealed, Language: lang, LastMessage: num(it, "nm"), Off: off}, nil
 }
 
-// NoticeSent records the message ID of the latest notice.
+// NoticeSent records the message ID of the latest notice. An account that
+// is gone gets nothing (one replaced since may get it on its marker, which
+// is harmless and expires with it).
 func (s *Store) NoticeSent(ctx context.Context, accountID string, messageID int64) error {
 	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
 		UpdateExpression:          aws.String("SET nm = :m"),
-		ConditionExpression:       aws.String("attribute_exists(ak)"),
+		ConditionExpression:       aws.String("attribute_exists(pk)"),
 		ExpressionAttributeValues: attrs{":m": nv(messageID)},
 	})
 	var failed *types.ConditionalCheckFailedException
@@ -750,13 +764,14 @@ func (s *Store) NoticeSent(ctx context.Context, accountID string, messageID int6
 }
 
 // NoticesOff records that Telegram refused a notice (the user blocked the
-// bot or never let it write), so none are tried until the app turns them on again.
+// bot or never let it write), so none are tried until the app turns them on
+// again. Like NoticeSent, it writes nothing for an account that is gone.
 func (s *Store) NoticesOff(ctx context.Context, accountID string) error {
 	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
 		UpdateExpression:          aws.String("SET #no = :one"),
-		ConditionExpression:       aws.String("attribute_exists(ak)"),
+		ConditionExpression:       aws.String("attribute_exists(pk)"),
 		ExpressionAttributeNames:  map[string]string{"#no": "no"},
 		ExpressionAttributeValues: attrs{":one": nv(1)},
 	})

@@ -45,6 +45,82 @@ func TestNonces(t *testing.T) {
 	}
 }
 
+// A quiet period started short, while acting, is kept for longer once the
+// action worked, or ended once it failed; a period someone else started
+// is never moved (finding BOT-6).
+func TestQuiet(t *testing.T) {
+	client := dynamotest.Client(t)
+	clock := start.Add(10 * time.Second)
+	table := dynamotest.Table(t, client)
+	q := &Quiet{DB: client, Table: table, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	begin := func(key string, until time.Time) bool {
+		t.Helper()
+		ok, err := q.Start(ctx, key, until)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	move := func(key string, from, until time.Time) {
+		t.Helper()
+		if err := q.Move(ctx, key, from, until); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ends := func(key string) (int64, bool) {
+		t.Helper()
+		out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &table, Key: map[string]types.AttributeValue{"pk": s("Q#" + key), "sk": s("Q")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Item == nil {
+			return 0, false
+		}
+		e, _ := strconv.ParseInt(out.Item["e"].(*types.AttributeValueMemberN).Value, 10, 64)
+		return e, true
+	}
+
+	// Worked: the period runs its whole length from then.
+	lease := clock.Add(30 * time.Second)
+	if !begin("a", lease) || begin("a", clock.Add(3*time.Minute)) {
+		t.Fatal("a period started twice, or not at all")
+	}
+	move("a", lease, clock.Add(3*time.Minute))
+	if e, _ := ends("a"); e != start.Add(4*time.Minute).Unix() {
+		t.Fatalf("moved to end at %d", e)
+	}
+	clock = start.Add(2 * time.Minute) // past the lease, within the period
+	if begin("a", clock.Add(time.Minute)) {
+		t.Fatal("the moved period ended with its lease")
+	}
+
+	// Failed: the period ends on the minute that has begun, and the next
+	// may start at once.
+	clock = start.Add(2*time.Minute + 20*time.Second)
+	lease = clock.Add(30 * time.Second)
+	if !begin("b", lease) {
+		t.Fatal("start refused")
+	}
+	move("b", lease, time.Time{})
+	if e, _ := ends("b"); e != start.Add(2*time.Minute).Unix() {
+		t.Fatalf("ended at %d", e)
+	}
+	if !begin("b", clock.Add(3*time.Minute)) {
+		t.Fatal("an ended period still holds")
+	}
+
+	// Someone else's period, or none, is left alone.
+	move("b", lease, time.Time{})
+	if begin("b", clock.Add(time.Minute)) {
+		t.Fatal("a stale move ended another's period")
+	}
+	move("c", lease, clock.Add(3*time.Minute))
+	if _, ok := ends("c"); ok {
+		t.Fatal("a move started a period")
+	}
+}
+
 func TestLimiter(t *testing.T) {
 	client := dynamotest.Client(t)
 	clock := start

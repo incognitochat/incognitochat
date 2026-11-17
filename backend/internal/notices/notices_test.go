@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
 
@@ -45,6 +50,7 @@ func TestSealer(t *testing.T) {
 }
 
 type memDirectory struct {
+	mu     sync.Mutex
 	target directory.NoticeTarget
 	found  bool
 	sent   []int64
@@ -52,6 +58,8 @@ type memDirectory struct {
 }
 
 func (m *memDirectory) Notices(context.Context, string) (directory.NoticeTarget, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.found {
 		return directory.NoticeTarget{}, directory.ErrNotFound
 	}
@@ -63,10 +71,17 @@ func (m *memDirectory) Notices(context.Context, string) (directory.NoticeTarget,
 	return t, nil
 }
 func (m *memDirectory) NoticeSent(_ context.Context, _ string, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sent = append(m.sent, id)
 	return nil
 }
-func (m *memDirectory) NoticesOff(context.Context, string) error { m.off = true; return nil }
+func (m *memDirectory) NoticesOff(context.Context, string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.off = true
+	return nil
+}
 
 type memQuiet struct {
 	mu    sync.Mutex
@@ -84,76 +99,167 @@ func (q *memQuiet) Start(_ context.Context, key string, until time.Time) (bool, 
 	return true, nil
 }
 
-func TestNotify(t *testing.T) {
-	var calls []string
-	var bodies []map[string]any
-	forbid := false
-	telegram := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (q *memQuiet) Move(_ context.Context, key string, from, until time.Time) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if u, ok := q.until[key]; ok && u.Equal(from) {
+		q.until[key] = until
+	}
+	return nil
+}
+
+// telegram is a fake Bot API. reply answers each call by method name and
+// how many calls of that method came before it since they were last seen;
+// a reply of "" (or no reply func) is a success with a new message ID.
+type telegram struct {
+	*httptest.Server
+	mu     sync.Mutex
+	calls  []string
+	bodies []map[string]any
+	given  int // message IDs given, from 10
+	reply  func(method string, n int) (int, string)
+}
+
+func newTelegram(t *testing.T) *telegram {
+	tg := &telegram{}
+	tg.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
-		calls = append(calls, method)
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
-		bodies = append(bodies, body)
-		if forbid {
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"ok":false,"error_code":403}`))
-			return
+		tg.mu.Lock()
+		n := 0
+		for _, c := range tg.calls {
+			if c == method {
+				n++
+			}
 		}
-		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":` + map[bool]string{true: "10", false: "11"}[len(calls) == 1] + `}}`))
+		tg.calls = append(tg.calls, method)
+		tg.bodies = append(tg.bodies, body)
+		reply := tg.reply
+		tg.mu.Unlock()
+		if reply != nil {
+			if status, out := reply(method, n); out != "" {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(out))
+				return
+			}
+		}
+		tg.mu.Lock()
+		id := 10 + tg.given
+		tg.given++
+		tg.mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":` + strconv.Itoa(id) + `}}`))
 	}))
-	defer telegram.Close()
+	t.Cleanup(tg.Close)
+	return tg
+}
 
+// seen returns the calls so far, and forgets them.
+func (tg *telegram) seen() ([]string, []map[string]any) {
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	calls, bodies := tg.calls, tg.bodies
+	tg.calls, tg.bodies = nil, nil
+	return calls, bodies
+}
+
+func (tg *telegram) answer(reply func(method string, n int) (int, string)) {
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	tg.reply = reply
+}
+
+const (
+	refused     = `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`
+	serverError = `{"ok":false,"error_code":500,"description":"Internal Server Error"}`
+)
+
+func flood(seconds int) string {
+	return `{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":` + strconv.Itoa(seconds) + `}}`
+}
+
+// notifier returns a Notifier with an in-memory directory (notices set up,
+// in Persian) and quiet periods, its clock, and the waits it took.
+func notifier(t *testing.T, tg *telegram) (*Notifier, *memDirectory, *time.Time, *[]time.Duration) {
 	sealer, _ := NewSealer(bytes.Repeat([]byte("k"), 32))
 	sealed, _ := sealer.Seal(4242)
 	clock := now
+	var waits []time.Duration
 	dir := &memDirectory{target: directory.NoticeTarget{SealedChat: sealed, Language: "fa"}, found: true}
-	quiet := &memQuiet{until: map[string]time.Time{}, now: &clock}
-	n := &Notifier{
+	return &Notifier{
 		Directory: dir,
-		Quiet:     quiet,
+		Quiet:     &memQuiet{until: map[string]time.Time{}, now: &clock},
 		QuietKey:  QuietKey(bytes.Repeat([]byte("k"), 32)),
 		Sealer:    sealer,
-		Bot:       botapi.Client{Token: "1:T", API: telegram.URL},
+		Bot:       botapi.Client{Token: "1:T", API: tg.URL},
 		AppURL:    "https://example.github.io/",
 		Now:       func() time.Time { return clock },
-	}
+		Sleep: func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d)
+			return nil
+		},
+	}, dir, &clock, &waits
+}
+
+func TestNotify(t *testing.T) {
+	tg := newTelegram(t)
+	n, dir, clock, _ := notifier(t, tg)
 	ctx := context.Background()
 
 	if err := n.Notify(ctx, "acct"); err != nil {
 		t.Fatal(err)
 	}
-	if calls[0] != "sendMessage" || bodies[0]["chat_id"] != float64(4242) || bodies[0]["text"] != "پیام جدید" {
-		t.Fatalf("first notice: %v %v", calls, bodies[0])
+	calls, bodies := tg.seen()
+	if !slices.Equal(calls, []string{"sendMessage"}) || bodies[0]["chat_id"] != float64(4242) || bodies[0]["text"] != "پیام جدید" {
+		t.Fatalf("first notice: %v %v", calls, bodies)
 	}
 	// The quiet period is named by a keyed hash of the account, not its ID.
-	for key := range quiet.until {
+	for key := range n.Quiet.(*memQuiet).until {
 		if !strings.HasPrefix(key, "notice#") || strings.Contains(key, "acct") {
 			t.Fatalf("quiet period %q", key)
 		}
 	}
 	// Within the quiet period: nothing.
-	if err := n.Notify(ctx, "acct"); err != nil || len(calls) != 1 {
-		t.Fatalf("second notice inside the interval: %v", calls)
-	}
-	// After it: the old notice is deleted, a new one sent.
-	clock = now.Add(Interval + time.Second)
 	if err := n.Notify(ctx, "acct"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(calls, " ") != "sendMessage deleteMessage sendMessage" || bodies[1]["message_id"] != float64(10) {
-		t.Fatalf("calls = %v, delete = %v", calls, bodies[1])
+	if calls, _ := tg.seen(); len(calls) != 0 {
+		t.Fatalf("second notice inside the interval: %v", calls)
 	}
+	// After it: a new one is sent, then the old one deleted.
+	*clock = now.Add(Interval + time.Second)
+	if err := n.Notify(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	calls, bodies = tg.seen()
+	if !slices.Equal(calls, []string{"sendMessage", "deleteMessage"}) || bodies[1]["message_id"] != float64(10) || !slices.Equal(dir.sent, []int64{10, 11}) {
+		t.Fatalf("calls = %v, delete = %v, sent %v", calls, bodies, dir.sent)
+	}
+	// The old notice failing to delete (older than 48 hours, say) changes nothing.
+	tg.answer(func(method string, _ int) (int, string) {
+		if method == "deleteMessage" {
+			return http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request: message can't be deleted"}`
+		}
+		return 0, ""
+	})
+	*clock = clock.Add(Interval + time.Second)
+	if err := n.Notify(ctx, "acct"); err != nil || len(dir.sent) != 3 {
+		t.Fatalf("undeletable old notice: %v, sent %v", err, dir.sent)
+	}
+	tg.seen()
 	// Telegram refusing turns notices off; then none are tried.
-	forbid = true
-	clock = clock.Add(Interval + time.Second)
+	tg.answer(func(string, int) (int, string) { return http.StatusForbidden, refused })
+	*clock = clock.Add(Interval + time.Second)
 	if err := n.Notify(ctx, "acct"); err != nil || !dir.off {
 		t.Fatalf("forbidden: %v, off %v", err, dir.off)
 	}
-	before := len(calls)
-	clock = clock.Add(Interval + time.Second)
+	if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage"}) {
+		t.Fatalf("forbidden: %v", calls)
+	}
+	*clock = clock.Add(Interval + time.Second)
 	_ = n.Notify(ctx, "acct")
-	if len(calls) != before {
+	if calls, _ := tg.seen(); len(calls) != 0 {
 		t.Fatal("a notice was tried with notices off")
 	}
 	// A chat ID sealed under another key turns notices off.
@@ -162,13 +268,191 @@ func TestNotify(t *testing.T) {
 	staleDir := &memDirectory{target: directory.NoticeTarget{SealedChat: old}, found: true}
 	n2 := *n
 	n2.Directory = staleDir
-	n2.Quiet = &memQuiet{until: map[string]time.Time{}, now: &clock}
-	if err := n2.Notify(ctx, "acct"); err != nil || !staleDir.off || len(calls) != before {
+	n2.Quiet = &memQuiet{until: map[string]time.Time{}, now: clock}
+	if err := n2.Notify(ctx, "acct"); err != nil || !staleDir.off {
 		t.Fatalf("stale seal: %v, off %v", err, staleDir.off)
+	}
+	if calls, _ := tg.seen(); len(calls) != 0 {
+		t.Fatalf("stale seal: %v", calls)
 	}
 	// No notice setup at all: nothing, no error.
 	if err := (&Notifier{Directory: &memDirectory{}, Now: n.Now}).Notify(ctx, "other"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A notice that fails to send leaves the previous one in the chat, and
+// the next message can notify at once: the new notice goes out before the
+// old one is deleted, and the quiet period counts only once it went out
+// (finding BOT-6).
+func TestNotifyFailedSendKeepsOldNotice(t *testing.T) {
+	tg := newTelegram(t)
+	n, dir, clock, _ := notifier(t, tg)
+	ctx := context.Background()
+	if err := n.Notify(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	tg.seen()
+
+	*clock = clock.Add(Interval + time.Second)
+	tg.answer(func(method string, _ int) (int, string) {
+		if method == "sendMessage" {
+			return http.StatusInternalServerError, serverError
+		}
+		return 0, ""
+	})
+	var apiErr *botapi.Error
+	if err := n.Notify(ctx, "acct"); !errors.As(err, &apiErr) || apiErr.Code != 500 {
+		t.Fatalf("failed send: %v", err)
+	}
+	if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage"}) || !slices.Equal(dir.sent, []int64{10}) {
+		t.Fatalf("after a failed send: calls %v, sent %v", calls, dir.sent)
+	}
+	// The next message, right away, brings the notice, which replaces the
+	// one still there.
+	tg.answer(nil)
+	if err := n.Notify(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	calls, bodies := tg.seen()
+	if !slices.Equal(calls, []string{"sendMessage", "deleteMessage"}) || bodies[1]["message_id"] != float64(10) || len(dir.sent) != 2 {
+		t.Fatalf("after the retry: %v %v, sent %v", calls, bodies, dir.sent)
+	}
+}
+
+// Telegram's flood control: a short wait is taken, once; a long one, a
+// second refusal, or a wait the invocation has no time for gives up
+// without using the quiet period, and keeps the previous notice (findings
+// BOT-3, SCL-7).
+func TestNotifyFloodControl(t *testing.T) {
+	ctx := context.Background()
+	t.Run("short wait", func(t *testing.T) {
+		tg := newTelegram(t)
+		n, dir, _, waits := notifier(t, tg)
+		tg.answer(func(method string, i int) (int, string) {
+			if method == "sendMessage" && i == 0 {
+				return http.StatusTooManyRequests, flood(2)
+			}
+			return 0, ""
+		})
+		if err := n.Notify(ctx, "acct"); err != nil {
+			t.Fatal(err)
+		}
+		if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage", "sendMessage"}) || !slices.Equal(*waits, []time.Duration{2 * time.Second}) || len(dir.sent) != 1 {
+			t.Fatalf("calls %v, waits %v, sent %v", calls, *waits, dir.sent)
+		}
+		// It went out: the quiet period holds.
+		if err := n.Notify(ctx, "acct"); err != nil {
+			t.Fatal(err)
+		}
+		if calls, _ := tg.seen(); len(calls) != 0 {
+			t.Fatalf("inside the quiet period: %v", calls)
+		}
+	})
+	for _, tc := range []struct {
+		name    string
+		replies []string // to sendMessage, in order
+		budget  time.Duration
+		calls   int
+		waits   []time.Duration
+	}{
+		{name: "refused again", replies: []string{flood(1), flood(1)}, calls: 2, waits: []time.Duration{time.Second}},
+		{name: "long wait", replies: []string{flood(30)}, calls: 1},
+		{name: "wait without one", replies: []string{`{"ok":false,"error_code":429}`}, calls: 1},
+		{name: "no time to wait", replies: []string{flood(3)}, budget: 4 * time.Second, calls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tg := newTelegram(t)
+			n, dir, clock, waits := notifier(t, tg)
+			if err := n.Notify(ctx, "acct"); err != nil {
+				t.Fatal(err)
+			}
+			tg.seen()
+			*clock = now.Add(Interval + time.Second)
+			tg.answer(func(method string, i int) (int, string) {
+				if method == "sendMessage" && i < len(tc.replies) {
+					return http.StatusTooManyRequests, tc.replies[i]
+				}
+				return 0, ""
+			})
+			c := ctx
+			if tc.budget > 0 {
+				var cancel context.CancelFunc
+				c, cancel = context.WithTimeout(ctx, tc.budget)
+				defer cancel()
+			}
+			if err := n.Notify(c, "acct"); !errors.Is(err, ErrRateLimited) {
+				t.Fatalf("err = %v", err)
+			}
+			calls, _ := tg.seen()
+			if len(calls) != tc.calls || slices.Contains(calls, "deleteMessage") || !slices.Equal(*waits, tc.waits) || !slices.Equal(dir.sent, []int64{10}) {
+				t.Fatalf("calls %v, waits %v, sent %v", calls, *waits, dir.sent)
+			}
+			// The quiet period wasn't used: the next message notifies.
+			tg.answer(nil)
+			if err := n.Notify(ctx, "acct"); err != nil {
+				t.Fatal(err)
+			}
+			if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage", "deleteMessage"}) {
+				t.Fatalf("next message: %v", calls)
+			}
+		})
+	}
+}
+
+// Deliveries at once still send one notice, with the real quiet periods
+// (a conditional write); and a failed send ends the period there too.
+func TestNotifyOnceAtATime(t *testing.T) {
+	client := dynamotest.Client(t)
+	tg := newTelegram(t)
+	n, dir, clock, _ := notifier(t, tg)
+	n.Quiet = &ephemeral.Quiet{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return *clock }}
+	ctx := context.Background()
+	// Each send takes a while, so the others try while it's under way.
+	tg.answer(func(method string, _ int) (int, string) {
+		if method == "sendMessage" {
+			time.Sleep(200 * time.Millisecond)
+		}
+		return 0, ""
+	})
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Go(func() { errs[i] = n.Notify(ctx, "acct") })
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
+	if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage"}) || len(dir.sent) != 1 {
+		t.Fatalf("calls %v, sent %v", calls, dir.sent)
+	}
+
+	// After the interval, a failed send ends the period it started.
+	*clock = clock.Add(Interval + time.Minute)
+	tg.answer(func(method string, _ int) (int, string) {
+		if method == "sendMessage" {
+			return http.StatusTooManyRequests, flood(60)
+		}
+		return 0, ""
+	})
+	if err := n.Notify(ctx, "acct"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v", err)
+	}
+	tg.answer(nil)
+	if err := n.Notify(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage", "sendMessage", "deleteMessage"}) || len(dir.sent) != 2 {
+		t.Fatalf("calls %v, sent %v", calls, dir.sent)
+	}
+	// And that one holds the period.
+	if err := n.Notify(ctx, "acct"); err != nil {
+		t.Fatal(err)
+	}
+	if calls, _ := tg.seen(); len(calls) != 0 {
+		t.Fatalf("inside the quiet period: %v", calls)
 	}
 }
 

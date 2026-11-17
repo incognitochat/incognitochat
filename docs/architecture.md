@@ -226,7 +226,15 @@ secret: one person keeps the same label through the same link.
 - **Notices:** if no app took the push, `ws` asks `notify`, and the bot sends
   a generic "New message" in the user's language: no names, no counts, at
   most one every 3 minutes, replacing the previous one. "Seen" receipts and
-  reactions never trigger one.
+  reactions never trigger one. The new notice goes out first, and only then
+  is the previous one deleted (if it's under 48 hours old: Telegram lets
+  bots delete their messages no later) and the 3 minutes started; while it
+  is being sent, a short hold keeps a second delivery from sending another.
+  If it can't go out, the previous one stays and the next message can try.
+  When Telegram's flood control (about 30 messages a second per bot) asks
+  for a wait of up to 3 seconds, `notify` waits and tries once more; for a
+  longer one it gives up. There is no queue: under a sustained flood,
+  notices are dropped, not delayed.
 
 ## Attachments
 
@@ -322,7 +330,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 | `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token |
 | `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket. Invokes `ws` (each send, without waiting) and `notify` (to seal a chat ID); posts to no socket |
 | `ws` | WebSocket connect (one record each, about 5 a minute per account; closing isn't routed); the push after each send, from `api` | the session key; socket records only. Posts hints to sockets; invokes `notify` (a notice, without waiting) when no open app took one |
-| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the key that opens chat IDs; notice settings and quiet periods. No sockets or socket records |
+| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the key that opens chat IDs; of the directory, only the notice fields of account items (reads the sealed chat ID, language, last notice and "notices off"; writes the last two), and its quiet periods. No other item, attribute or table; no sockets or socket records |
 
 | Table | Holds | Expires |
 |---|---|---|

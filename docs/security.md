@@ -271,6 +271,20 @@ it. This is how close it gets.
   (or whoever controls it) could have `notify` send any account a notice,
   at most one every 3 minutes, skipping `ws`'s check that no open app took
   the push. The notice is still the generic one, and says nothing more.
+- **What `notify` can reach.** It holds the key that opens chat IDs, so its
+  role reaches little else ([infra/functions.tf](../infra/functions.tf)).
+  In the directory it may read only the notice fields of account items
+  (the sealed chat ID, language, last notice and "notices off"), naming
+  them in each read, and write only the last two, getting nothing back. It
+  can't read links, mailboxes, devices or other attributes, list or scan
+  anything, or delete. So whoever holds its role (stolen credentials, a bad
+  dependency in its build) can match to Telegram users only accounts whose
+  IDs they already have (`notify` is given the ID of each account it
+  notifies), not the link and mailbox registry. IAM can't limit sort keys,
+  so two things remain: such a role can tell whether an item with a given
+  key exists in an account's partition (whether that account owns a link
+  or mailbox whose ID it knows), and add the notice fields to items there,
+  which could break that account's requests.
 - **The server says which mailbox an envelope came through.** The app
   takes an envelope in only through the mailbox it belongs to
   ([protocol.md](protocol.md#inner-message)), so a user who knows one of

@@ -58,6 +58,7 @@ for dir in infra infra/init; do
   terraform -chdir="$dir" init -backend=false -lockfile=readonly
   terraform -chdir="$dir" validate
 done
+terraform -chdir=infra test   # renders function role policies; no AWS calls
 ```
 
 ## Reproducible builds

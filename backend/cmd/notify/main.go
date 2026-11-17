@@ -2,7 +2,9 @@
 // function invokes it to seal a chat ID (only notify holds the key), and
 // the ws function, without waiting, after a delivery that no open app took
 // and that isn't quiet. It can read the bot token and the chat key, and the
-// notice fields of accounts; nothing about messages, and no socket records.
+// notice fields of accounts (infra/functions.tf: no other attribute, and
+// nothing outside account partitions); nothing about messages, and no
+// socket records.
 package main
 
 import (
@@ -36,7 +38,12 @@ func main() {
 	}
 	lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
 		out, err := handle(ctx, raw, sealer, notifier.Notify)
-		if err != nil {
+		switch {
+		case errors.Is(err, notices.ErrRateLimited):
+			// Dropped as Telegram asked; the next message can notify.
+			log.Warn("notice refused by flood control")
+			return out, nil
+		case err != nil:
 			log.Warn("notify failed", logx.ErrorKind(err))
 		}
 		return out, err
