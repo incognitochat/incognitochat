@@ -193,6 +193,22 @@ func TestDirectoryCapacity(t *testing.T) {
 	if _, e := tb.cost(t, "GET /media/{random}"); e.Read != 0.5 {
 		t.Fatalf("download lookup read %.1f units", e.Read)
 	}
+	// A delete with a random ID: half a unit too (the firewall's
+	// lookups-total is sized by these). A fresh upload URL reads strongly,
+	// a whole unit, and writes nothing for a random ID either.
+	secret := map[string]any{"secret": b64(randomBytes(t, 16))}
+	if status, out := h.post(t, "/media/"+ids.New()+"/delete", secret); status != http.StatusNotFound {
+		t.Fatalf("delete: %d %v", status, out)
+	}
+	if d, e := tb.cost(t, "POST /media/{random}/delete"); e.Read != 0.5 || e.Write != 0 || d.Read != 0 {
+		t.Fatalf("delete lookup: ephemeral %+v, directory %+v", e, d)
+	}
+	if status, out := h.post(t, "/media/"+ids.New()+"/upload", secret); status != http.StatusNotFound {
+		t.Fatalf("renew: %d %v", status, out)
+	}
+	if d, e := tb.cost(t, "POST /media/{random}/upload"); e.Read != 1 || e.Write != 0 || d.Read != 0 {
+		t.Fatalf("renew lookup: ephemeral %+v, directory %+v", e, d)
+	}
 }
 
 // Every registration attempt that reaches the directory counts, retries

@@ -90,6 +90,10 @@ func (m *memUploads) Exists(ctx context.Context, id string) (bool, error) {
 	return ok, err
 }
 
+func (m *memUploads) Lookup(ctx context.Context, id string) (ephemeral.Upload, bool, error) {
+	return m.Get(ctx, id)
+}
+
 func (m *memUploads) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

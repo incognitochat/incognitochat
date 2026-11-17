@@ -15,7 +15,7 @@ import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '
 import { MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { getMeta, getSealed, openDatabase, putKey, putMeta, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
-import { canResend, createMessaging, SyncFailed, type MessagingDeps } from './engine';
+import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, type KeyEntry } from './keys';
@@ -946,6 +946,40 @@ describe('key rotation', () => {
     expect(after.map((k) => k.pub)).not.toContain(toBase64Url(firstKey));
     expect(await getSealed(owner.db, firstName)).toBeUndefined();
     expect(after.map((k) => k.deleteAfter !== undefined)).toEqual([true, false]);
+  });
+
+  it("doesn't fetch the link's key with every send while that fails", async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const now = () => clock;
+    const owner = await person(backend, 'owner', now);
+    const sender = await person(backend, 'sender', now);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    clock += 2 * 3600_000;
+
+    for (const trouble of ['unreachable', 'busy'] as const) {
+      backend.down.bundles = trouble;
+      backend.bundleFetches.length = 0;
+      // Sent with the key it has; one fetch, not one per send.
+      for (const text of ['one', 'two', 'three']) await sender.messaging.send(conv, text);
+      expect(backend.bundleFetches).toEqual([ref.id]);
+      // Tried again 5 to 10 minutes later.
+      clock += LINK_KEY_RETRY_MS / 2 - 1000;
+      await sender.messaging.send(conv, 'four');
+      expect(backend.bundleFetches).toHaveLength(1);
+      clock += LINK_KEY_RETRY_MS / 2 + 1000;
+      await sender.messaging.send(conv, 'five');
+      expect(backend.bundleFetches).toHaveLength(2);
+      clock += LINK_KEY_RETRY_MS;
+    }
+    backend.down.bundles = null;
+    backend.bundleFetches.length = 0;
+    await sender.messaging.send(conv, 'six');
+    await sender.messaging.send(conv, 'seven');
+    expect(backend.bundleFetches).toEqual([ref.id]);
+    // Everything arrived, written with the key it had.
+    expect(await owner.messaging.sync()).toBe(13);
   });
 });
 
@@ -3569,8 +3603,10 @@ describe('envelopes that come again, or late', () => {
 
   describe('what is kept to tell', () => {
     it('is keyed hashes and days, never IDs or exact times, and goes once nothing it covers can still arrive', async () => {
-      // Midday, so everything below falls on one day.
-      let clock = Math.floor(Date.now() / DAY) * DAY + 12 * HOUR;
+      // On the hour, so everything below falls on one day, and after the
+      // link's key starts: chat() makes it 3 to 14 hours before now, so
+      // midday (as this used) came before it after 15:00 UTC, at random.
+      let clock = Math.floor(Date.now() / HOUR) * HOUR;
       const now = () => clock;
       const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
       clock += 1000;

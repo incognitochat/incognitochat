@@ -2,9 +2,9 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { prepareSetup, readAccount, register } from '../account/account';
 import { openDatabase } from '../storage/db';
-import { ApiError, checkObject, type Api } from './api';
+import { ApiError, checkObject, NetworkError, type Api } from './api';
 import { createClock } from './clock';
-import { createSession } from './session';
+import { createSession, LOGIN_RETRY_MAX_MS, LOGIN_RETRY_MS } from './session';
 
 let n = 0;
 const NOW = 1_800_000_000;
@@ -143,6 +143,107 @@ describe('session', () => {
     session.use({ account: 'BBBBBBBBBBBBBBBBBBBBBB', token: 'v1.t.m', expires: NOW + 900 });
     await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
     expect(await readAccount(db)).toMatchObject({ state: 'refused' });
+  });
+});
+
+describe('logins that fail for want of the server', () => {
+  /** A server whose logins fail with fail() while it returns an error, and succeed otherwise. */
+  function failing(fail: () => Error | null) {
+    const s = server();
+    let tries = 0;
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      async request(method, path, init, check) {
+        if (path === '/session') {
+          tries++;
+          const err = fail();
+          if (err) throw err;
+        }
+        return s.api.request(method, path, init, check);
+      },
+    };
+    return { api, setUpWith: s.api, tries: () => tries };
+  }
+
+  it.each([
+    ['the firewall turning it away', () => new ApiError(429, 'rate_limited')],
+    ['the server failing', () => new ApiError(500, 'internal')],
+    ['no answer', () => new NetworkError('request failed')],
+  ])('waits, longer each time, after %s', async (_, error) => {
+    let down = true;
+    const f = failing(() => (down ? error() : null));
+    const db = await registeredDb(f.setUpWith);
+    let clockMs = 1_000_000;
+    // The longest wait each time (no jitter off it).
+    const session = createSession(db, f.api, deviceClock(), () => clockMs, () => 0.999_999);
+    const get = () => session.call('GET', '/account', undefined, checkObject);
+
+    const first: unknown = await get().catch((e: unknown) => e);
+    expect(f.tries()).toBe(1);
+    // Every request until the wait is over gets the same error, without a login.
+    clockMs += LOGIN_RETRY_MS - 10;
+    await expect(get()).rejects.toBe(first);
+    expect(f.tries()).toBe(1);
+    clockMs += 10;
+    await expect(get()).rejects.toThrow();
+    expect(f.tries()).toBe(2);
+    // Twice as long the second time.
+    clockMs += LOGIN_RETRY_MS;
+    await expect(get()).rejects.toThrow();
+    expect(f.tries()).toBe(2);
+    clockMs += LOGIN_RETRY_MS;
+    await expect(get()).rejects.toThrow();
+    expect(f.tries()).toBe(3);
+    // Never longer than the most.
+    for (let i = 0; i < 10; i++) {
+      clockMs += LOGIN_RETRY_MAX_MS;
+      await expect(get()).rejects.toThrow();
+    }
+    expect(f.tries()).toBe(13);
+    // And once the server is back, the next try logs in.
+    down = false;
+    clockMs += LOGIN_RETRY_MAX_MS;
+    await get();
+    expect(f.tries()).toBe(14);
+  });
+
+  it('spreads the waits of apps behind one address', async () => {
+    const f = failing(() => new ApiError(429, 'rate_limited'));
+    const db = await registeredDb(f.setUpWith);
+    let clockMs = 1_000_000;
+    // Half the wait, the shortest.
+    const session = createSession(db, f.api, deviceClock(), () => clockMs, () => 0);
+    const get = () => session.call('GET', '/account', undefined, checkObject);
+    await expect(get()).rejects.toMatchObject({ code: 'rate_limited' });
+    clockMs += LOGIN_RETRY_MS / 2;
+    await expect(get()).rejects.toMatchObject({ code: 'rate_limited' });
+    expect(f.tries()).toBe(2);
+  });
+
+  it("doesn't wait after a refusal, and logs in once for everything that needs it at the same time", async () => {
+    const s = server();
+    const session = createSession(await registeredDb(s.api), s.api, deviceClock());
+    await Promise.all([1, 2, 3].map(() => session.call('GET', '/account', undefined, checkObject)));
+    expect(s.logins()).toBe(1);
+
+    const refused = failing(() => new ApiError(401, 'login_refused'));
+    const db = await registeredDb(refused.setUpWith);
+    const again = createSession(db, refused.api, deviceClock(), () => 0);
+    await expect(again.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
+    await expect(again.call('GET', '/account', undefined, checkObject)).rejects.toMatchObject({ code: 'login_refused' });
+    expect(refused.tries()).toBe(2);
+  });
+
+  it('logs in at once after a setup in another copy', async () => {
+    let down = true;
+    const f = failing(() => (down ? new NetworkError('request failed') : null));
+    const db = await registeredDb(f.setUpWith);
+    const session = createSession(db, f.api, deviceClock(), () => 1_000_000);
+    await expect(session.call('GET', '/account', undefined, checkObject)).rejects.toBeInstanceOf(NetworkError);
+    down = false;
+    session.setUp();
+    await session.call('GET', '/account', undefined, checkObject);
+    expect(f.tries()).toBe(2);
   });
 });
 
