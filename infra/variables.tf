@@ -212,24 +212,33 @@ variable "reserve_concurrency" {
 # about $51 a day in production, $26 elsewhere (docs/deployment.md, Cost
 # guards).
 variable "table_max_read_units" {
-  description = "Per-table cap on on-demand read request units per second, a cost guard. Unset (null), 400 in production and 200 elsewhere. GitHub variable TABLE_MAX_READ_UNITS"
+  description = "Per-table cap on on-demand read request units per second, a cost guard. Unset (null), 400 in production and 200 elsewhere; at most 3,000. GitHub variable TABLE_MAX_READ_UNITS"
   type        = number
   default     = null
 
+  # At most 3,000, what DynamoDB lets one partition read: sends to mailboxes
+  # that don't exist all read the same placeholder device in the directory
+  # (backend/internal/directory), as table_max_write_units below.
   validation {
-    condition     = coalesce(var.table_max_read_units, 1) >= 1
-    error_message = "table_max_read_units must be at least 1."
+    condition     = coalesce(var.table_max_read_units, 1) >= 1 && coalesce(var.table_max_read_units, 1) <= 3000
+    error_message = "table_max_read_units must be from 1 to 3,000."
   }
 }
 
 variable "table_max_write_units" {
-  description = "Per-table cap on on-demand write request units per second, a cost guard. Unset (null), 200 in production and 100 elsewhere. GitHub variable TABLE_MAX_WRITE_UNITS"
+  description = "Per-table cap on on-demand write request units per second, a cost guard. Unset (null), 200 in production and 100 elsewhere; at most 1,000. GitHub variable TABLE_MAX_WRITE_UNITS"
   type        = number
   default     = null
 
+  # At most 1,000, what DynamoDB lets one partition take: sends to mailboxes
+  # that don't exist all write the same few placeholder items in the
+  # messages table (backend/internal/inbox), one per envelope size. Under a
+  # higher cap, a flood of them would be throttled at the placeholder's
+  # partition before real deliveries were at the table's cap, which a sender
+  # could tell apart.
   validation {
-    condition     = coalesce(var.table_max_write_units, 1) >= 1
-    error_message = "table_max_write_units must be at least 1."
+    condition     = coalesce(var.table_max_write_units, 1) >= 1 && coalesce(var.table_max_write_units, 1) <= 1000
+    error_message = "table_max_write_units must be from 1 to 1,000."
   }
 }
 

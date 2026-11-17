@@ -149,6 +149,16 @@ jobs:
           role-session-name: github-${{ github.run_id }}-${{ github.run_attempt }}
           role-duration-seconds: 1800
 
+      # Before anything changes: the Lambda permissions boundary, which only
+      # an admin applies (infra/init), must let the functions call each
+      # other as this code does, or the deploy would leave sends succeeding
+      # while pushes and notices stopped. Checked on the existing roles, as
+      # if their own policies allowed every invoke, so only the boundary
+      # decides; skipped on a first deploy, which the check after applying
+      # covers.
+      - name: Check the permissions boundary is up to date
+        run: scripts/check-function-roles.sh boundary "incognitochat-${ENVIRONMENT}"
+
       - name: Terraform init
         working-directory: infra
         env:
@@ -237,6 +247,15 @@ jobs:
       # attested build plus AWS Signer's signature; prints both hashes.
       - name: Check the deployed code
         run: python3 scripts/check-lambda-deploy.py backend/dist "incognitochat-${ENVIRONMENT}"
+
+      # And after applying: each function's role, its own policy and the
+      # boundary together, must allow every call the functions make to each
+      # other (Terraform's permission_checks output), first deploys included.
+      - name: Check the functions may call each other
+        working-directory: infra
+        run: |
+          set -o pipefail
+          terraform output -json permission_checks | ../scripts/check-function-roles.sh roles
 
       - name: Read endpoints
         working-directory: infra
@@ -334,8 +353,8 @@ jobs:
       - name: Smoke test – the notify function starts
         working-directory: infra
         run: |
-          # An empty account is the no-op the api sends for unknown mailboxes;
-          # it proves the function reads its parameters and starts.
+          # A notice for an empty account is a no-op; it proves the function
+          # reads its parameters and starts.
           function=$(terraform output -raw notify_function_name)
           failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
             --payload '{"notify":{"account":""}}' --query FunctionError --output text "$RUNNER_TEMP/notify.json")

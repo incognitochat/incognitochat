@@ -4,14 +4,22 @@
 # Terraform state or plan files. Each function role can read only the
 # parameters it needs (functions.tf).
 
-# HMAC key for session tokens (api issues them, ws checks them).
+# HMAC key for session tokens (api issues them, ws checks them). A key
+# derived from it, with a label of its own, names socket records in the
+# ephemeral table (ws records and reads them, api forgets an account's), so
+# a copy of the table can't be matched with the directory. A new value logs
+# everyone out, and leaves the old socket records unfound: open apps get a
+# notice instead of a push until they replace their sockets (within about
+# half an hour), and the old records expire within 40 minutes.
 ephemeral "random_password" "session_key" {
   length  = 64
   special = false
 }
 
 # Key for the keyed hash of Telegram user IDs, so the directory can enforce one
-# account per Telegram user without storing the IDs themselves.
+# account per Telegram user without storing the IDs themselves. api also
+# names its rate counters with it (keyed hashes that change every window),
+# so a new value starts every limit afresh, for the minute, hour or day.
 ephemeral "random_password" "telegram_id_pepper" {
   length  = 64
   special = false
@@ -23,9 +31,11 @@ ephemeral "random_password" "webhook_secret" {
   special = false
 }
 
-# Seals the Telegram chat IDs notices go to; only notify can read it. A new
-# key leaves stored chat IDs unreadable: notices stop until each app sets
-# them up again, which it does when the account says they're off.
+# Seals the Telegram chat IDs notices go to; only notify can read it. A key
+# derived from it names notify's quiet periods (one notice per account every
+# 3 minutes). A new key leaves stored chat IDs unreadable: notices stop until
+# each app sets them up again, which it does when the account says they're
+# off (and the quiet periods start afresh).
 ephemeral "random_password" "chat_key" {
   length  = 64
   special = false

@@ -1,7 +1,8 @@
 // Command notify sends Telegram "New message" notices (design §12). The api
-// function invokes it: to seal a chat ID (only notify holds the key), and,
-// without waiting, after each delivery. It can read the bot token and the
-// chat key, and the notice fields of accounts; nothing about messages.
+// function invokes it to seal a chat ID (only notify holds the key), and
+// the ws function, without waiting, after a delivery that no open app took
+// and that isn't quiet. It can read the bot token and the chat key, and the
+// notice fields of accounts; nothing about messages, and no socket records.
 package main
 
 import (
@@ -59,7 +60,9 @@ func handle(ctx context.Context, raw json.RawMessage, sealer *notices.Sealer, no
 		return notices.SealResult{Sealed: base64.RawURLEncoding.EncodeToString(sealed)}, nil
 	case e.Notify != nil:
 		if e.Notify.Account == "" {
-			// Sent for sends to unknown mailboxes, so they take as long.
+			// Nothing to do: the deploy sends this to check the function
+			// starts (api functions from before ws asked for notices also
+			// sent it, for sends to mailboxes that don't exist).
 			return nil, nil
 		}
 		if !ids.Valid(e.Notify.Account) {
@@ -83,7 +86,8 @@ func load(ctx context.Context) (*notices.Sealer, *notices.Notifier, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sealer, err := notices.NewSealer([]byte(params[env["PARAM_CHAT_KEY"]]))
+	chatKey := []byte(params[env["PARAM_CHAT_KEY"]])
+	sealer, err := notices.NewSealer(chatKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -92,6 +96,7 @@ func load(ctx context.Context) (*notices.Sealer, *notices.Notifier, error) {
 	return sealer, &notices.Notifier{
 		Directory: &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]},
 		Quiet:     &ephemeral.Quiet{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
+		QuietKey:  notices.QuietKey(chatKey),
 		Sealer:    sealer,
 		Bot:       botapi.Client{Token: params[env["PARAM_BOT_TOKEN"]]},
 		AppURL:    env["APP_URL"],

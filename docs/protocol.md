@@ -552,10 +552,16 @@ each mailbox's owner, to deliver, but not who writes to it.
   only send tokens: as many as the envelope costs, one per started 2.5 KiB
   (Send tokens, below), so one for all but long texts. The server checks
   the envelope's layout, the tokens and the caps, then stores the envelope
-  once for each of the owner's devices. Unknown and discarded mailboxes get
-  the same `200 {}`, after a similar pause, and nothing is stored. `quiet`
-  sends (seen receipts, reactions, edits, deletes and key updates) trigger
-  no notice.
+  once for each of the owner's devices. Unknown and discarded mailboxes go
+  through the same steps, for an account that doesn't exist: the same
+  reads, the same write of the same size, which goes to a placeholder of
+  the envelope's size that holds nothing (it's overwritten with zeros each
+  time, so it costs the same and keeps nothing), and the same request for
+  a push (below), for nobody. They get the same `200 {}`, and fail the same
+  way when the database does. Only a link's intro mailbox also counts the
+  link's first messages; the sender knows whether it writes to one, and a
+  link that is gone says so itself. `quiet` sends (seen receipts,
+  reactions, edits, deletes and key updates) trigger no notice.
 - `GET /inbox` returns a page of a device's undelivered envelopes in no
   meaningful order, each with the mailbox it came through
   (`{id, mailbox, envelope}`): the app takes an envelope in only through the
@@ -636,11 +642,24 @@ each mailbox's owner, to deliver, but not who writes to it.
   sends a heartbeat about every 5 minutes, keeps the socket only while it's
   visible, and replaces it with a new one about every 30 minutes.
 
+  `/send` doesn't wait for the push: the `api` function hands every send to
+  the `ws` function in an asynchronous invoke (`{"push":{"account","quiet"}}`,
+  with an empty account for a mailbox that doesn't exist) and answers. `ws`
+  pushes, and, if no socket took it and the send isn't `quiet`, asks
+  `notify` for the notice, without waiting either. So how long a send takes
+  says nothing about whether the recipient's app is open. A push is tried
+  once: not again after a failure, and not at all if it waited a minute for
+  `ws` to have room (the app also polls, every two minutes while its socket
+  is open). It usually reaches the app a few tenths of a second after the
+  answer; `api` can't post to sockets, and `notify` can't see them.
+
   The server doesn't hear when a socket closes. It keeps a record of each
-  socket (account ID, connection ID, and when it expires: 40 minutes after
-  the minute it opened, rounded up to the minute) until a push finds the
-  socket closed, a later connect needs the place, the account is deleted, or
-  a connect or push finds it expired; DynamoDB's TTL can take days to delete
+  socket (a keyed hash of the account, not its ID; the connection ID; and
+  when it expires: 40 minutes after the minute it opened, rounded up to the
+  minute) until a push finds the socket closed, a later connect needs the
+  place, the account is deleted, or a connect or push finds it expired; the
+  key is derived from the session key, which `api` and `ws` hold. DynamoDB's
+  TTL can take days to delete
   an expired record, which is never used. A socket an app keeps open longer
   than that (an older app that doesn't replace it) gets no pushes, and the
   app polls. A delivery is pushed to the account's most recently opened
@@ -808,10 +827,12 @@ function holds the bot token.
   language, nothing else. The bot needs permission to write first; the app
   asks Telegram for it. `GET /account` says whether notices are on, and the
   app sets them up again when they're off.
-- After each delivery that isn't `quiet`, `api` asks `notify` to send the
-  owner a notice, without waiting. `notify` sends at most one every 3 minutes
-  per account, and deletes the previous one, so the chat holds one notice at
-  most. If Telegram refuses (the bot is blocked), notices turn off.
+- After each delivery that isn't `quiet` and that no open app took (Delivery,
+  Push), `ws` asks `notify` to send the owner a notice, without waiting.
+  `notify` sends at most one every 3 minutes per account (its quiet period is
+  stored under a keyed hash of the account, with a key derived from the chat
+  key), and deletes the previous one, so the chat holds one notice at most.
+  If Telegram refuses (the bot is blocked), notices turn off.
 
 What this tells the server: that an account has a Telegram chat, which it
 already knows from registration, and when the account gets messages, which

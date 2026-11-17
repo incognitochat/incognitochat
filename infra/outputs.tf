@@ -50,3 +50,33 @@ output "notify_function_name" {
   description = "The notify function, which the deploy invokes once to check it starts"
   value       = aws_lambda_function.fn["notify"].function_name
 }
+
+# The calls between functions that their roles must allow, permissions
+# boundary (infra/init) included. A refused one only logs a warning, so the
+# deploy checks them with IAM's policy simulator. ARNs name the account.
+output "permission_checks" {
+  description = "What each function's role must be allowed to do to the others, for the deploy to check"
+  sensitive   = true
+  value = {
+    "api invokes ws (the push after each send)" = {
+      role     = aws_iam_role.fn["api"].arn
+      action   = "lambda:InvokeFunction"
+      resource = aws_lambda_function.fn["ws"].arn
+    }
+    "api invokes notify (sealing chat IDs)" = {
+      role     = aws_iam_role.fn["api"].arn
+      action   = "lambda:InvokeFunction"
+      resource = aws_lambda_function.fn["notify"].arn
+    }
+    "ws invokes notify (notices)" = {
+      role     = aws_iam_role.fn["ws"].arn
+      action   = "lambda:InvokeFunction"
+      resource = aws_lambda_function.fn["notify"].arn
+    }
+    "ws posts to sockets" = {
+      role     = aws_iam_role.fn["ws"].arn
+      action   = "execute-api:ManageConnections"
+      resource = "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/check"
+    }
+  }
+}

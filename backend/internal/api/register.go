@@ -118,7 +118,7 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 	// items it needs are read: the Telegram user's account, its account
 	// item and this device's, never the whole partition (thousands of
 	// mailboxes), which only a replacement lists, once counted.
-	if resp, ok := s.allowPerDay(ctx, route, "regtry#"+telegramHash, RegisterAttemptsPerDay); !ok {
+	if resp, ok := s.allowPerDay(ctx, route, "regtry", telegramHash, RegisterAttemptsPerDay); !ok {
 		return resp
 	}
 	existing, err := s.Directory.ByTelegram(ctx, telegramHash, in.Device)
@@ -156,11 +156,11 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 }
 
 func (s *Server) allowRegistration(ctx context.Context, route, telegramHash string) (httpapi.Response, bool) {
-	return s.allowPerDay(ctx, route, "reg#"+telegramHash, RegistrationsPerDay)
+	return s.allowPerDay(ctx, route, "reg", telegramHash, RegistrationsPerDay)
 }
 
-func (s *Server) allowPerDay(ctx context.Context, route, key string, limit int) (httpapi.Response, bool) {
-	ok, err := s.Limits.Allow(ctx, key, limit, 24*time.Hour)
+func (s *Server) allowPerDay(ctx context.Context, route, kind, who string, limit int) (httpapi.Response, bool) {
+	ok, err := s.allow(ctx, kind, limit, 24*time.Hour, who)
 	if err != nil {
 		return s.internal(route, err), false
 	}

@@ -117,7 +117,7 @@ func TestDirectoryCapacity(t *testing.T) {
 
 	// A replacement refused by the day's limit doesn't list the partition.
 	for {
-		if ok, _ := h.server.Limits.Allow(context.Background(), "reg#"+directory.TelegramHash(h.server.Pepper, big.user), RegistrationsPerDay, 24*time.Hour); !ok {
+		if ok, _ := h.server.allow(context.Background(), "reg", RegistrationsPerDay, 24*time.Hour, directory.TelegramHash(h.server.Pepper, big.user)); !ok {
 			break
 		}
 	}

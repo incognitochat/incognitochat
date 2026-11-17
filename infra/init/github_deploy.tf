@@ -191,6 +191,16 @@ data "aws_iam_policy_document" "deploy" {
     resources = [local.arns.lambda_roles]
   }
 
+  # After applying, the deploy asks IAM's policy simulator whether each
+  # function's role, permissions boundary included, allows what it calls
+  # the others for (deploy-environment.yml), so a boundary that wasn't
+  # updated fails the deploy instead of silently stopping pushes.
+  statement {
+    sid       = "CheckLambdaRoles"
+    actions   = ["iam:SimulatePrincipalPolicy"]
+    resources = [local.arns.lambda_roles]
+  }
+
   statement {
     sid       = "PassLambdaRolesToLambdaOnly"
     actions   = ["iam:PassRole"]
@@ -427,10 +437,12 @@ data "aws_iam_policy_document" "lambda_boundary" {
     resources = [local.arns.ws_management]
   }
 
+  # api invokes ws after each send (which pushes) and notify to seal chat
+  # IDs; ws invokes notify for a notice. Each role allows only its own.
   statement {
-    sid       = "InvokeNotify"
+    sid       = "InvokeFunctions"
     actions   = ["lambda:InvokeFunction"]
-    resources = [local.arns.notify]
+    resources = [local.arns.notify, local.arns.ws]
   }
 
   # Encrypted attachments (presigned uploads and downloads, deletion).

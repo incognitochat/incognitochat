@@ -17,6 +17,48 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
 
+// Looking up the devices of an account that doesn't exist (a send to a
+// mailbox that doesn't exist) makes the same query as for an account with
+// its one device, at the same cost, and finds none; it writes its
+// placeholder only the first time.
+func TestNoDevicesCostsWhatDevicesDoes(t *testing.T) {
+	s, meter, _ := metered(t)
+	ctx := context.Background()
+	now := time.Unix(1_800_000_000, 0)
+	n := newAccount(t, "th-1")
+	if err := s.Create(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	meter.Reset()
+	if devices, err := s.Devices(ctx, n.ID, now); err != nil || len(devices) != 1 {
+		t.Fatalf("Devices = %v, %v", devices, err)
+	}
+	calls, units := meter.Calls(), meter.Units(s.Table)
+
+	meter.Reset()
+	if err := s.NoDevices(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if u := meter.Units(s.Table); u.Write != 1 {
+		t.Fatalf("the first lookup cost %+v", u)
+	}
+	for range 3 {
+		meter.Reset()
+		if err := s.NoDevices(ctx, now); err != nil {
+			t.Fatal(err)
+		}
+		if got := meter.Calls(); !slices.Equal(got, calls) {
+			t.Fatalf("NoDevices made %v, Devices %v", got, calls)
+		}
+		if got := meter.Units(s.Table); got != units {
+			t.Fatalf("NoDevices cost %+v, Devices %+v", got, units)
+		}
+	}
+	if devices, err := s.Devices(ctx, NoAccount, now); err != nil || len(devices) != 0 {
+		t.Fatalf("the placeholder's devices: %v, %v", devices, err)
+	}
+}
+
 // metered is a store whose reads and writes are counted.
 func metered(t *testing.T) (*Store, *dynamotest.Meter, *dynamodb.Client) {
 	t.Helper()

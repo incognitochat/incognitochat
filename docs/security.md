@@ -19,7 +19,10 @@ version 2 moves all content out of Telegram and encrypts it on the device.
   can read it: not Telegram, not the bot-token holder, not the operator, not
   AWS, not GitHub, not anyone with a copy of the database.
 - **Stored data shows no social graph.** The server never records who sent a
-  message or which conversations belong together.
+  message or which conversations belong together. What it keeps for a short
+  while (rate counters, socket records, notice quiet periods) is named by
+  keyed hashes, so a copy of the database can't be matched with the
+  directory to show which accounts got messages, or had the app open, when.
 - **Anonymous senders stay anonymous**, also to recipients who compare notes.
   Someone's anonymous conversation with you can't be linked to the
   conversation they have with you through their own link.
@@ -37,15 +40,15 @@ device.
 
 | Who | Can | Gets |
 |---|---|---|
-| A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments. No content, no senders, no conversation pairs. |
-| The operator or AWS account holder, passively | Read the database, logs and settings | The same. |
+| A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when. |
+| The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
 | The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | The bot-token holder | Everything Telegram's bot APIs allow | Who uses the bot, when notices go out. No content. Can send look-alike notices that open a look-alike page, which has none of the user's keys. |
 | The BotFather owner | Change the Mini App's address | Can point the app at a malicious page, for everyone or for chosen people. The largest remaining risk; see below. |
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes. |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
 
@@ -57,7 +60,10 @@ it. This is how close it gets.
 **What the operator can't do at all**
 
 - Read anyone's messages or attachments.
-- Learn from stored data who wrote to whom, or who an anonymous sender is.
+- Learn from stored data who wrote to whom, or who an anonymous sender is:
+  nothing stored says so. (With the functions' keys it can read the
+  short-lived records for as long as they're kept, which show some of the
+  timing it can watch live; see 2. below.)
 - Forge messages or slip them into a conversation.
 - Undo what happened in a conversation by delivering old envelopes again,
   or out of order: bring back a deleted message or chat, wipe later history
@@ -106,8 +112,10 @@ it. This is how close it gets.
    - the person's link changes, which their contacts see.
 2. **Watching live traffic.** The operator, or AWS, can watch requests as they
    happen and link people by timing and IP address: a message arriving, then
-   a notice, then a reply or a "seen". Nothing stored shows this, but live
-   observation does. Immediate "seen" receipts make it easier.
+   a notice, then a reply or a "seen". A copy of the stored data doesn't show
+   this, but live observation does, and so, for a short while, do the
+   short-lived records to whoever also holds the functions' keys (What still
+   leaks, Short-lived records). Immediate "seen" receipts make it easier.
 
 **What every user trusts in any app**
 
@@ -121,6 +129,20 @@ it. This is how close it gets.
   message arrived" with "a notice went out" or "someone replied", and link
   people after a few rounds. "Seen" receipts are sent the moment a message is
   read, which sharpens this. Not stored, but observable.
+- **Not to other users: whether someone's app is open, or whether a mailbox
+  still exists.** A send is answered after the same steps whatever the
+  mailbox. Pushing to the recipient's open apps (and the notice, if none is
+  open) happens afterwards, in another function the answer doesn't wait
+  for, so how long a send takes doesn't say whether their app is open. A
+  mailbox that doesn't exist (never did, or ended with a block or the
+  conversation) goes through the same reads and the same write, of the
+  same size, costing the same capacity, to placeholders that hold only
+  zeros ([data.md](data.md#on-the-server)), so neither the answer, its time
+  nor a failure says whether a sender was blocked. What's left: the
+  database finds the mailbox and a device, or the placeholders, and
+  answers a few bytes more or less; and the very first send to such a
+  mailbox in a deployment writes the placeholder device once. "Seen"
+  receipts, sent when the person opens the chat, show when they read it.
 - **IP addresses.** AWS sees the IP address of every request, including
   attachment uploads and downloads. GitHub sees the IP address of every app
   load, together with the link being opened (Telegram puts it in the page
@@ -158,17 +180,40 @@ it. This is how close it gets.
   If the person already does, the app says so and waits for a tap on Open,
   and warns that opening the chat right away could give them away. Someone
   who opens it at once anyway can still be recognised by the timing.
-- **Rate counters.** So that no account can use up the database's shared
-  capacity, the server counts what each device fetches in a minute, and
-  what each person fetched, and confirmed that was already gone, that
-  day. Each counter is named by a keyed hash of the device (or
-  person) and its minute (or day), so the name changes every window, and it
-  expires when its window ends (the daily ones an hour later). A copy of
-  the database can't tell whose a counter is, or string one device's
-  minutes together into a record of when it fetched its messages, to set
-  against when its mailboxes received them. Whoever holds the server's key
-  could, for the counters the database hasn't deleted yet (DynamoDB
-  deletes expired items within a few days, usually much sooner).
+- **Short-lived records.** The server keeps, for minutes to a day:
+  - rate counters: messages to each mailbox per minute, first messages
+    through each link per hour, what each device fetches per minute, and
+    what each person uses per day (so that no one can flood a mailbox or a
+    link, or use up the capacity everyone shares);
+  - a record of each open app's socket, for pushes, and the minute it
+    opened;
+  - when each account last got a notice, for the 3 minutes until the next
+    may go out.
+
+  None of them holds a mailbox, link, account or device ID, or the hash of
+  a Telegram ID the directory keeps. Each is named by a keyed hash, under a
+  key only the functions that use it hold, outside the database: the rate
+  counters' only `api` (from the Telegram-ID pepper), with a new name every
+  minute, hour or day; the socket records' `api` and `ws` (derived from the
+  session key); the quiet periods' only `notify` (derived from the chat
+  key). Each expires when its window ends. So a copy of the database can't
+  be matched with the directory, which says who owns each mailbox and link:
+  it can't tell whose a counter or record is, string a mailbox's minutes
+  together, or set when someone's mailboxes got messages against when
+  someone else's did, or against when anyone had the app open. Socket
+  records and quiet periods keep one name per account while they last, so a
+  copy shows that some account had the app open, or got a notice, but not
+  which.
+
+  Whoever holds those keys (the operator or the AWS account holder, who can
+  read SSM, or someone who took them from a running function) could, for
+  the records the database hasn't deleted yet (DynamoDB deletes expired
+  items within a few days, usually much sooner): recompute the names for
+  every mailbox, link and account in the directory, and so see which
+  mailboxes got messages in which minute (and so, by timing, who likely
+  writes to whom), and which accounts had the app open in which minute.
+  That is part of what watching live shows them anyway (What users still
+  have to trust, 2.).
 - **Who invited whom** can be guessed from when an invitation code is used.
   An invitation link only asks; it's used when the person taps Join.
 - **Activity and volume:** roughly how many mailboxes and messages an account
@@ -205,6 +250,11 @@ it. This is how close it gets.
 - **A blocked sender may still trigger a notice**: the server can't tell a
   blocked first message from any other, so the owner may be notified of a
   message their app then drops.
+- **`api` can ask for notices directly.** Its right to invoke `notify`,
+  which it needs to seal chat IDs, can't be limited to sealing, so `api`
+  (or whoever controls it) could have `notify` send any account a notice,
+  at most one every 3 minutes, skipping `ws`'s check that no open app took
+  the push. The notice is still the generic one, and says nothing more.
 - **The server says which mailbox an envelope came through.** The app
   takes an envelope in only through the mailbox it belongs to
   ([protocol.md](protocol.md#inner-message)), so a user who knows one of

@@ -31,8 +31,9 @@ flowchart LR
   app -- "HTTPS" --> api
   ws -- "sync hint" --> app
   app -- "upload, download" --> s3
-  api -- "push" --> ws
-  api -- "invoke" --> notify
+  api -- "each send,<br/>without waiting" --> ws
+  api -- "seal a chat ID" --> notify
+  ws -- "no app took it" --> notify
   api --- db
   api --- ssm
   tg -- "webhook" --> bot
@@ -206,20 +207,26 @@ secret: one person keeps the same label through the same link.
   budget of their own (at most 500 a day, so 500 MiB), signed by a second
   issuer key.
 - **Caps:** at most 30 messages a minute to one mailbox, and 60 first messages
-  an hour through one link.
+  an hour through one link. Their counters, like every rate counter, are
+  named by a keyed hash of the mailbox (or link) and the minute (or hour),
+  so the database keeps no log of which mailboxes got messages when.
 - **Delivery:** the server stores each envelope for the mailbox owner's device
   until it confirms it, at most 30 days. Unknown, ended and blocked mailboxes
-  get the same answer, and nothing is stored. The device fetches a page at a
+  go through the same steps, for an account that doesn't exist, and get the
+  same answer; nothing is stored. The device fetches a page at a
   time, capped by size, and confirms by IDs the server signed for it, which
   stay good for one to two hours. What its fetches read is limited per
   minute and per person and day, and confirming messages that are already
   gone per person and day, so no one account can use up the capacity
   everyone shares.
 - **Push:** an open app keeps a WebSocket while it's visible. After a delivery,
-  the server sends it a content-free "sync" hint, and the app fetches.
-- **Notices:** if no app took the push, the bot sends a generic "New message"
-  in the user's language: no names, no counts, at most one every 3 minutes,
-  replacing the previous one. "Seen" receipts and reactions never trigger one.
+  `api` hands the send to the `ws` function and answers without waiting; `ws`
+  sends the app a content-free "sync" hint, and the app fetches. So a send
+  takes as long whether or not the recipient's app is open.
+- **Notices:** if no app took the push, `ws` asks `notify`, and the bot sends
+  a generic "New message" in the user's language: no names, no counts, at
+  most one every 3 minutes, replacing the previous one. "Seen" receipts and
+  reactions never trigger one.
 
 ## Attachments
 
@@ -313,17 +320,24 @@ The panel under the message box has emoji and stickers, as in Telegram.
 | Function | Entry | Can read |
 |---|---|---|
 | `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token |
-| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket |
-| `ws` | WebSocket connect (one record each, about 5 a minute per account; closing isn't routed) | the session key; socket records only |
-| `notify` | invoked by `api` | the bot token and the key that opens chat IDs |
+| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket. Invokes `ws` (each send, without waiting) and `notify` (to seal a chat ID); posts to no socket |
+| `ws` | WebSocket connect (one record each, about 5 a minute per account; closing isn't routed); the push after each send, from `api` | the session key; socket records only. Posts hints to sockets; invokes `notify` (a notice, without waiting) when no open app took one |
+| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the key that opens chat IDs; notice settings and quiet periods. No sockets or socket records |
 
 | Table | Holds | Expires |
 |---|---|---|
 | `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | mailboxes expire |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
-| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
+| `ephemeral` | socket records, rate counters, notice quiet periods (each named by a keyed hash, not a mailbox, link or account ID), login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 
-- No precise timestamps: keys are random IDs, and times are rounded.
+- No precise timestamps: keys are random IDs or keyed hashes, and times are
+  rounded.
+- Nothing in the ephemeral table can be matched with the directory: rows
+  about a mailbox, link or account are named by a keyed hash, under a key
+  only the functions that use them hold (rate counters: `api`, from the
+  Telegram-ID pepper, a new name every window; socket records: `api` and
+  `ws`, derived from the session key; quiet periods: `notify`, derived from
+  the chat key).
 - Point-in-time recovery stays off, so deleted data can't be restored.
 - Limits: each table takes at most 400 read and 200 write units a second
   in production (200 and 100 elsewhere) and refuses the rest, which caps

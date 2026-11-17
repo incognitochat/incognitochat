@@ -161,8 +161,9 @@ func TestPausedDownloads(t *testing.T) {
 		status, out := h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false)
 		wantError(t, status, out, http.StatusServiceUnavailable, "downloads_paused")
 	}
-	if limits.counts["dl#"+id] != 0 || store.presigned != presigned {
-		t.Fatalf("counted %d downloads, presigned %d -> %d", limits.counts["dl#"+id], presigned, store.presigned)
+	downloads := h.server.rateName("dl", h.now, 24*time.Hour, id)
+	if limits.counts[downloads] != 0 || store.presigned != presigned {
+		t.Fatalf("counted %d downloads, presigned %d -> %d", limits.counts[downloads], presigned, store.presigned)
 	}
 	// Uploads and deletes go on.
 	if status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusCreated {

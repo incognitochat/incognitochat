@@ -206,7 +206,7 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	} else if !ok {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	ok, err := s.Limits.Allow(ctx, "dl#"+id, DownloadsPerDay, 24*time.Hour)
+	ok, err := s.allow(ctx, "dl", DownloadsPerDay, 24*time.Hour, id)
 	if err != nil {
 		return s.internal(route, err)
 	}

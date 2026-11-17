@@ -33,7 +33,8 @@ type Upload struct {
 	Renewals   int
 }
 
-// Put records an upload until expires. It fails if the ID is taken.
+// Put records an upload until expires, rounded up to the minute, so the
+// record holds no exact time. It fails if the ID is taken.
 func (u *Uploads) Put(ctx context.Context, id string, up Upload, expires time.Time) error {
 	_, err := u.DB.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &u.Table,
@@ -41,7 +42,7 @@ func (u *Uploads) Put(ctx context.Context, id string, up Upload, expires time.Ti
 			"pk": sv("U#" + id), "sk": sv("U"),
 			"d": &types.AttributeValueMemberB{Value: up.DeleteHash},
 			"s": num(up.Size),
-			"e": num(expires.Unix()),
+			"e": num(expiry(expires)),
 		},
 		ConditionExpression: aws.String("attribute_not_exists(pk)"),
 	})

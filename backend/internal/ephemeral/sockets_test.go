@@ -1,6 +1,7 @@
 package ephemeral
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -30,8 +31,11 @@ func socketsAt(t *testing.T, clock *time.Time) (*Sockets, *dynamotest.Meter, *dy
 	t.Helper()
 	client := dynamotest.Client(t)
 	meter := dynamotest.NewMeter(client)
-	return &Sockets{DB: meter, Table: dynamotest.Table(t, client), Now: func() time.Time { return *clock }}, meter, client
+	return &Sockets{DB: meter, Table: dynamotest.Table(t, client), Now: func() time.Time { return *clock }, Key: testSocketKey}, meter, client
 }
+
+// testSocketKey names the tests' socket records.
+var testSocketKey = SocketKey(bytes.Repeat([]byte("k"), 32))
 
 // stored is every item in an account's partition, expired ones included.
 func stored(t *testing.T, client *dynamodb.Client, table, account string) []map[string]types.AttributeValue {
@@ -39,7 +43,7 @@ func stored(t *testing.T, client *dynamodb.Client, table, account string) []map[
 	out, err := client.Query(context.Background(), &dynamodb.QueryInput{
 		TableName:                 &table,
 		KeyConditionExpression:    aws.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv("C#" + account)},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": sv((&Sockets{Key: testSocketKey}).partition(account))},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +118,33 @@ func TestSocketRecordsHoldNoExactTime(t *testing.T) {
 		if name != "pk" && name != "sk" && name != "e" {
 			t.Fatalf("stored %q", name)
 		}
+	}
+}
+
+// A record names its account by a keyed hash, not its ID: under another
+// key (a new session key), the account's records aren't found.
+func TestSocketRecordsNameNoAccount(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	s, _, client := socketsAt(t, &clock)
+	ctx := context.Background()
+	account := "Ab3dEf6hIj9lMn2pQr5tUv"
+	if err := s.Open(ctx, account, "c"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Table})
+	if err != nil || len(out.Items) != 1 {
+		t.Fatalf("scan: %d items, %v", len(out.Items), err)
+	}
+	pk := out.Items[0]["pk"].(*types.AttributeValueMemberS).Value
+	if !strings.HasPrefix(pk, "C#") || strings.Contains(pk, account) || len(pk) != len("C#")+22 {
+		t.Fatalf("record %q", pk)
+	}
+	if conns, _ := s.Connections(ctx, account); !slices.Equal(conns, []string{"c"}) {
+		t.Fatalf("connections = %v", conns)
+	}
+	rotated := &Sockets{DB: s.DB, Table: s.Table, Now: s.Now, Key: SocketKey(bytes.Repeat([]byte("n"), 32))}
+	if conns, _ := rotated.Connections(ctx, account); len(conns) != 0 {
+		t.Fatalf("found under another key: %v", conns)
 	}
 }
 

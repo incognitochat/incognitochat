@@ -29,8 +29,6 @@ func clientEnvelope(t *testing.T) string {
 func TestDelivery(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false
-	paused := 0
-	h.server.Pause = func() { paused++ }
 	owner := h.account(t, userID)
 	sender := h.account(t, userID+1)
 	env := clientEnvelope(t)
@@ -51,10 +49,11 @@ func TestDelivery(t *testing.T) {
 	if status != http.StatusOK || len(out) != 0 {
 		t.Fatalf("send: %d %v", status, out)
 	}
-	// Unknown mailboxes get the same answer, after the same pause, and nothing is stored.
+	// Unknown mailboxes get the same answer (after the same steps:
+	// TestSendDoesTheSameWork), and nothing is stored.
 	unknownStatus, unknownOut := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": env, "token": mintToken(t, h.now)})
-	if unknownStatus != status || len(unknownOut) != 0 || paused != 1 {
-		t.Fatalf("unknown mailbox: %d %v, paused %d", unknownStatus, unknownOut, paused)
+	if unknownStatus != status || len(unknownOut) != 0 {
+		t.Fatalf("unknown mailbox: %d %v", unknownStatus, unknownOut)
 	}
 
 	// The owner's device fetches and confirms.

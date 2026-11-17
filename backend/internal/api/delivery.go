@@ -9,7 +9,6 @@ import (
 	"errors"
 	"log/slog"
 	"math"
-	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/inbox"
+	"github.com/incognitochat/incognitochat/backend/internal/keyed"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
@@ -144,7 +144,7 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 	if in.Count < 1 || in.Count > MailboxBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
-	ok, err := s.Limits.AllowN(ctx, "mbx#"+c.person(), in.Count, MailboxesPerDay, 24*time.Hour)
+	ok, err := s.allowN(ctx, "mbx", in.Count, MailboxesPerDay, 24*time.Hour, c.person())
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -189,9 +189,25 @@ func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller
 // spends anonymous tokens (tokens.go), which can't be linked to the
 // account they were issued to: one per started 2.5 KiB of envelope
 // (envelope.TokensFor), so the daily budget bounds what a person's sends
-// cost the messages table, not just how many there are. Unknown,
-// discarded and blocked mailboxes get the same answer, in similar time, and
-// nothing is stored for them.
+// cost the messages table, not just how many there are.
+//
+// Neither whether the mailbox exists nor whether its owner's app is open
+// changes which calls a send makes, the bytes they carry or the capacity
+// they use, and so neither changes the answer or how it fails:
+//   - A mailbox that doesn't exist (never did, or ended: a block, an ended
+//     conversation) takes the same steps for an account that doesn't
+//     exist either: its devices are looked up (there are none), and the
+//     delivery's write, the same size, goes to a placeholder that holds
+//     nothing (inbox.Store.Deliver). ws is asked to push to nobody.
+//   - Pushing to open apps, and the notice if none took it, happen in the
+//     ws function, which this asks the same way for every send, without
+//     waiting (Pusher).
+//
+// What differs is only what the database finds (the mailbox and a device,
+// or the placeholders), and the very first send to a mailbox that doesn't
+// exist, which writes the placeholder device. A link's intro mailbox also
+// counts the link's first messages; a sender knows whether it writes to
+// one, and a link that is gone says so itself (GET /links/{id}).
 func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /send"
 	var in sendRequest
@@ -216,7 +232,11 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	}
 	// A mailbox known to be at its cap is refused before the tokens are
 	// spent: retrying, or replaying tokens at it, costs the table nothing.
-	if s.Limits.Full("send#"+in.Mailbox, SendsPerMailboxPerMinute, time.Minute) {
+	// The counter is named by a keyed hash of the mailbox and the minute,
+	// so the ephemeral table holds no log of which mailboxes got messages
+	// when.
+	capName := s.rateName("send", now, time.Minute, in.Mailbox)
+	if s.Limits.FullAt(capName, SendsPerMailboxPerMinute, time.Minute, now) {
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
 	// The tokens are spent before anything is counted, so replayed tokens
@@ -229,7 +249,7 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	if !fresh {
 		return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 	}
-	ok, err := s.Limits.Allow(ctx, "send#"+in.Mailbox, SendsPerMailboxPerMinute, time.Minute)
+	ok, err := s.Limits.AllowNAt(ctx, capName, 1, SendsPerMailboxPerMinute, time.Minute, now)
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -243,22 +263,15 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	}
 
 	mailbox, err := s.Directory.Mailbox(ctx, in.Mailbox)
+	exists := err == nil
 	if errors.Is(err, directory.ErrNotFound) {
-		if s.Pause != nil {
-			s.Pause()
-		}
-		// The same requests a delivery makes, so the answer takes as long.
-		s.push(ctx, "")
-		if !in.Quiet {
-			s.notify(ctx, "")
-		}
-		return accepted()
+		err = nil
 	}
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if mailbox.Link != "" {
-		ok, err := s.Limits.Allow(ctx, "intro#"+mailbox.Link, IntroSendsPerHour, time.Hour)
+		ok, err := s.allow(ctx, "intro", IntroSendsPerHour, time.Hour, mailbox.Link)
 		if err != nil {
 			return s.internal(route, err)
 		}
@@ -266,34 +279,31 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 			return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 		}
 	}
-	devices, err := s.Directory.Devices(ctx, mailbox.Owner, now)
+	// A mailbox that doesn't exist takes the same steps for an account
+	// that doesn't exist either: the same query for its devices, which
+	// finds none (directory.Store.NoDevices), so the same write, to a
+	// placeholder (inbox.Store.Deliver), and a push to nobody.
+	var devices []string
+	if exists {
+		devices, err = s.Directory.Devices(ctx, mailbox.Owner, now)
+	} else {
+		err = s.Directory.NoDevices(ctx, now)
+	}
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if err := s.Inbox.Deliver(ctx, mailbox.Owner, devices, in.Mailbox, env, now); err != nil {
 		return s.internal(route, err)
 	}
-	// Open apps fetch at once; a notice only if none is open. Receipts are
+	// Open apps fetch at once, and a notice goes out if none is open, both
+	// from the ws function, which this doesn't wait for. Receipts are
 	// pushed too (they update check marks), but never noticed.
-	pushed := s.push(ctx, mailbox.Owner)
-	if !in.Quiet {
-		if pushed {
-			s.notify(ctx, "")
-		} else {
-			s.notify(ctx, mailbox.Owner)
-		}
-	}
+	s.push(ctx, mailbox.Owner, in.Quiet)
 	return accepted()
 }
 
 func accepted() httpapi.Response {
 	return httpapi.JSON(http.StatusOK, map[string]string{})
-}
-
-// RandomPause stands in for the delivery work skipped for unknown mailboxes,
-// so their answer takes about as long.
-func RandomPause() {
-	time.Sleep(time.Duration(15+rand.IntN(25)) * time.Millisecond)
 }
 
 // MailboxChecksPerDay limits POST /mailboxes/check per account.
@@ -320,7 +330,7 @@ func (s *Server) checkMailboxes(ctx context.Context, req httpapi.Request, c call
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
 		}
 	}
-	ok, err := s.Limits.Allow(ctx, "mbxcheck#"+c.person(), MailboxChecksPerDay, 24*time.Hour)
+	ok, err := s.allow(ctx, "mbxcheck", MailboxChecksPerDay, 24*time.Hour, c.person())
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -702,18 +712,31 @@ func (s *Server) itemMAC(c caller, fields []byte) []byte {
 	return mac.Sum(nil)[:16]
 }
 
-// rateName is the key of a rate counter of kind, for who (a device, or a
-// person), in the window that holds now: kind and a keyed hash of who and
-// the window. It changes with every window, so the ephemeral table holds
-// nothing that ties a counter to an account, or one window's counter to
-// the next, and so nothing that tells when an account fetched or
-// confirmed its messages.
+// rateName is the key of a rate counter of kind, for who (a mailbox, a
+// link, a device, a person, an upload), in the window that holds now: kind
+// and a keyed hash of who and the window, under the pepper, which only
+// this function holds. It changes with every window, so the ephemeral
+// table holds nothing that ties a counter to an account, a mailbox or a
+// link, or one window's counter to the next: nothing that tells which
+// mailboxes got messages when, or when an account fetched or confirmed its
+// messages, and nothing to match with the directory. Every rate counter is
+// named this way.
 func (s *Server) rateName(kind string, now time.Time, window time.Duration, who ...string) string {
 	parts := [][]byte{[]byte(kind), strconv.AppendInt(nil, now.Truncate(window).Unix(), 10)}
 	for _, w := range who {
 		parts = append(parts, []byte(w))
 	}
-	mac := hmac.New(sha256.New, s.Pepper)
-	mac.Write(devicesig.Message(labelRateName, parts...))
-	return kind + "#" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+	return kind + "#" + keyed.Name(s.Pepper, labelRateName, parts...)
+}
+
+// allow counts one use of kind's limit for who, in the window that holds
+// now, and reports whether it fits.
+func (s *Server) allow(ctx context.Context, kind string, limit int, window time.Duration, who ...string) (bool, error) {
+	return s.allowN(ctx, kind, 1, limit, window, who...)
+}
+
+// allowN counts n uses at once, allowing them only if all fit.
+func (s *Server) allowN(ctx context.Context, kind string, n, limit int, window time.Duration, who ...string) (bool, error) {
+	now := s.Now()
+	return s.Limits.AllowNAt(ctx, s.rateName(kind, now, window, who...), n, limit, window, now)
 }

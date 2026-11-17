@@ -47,6 +47,17 @@ func TestUploads(t *testing.T) {
 	if err := u.Delete(ctx, "up1"); err != nil {
 		t.Fatal(err)
 	}
+
+	// The record holds no exact time: its expiry is rounded up to the
+	// minute.
+	paid := clock.Add(37 * time.Second)
+	if err := u.Put(ctx, "up2", Upload{DeleteHash: hash, Size: 1}, paid.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = u.Get(ctx, "up2")
+	if got.Expires.Unix()%60 != 0 || got.Expires.Before(paid.Add(time.Hour)) || got.Expires.After(paid.Add(time.Hour+time.Minute)) {
+		t.Fatalf("expires %v for %v", got.Expires, paid.Add(time.Hour))
+	}
 }
 
 func TestUploadRenewals(t *testing.T) {

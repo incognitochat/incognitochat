@@ -452,8 +452,7 @@ func TestLimiterCheck(t *testing.T) {
 	}
 }
 
-// A counter of a window shorter than an hour expires when its window ends;
-// longer ones are kept an hour past theirs, rounded up to the hour.
+// A counter expires when its window ends, whatever the window.
 func TestLimiterExpiry(t *testing.T) {
 	client := dynamotest.Client(t)
 	table := dynamotest.Table(t, client)
@@ -465,7 +464,8 @@ func TestLimiterExpiry(t *testing.T) {
 		want   time.Time
 	}{
 		{time.Minute, at.Truncate(time.Minute).Add(time.Minute)},
-		{24 * time.Hour, at.Truncate(24 * time.Hour).Add(25 * time.Hour)},
+		{time.Hour, at.Truncate(time.Hour).Add(time.Hour)},
+		{24 * time.Hour, at.Truncate(24 * time.Hour).Add(24 * time.Hour)},
 	} {
 		key := tc.window.String()
 		if ok, err := l.Allow(ctx, key, 5, tc.window); !ok || err != nil {

@@ -6,6 +6,10 @@
 // No sender, no account of the sender, no precise time: the expiry is 30 days
 // after delivery, rounded up to the hour. A device confirms what it stored,
 // which deletes its items; whatever isn't confirmed expires.
+//
+// Besides, at most one placeholder per envelope size (Deliver), all zeros,
+// under an account ID no account has: what sends to mailboxes that don't
+// exist write instead, so that they cost what a delivery costs.
 package inbox
 
 import (
@@ -63,7 +67,23 @@ type Item struct {
 func devicePK(accountID, deviceID string) string { return "D#" + accountID + "#" + deviceID }
 
 // Deliver stores an envelope once for each of the owner's devices.
+//
+// With no devices (a send to a mailbox that doesn't exist, which POST
+// /send hands an account that doesn't exist either, or to an account that
+// has no device left) it makes the write a one-device delivery makes all
+// the same, carrying as many bytes, but to the placeholder for envelopes of
+// this size, which it overwrites with the same item every time: zeros, no
+// mailbox, no time (placeholder). DynamoDB charges a write by the item's
+// size and handles it the same way, so it costs as many write units as a
+// delivery, uses up the table's capacity as fast and fails as one would,
+// and keeps nothing about the send. Only the item it replaces differs: an
+// identical one, or none for a new item. A refused conditional write would
+// carry the bytes too, but DynamoDB charges a refused write by the item
+// that's there (one unit for none), not by what was sent.
 func (s *Store) Deliver(ctx context.Context, accountID string, devices []string, mailbox string, envelope []byte, now time.Time) error {
+	if len(devices) == 0 {
+		return s.write(ctx, []types.WriteRequest{{PutRequest: &types.PutRequest{Item: placeholder(len(envelope))}}})
+	}
 	expires := strconv.FormatInt(now.Add(TTL+time.Hour-time.Nanosecond).Truncate(time.Hour).Unix(), 10)
 	requests := make([]types.WriteRequest, 0, len(devices))
 	for _, d := range devices {
@@ -76,6 +96,37 @@ func (s *Store) Deliver(ctx context.Context, accountID string, devices []string,
 		}}})
 	}
 	return s.write(ctx, requests)
+}
+
+// placeholderID stands in for the account, the item ID and the mailbox in
+// placeholders: an ID no account or mailbox has (IDs are random; this one
+// is all zeros), as long as theirs.
+var placeholderID = ids.Encode([16]byte{})
+
+// placeholderExpiry is what placeholders have for an expiry: a time with
+// as many significant digits as a delivery's (so the item is as large) that
+// says nothing (1 January 2100), so they never expire.
+const placeholderExpiry = "4102444800"
+
+// placeholder is the item that a send to a mailbox that doesn't exist
+// writes for an envelope of size bytes: shaped like a delivered one, with
+// keys and attributes of the same lengths and an envelope of zeros, in a
+// partition of its own for each envelope size (there are 64 valid ones),
+// which nothing reads. Every write of it writes exactly the same item. One
+// partition takes at most 1,000 write units a second, so the table's cap
+// stays at most that (infra/variables.tf, table_max_write_units): a flood
+// of such sends is held back by the cap, as deliveries are, not by the
+// partition first.
+func placeholder(size int) map[string]types.AttributeValue {
+	var device [16]byte
+	device[12], device[13], device[14], device[15] = byte(size>>24), byte(size>>16), byte(size>>8), byte(size)
+	return map[string]types.AttributeValue{
+		"pk": &types.AttributeValueMemberS{Value: devicePK(placeholderID, ids.Encode(device))},
+		"sk": &types.AttributeValueMemberS{Value: placeholderID},
+		"m":  &types.AttributeValueMemberS{Value: placeholderID},
+		"b":  &types.AttributeValueMemberB{Value: make([]byte, size)},
+		"e":  &types.AttributeValueMemberN{Value: placeholderExpiry},
+	}
 }
 
 // MaxItemSize bounds what one stored item can take, as DynamoDB counts it:

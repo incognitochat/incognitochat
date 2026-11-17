@@ -87,6 +87,25 @@ secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 `TF_STATE_BUCKET`, `LAMBDA_BUILDS_BUCKET`, `LAMBDA_SIGNING_PROFILE`,
 `LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`).
 
+CI never changes `infra/init` (it can't change its own permissions). When a
+change touches it, rerun the bootstrap in each environment before that
+change deploys there. Each deploy checks this with IAM's policy simulator
+(`scripts/check-function-roles.sh`), because a refused call between functions
+would only log a warning: sends would still succeed while pushes and notices
+stopped.
+
+- Before applying anything, it asks whether the permissions boundary lets
+  the existing roles make the invokes this code makes (`api` invoking `ws`
+  and `notify`, `ws` invoking `notify`), as if the roles' own policies
+  allowed them. A first deploy, with no roles yet, skips this.
+- After applying, it asks whether each function's role, its policy and the
+  boundary together, allows every call the functions make to each other
+  (those, and `ws` posting to sockets).
+
+Either fails the deploy if a call is refused, or if the deploy role may not
+ask (an older `infra/init`), and asks again a few times when IAM is slow or
+throttles.
+
 Code signing is a versioned bucket for the bundles, an AWS Signer profile,
 and a code signing config set to enforce. Every function must use the config,
 so Lambda runs only code signed by the profile. The deploy role can upload
@@ -97,7 +116,7 @@ Lambda refuses to deploy anything it signed, and replace the profile by
 rerunning the bootstrap.
 
 Alerts are a monthly cost budget (`MONTHLY_BUDGET=<dollars>` when
-bootstrapping; 50 for production and 10 otherwise by default) and a few
+bootstrapping; 50 for production and 15 otherwise by default) and a few
 alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 
 | Alert | When |
@@ -143,11 +162,11 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins. A secret, so the IDs stay out of the public deploy logs; the API keeps only their keyed hashes. |
 | `CLIENT_ORIGINS` | variable | Origins allowed to call the API from a browser: the app's `https://<org>.github.io`. |
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
-| `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `notify` 20, `ws` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
+| `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
 | `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
-| `SECRETS_VERSION` | variable | Raise it to replace the generated secrets (session key, Telegram-ID pepper, webhook secret). Replacing the pepper starts every account over. |
+| `SECRETS_VERSION` | variable | Raise it to replace the generated secrets (session key, Telegram-ID pepper, webhook secret, chat key). Replacing the pepper starts every account over. The short-lived records named with keys from these secrets just start afresh: every rate limit for its minute, hour or day; socket records, so open apps get a notice instead of a push until they reopen their sockets (within about half an hour); and the 3-minute gap between notices. |
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
 | `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
 
@@ -159,7 +178,7 @@ anything else), so an environment comes from the repository alone.
 
 | Name | Default | What |
 |---|---|---|
-| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. |
+| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere; at most 3,000 and 1,000 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. At most 3,000 and 1,000, what one partition can take: sends to mailboxes that don't exist all read and write the same few placeholder items, which must not be throttled before the table is. |
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |

@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
 
 // Mailboxes (design §9): the server routes by mailbox, never by account. It
@@ -148,6 +150,13 @@ func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error 
 
 // Devices returns the IDs of an account's current devices, for delivery.
 func (s *Store) Devices(ctx context.Context, accountID string, now time.Time) ([]string, error) {
+	devices, _, err := s.devices(ctx, accountID, now)
+	return devices, err
+}
+
+// devices is Devices, also reporting how many items it read, expired ones
+// too.
+func (s *Store) devices(ctx context.Context, accountID string, now time.Time) ([]string, int, error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:              &s.Table,
 		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :d)"),
@@ -157,11 +166,13 @@ func (s *Store) Devices(ctx context.Context, accountID string, now time.Time) ([
 		},
 	})
 	var devices []string
+	read := 0
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, read, err
 		}
+		read += len(page.Items)
 		for _, it := range page.Items {
 			if expired(it, now) {
 				continue
@@ -170,7 +181,37 @@ func (s *Store) Devices(ctx context.Context, accountID string, now time.Time) ([
 			devices = append(devices, strings.TrimPrefix(sk, devicePrefix))
 		}
 	}
-	return devices, nil
+	return devices, read, nil
+}
+
+// NoAccount is the account ID of placeholders: no account has it (IDs are
+// random; this one is all zeros).
+var NoAccount = ids.Encode([16]byte{})
+
+// placeholderKeyLen is the length of a device's public key, as stored
+// (a raw P-256 point).
+const placeholderKeyLen = 65
+
+// NoDevices looks up the devices of an account that doesn't exist, for a
+// send to a mailbox that doesn't exist, the way Devices looks up an
+// account's: the same query, reading one item as large as a device's (a
+// placeholder of NoAccount's, all zeros, that expired long ago, so none is
+// found). So the lookup costs as many read units, and answers about as
+// much, as one for an account with its one device. It writes the
+// placeholder when it's missing: the first time, and if TTL ever took it
+// (TTL skips expiries more than five years past, as its is). One partition
+// reads at most 3,000 units a second, so the table's cap stays at most
+// that (infra/variables.tf, table_max_read_units).
+func (s *Store) NoDevices(ctx context.Context, now time.Time) error {
+	_, read, err := s.devices(ctx, NoAccount, now)
+	if err != nil || read > 0 {
+		return err
+	}
+	_, err = s.DB.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &s.Table,
+		Item:      item(accountPK(NoAccount), devicePrefix+NoAccount, attrs{"k": bv(make([]byte, placeholderKeyLen)), "e": nv(1)}),
+	})
+	return err
 }
 
 // introMailboxWrites creates a link's intro mailbox (with CreateLink).

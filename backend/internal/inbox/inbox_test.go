@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,82 @@ var now = time.Unix(1_800_000_000, 0)
 
 // limits are a page's limits for tests: as GET /inbox's, in a size.
 func limits(items, bytes int) PageLimits { return PageLimits{Items: items, Units: 300, Bytes: bytes} }
+
+// validSizes are the sizes a valid envelope can have: every padding, with
+// every number of wraps.
+func validSizes() []int {
+	var sizes []int
+	for _, padded := range envelope.PaddedSizes {
+		for wraps := 1; wraps <= envelope.MaxWraps; wraps++ {
+			sizes = append(sizes, 2+wraps*envelope.WrapLen+12+padded+16)
+		}
+	}
+	return sizes
+}
+
+// Delivering to no device (a mailbox that doesn't exist) makes the same
+// call as a one-device delivery, carrying as many bytes and costing as many
+// write units, for every size an envelope can have, again and again; it
+// keeps nothing about the send, and adds no item after the first of a size.
+func TestDeliverToNoDevice(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	s := &Store{DB: meter, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone, mailbox := ids.New(), ids.New(), ids.New()
+	sizes := validSizes()
+	if len(sizes) != 64 || sizes[len(sizes)-1] != envelope.MaxLen {
+		t.Fatalf("%d sizes, the largest %d", len(sizes), sizes[len(sizes)-1])
+	}
+
+	for _, size := range sizes {
+		env := bytes.Repeat([]byte{7}, size)
+		meter.Reset()
+		if err := s.Deliver(ctx, account, []string{phone}, mailbox, env, now); err != nil {
+			t.Fatal(err)
+		}
+		calls, units := meter.Calls(), meter.Units(s.Table)
+		for range 2 {
+			meter.Reset()
+			if err := s.Deliver(ctx, ids.New(), nil, mailbox, env, now); err != nil {
+				t.Fatal(err)
+			}
+			if got := meter.Calls(); !slices.Equal(got, calls) {
+				t.Fatalf("size %d: no device made %v, a delivery %v", size, got, calls)
+			}
+			if got := meter.Units(s.Table); got != units {
+				t.Fatalf("size %d: no device cost %+v, a delivery %+v", size, got, units)
+			}
+		}
+	}
+
+	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Table})
+	if err != nil || len(out.Items) != 2*len(sizes) {
+		t.Fatalf("the table holds %d items, %v", len(out.Items), err)
+	}
+	placeholders := 0
+	for _, it := range out.Items {
+		pk := it["pk"].(*types.AttributeValueMemberS).Value
+		if pk == devicePK(account, phone) {
+			continue
+		}
+		placeholders++
+		if !strings.HasPrefix(pk, "D#"+placeholderID+"#") || it["m"].(*types.AttributeValueMemberS).Value != placeholderID ||
+			it["e"].(*types.AttributeValueMemberN).Value != placeholderExpiry ||
+			!bytes.Equal(it["b"].(*types.AttributeValueMemberB).Value, make([]byte, len(it["b"].(*types.AttributeValueMemberB).Value))) {
+			t.Fatalf("placeholder %v", it)
+		}
+	}
+	if placeholders != len(sizes) {
+		t.Fatalf("%d placeholders", placeholders)
+	}
+	// Nothing reads them: a device lists only its own items.
+	for _, it := range list(t, s, account, phone, now) {
+		if it.Mailbox != mailbox {
+			t.Fatalf("the device listed %+v", it)
+		}
+	}
+}
 
 func TestDeliverListAck(t *testing.T) {
 	client := dynamotest.Client(t)

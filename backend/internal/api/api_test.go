@@ -175,6 +175,8 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	return out, nil
 }
 
+func (m *memDirectory) NoDevices(context.Context, time.Time) error { return nil }
+
 type memInbox struct {
 	mu    sync.Mutex
 	items map[string][]inbox.Item // "<account>#<device>" -> items
@@ -605,6 +607,14 @@ func (l *memLimiter) FullAt(key string, limit int, window time.Duration, _ time.
 
 func (l *memLimiter) CheckAt(_ context.Context, key string, limit int, window time.Duration, _ time.Time) (bool, error) {
 	return !l.Full(key, limit, window), nil
+}
+
+func (l *memLimiter) UsedAt(ctx context.Context, key string, window time.Duration, _ time.Time) (int, error) {
+	return l.Used(ctx, key, window)
+}
+
+func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) int {
+	return l.Counted(key, window)
 }
 
 type memSpent struct {

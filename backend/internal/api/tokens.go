@@ -118,7 +118,7 @@ func (s *Server) unspendAll(ctx context.Context, tokens []ephemeral.TokenNonce) 
 // The issuer can't see the tokens, so it can't link their later use to the
 // account.
 func (s *Server) issueTokens(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
-	return s.signTokens(ctx, req, "POST /tokens", s.Issuer, "tok#"+c.person(), TokensPerDay)
+	return s.signTokens(ctx, req, "POST /tokens", s.Issuer, "tok", c.person(), TokensPerDay)
 }
 
 // issueMediaTokens does the same for media tokens, which pay for uploads.
@@ -127,10 +127,10 @@ func (s *Server) issueMediaTokens(ctx context.Context, req httpapi.Request, c ca
 	if s.MediaIssuer == nil {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok#"+c.person(), MediaTokensPerDay)
+	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok", c.person(), MediaTokensPerDay)
 }
 
-func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, limitKey string, perDay int) httpapi.Response {
+func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, kind, person string, perDay int) httpapi.Response {
 	var in struct {
 		Blinded []string `json:"blinded"`
 	}
@@ -148,7 +148,9 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 		}
 		blinded[i] = raw
 	}
-	ok, err := s.Limits.AllowN(ctx, limitKey, len(blinded), perDay, 24*time.Hour)
+	now := s.Now()
+	limitKey := s.rateName(kind, now, 24*time.Hour, person)
+	ok, err := s.Limits.AllowNAt(ctx, limitKey, len(blinded), perDay, 24*time.Hour, now)
 	if err != nil {
 		return s.internal(route, err)
 	}
@@ -164,7 +166,7 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 		signatures[i] = base64.RawURLEncoding.EncodeToString(sig)
 	}
 	// How many more it can have today, so the app can say when it runs low:
-	// as AllowN just counted.
-	used := s.Limits.Counted(limitKey, 24*time.Hour)
+	// as AllowNAt just counted.
+	used := s.Limits.CountedAt(limitKey, 24*time.Hour, now)
 	return httpapi.JSON(http.StatusOK, map[string]any{"signatures": signatures, "left": max(perDay-used, 0)})
 }

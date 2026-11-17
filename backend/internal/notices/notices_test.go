@@ -108,9 +108,11 @@ func TestNotify(t *testing.T) {
 	sealed, _ := sealer.Seal(4242)
 	clock := now
 	dir := &memDirectory{target: directory.NoticeTarget{SealedChat: sealed, Language: "fa"}, found: true}
+	quiet := &memQuiet{until: map[string]time.Time{}, now: &clock}
 	n := &Notifier{
 		Directory: dir,
-		Quiet:     &memQuiet{until: map[string]time.Time{}, now: &clock},
+		Quiet:     quiet,
+		QuietKey:  QuietKey(bytes.Repeat([]byte("k"), 32)),
 		Sealer:    sealer,
 		Bot:       botapi.Client{Token: "1:T", API: telegram.URL},
 		AppURL:    "https://example.github.io/",
@@ -123,6 +125,12 @@ func TestNotify(t *testing.T) {
 	}
 	if calls[0] != "sendMessage" || bodies[0]["chat_id"] != float64(4242) || bodies[0]["text"] != "پیام جدید" {
 		t.Fatalf("first notice: %v %v", calls, bodies[0])
+	}
+	// The quiet period is named by a keyed hash of the account, not its ID.
+	for key := range quiet.until {
+		if !strings.HasPrefix(key, "notice#") || strings.Contains(key, "acct") {
+			t.Fatalf("quiet period %q", key)
+		}
 	}
 	// Within the quiet period: nothing.
 	if err := n.Notify(ctx, "acct"); err != nil || len(calls) != 1 {

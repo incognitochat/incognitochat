@@ -6,7 +6,9 @@
 //
 // The chat ID (the user's Telegram ID) is kept sealed with a key only the
 // notify function holds, so neither the api function nor a copy of the
-// directory table can read it.
+// directory table can read it. notify is asked for a notice by the ws
+// function, after a delivery no open app took; it has no access to socket
+// records.
 package notices
 
 import (
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/keyed"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
 
@@ -86,14 +89,30 @@ type Quiet interface {
 	Start(ctx context.Context, key string, until time.Time) (bool, error)
 }
 
+const (
+	labelQuietKey  = "incognitochat/v2/notice-key"
+	labelQuietName = "incognitochat/v2/notice-name"
+)
+
+// QuietKey derives the key that names quiet periods from the chat key,
+// which only the notify function holds: a quiet period is stored under a
+// keyed hash of its account, not the account's ID, so a copy of the
+// ephemeral table can't be matched with the directory. A new chat key
+// gives new names, so an account may get a second notice within Interval,
+// once (and its sealed chat ID no longer opens anyway, until the app sets
+// notices up again).
+func QuietKey(chatKey []byte) []byte { return keyed.Key(chatKey, labelQuietKey) }
+
 // Notifier sends notices.
 type Notifier struct {
 	Directory Directory
 	Quiet     Quiet
-	Sealer    *Sealer
-	Bot       botapi.Client
-	AppURL    string
-	Now       func() time.Time
+	// QuietKey names quiet periods (QuietKey).
+	QuietKey []byte
+	Sealer   *Sealer
+	Bot      botapi.Client
+	AppURL   string
+	Now      func() time.Time
 }
 
 // Notify sends an account its notice, unless it has notices off, has none
@@ -106,7 +125,7 @@ func (n *Notifier) Notify(ctx context.Context, accountID string) error {
 	if err != nil {
 		return err
 	}
-	ok, err := n.Quiet.Start(ctx, "notice#"+accountID, n.Now().Add(Interval))
+	ok, err := n.Quiet.Start(ctx, "notice#"+keyed.Name(n.QuietKey, labelQuietName, []byte(accountID)), n.Now().Add(Interval))
 	if err != nil || !ok {
 		return err
 	}

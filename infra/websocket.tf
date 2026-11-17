@@ -1,7 +1,9 @@
 # WebSocket API, used only for pushes from the server to open apps. Every
 # action goes through the HTTPS API, so a dropped socket loses nothing. The
-# ws function authenticates each connection on $connect; no access or
-# execution logs are kept (they would record IP addresses and connection IDs).
+# ws function authenticates each connection on $connect, and is the only
+# one that posts to connections (after each send, which api hands it
+# without waiting); no access or execution logs are kept (they would record
+# IP addresses and connection IDs).
 resource "aws_apigatewayv2_api" "ws" {
   name                       = "${local.prefix}-ws"
   description                = "Incognito Chat pushes (${var.environment})"
