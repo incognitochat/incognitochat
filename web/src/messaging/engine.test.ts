@@ -3603,8 +3603,10 @@ describe('envelopes that come again, or late', () => {
 
   describe('what is kept to tell', () => {
     it('is keyed hashes and days, never IDs or exact times, and goes once nothing it covers can still arrive', async () => {
-      // Midday, so everything below falls on one day.
-      let clock = Math.floor(Date.now() / DAY) * DAY + 12 * HOUR;
+      // On the hour, so everything below falls on one day, and after the
+      // link's key starts: chat() makes it 3 to 14 hours before now, so
+      // midday (as this used) came before it after 15:00 UTC, at random.
+      let clock = Math.floor(Date.now() / HOUR) * HOUR;
       const now = () => clock;
       const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
       clock += 1000;
