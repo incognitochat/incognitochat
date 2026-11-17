@@ -311,7 +311,17 @@ func TestInboxConcurrentEveryMinute(t *testing.T) {
 			}
 			t.Logf("first minute: %.1f R messages, %.0f W ephemeral; then about %.1f R and %.0f W a minute; %d minutes (free: %v), %.0f R and %.0f W in all",
 				first.Read, first.Write, steady.Read, steady.Write, minutes, free, total.Read, total.Write)
-			if steady.Read > InboxUnitsPerMinute || total.Read > InboxUnitsPerDay {
+			// The pages of a minute read at most InboxUnitsPerMinute, however
+			// many instances fetch at once. On top come the first reads (two
+			// of the largest envelopes: firstRead units) of fetches refused on
+			// an instance that doesn't know yet that the minute is full. An
+			// instance makes one each time it has forgotten that the device
+			// needed a page (after pagedFor), so at most twice in these 10
+			// minutes: c units a minute on average, a bound timing can't
+			// exceed. Without these limits a minute read 600 to 680.
+			const firstRead = 5
+			margin := float64(firstRead*c*(10*60/pagedFor)) / 10
+			if steady.Read > InboxUnitsPerMinute+margin || total.Read > InboxUnitsPerDay {
 				t.Fatalf("reads: %v a minute, %v in all", steady.Read, total.Read)
 			}
 			if !free {
