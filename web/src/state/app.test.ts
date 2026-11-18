@@ -947,6 +947,16 @@ describe('links', () => {
     expect(sender.app.screen.value).toMatchObject({ kind: 'link', status: 'not-found' });
   });
 
+  it('makes the link with a new signing key when another account has the old one, and says so', async () => {
+    const server = fakeServer({ createLink: [new ApiError(409, 'signing_key_taken')] });
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    const screen = home(owner.app.screen.value);
+    expect(screen).toMatchObject({ notice: 'new-signing-key' });
+    expect(screen.links).toHaveLength(1);
+    expect(server.bundles.size).toBe(1);
+  });
+
   it('says when an invitation is needed', async () => {
     const server = fakeServer({ createLink: [new ApiError(403, 'invitation_required')] });
     const owner = await registered(server.api);

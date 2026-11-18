@@ -235,6 +235,12 @@ export interface MessagingDeps {
   onResume?: () => void;
   /** Called when upkeep found the account's link changed: a create or replace whose answer was lost, which the server had made. */
   onLinks?: () => void;
+  /**
+   * Called when upkeep replaced the account's link because it couldn't get
+   * new keys any more (another account has its signing key): the link has a
+   * new address, and its labels and blocks start over, which the user is told.
+   */
+  onNewLink?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -1942,7 +1948,12 @@ export function createMessaging(deps: MessagingDeps) {
       },
       backfillLinks,
       backfillIntros,
-      () => rotateLinkKey(db, session, Math.floor(now() / 1000)),
+      async () => {
+        if ((await rotateLinkKey(db, session, Math.floor(now() / 1000))) === 'new-link') {
+          deps.onLinks?.();
+          deps.onNewLink?.();
+        }
+      },
     ];
     // Each on its own: one that fails (out of reach, or a daily limit
     // reached) doesn't keep the others from running. The first failure is

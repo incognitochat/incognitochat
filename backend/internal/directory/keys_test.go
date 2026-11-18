@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -10,13 +11,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
-	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
 )
 
-// keyOwner returns the account a signing key's item names ("" if there is
-// none), read straight from the table.
-func keyOwner(t *testing.T, client *dynamodb.Client, table string, signingKey []byte) string {
+// keyOwner returns the account a signing key's item names ("" for none),
+// and whether there is an item, read straight from the table.
+func keyOwner(t *testing.T, client *dynamodb.Client, table string, signingKey []byte) (string, bool) {
 	t.Helper()
 	out, err := client.GetItem(context.Background(), &dynamodb.GetItemInput{
 		TableName:      &table,
@@ -27,7 +27,32 @@ func keyOwner(t *testing.T, client *dynamodb.Client, table string, signingKey []
 		t.Fatal(err)
 	}
 	owner, _ := str(out.Item, "a")
-	return owner
+	return owner, out.Item != nil
+}
+
+// burned fails unless a signing key's item is a tombstone: there, naming
+// no account, with nothing but its key.
+func burned(t *testing.T, client *dynamodb.Client, table string, signingKey []byte, how string) {
+	t.Helper()
+	out, err := client.GetItem(context.Background(), &dynamodb.GetItemInput{
+		TableName:      &table,
+		Key:            key(keyPK(devicesig.Fingerprint(signingKey)), skKey),
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Item == nil || len(out.Item) != 2 {
+		t.Fatalf("%s: the key's item is %v, not a tombstone", how, out.Item)
+	}
+}
+
+// tombstone reports whether an item is a signing key's tombstone: its key
+// and nothing else.
+func tombstone(it map[string]types.AttributeValue) bool {
+	pk, _ := str(it, "pk")
+	sk, _ := str(it, "sk")
+	return strings.HasPrefix(pk, keyPK("")) && sk == skKey && len(it) == 2
 }
 
 // withKey is a new link (new ID, keys, intro mailbox) with the given
@@ -53,23 +78,24 @@ func linkChangeOf(t *testing.T, s *Store, accountID string) string {
 }
 
 // asBefore makes an account's link look like one made before signing keys
-// were recorded: no item for its key, and a record that doesn't note it.
+// were claimed: no item for its key, and no record of it.
 func asBefore(t *testing.T, client *dynamodb.Client, table, accountID string, l Link) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &table, Key: key(keyPK(devicesig.Fingerprint(l.SigningKey)), skKey)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &table, Item: item(accountPK(accountID), linkPrefix+l.ID, attrs{})}); err != nil {
-		t.Fatal(err)
+	fingerprint := devicesig.Fingerprint(l.SigningKey)
+	for _, k := range []map[string]types.AttributeValue{key(keyPK(fingerprint), skKey), key(accountPK(accountID), keyRecordPrefix+fingerprint)} {
+		if _, err := client.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &table, Key: k}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-// A link signing key belongs to one account: another account can't make a
-// link with it, or replace its own link with one that has it, so a sender's
-// tag never matches across accounts. The account itself keeps it through
-// rotations and replacements; once it stops using the key (a replacement
-// with another key, or a revocation), anyone can.
+// A link signing key is one account's for good: another account can't make
+// a link with it, or replace its own link with one that has it, so a
+// sender's tag never matches across accounts, nor can a key pass from one
+// account to another over time. The account itself keeps it through
+// rotations and replacements, and after it revokes its link or moves to
+// another key, for its next link.
 func TestOneAccountPerSigningKey(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
@@ -79,19 +105,16 @@ func TestOneAccountPerSigningKey(t *testing.T) {
 	if err := s.CreateLink(ctx, owner.ID, l, links.MaxActive); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != owner.ID {
+	if got, _ := keyOwner(t, client, s.Table, l.SigningKey); got != owner.ID {
 		t.Fatalf("the key's item names %q", got)
 	}
-
-	// Another account, with a copy of the key (a modified app, or one that
-	// copied a bundle).
-	clone := withKey(t, l.SigningKey)
-	clone.Keys = l.Keys
-	if err := s.CreateLink(ctx, other.ID, clone, links.MaxActive); !errors.Is(err, ErrKeyTaken) {
-		t.Fatalf("another account's link with the key: %v", err)
+	if sks := partitionKeysWith(t, client, s.Table, owner.ID, keyRecordPrefix); len(sks) != 1 {
+		t.Fatalf("the account's records of keys: %v", sks)
 	}
-	if _, err := s.Link(ctx, clone.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("the refused link: %v", err)
+
+	// Another account, with the key (shared on purpose).
+	if err := s.CreateLink(ctx, other.ID, withKey(t, l.SigningKey), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
+		t.Fatalf("another account's link with the key: %v", err)
 	}
 	if dev, _ := s.Device(ctx, other.ID, other.DeviceID, now); dev.Links != 0 {
 		t.Fatalf("the refused link was counted: %d", dev.Links)
@@ -106,15 +129,12 @@ func TestOneAccountPerSigningKey(t *testing.T) {
 	if _, err := s.Link(ctx, own.ID); err != nil {
 		t.Fatalf("the link a refused replacement was for: %v", err)
 	}
-	// Someone else's link still answers like a missing one, key or not.
+	// Someone else's link still answers like a missing one.
 	if err := s.SetLinkKeys(ctx, other.ID, l.ID, l.Keys); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotating another account's link: %v", err)
 	}
-	if err := s.ReplaceLink(ctx, other.ID, l.ID, withKey(t, l.SigningKey)); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("replacing another account's link: %v", err)
-	}
 
-	// The owner rotates and replaces with it.
+	// The owner rotates, and replaces keeping the key.
 	if err := s.SetLinkKeys(ctx, owner.ID, l.ID, testLink(t).Keys); err != nil {
 		t.Fatal(err)
 	}
@@ -122,127 +142,139 @@ func TestOneAccountPerSigningKey(t *testing.T) {
 	if err := s.ReplaceLink(ctx, owner.ID, l.ID, same); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != owner.ID {
-		t.Fatalf("after a replacement keeping the key, its item names %q", got)
-	}
-	// A replacement with another key frees the old one.
+	// Moving to another key keeps the old one the owner's.
 	next := testLink(t)
 	if err := s.ReplaceLink(ctx, owner.ID, same.ID, next); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-		t.Fatalf("the old key's item names %q", got)
+	for _, k := range [][]byte{l.SigningKey, next.SigningKey} {
+		if got, _ := keyOwner(t, client, s.Table, k); got != owner.ID {
+			t.Fatalf("after moving to another key, a key's item names %q", got)
+		}
 	}
-	if got := keyOwner(t, client, s.Table, next.SigningKey); got != owner.ID {
-		t.Fatalf("the new key's item names %q", got)
+	if err := s.ReplaceLink(ctx, other.ID, own.ID, withKey(t, l.SigningKey)); !errors.Is(err, ErrKeyTaken) {
+		t.Fatalf("a key the owner moved away from: %v", err)
 	}
-	if err := s.ReplaceLink(ctx, other.ID, own.ID, withKey(t, l.SigningKey)); err != nil {
-		t.Fatalf("taking up a key the owner left: %v", err)
-	}
-	// A revocation frees it.
+	// So does a revocation, and the owner makes its next link with it.
 	if err := s.DeleteLink(ctx, owner.ID, next.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, next.SigningKey); got != "" {
-		t.Fatalf("a revoked link's key's item names %q", got)
+	if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, next.SigningKey), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
+		t.Fatalf("a revoked link's key, by another account: %v", err)
 	}
-	if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, next.SigningKey), links.MaxActive); err != nil {
-		t.Fatalf("taking up a revoked link's key: %v", err)
+	if err := s.CreateLink(ctx, owner.ID, withKey(t, next.SigningKey), links.MaxActive); err != nil {
+		t.Fatalf("the owner's key after a revocation: %v", err)
 	}
-	// And the owner can't come back to the key it gave up.
-	if err := s.CreateLink(ctx, owner.ID, withKey(t, l.SigningKey), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
-		t.Fatalf("the owner's old key, now another's: %v", err)
-	}
-}
-
-// An account that ends (replaced, or deleted) frees its link's signing key
-// at once, in the write that ends it; the rest of its deletion leaves no
-// signing key's item behind.
-func TestSigningKeyGoesWithTheAccount(t *testing.T) {
-	s, client := store(t)
-	ctx := context.Background()
-
-	first := newAccount(t, "th-1")
-	if err := s.Create(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	l := testLink(t)
-	if err := s.CreateLink(ctx, first.ID, l, links.MaxActive); err != nil {
-		t.Fatal(err)
-	}
-	old, _ := s.ByTelegram(ctx, "th-1", first.DeviceID)
-	second := newAccount(t, "th-1")
-	if err := s.Replace(ctx, old, second, now); err != nil {
-		t.Fatal(err)
-	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-		t.Fatalf("a replaced account's key's item names %q", got)
-	}
-	cleanUp(t, s, second.ID, first.ID)
-
-	deleting := registered(t, s)
-	l = testLink(t)
-	if err := s.CreateLink(ctx, deleting.ID, l, links.MaxActive); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MarkDeleting(ctx, deleting.ID); err != nil {
-		t.Fatal(err)
-	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-		t.Fatalf("the key's item of an account being deleted names %q", got)
-	}
-	if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, l.SigningKey), links.MaxActive); err != nil {
-		t.Fatalf("the key of an account being deleted: %v", err)
-	}
-	for steps := 0; ; steps++ {
-		if steps > 20 {
-			t.Fatal("never finishes")
-		}
-		done, err := s.Delete(ctx, deleting.ID, deleting.TelegramHash, step)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if done {
-			break
-		}
-	}
-	if sks := partitionKeys(t, client, s.Table, deleting.ID); len(sks) != 0 {
-		t.Fatalf("left behind: %v", sks)
+	if sks := partitionKeysWith(t, client, s.Table, owner.ID, keyRecordPrefix); len(sks) != 2 {
+		t.Fatalf("the account's records of keys: %v", sks)
 	}
 }
 
-// What the first write didn't take (a record the steps find: a link past
-// what that write takes, or one recorded meanwhile) goes in the steps,
-// signing key's item and all, and only if it is still the account's.
-func TestStepsDeleteSigningKeys(t *testing.T) {
+// When an account ends, the items of every signing key it has lose it and
+// stay, as tombstones that refuse every account, so a key never passes to
+// another account. The write that ends the account does it; the steps after
+// take what that write didn't (more keys than it takes), and leave no
+// record of a key behind.
+func TestSigningKeysBurnWithTheAccount(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
-	put := func(it attrs) {
-		t.Helper()
-		if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: it}); err != nil {
+
+	for _, end := range []string{"replace", "delete"} {
+		n := newAccount(t, "th-"+end)
+		if err := s.Create(ctx, n); err != nil {
 			t.Fatal(err)
 		}
+		// Keys it moved away from, and its link's.
+		var keys [][]byte
+		var current Link
+		for i := range maxSwapLinks + 2 {
+			l := testLink(t)
+			if i == 0 {
+				err := s.CreateLink(ctx, n.ID, l, links.MaxActive)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err := s.ReplaceLink(ctx, n.ID, current.ID, l); err != nil {
+				t.Fatal(err)
+			}
+			current = l
+			keys = append(keys, l.SigningKey)
+		}
+		var successor NewAccount
+		if end == "replace" {
+			old, _ := s.ByTelegram(ctx, n.TelegramHash, n.DeviceID)
+			successor = newAccount(t, n.TelegramHash)
+			if err := s.Replace(ctx, old, successor, now); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := s.MarkDeleting(ctx, n.ID); err != nil {
+			t.Fatal(err)
+		}
+		// The first write took its link's key with the link, and as many
+		// others as it takes; none is left to anyone meanwhile.
+		burned(t, client, s.Table, current.SigningKey, end+", at once")
+		// (Its link's key, and maxSwapLinks records, which may include it.)
+		if got := len(partitionKeysWith(t, client, s.Table, n.ID, keyRecordPrefix)); got < len(keys)-maxSwapLinks-1 || got > len(keys)-maxSwapLinks {
+			t.Fatalf("%s: %d records of keys left after the first write", end, got)
+		}
+		for _, k := range keys {
+			if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, k), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
+				t.Fatalf("%s: an ended account's key: %v", end, err)
+			}
+		}
+		if end == "replace" {
+			cleanUp(t, s, successor.ID, n.ID)
+		} else {
+			for steps := 0; ; steps++ {
+				if steps > 20 {
+					t.Fatal("never finishes")
+				}
+				done, err := s.Delete(ctx, n.ID, n.TelegramHash, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if done {
+					break
+				}
+			}
+			if sks := partitionKeys(t, client, s.Table, n.ID); len(sks) != 0 {
+				t.Fatalf("left behind: %v", sks)
+			}
+		}
+		for _, k := range keys {
+			burned(t, client, s.Table, k, end+", after the steps")
+		}
+		if shared, records := owned(t, client, s.Table, n.ID); len(shared)+len(records) != 0 {
+			t.Fatalf("%s: left behind: %v, %v", end, shared, records)
+		}
 	}
-	leftover := func(accountID string) []byte {
-		t.Helper()
-		k := publicKey(t)
-		put(linkRecord(accountID, linkID(), k))
-		put(item(keyPK(devicesig.Fingerprint(k)), skKey, attrs{"a": sv(accountID)}))
-		return k
-	}
+}
 
-	// Deleted: what the first write took, and then what the steps find.
-	n := registered(t, s)
-	if err := s.MarkDeleting(ctx, n.ID); err != nil {
-		t.Fatal(err)
-	}
-	k := leftover(n.ID)
+// A record of a key someone else has (which nothing makes) goes when the
+// account ends; their item stays theirs. One the account has, that the
+// first write left (a step cut short), is burned by the next step.
+func TestStepsBurnOnlyTheAccountsKeys(t *testing.T) {
+	s, client := store(t)
+	ctx := context.Background()
 	theirs := registered(t, s)
 	taken := testLink(t)
 	if err := s.CreateLink(ctx, theirs.ID, taken, links.MaxActive); err != nil {
 		t.Fatal(err)
 	}
-	put(linkRecord(n.ID, linkID(), taken.SigningKey)) // naming another's key
+	n := registered(t, s)
+	if err := s.MarkDeleting(ctx, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	mine := publicKey(t)
+	for _, it := range []attrs{
+		item(accountPK(n.ID), keyRecordPrefix+devicesig.Fingerprint(taken.SigningKey), attrs{}),
+		item(accountPK(n.ID), keyRecordPrefix+devicesig.Fingerprint(mine), attrs{}),
+		item(keyPK(devicesig.Fingerprint(mine)), skKey, attrs{"a": sv(n.ID)}),
+	} {
+		if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: it}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for steps := 0; ; steps++ {
 		if steps > 20 {
 			t.Fatal("never finishes")
@@ -255,88 +287,22 @@ func TestStepsDeleteSigningKeys(t *testing.T) {
 			break
 		}
 	}
-	if got := keyOwner(t, client, s.Table, k); got != "" {
-		t.Fatalf("after the deletion, the key's item names %q", got)
-	}
-	if got := keyOwner(t, client, s.Table, taken.SigningKey); got != theirs.ID {
+	burned(t, client, s.Table, mine, "the account's key")
+	if got, _ := keyOwner(t, client, s.Table, taken.SigningKey); got != theirs.ID {
 		t.Fatalf("another account's key's item names %q", got)
 	}
-
-	// Replaced.
-	first := newAccount(t, "th-2")
-	if err := s.Create(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	old, _ := s.ByTelegram(ctx, "th-2", first.DeviceID)
-	second := newAccount(t, "th-2")
-	if err := s.Replace(ctx, old, second, now); err != nil {
-		t.Fatal(err)
-	}
-	k = leftover(first.ID)
-	put(linkRecord(first.ID, linkID(), taken.SigningKey))
-	cleanUp(t, s, second.ID, first.ID)
-	if got := keyOwner(t, client, s.Table, k); got != "" {
-		t.Fatalf("after the cleanup, the key's item names %q", got)
-	}
-	if got := keyOwner(t, client, s.Table, taken.SigningKey); got != theirs.ID {
-		t.Fatalf("another account's key's item names %q", got)
-	}
-	if shared, records := owned(t, client, s.Table, first.ID); len(shared)+len(records) != 0 {
-		t.Fatalf("left behind: %v, %v", shared, records)
+	if sks := partitionKeys(t, client, s.Table, n.ID); len(sks) != 0 {
+		t.Fatalf("left behind: %v", sks)
 	}
 }
 
-// An item an account left when it ended (which the write that ends it
-// doesn't, unless cut across) blocks nobody: a live account takes it over.
-// One a live account has still refuses.
-func TestSigningKeyLeftByAnEndedAccountIsTakenOver(t *testing.T) {
-	s, client := store(t)
-	ctx := context.Background()
-	leave := func(owner string) []byte {
-		t.Helper()
-		k := publicKey(t)
-		if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: item(keyPK(devicesig.Fingerprint(k)), skKey, attrs{"a": sv(owner)})}); err != nil {
-			t.Fatal(err)
-		}
-		return k
-	}
-
-	first := newAccount(t, "th-1")
-	if err := s.Create(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	old, _ := s.ByTelegram(ctx, "th-1", first.DeviceID)
-	if err := s.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
-		t.Fatal(err)
-	}
-	deleting := registered(t, s)
-	if err := s.MarkDeleting(ctx, deleting.ID); err != nil {
-		t.Fatal(err)
-	}
-	for _, ended := range []string{ids.New(), first.ID, deleting.ID} {
-		k := leave(ended)
-		n := registered(t, s)
-		if err := s.CreateLink(ctx, n.ID, withKey(t, k), links.MaxActive); err != nil {
-			t.Fatalf("a key %s left: %v", ended, err)
-		}
-		if got := keyOwner(t, client, s.Table, k); got != n.ID {
-			t.Fatalf("the key's item names %q", got)
-		}
-	}
-
-	live := registered(t, s)
-	k := leave(live.ID)
-	if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, k), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
-		t.Fatalf("a live account's key: %v", err)
-	}
-}
-
-// Links made before signing keys were recorded get their key recorded at
-// their next rotation or replacement, and from then on it is theirs alone.
-// Until then another account can still take the key; the earlier link
-// then can't rotate or be replaced with it, but can still be revoked, and
-// its account ended, without touching the other's item.
-func TestEarlierLinksGetTheirKeyRecorded(t *testing.T) {
+// Links made before signing keys were claimed get theirs claimed at their
+// next rotation or replacement, as a change to the account's links. Until
+// then another account holding the private key (one it shared) could claim
+// it first; the earlier link then can't be rotated or replaced with it,
+// but can still be revoked, and its account ended, without touching the
+// other's claim. A key nobody claimed isn't burned when its account ends.
+func TestEarlierLinksClaimTheirKeyLazily(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
 
@@ -351,29 +317,25 @@ func TestEarlierLinksGetTheirKeyRecorded(t *testing.T) {
 	if err := s.SetLinkKeys(ctx, n.ID, l.ID, testLink(t).Keys); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != n.ID {
+	if got, _ := keyOwner(t, client, s.Table, l.SigningKey); got != n.ID {
 		t.Fatalf("after a rotation, the key's item names %q", got)
 	}
 	if after := linkChangeOf(t, s, n.ID); after == "" || after == before {
-		t.Fatal("recording the key isn't a change to the account's links")
+		t.Fatal("claiming the key isn't a change to the account's links")
 	}
-	// Its record notes the key, so the steps would find it.
-	record, err := s.get(ctx, accountPK(n.ID), linkPrefix+l.ID, now)
-	if f, _ := str(record, "f"); err != nil || f != devicesig.Fingerprint(l.SigningKey) {
-		t.Fatalf("the link's record = %v, %v", record, err)
+	if sks := partitionKeysWith(t, client, s.Table, n.ID, keyRecordPrefix); len(sks) != 1 {
+		t.Fatalf("the account's records of keys: %v", sks)
 	}
 	if err := s.CreateLink(ctx, registered(t, s).ID, withKey(t, l.SigningKey), links.MaxActive); !errors.Is(err, ErrKeyTaken) {
 		t.Fatalf("a rotated link's key: %v", err)
 	}
-	// Once recorded, a rotation only rotates.
+	// Once claimed, a rotation only rotates.
+	before = linkChangeOf(t, s, n.ID)
 	if err := s.SetLinkKeys(ctx, n.ID, l.ID, testLink(t).Keys); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkDeleting(ctx, n.ID); err != nil {
-		t.Fatal(err)
-	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-		t.Fatalf("after its account's deletion, the key's item names %q", got)
+	if linkChangeOf(t, s, n.ID) != before {
+		t.Fatal("a rotation of a claimed key changed the account's links")
 	}
 
 	// Replaced.
@@ -386,53 +348,41 @@ func TestEarlierLinksGetTheirKeyRecorded(t *testing.T) {
 	if err := s.ReplaceLink(ctx, n.ID, l.ID, withKey(t, l.SigningKey)); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != n.ID {
+	if got, _ := keyOwner(t, client, s.Table, l.SigningKey); got != n.ID {
 		t.Fatalf("after a replacement, the key's item names %q", got)
 	}
 
-	// Taken by another account first.
-	n = registered(t, s)
-	l = testLink(t)
-	if err := s.CreateLink(ctx, n.ID, l, links.MaxActive); err != nil {
-		t.Fatal(err)
-	}
-	asBefore(t, client, s.Table, n.ID, l)
-	other := registered(t, s)
-	if err := s.CreateLink(ctx, other.ID, withKey(t, l.SigningKey), links.MaxActive); err != nil {
-		t.Fatalf("a key no item records: %v", err)
-	}
-	if err := s.SetLinkKeys(ctx, n.ID, l.ID, testLink(t).Keys); !errors.Is(err, ErrKeyTaken) {
-		t.Fatalf("rotating a link whose key another account recorded: %v", err)
-	}
-	if err := s.ReplaceLink(ctx, n.ID, l.ID, withKey(t, l.SigningKey)); !errors.Is(err, ErrKeyTaken) {
-		t.Fatalf("replacing it with that key: %v", err)
-	}
-	if err := s.DeleteLink(ctx, n.ID, l.ID); err != nil {
-		t.Fatalf("revoking it: %v", err)
-	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != other.ID {
-		t.Fatalf("after the revocation, the key's item names %q", got)
-	}
-	for _, end := range []string{"delete", "replace"} {
+	// Claimed by another account first.
+	for _, end := range []string{"revoke", "delete", "replace"} {
 		n := newAccount(t, "th-"+end)
 		if err := s.Create(ctx, n); err != nil {
 			t.Fatal(err)
 		}
-		l := withKey(t, publicKey(t))
+		l := testLink(t)
 		if err := s.CreateLink(ctx, n.ID, l, links.MaxActive); err != nil {
 			t.Fatal(err)
 		}
 		asBefore(t, client, s.Table, n.ID, l)
 		other := registered(t, s)
 		if err := s.CreateLink(ctx, other.ID, withKey(t, l.SigningKey), links.MaxActive); err != nil {
-			t.Fatal(err)
+			t.Fatalf("a key nobody claimed: %v", err)
 		}
-		if end == "delete" {
-			err := s.MarkDeleting(ctx, n.ID)
-			if err != nil {
+		if err := s.SetLinkKeys(ctx, n.ID, l.ID, testLink(t).Keys); !errors.Is(err, ErrKeyTaken) {
+			t.Fatalf("rotating a link whose key another account claimed: %v", err)
+		}
+		if err := s.ReplaceLink(ctx, n.ID, l.ID, withKey(t, l.SigningKey)); !errors.Is(err, ErrKeyTaken) {
+			t.Fatalf("replacing it with that key: %v", err)
+		}
+		switch end {
+		case "revoke":
+			if err := s.DeleteLink(ctx, n.ID, l.ID); err != nil {
 				t.Fatal(err)
 			}
-		} else {
+		case "delete":
+			if err := s.MarkDeleting(ctx, n.ID); err != nil {
+				t.Fatal(err)
+			}
+		case "replace":
 			old, _ := s.ByTelegram(ctx, n.TelegramHash, n.DeviceID)
 			if err := s.Replace(ctx, old, newAccount(t, n.TelegramHash), now); err != nil {
 				t.Fatal(err)
@@ -441,16 +391,30 @@ func TestEarlierLinksGetTheirKeyRecorded(t *testing.T) {
 		if _, err := s.Bundle(ctx, l.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("%s: the link: %v", end, err)
 		}
-		if got := keyOwner(t, client, s.Table, l.SigningKey); got != other.ID {
+		if got, _ := keyOwner(t, client, s.Table, l.SigningKey); got != other.ID {
 			t.Fatalf("%s: the other account's key's item names %q", end, got)
 		}
 	}
+
+	// Nobody claimed it: the end leaves it unclaimed.
+	n = registered(t, s)
+	l = testLink(t)
+	if err := s.CreateLink(ctx, n.ID, l, links.MaxActive); err != nil {
+		t.Fatal(err)
+	}
+	asBefore(t, client, s.Table, n.ID, l)
+	if err := s.MarkDeleting(ctx, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, there := keyOwner(t, client, s.Table, l.SigningKey); there {
+		t.Fatal("an unclaimed key got an item when its account ended")
+	}
 }
 
-// A rotation that records its link's key is a change to the account's
-// links: a deletion (or replacement) that read them before loses, and done
-// again deletes the item too.
-func TestEndingLosesToAKeyRecordedMeanwhile(t *testing.T) {
+// A rotation that claims its link's key is a change to the account's links:
+// a deletion (or replacement) that read them before loses, and done again
+// burns the claim too.
+func TestEndingLosesToAKeyClaimedMeanwhile(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
 	n := registered(t, s)
@@ -465,49 +429,10 @@ func TestEndingLosesToAKeyRecordedMeanwhile(t *testing.T) {
 		}
 	}}, Table: s.Table}
 	if err := hooked.MarkDeleting(ctx, n.ID); !errors.Is(err, ErrConflict) {
-		t.Fatalf("marking with a key recorded meanwhile: %v", err)
+		t.Fatalf("marking with a key claimed meanwhile: %v", err)
 	}
 	if err := s.MarkDeleting(ctx, n.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-		t.Fatalf("the key's item names %q", got)
-	}
-}
-
-// The writes that make, replace, rotate and end links stay transactions
-// DynamoDB takes when an account has as many links as Replace and
-// MarkDeleting take in one go, each with its own key.
-func TestEndingManyLinksWithTheirKeys(t *testing.T) {
-	s, client := store(t)
-	ctx := context.Background()
-	for _, end := range []string{"delete", "replace"} {
-		n := newAccount(t, "th-"+end)
-		if err := s.Create(ctx, n); err != nil {
-			t.Fatal(err)
-		}
-		var made []Link
-		for range maxSwapLinks {
-			l := testLink(t)
-			if err := s.CreateLink(ctx, n.ID, l, maxSwapLinks); err != nil {
-				t.Fatal(err)
-			}
-			made = append(made, l)
-		}
-		if end == "delete" {
-			if err := s.MarkDeleting(ctx, n.ID); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			old, _ := s.ByTelegram(ctx, n.TelegramHash, n.DeviceID)
-			if err := s.Replace(ctx, old, newAccount(t, n.TelegramHash), now); err != nil {
-				t.Fatal(err)
-			}
-		}
-		for _, l := range made {
-			if got := keyOwner(t, client, s.Table, l.SigningKey); got != "" {
-				t.Fatalf("%s: a key's item names %q", end, got)
-			}
-		}
-	}
+	burned(t, client, s.Table, l.SigningKey, "after the deletion")
 }

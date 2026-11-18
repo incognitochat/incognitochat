@@ -9,7 +9,7 @@
 // key matches the fingerprint and every encryption key is signed by it: a
 // server that swaps keys is caught.
 
-import { fromBase64Url, toBase64Url } from '../crypto/encoding';
+import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { fingerprint, importAgreementPublicKey, importSigningPublicKey, SUITE } from '../crypto/keys';
 import { LABEL_LINK_KEY, verify } from '../crypto/signing';
 
@@ -51,6 +51,15 @@ export function linkUrl(botUsername: string, appName: string, ref: LinkRef): str
 /** The signed parts of an encryption key (backend: links.KeyParts). */
 export function keyParts(key: Uint8Array, from: number, until: number): Uint8Array[] {
   return [new Uint8Array([SUITE]), key, u64(from), u64(until)];
+}
+
+/**
+ * The signed parts of an owner proof (backend: links.OwnerParts): the link
+ * signing key's signature over these shows the server that whoever creates,
+ * replaces or rotates the link holds the key, for this account and link.
+ */
+export function ownerParts(linkId: string, accountId: string): Uint8Array[] {
+  return [new Uint8Array([SUITE]), utf8(linkId), utf8(accountId)];
 }
 
 /** An encryption key in a bundle, as the API sends it. */

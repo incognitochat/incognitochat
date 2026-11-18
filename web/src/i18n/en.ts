@@ -33,6 +33,7 @@ export const en = {
   revokeYes: 'Delete link',
   noticeCreated: 'Your link is ready.',
   noticeReplaced: 'Your new link is ready. The old one no longer works.',
+  noticeNewSigningKey: "Your link was swapped for one with a new key, because another account had the old key. Share the new link. People who write to it get new names, and blocks don't carry over to it.",
   noticeRevoked: 'Your link was deleted.',
   noticeLimit: 'You already have a link. Swap it for a new one instead.',
 

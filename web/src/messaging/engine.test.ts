@@ -1,16 +1,17 @@
 import 'fake-indexeddb/auto';
 import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLink, keyName, listLinks, replaceLink, revokeLink } from '../account/links';
+import { createLink, keyName, listLinks, replaceLink, revokeLink, rotateLinkKey } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
-import { generateCopyableAgreementKey } from '../crypto/keys';
+import { generateCopyableAgreementKey, importSigningPublicKey } from '../crypto/keys';
+import { LABEL_LINK_OWNER, verify } from '../crypto/signing';
 import { generateVaultKey, seal } from '../crypto/vault';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import type { Session } from '../net/session';
 import { sendTokensFor } from '../protocol/envelope';
-import { checkBundle, type LinkRef } from '../protocol/link';
+import { checkBundle, ownerParts, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
 import { MAX_TEXT_BYTES, newId } from '../protocol/message';
@@ -155,6 +156,20 @@ async function fakeBackend() {
   /** Who owns each link, and how many links an account may have (the real server: one). */
   const linkOwners = new Map<string, string>();
   const linkRules = { max: Infinity };
+  /** Each account's ID, which owner proofs name, by the name the tests give it. */
+  const accountIds = new Map<string, string>();
+  /** The account each link signing key (base64url) is given to, for good, as the server does. */
+  const keyOwners = new Map<string, string>();
+  /** Checks an owner proof as the server does, then gives the key to the account, or says another has it. */
+  async function claim(account: string, linkId: string, signingKey: string, proof: unknown): Promise<void> {
+    const key = await importSigningPublicKey(fromBase64Url(signingKey));
+    if (typeof proof !== 'string' || !(await verify(key, fromBase64Url(proof), LABEL_LINK_OWNER, ...ownerParts(linkId, accountIds.get(account) ?? '')))) {
+      throw new ApiError(400, 'invalid_link');
+    }
+    const owner = keyOwners.get(signingKey);
+    if (owner !== undefined && owner !== account) throw new ApiError(409, 'signing_key_taken');
+    keyOwners.set(signingKey, account);
+  }
   const uploads = new Map<string, { size: number; deleteHash: string; body: Uint8Array<ArrayBuffer> | null; renewals: number }>();
   /** Every upload URL handed out, every PUT tried, and every wait before trying again. */
   const uploadUrls: string[] = [];
@@ -295,6 +310,7 @@ async function fakeBackend() {
         }
         if (path === '/links') {
           const id = b.id as string;
+          await claim(account, id, b.signingKey as string, b.proof);
           if (b.replaces) {
             // The old link and its intro mailbox go.
             const old = bundles.get(b.replaces as string);
@@ -326,6 +342,7 @@ async function fakeBackend() {
         if (method === 'PUT' && path.startsWith('/links/') && path.endsWith('/keys')) {
           const bundle = bundles.get(path.split('/')[2]!);
           if (!bundle) throw new ApiError(404, 'not_found');
+          await claim(account, path.split('/')[2]!, bundle.signingKey as string, b.proof);
           bundle.keys = b.keys;
           return check({});
         }
@@ -357,12 +374,16 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, spent, sendPayments, sendShapes, sendAttempts, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, linkOwners, linkRules, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, sendShapes, sendAttempts, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, linkOwners, linkRules, accountIds, keyOwners, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
   const db: Database = await openDatabase(`engine-test-${n++}`);
   await putKey(db, 'vault-key', await generateVaultKey());
+  // A set-up account, whose ID owner proofs name.
+  const accountId = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+  backend.accountIds.set(account, accountId);
+  await putMeta(db, 'account', { state: 'registered', deviceId: toBase64Url(crypto.getRandomValues(new Uint8Array(16))), fingerprint: 'A'.repeat(43), accountId });
   const session = backend.session(account);
   /** The app on this device, as it starts (again, after it was closed). */
   const open = (extra: Partial<MessagingDeps> = {}) =>
@@ -1112,6 +1133,107 @@ describe('key rotation', () => {
     expect(backend.bundleFetches).toEqual([ref.id]);
     // Everything arrived, written with the key it had.
     expect(await owner.messaging.sync()).toBe(13);
+  });
+});
+
+describe('a link signing key another account has', () => {
+  const DAY = 24 * 3600 * 1000;
+  const bundleOf = (backend: Awaited<ReturnType<typeof fakeBackend>>, id: string) => backend.api.request('GET', `/links/${id}`, {}, checkBundle);
+  /** What the server says once another account claimed the key first (it was shared before keys were one account's). */
+  const takenBySomeoneElse = async (backend: Awaited<ReturnType<typeof fakeBackend>>, linkId: string) =>
+    backend.keyOwners.set(toBase64Url((await bundleOf(backend, linkId)).signingKey), 'someone else');
+
+  it('proves the key for this account and link with every change, which the server checks', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const first = await createLink(owner.db, owner.session, backend.api);
+    expect(backend.keyOwners.get(toBase64Url((await bundleOf(backend, first.id)).signingKey))).toBe('owner');
+    // A proof for another account doesn't do.
+    backend.accountIds.set('owner', toBase64Url(crypto.getRandomValues(new Uint8Array(16))));
+    await expect(replaceLink(owner.db, owner.session, backend.api)).rejects.toMatchObject({ code: 'invalid_link' });
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([first.id]);
+  });
+
+  it('replacing makes the link with a new signing key, and says so', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const first = await createLink(owner.db, owner.session, backend.api);
+    await takenBySomeoneElse(backend, first.id);
+
+    const next = await replaceLink(owner.db, owner.session, backend.api);
+    expect(next.newSigningKey).toBe(true);
+    expect(next.fingerprint).not.toBe(first.fingerprint);
+    expect(backend.bundles.has(first.id)).toBe(false);
+    expect(backend.keyOwners.get(toBase64Url((await bundleOf(backend, next.id)).signingKey))).toBe('owner');
+    const links = await listLinks(owner.db);
+    expect(links.map((l) => [l.id, l.fingerprint])).toEqual([[next.id, next.fingerprint]]);
+    expect(links[0]).not.toHaveProperty('newSigningKey');
+    // From then on the new key is the account's, kept as usual.
+    const third = await replaceLink(owner.db, owner.session, backend.api);
+    expect(third.newSigningKey).toBeUndefined();
+    expect(third.fingerprint).toBe(next.fingerprint);
+  });
+
+  it('creating does the same', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const first = await createLink(owner.db, owner.session, backend.api);
+    await takenBySomeoneElse(backend, first.id);
+    await revokeLink(owner.db, owner.session, first.id);
+    const made = await createLink(owner.db, owner.session, backend.api);
+    expect(made.newSigningKey).toBe(true);
+    expect(made.fingerprint).not.toBe(first.fingerprint);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([made.id]);
+  });
+
+  it('upkeep replaces a link it can no longer rotate, and tells the app; then rotates as usual', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const onNewLink = vi.fn();
+    const onLinks = vi.fn();
+    const messaging = owner.open({ onNewLink, onLinks });
+    const first = await createLink(owner.db, owner.session, backend.api);
+    await takenBySomeoneElse(backend, first.id);
+
+    clock += 10 * DAY;
+    await messaging.maintain();
+    expect(onNewLink).toHaveBeenCalledOnce();
+    expect(onLinks).toHaveBeenCalledOnce();
+    const [link] = await listLinks(owner.db);
+    expect(link!.id).not.toBe(first.id);
+    expect(link!.fingerprint).not.toBe(first.fingerprint);
+    expect(backend.bundles.has(first.id)).toBe(false);
+
+    clock += 10 * DAY;
+    expect(await rotateLinkKey(owner.db, owner.session, Math.floor(clock / 1000))).toBe(true);
+    expect((await listLinks(owner.db))[0]!.id).toBe(link!.id);
+    expect(onNewLink).toHaveBeenCalledOnce();
+  });
+
+  it('a stuck link whose replacement failed is replaced at a later upkeep, with the key made then', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const onNewLink = vi.fn();
+    const messaging = owner.open({ onNewLink });
+    const first = await createLink(owner.db, owner.session, backend.api);
+    await takenBySomeoneElse(backend, first.id);
+    clock += 10 * DAY;
+    // The replacement never reaches the server.
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(messaging.maintain()).rejects.toThrow(NetworkError);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([first.id]);
+    expect(onNewLink).not.toHaveBeenCalled();
+    // Once that change is given up, upkeep replaces the link (whose key it
+    // no longer has as the account's) with the account's new key.
+    clock += 11 * 60 * 1000;
+    await messaging.maintain();
+    expect(onNewLink).toHaveBeenCalledOnce();
+    const [link] = await listLinks(owner.db);
+    expect(link!.id).not.toBe(first.id);
+    expect(link!.fingerprint).not.toBe(first.fingerprint);
+    expect(backend.bundles.has(first.id)).toBe(false);
   });
 });
 

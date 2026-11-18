@@ -132,6 +132,7 @@ export type HomeNotice =
   | 'already-member'
   | 'own-invitation'
   | 'rate-limited'
+  | 'new-signing-key'
   | 'network'
   | 'generic';
 
@@ -364,6 +365,8 @@ export function createApp(deps: Deps) {
   let messaging: Messaging | null = null;
   let mediaSettings: MediaSettings = DEFAULT_MEDIA_SETTINGS;
   let tab: 'chats' | 'links' = 'chats';
+  /** A notice for the next time the home screen shows (from upkeep, while another screen was up). */
+  let pendingNotice: HomeNotice | null = null;
   let backgroundStarted = false;
   // Stops the inbox poll and the push socket (the account was deleted).
   let stopBackground = (): void => {};
@@ -612,6 +615,13 @@ export function createApp(deps: Deps) {
         onLinks: () => {
           deps.broadcast({ type: 'data-changed' });
           void refresh();
+        },
+        // A link replaced for want of new keys: the user is told, on the
+        // home screen now or the next time it shows.
+        onNewLink: () => {
+          const current = screen.value;
+          if (current.kind === 'home' && !current.busy) void showHome({ notice: 'new-signing-key' });
+          else pendingNotice = 'new-signing-key';
         },
       });
       return true;
@@ -1653,6 +1663,8 @@ export function createApp(deps: Deps) {
 
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
     if (options.tab) tab = options.tab;
+    const notice = options.notice ?? pendingNotice;
+    pendingNotice = null;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
@@ -1682,7 +1694,7 @@ export function createApp(deps: Deps) {
       invitations,
       links,
       busy: false,
-      notice: options.notice ?? null,
+      notice,
       askNotices: noticeLaunch && !!account && !account.notices && !writeAllowed,
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
@@ -1823,14 +1835,18 @@ export function createApp(deps: Deps) {
     return adminAction(() => session!.call('POST', '/admin/grant', { link: ref.id, invitations }, checkObject, { sign: true }), 'granted');
   }
 
-  /** Runs a link action from the home screen, then shows home again with its outcome. */
-  async function linkAction(action: () => Promise<unknown>, done: HomeNotice): Promise<void> {
+  /**
+   * Runs a link action from the home screen, then shows home again with its
+   * outcome. A link made with a new signing key (another account had the
+   * old one) says so: its labels and blocks start over.
+   */
+  async function linkAction(action: () => Promise<{ newSigningKey?: true } | void>, done: HomeNotice): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'home' || current.busy) return;
     screen.value = { ...current, busy: true, notice: null };
     let notice: HomeNotice = done;
     try {
-      await action();
+      if ((await action())?.newSigningKey) notice = 'new-signing-key';
     } catch (err) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'invitation_required') notice = 'invitation';

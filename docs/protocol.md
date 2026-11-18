@@ -34,7 +34,7 @@ record exactly when anything happened.
 |---|---|---|
 | Account key | ECDSA P-256 | Copyable (sealed in the vault), never shown to other users |
 | Device signing key | ECDSA P-256 | Non-extractable, one device |
-| Link signing key | ECDSA P-256 | One per account, kept when its link is replaced; no other account's link may have it; copyable |
+| Link signing key | ECDSA P-256 | One per account, kept when its link is replaced; the server gives it to that account for good; copyable |
 | Link encryption key | ECDH P-256 | Signed by the link signing key, rotated |
 | Conversation key | ECDH P-256 | One per conversation per side, rotated |
 
@@ -280,28 +280,51 @@ keeps blocks and labels. Conversations carry on, since after the first message
 they don't go through the link; a sender the owner hasn't answered yet keeps
 writing to the old intro mailbox until the owner replies.
 
+**Owner proof.** Creating or replacing a link (`POST /links`) and rotating
+its keys (`PUT /links/{id}/keys`) carry `proof`, the link signing key's
+signature over
+
+```
+Message("incognitochat/v2/link-owner", [0x01], UTF-8 link ID, UTF-8 account ID)
+```
+
+with the new link's ID when creating or replacing, and the caller's account
+ID. The server checks it first; a missing or wrong proof is
+`400 {"error": "invalid_link"}`. The encryption keys' signatures don't name
+the link, and anyone can copy them from a bundle, so they don't show that
+the caller holds the key. The proof does, and only for that account and
+link.
+
 **One account per signing key.** Since a sender's tag is the same on every
 link with one signing key, accounts whose links shared a key could compare
 the tags they get and match a sender who writes to each of them. So the
-server records, with each link, that its signing key (by fingerprint) is
-that account's, and refuses another account's link with it: `POST /links`,
-with or without `replaces`, answers `409 {"error": "signing_key_taken"}`,
-and so does `PUT /links/{id}/keys` for a link whose key another account has
-(below). The same account may use its key again: rotating, replacing, or
-revoking and creating. The record goes with the account's link that has the
-key: when the link is revoked, replaced by one with another key, or ends
-with its account (deleted or replaced, in the write that ends it). A record
-left by an account that ended is taken over by the next account to use the
-key, so none blocks a key for good. A new account always makes a new
-signing key, so for links made since, `signing_key_taken` comes only from a
-modified app or a copied bundle; the app shows it as a failed request.
+server gives each signing key to the first account that proves it holds it,
+for good. Any other account's create, replace or rotation with that key
+gets `409 {"error": "signing_key_taken"}`. The account keeps the key after
+it revokes its link or moves to another key, so its next link can use it
+again. When the account ends (deleted, or replaced by setting up again), the
+key isn't freed: the server keeps a tombstone of it, holding only the
+fingerprint, which refuses every account. So a key never passes from one
+account to another, at the same time or later.
 
-Links made before the server recorded keys get their record at their next
-key rotation or replacement. Until then (at most about 9 days, for an app
-opened in that time), another account could still take such a link's key first; the
-earlier link then keeps its current keys until they expire but can't be
-rotated (`signing_key_taken`), or replaced with that key. It can still be
-revoked, and its account ended, without touching the other account's record.
+Links made before the server checked this get their key claimed at their
+next rotation or replacement, each with an owner proof: whoever proves they
+hold the key first claims it. Someone who only copied a bundle can't make a
+proof, so they can't claim the key, rotate their copy or make another one.
+A copy made before stops working once its keys expire, within 8 weeks (the
+longest a key may be offered). Only accounts that shared the private key
+itself can claim a key before its owner does. The owner's next create,
+replace or rotation then gets `signing_key_taken`. A key that was never
+claimed stays unclaimed when its link is revoked or its account ends,
+since those writes carry no proof, and whoever holds it can still claim it.
+
+**A key someone else has.** Told `signing_key_taken` when it creates or
+replaces a link, the app makes a new signing key and tries once more with
+it. Told so when it rotates, it replaces the link with one that has a new
+signing key. It does the same for a link whose signing key is gone from the
+device. Either way the user is told that the link changed: they share the
+new link, senders get new tags on it, and so new labels, and blocks don't
+carry over.
 
 **A lost answer.** The client picks the new link's ID, and makes and signs
 its keys, before it asks. Without an answer (a timeout, a dropped
@@ -1233,7 +1256,7 @@ logged-in admin, and every change also a device signature
 | Fingerprint | `backend/internal/devicesig`, `web/src/crypto/crypto.test.ts` |
 | Device list | `backend/internal/devicelist`, `web/src/protocol/device-list.test.ts` |
 | Register, session and request messages | `backend/internal/api/vectors_test.go`, `web/src/account/account.test.ts` |
-| Link keys | `backend/internal/links`, `web/src/protocol/link.test.ts` |
+| Link keys, owner proofs | `backend/internal/links`, `web/src/protocol/link.test.ts` |
 | HPKE (RFC 9180 Appendix A, AES-128-GCM and AES-256-GCM) | `web/src/crypto/hpke-vectors.json` |
 | Envelope layout (sealed by the client) | `backend/internal/envelope/testdata` |
 | Blind RSA (RFC 9474 Appendix A, PSS-Deterministic) | `web/src/crypto/blindrsa-vectors.json`, `backend/internal/tokens/testdata` |

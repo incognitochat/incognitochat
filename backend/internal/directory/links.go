@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,13 +20,16 @@ const (
 	linkPrefix = "K#"
 	skLink     = "L"
 	skKey      = "F"
+	// keyRecordPrefix starts the sort key of an account's record of a
+	// signing key it has, by the key's fingerprint.
+	keyRecordPrefix = "F#"
 )
 
 var (
 	// ErrLimit is returned when an account already has the most links allowed.
 	ErrLimit = errors.New("directory: limit reached")
-	// ErrKeyTaken is returned when another account's link has the signing
-	// key a link is to have (claimKey).
+	// ErrKeyTaken is returned when another account has the signing key a
+	// link is to have, or had it (claimKey).
 	ErrKeyTaken = errors.New("directory: signing key taken")
 )
 
@@ -42,102 +46,113 @@ func linkPK(id string) string { return "L#" + id }
 // Signing keys. A sender's tag is the same on every link with one signing
 // key (docs/protocol.md, the tag field), so two accounts whose links shared
 // a key could compare the tags they get and match a sender who writes to
-// both. So a signing key belongs to one account:
+// both. So a signing key is given to one account, for good:
 //
-//	F#<fingerprint>  F        the account whose links have the signing key (a)
+//	F#<fingerprint>  F                the account that has the key (a); none once it ended
+//	A#<account>      F#<fingerprint>  marks a signing key the account has
 //
-// It is written in the same transaction that gives the account a link with
-// the key (claimKey), and the account's record of the link notes the
-// fingerprint (f), so the item goes with that record (releaseKey: when the
-// link is revoked, replaced by one with another key, or ends with its
-// account; or, from the record, in the steps after). The same account may
-// use the key again (a replacement keeps it); another account is refused
-// (ErrKeyTaken), unless the one the item names isn't live any more: its
-// links are gone, or deliver nothing, and the item it left is taken over.
-// So an item never blocks a key for good; only its own account's writes
-// delete it, and another account's only take it over once that account
-// has ended. It says nothing the link item doesn't (the link's owner, and
-// its signing key, whose fingerprint anyone can work out), and only while
-// the account has a link with that key.
+// The account claims the key in the same transaction that gives it a link
+// with it (claimKey: creating, replacing, and rotating a link from before
+// keys were claimed), which the API allows only with an owner proof
+// (links.CheckOwner), so only whoever holds the private key can claim it.
+// The same account may use it again at any time (a replacement keeps it,
+// and a revoked link's key stays the account's for its next link). Another
+// account never gets it (ErrKeyTaken): not while the account has it, and
+// not after the account ends, when the item loses the account (endKeys, in
+// the write that ends it, and the steps after) and stays as a tombstone
+// that holds only the fingerprint, refusing every claim. So a key can't
+// pass from one account to another over time either. Only the account's
+// own writes change the item, and only when it ends.
 //
-// Links made before these items existed have none until their account
-// rotates their keys (SetLinkKeys) or replaces them, which records it.
+// While the account's link has the key, the item names nothing the link
+// item doesn't (its owner, and its signing key, whose fingerprint anyone
+// can work out); after a revocation it keeps the account's claim, and
+// after the account ends, only that the key was used.
+//
+// Links made before keys were claimed have no item until their account
+// rotates their keys (SetLinkKeys) or replaces them, which claims it.
 
 // keyPK is the partition key of a signing key's item, by its fingerprint.
 func keyPK(fingerprint string) string { return "F#" + fingerprint }
 
-// claimKey returns the transaction items that record a signing key, by its
-// fingerprint, as accountID's, to go with the write that gives the account a
+// claimKey returns the transaction items that claim a signing key, by its
+// fingerprint, for accountID, to go with the write that gives the account a
 // link with it, and whether the key is accountID's already (then the item
-// only checks that it still is). It returns ErrKeyTaken if a live account
-// other than accountID has it.
+// only checks that it still is). It returns ErrKeyTaken if another account
+// has the key, or had it and ended.
 func (s *Store) claimKey(ctx context.Context, accountID, fingerprint string) ([]types.TransactWriteItem, bool, error) {
 	it, err := s.get(ctx, keyPK(fingerprint), skKey, time.Time{})
-	if err != nil && !errors.Is(err, ErrNotFound) {
+	if errors.Is(err, ErrNotFound) {
+		return []types.TransactWriteItem{
+			{Put: &types.Put{
+				TableName:           &s.Table,
+				Item:                item(keyPK(fingerprint), skKey, attrs{"a": sv(accountID)}),
+				ConditionExpression: aws.String("attribute_not_exists(pk)"),
+			}},
+			{Put: &types.Put{TableName: &s.Table, Item: item(accountPK(accountID), keyRecordPrefix+fingerprint, attrs{})}},
+		}, false, nil
+	}
+	if err != nil {
 		return nil, false, err
 	}
-	claim := &types.Put{
-		TableName:           &s.Table,
-		Item:                item(keyPK(fingerprint), skKey, attrs{"a": sv(accountID)}),
-		ConditionExpression: aws.String("attribute_not_exists(pk)"),
-	}
-	if it == nil {
-		return []types.TransactWriteItem{{Put: claim}}, false, nil
-	}
-	owner, ok := str(it, "a")
-	if ok && owner == accountID {
-		return []types.TransactWriteItem{{ConditionCheck: &types.ConditionCheck{
-			TableName:                 &s.Table,
-			Key:                       key(keyPK(fingerprint), skKey),
-			ConditionExpression:       aws.String("a = :a"),
-			ExpressionAttributeValues: attrs{":a": sv(accountID)},
-		}}}, true, nil
-	}
-	if !ok {
-		claim.ConditionExpression = aws.String("attribute_not_exists(a)")
-		return []types.TransactWriteItem{{Put: claim}}, false, nil
-	}
-	acct, err := s.get(ctx, accountPK(owner), skAccount, time.Time{})
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, false, err
-	}
-	_, hasKey := acct["ak"]
-	_, deleting := acct["dl"]
-	if hasKey && !deleting {
+	if owner, _ := str(it, "a"); owner != accountID {
 		return nil, false, ErrKeyTaken
 	}
-	// Left by an account that ended: taken over, only while it is so.
-	claim.ConditionExpression = aws.String("a = :o")
-	claim.ExpressionAttributeValues = attrs{":o": sv(owner)}
-	return []types.TransactWriteItem{
-		{Put: claim},
-		{ConditionCheck: &types.ConditionCheck{
-			TableName:           &s.Table,
-			Key:                 key(accountPK(owner), skAccount),
-			ConditionExpression: aws.String(ended),
-		}},
-	}, false, nil
-}
-
-// releaseKey returns the transaction item that deletes a signing key's
-// item, by its fingerprint, to go with the write that ends accountID's link
-// with it: only while accountID has the key, or nobody does (so one that a
-// rotation records meanwhile goes too), and none if another account has it
-// (it isn't accountID's to delete).
-func (s *Store) releaseKey(ctx context.Context, accountID, fingerprint string) ([]types.TransactWriteItem, error) {
-	it, err := s.get(ctx, keyPK(fingerprint), skKey, time.Time{})
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	if owner, ok := str(it, "a"); ok && owner != accountID {
-		return nil, nil
-	}
-	return []types.TransactWriteItem{{Delete: &types.Delete{
+	return []types.TransactWriteItem{{ConditionCheck: &types.ConditionCheck{
 		TableName:                 &s.Table,
 		Key:                       key(keyPK(fingerprint), skKey),
-		ConditionExpression:       aws.String("attribute_not_exists(pk) OR a = :a"),
+		ConditionExpression:       aws.String("a = :a"),
 		ExpressionAttributeValues: attrs{":a": sv(accountID)},
-	}}}, nil
+	}}}, true, nil
+}
+
+// endKeys returns the transaction items that end an account's claims on its
+// signing keys, for the write that ends the account: the keys of the links
+// that write ends (their fingerprints, first), and up to maxSwapLinks more
+// (the steps take any others). Each key's item the account has becomes a
+// tombstone, only while it still has it, and the account's record of the
+// key goes. A key the account doesn't have keeps its item (another
+// account's, or none: a link from before keys were claimed), and a record
+// of it (which nothing makes) goes all the same.
+func (s *Store) endKeys(ctx context.Context, accountID string, first []string) ([]types.TransactWriteItem, error) {
+	pk := accountPK(accountID)
+	records, err := s.query(ctx, pk, "begins_with(sk, :v)", keyRecordPrefix, "sk", maxSwapLinks)
+	if err != nil {
+		return nil, err
+	}
+	recorded := map[string]bool{}
+	fingerprints := first
+	for _, r := range records.items {
+		sk, _ := str(r, "sk")
+		fingerprint := strings.TrimPrefix(sk, keyRecordPrefix)
+		recorded[fingerprint] = true
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	var writes []types.TransactWriteItem
+	seen := map[string]bool{}
+	for _, fingerprint := range fingerprints {
+		if seen[fingerprint] {
+			continue // a transaction takes each item once
+		}
+		seen[fingerprint] = true
+		it, err := s.get(ctx, keyPK(fingerprint), skKey, time.Time{})
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		owner, _ := str(it, "a")
+		if owner == accountID {
+			writes = append(writes, types.TransactWriteItem{Put: &types.Put{
+				TableName:                 &s.Table,
+				Item:                      item(keyPK(fingerprint), skKey, attrs{}),
+				ConditionExpression:       aws.String("a = :a"),
+				ExpressionAttributeValues: attrs{":a": sv(accountID)},
+			}})
+		}
+		if owner == accountID || recorded[fingerprint] {
+			writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, keyRecordPrefix+fingerprint)}})
+		}
+	}
+	return writes, nil
 }
 
 // CreateLink stores a new link for an account, counting it against max. It
@@ -245,8 +260,7 @@ func (s *Store) recountLinks(ctx context.Context, accountID string) (bool, error
 	return err == nil, err
 }
 
-// newLinkWrites stores a link's bundle and lists it under its account, with
-// its signing key's fingerprint (whose item goes with the listing).
+// newLinkWrites stores a link's bundle and lists it under its account.
 func (s *Store) newLinkWrites(accountID string, l Link) []types.TransactWriteItem {
 	return []types.TransactWriteItem{
 		{Put: &types.Put{
@@ -259,14 +273,11 @@ func (s *Store) newLinkWrites(accountID string, l Link) []types.TransactWriteIte
 			}),
 			ConditionExpression: aws.String("attribute_not_exists(pk)"),
 		}},
-		{Put: &types.Put{TableName: &s.Table, Item: linkRecord(accountID, l.ID, l.SigningKey)}},
+		{Put: &types.Put{
+			TableName: &s.Table,
+			Item:      item(accountPK(accountID), linkPrefix+l.ID, attrs{}),
+		}},
 	}
-}
-
-// linkRecord is an account's record of a link it owns, noting the
-// fingerprint of the link's signing key (f).
-func linkRecord(accountID, linkID string, signingKey []byte) attrs {
-	return item(accountPK(accountID), linkPrefix+linkID, attrs{"f": sv(devicesig.Fingerprint(signingKey))})
 }
 
 // oldLinkWrites deletes an account's link, its listing and its intro mailbox.
@@ -287,11 +298,11 @@ func (s *Store) oldLinkWrites(accountID string, old Link) []types.TransactWriteI
 
 // ReplaceLink swaps an account's link for a new one in one step: the old
 // link and its intro mailbox go, the new one takes its place, and the link
-// count stays the same. The new link's signing key is recorded as the
-// account's, and the old one's record goes unless the new link keeps it. It
-// returns ErrNotFound unless the account (still there, neither replaced nor
-// being deleted) owns oldID, ErrKeyTaken if another account's link has the
-// new signing key, and ErrConflict if the new ID is taken.
+// count stays the same. The new link's signing key is claimed for the
+// account; the old one's stays the account's. It returns ErrNotFound unless
+// the account (still there, neither replaced nor being deleted) owns oldID,
+// ErrKeyTaken if another account has (or had) the new signing key, and
+// ErrConflict if the new ID is taken.
 func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link) error {
 	if oldID == l.ID {
 		return ErrConflict
@@ -303,21 +314,13 @@ func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link
 	if owner != accountID {
 		return ErrNotFound
 	}
-	fingerprint, oldFingerprint := devicesig.Fingerprint(l.SigningKey), devicesig.Fingerprint(old.SigningKey)
-	keys, _, err := s.claimKey(ctx, accountID, fingerprint)
+	claim, _, err := s.claimKey(ctx, accountID, devicesig.Fingerprint(l.SigningKey))
 	if err != nil {
 		return err
 	}
-	if oldFingerprint != fingerprint {
-		release, err := s.releaseKey(ctx, accountID, oldFingerprint)
-		if err != nil {
-			return err
-		}
-		keys = append(keys, release...)
-	}
 	writes := append(s.oldLinkWrites(accountID, old), s.newLinkWrites(accountID, l)...)
 	writes = append(writes, s.introMailboxWrites(accountID, l.ID, l.Mailbox)...)
-	writes = append(writes, keys...)
+	writes = append(writes, claim...)
 	// As for every item made in the partition: a replaced account's item is
 	// only a marker, with no account key, and nothing new joins it, nor an
 	// account being deleted.
@@ -368,13 +371,13 @@ func (s *Store) link(ctx context.Context, id string, consistent bool) (Link, str
 }
 
 // SetLinkKeys replaces a link's encryption keys. It returns ErrNotFound unless
-// the account owns the link.
+// the account owns the link, and ErrConflict if a concurrent change won.
 //
-// A link whose signing key isn't recorded as the account's yet (one made
-// before keys were recorded, or whose item an account that ended left) gets
-// it recorded too, in the same transaction, as a change to the account's
-// links (lq), so a deletion or replacement that read them before doesn't
-// leave the item behind; ErrKeyTaken if another account has it.
+// A link whose signing key isn't claimed yet (one made before keys were
+// claimed) gets it claimed for the account in the same transaction, as a
+// change to the account's links (lq), so a deletion or replacement that
+// read them before doesn't leave the claim behind; ErrKeyTaken if another
+// account has (or had) it.
 func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []links.Key) error {
 	l, owner, err := s.link(ctx, id, true)
 	if err != nil {
@@ -383,7 +386,7 @@ func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []li
 	if owner != accountID {
 		return ErrNotFound
 	}
-	claim, recorded, err := s.claimKey(ctx, accountID, devicesig.Fingerprint(l.SigningKey))
+	claim, claimed, err := s.claimKey(ctx, accountID, devicesig.Fingerprint(l.SigningKey))
 	if err != nil {
 		return err
 	}
@@ -394,7 +397,7 @@ func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []li
 		ConditionExpression:       aws.String("a = :a"),
 		ExpressionAttributeValues: attrs{":ek": keysValue(keys), ":a": sv(accountID)},
 	}
-	if recorded {
+	if claimed {
 		_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 			TableName:                 update.TableName,
 			Key:                       update.Key,
@@ -409,16 +412,13 @@ func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []li
 		return err
 	}
 	writes := append([]types.TransactWriteItem{{Update: update}}, claim...)
-	writes = append(writes,
-		types.TransactWriteItem{Put: &types.Put{TableName: &s.Table, Item: linkRecord(accountID, id, l.SigningKey)}},
-		types.TransactWriteItem{Update: &types.Update{
-			TableName:                 &s.Table,
-			Key:                       key(accountPK(accountID), skAccount),
-			UpdateExpression:          aws.String("SET " + linkChange),
-			ConditionExpression:       aws.String(live),
-			ExpressionAttributeValues: attrs{":lq": newLinkChange()},
-		}},
-	)
+	writes = append(writes, types.TransactWriteItem{Update: &types.Update{
+		TableName:                 &s.Table,
+		Key:                       key(accountPK(accountID), skAccount),
+		UpdateExpression:          aws.String("SET " + linkChange),
+		ConditionExpression:       aws.String(live),
+		ExpressionAttributeValues: attrs{":lq": newLinkChange()},
+	}})
 	reasons, err := s.transactReasons(ctx, writes)
 	if errors.Is(err, ErrConflict) && len(reasons) == len(writes) &&
 		(reasons[0] == "ConditionalCheckFailed" || reasons[len(reasons)-1] == "ConditionalCheckFailed") {
@@ -427,22 +427,15 @@ func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []li
 	return err
 }
 
-// DeleteLink revokes a link and its intro mailbox, and the record of its
-// signing key. It returns ErrNotFound unless the account owns it.
+// DeleteLink revokes a link and its intro mailbox; its signing key stays the
+// account's, for its next link. It returns ErrNotFound unless the account
+// owns it, and ErrConflict if a concurrent change won.
 func (s *Store) DeleteLink(ctx context.Context, accountID, id string) error {
-	l, owner, err := s.link(ctx, id, true)
+	l, err := s.Link(ctx, id)
 	if err != nil {
 		return err
 	}
-	if owner != accountID {
-		return ErrNotFound
-	}
-	release, err := s.releaseKey(ctx, accountID, devicesig.Fingerprint(l.SigningKey))
-	if err != nil {
-		return err
-	}
-	writes := append(s.oldLinkWrites(accountID, l), release...)
-	writes = append(writes, types.TransactWriteItem{Update: &types.Update{
+	writes := append(s.oldLinkWrites(accountID, l), types.TransactWriteItem{Update: &types.Update{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
 		UpdateExpression:          aws.String("SET lc = lc - :one, " + linkChange),
