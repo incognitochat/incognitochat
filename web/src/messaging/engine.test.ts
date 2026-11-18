@@ -473,8 +473,9 @@ function failRequest(who: { session: Session }, method: string, path: RegExp, fa
   } as Session['call'];
 }
 
-async function linkOf(backend: Awaited<ReturnType<typeof fakeBackend>>, owner: Awaited<ReturnType<typeof person>>) {
-  const record = await createLink(owner.db, owner.session, backend.api);
+/** A link of the owner's, made now (Unix seconds; the device's clock if not given). */
+async function linkOf(backend: Awaited<ReturnType<typeof fakeBackend>>, owner: Awaited<ReturnType<typeof person>>, now?: () => number) {
+  const record = await createLink(owner.db, owner.session, backend.api, now);
   const ref: LinkRef = { id: record.id, fingerprint: record.fingerprint };
   const bundle = await backend.api.request('GET', `/links/${record.id}`, {}, checkBundle);
   return { ref, bundle };
@@ -4702,7 +4703,9 @@ describe('message times', () => {
     const s = await person(backend, 'sender', clocks.senderDevice ?? clocks.sender);
     const owner: Person = { ...o, messaging: o.open({ messageNow: clocks.owner }) };
     const sender: Person = { ...s, messaging: s.open({ messageNow: clocks.sender }) };
-    const { ref, bundle } = await linkOf(backend, o);
+    // Made at S too: by the real clock, its key could start in an hour that
+    // began after S (since this file loaded), and not be valid yet at S.
+    const { ref, bundle } = await linkOf(backend, o, () => S / 1000);
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     await owner.messaging.sync();
     const mine = await across(sender.db, conv, owner.db);
@@ -4798,6 +4801,70 @@ describe('message times', () => {
     expect(await texts('sender')).toEqual(['hello', 'first', 'second', 'answer']);
     expect((await listMessages(owner.db, mine)).map((m) => m.at)).toEqual([S, S, S, S]);
     expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual([S, S, S, S]);
+  });
+
+  it('shows a reply after what it answers, though the clock it was dated by is a little behind', async () => {
+    // The owner knows the server's clock as four tenths of a second behind
+    // the sender, across a second: 'hello' comes dated a second after the
+    // owner's reply.
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S - 300, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    expect(await texts('sender')).toEqual(['hello', 'hi']);
+    // At the time of what it answers, and taken in after it; sent by their clock.
+    expect((await listMessages(sender.db, conv)).map((m) => [m.at, m.sent])).toEqual([
+      [S, undefined],
+      [S, S - 1000],
+    ]);
+  });
+
+  it('shows what comes after a quick run of ours after it, though ours are dated ahead', async () => {
+    // All in one second: the owner writes two (the second dated a second
+    // ahead), and then the sender writes, dated a second after 'hello'.
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'one');
+    await owner.messaging.send(mine, 'two');
+    await sender.messaging.send(conv, 'three');
+    await owner.messaging.sync();
+    expect(await texts('owner')).toEqual(['hello', 'one', 'two', 'three']);
+  });
+
+  it.each(['reaction', 'edit', 'seen receipt'] as const)('shows a reply after ours though the newest of ours it names is our %s, not a message', async (kind) => {
+    // Clocks alike, all in one second. The owner writes; the sender writes
+    // two more, then sends the other envelope: dated a second apart, so
+    // ahead. The owner's reply names that one as the newest of the sender's
+    // it had (`last`).
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    await sender.messaging.send(conv, 'one');
+    await sender.messaging.send(conv, 'two');
+    const [hello] = await listMessages(sender.db, conv);
+    if (kind === 'reaction') await sender.messaging.react(conv, hello!.id, '👍');
+    if (kind === 'edit') await sender.messaging.edit(conv, hello!.id, 'hello!');
+    if (kind === 'seen receipt') await sender.messaging.markSeen(conv);
+    await owner.messaging.sync();
+    await owner.messaging.send(mine, 'reply');
+    await sender.messaging.sync();
+    expect((await texts('sender')).slice(-3)).toEqual(['one', 'two', 'reply']);
+    // At that one's time, though dated earlier by their clock.
+    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ at: S + 3000, sent: S + 1000 });
+  });
+
+  it("shows a reply no later than it arrived, though it names one of ours dated further ahead", async () => {
+    // The sender's clock was ten minutes fast when it wrote 'hello', and
+    // then set right (more than a minute back: it dates from there again).
+    let clock = S + 600_000 + 100;
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => clock, senderDevice: () => S + 100 });
+    clock = S + 100;
+    // The reply names 'hello' (`last`); a modified app could name it in all it sends.
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    await sender.messaging.send(conv, 'after');
+    const at = async (text: string) => (await listMessages(sender.db, conv)).find((m) => m.text === text)!.at;
+    expect([await at('hello'), await at('hi'), await at('after')]).toEqual([S + 600_000, S, S]);
+    // What the sender writes after it shows after it.
+    expect(await texts('sender')).toEqual(['hi', 'after', 'hello']);
   });
 
   it('takes the later of two edits from the same second, here or not yet, and the same one again changes nothing', async () => {
@@ -4897,6 +4964,8 @@ describe('message times', () => {
     expect(await sentAt(sender, conv)).toBe(S + 1000);
     await sender.messaging.remove(conv, true);
     expect(await sentAt(sender, conv)).toBeUndefined();
+    // Nor are the IDs and times of the last few things sent there kept.
+    expect([await getMeta(sender.db, `sent-ids:${conv}`), await getMeta(owner.db, `sent-ids:${mine}`)]).toEqual([undefined, undefined]);
     // What it sends there next, in the same second, is still dated after the delete (S + 2000), and stays.
     await sender.messaging.send(conv, 'fresh start');
     expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual([S + 3000]);

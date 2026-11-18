@@ -298,18 +298,44 @@ function sentKey(conv: string): string {
   return `sent-at:${conv}`;
 }
 
+function sentIdsKey(conv: string): string {
+  return `sent-ids:${conv}`;
+}
+
+/**
+ * Of how many of the last things this device sent in a conversation (of
+ * any kind) it keeps the envelope's ID and time (takeSentAt): enough for a
+ * run of messages, receipts, reactions and edits sent while the other side
+ * writes. What they write names the newest of ours they had (`last`), and
+ * shows after it (engine.ts, shownAt).
+ */
+export const SENT_KEPT = 10;
+
+/** One of the last things this device sent in a conversation (takeSentAt): its envelope's ID and time. */
+interface SentEnvelope {
+  id: string;
+  at: number;
+}
+
 /**
  * Takes the time for something this device sends in a conversation (`at`):
  * choose gets the time of the last one sent there, from this device (also
  * before a reload, and from any copy of the app), and returns the next.
  * Kept apart from the conversation, under a lock of its own: two sends at
  * once never get the same time, and a send going out (which holds the
- * conversation's lock) doesn't hold up the next one being shown.
+ * conversation's lock) doesn't hold up the next one being shown. With the
+ * envelope's ID, that and its time are kept too, for the last SENT_KEPT.
  */
-export function takeSentAt(db: Database, conv: string, choose: (last: number | undefined) => number): Promise<number> {
+export function takeSentAt(db: Database, conv: string, choose: (last: number | undefined) => number, id?: string): Promise<number> {
   return withLock(sentKey(conv), async () => {
     const next = choose(await getMeta<number>(db, sentKey(conv)));
-    await putMeta(db, sentKey(conv), next);
+    const tx = db.transaction('meta', 'readwrite');
+    await tx.store.put(next, sentKey(conv));
+    if (id !== undefined) {
+      const kept = ((await tx.store.get(sentIdsKey(conv))) as SentEnvelope[] | undefined) ?? [];
+      await tx.store.put([...kept.filter((e) => e.id !== id), { id, at: next }].slice(-SENT_KEPT), sentIdsKey(conv));
+    }
+    await tx.done;
     return next;
   });
 }
@@ -319,17 +345,23 @@ export function lastSentAt(db: Database, conv: string): Promise<number | undefin
   return getMeta<number>(db, sentKey(conv));
 }
 
-/**
- * Deletes when this device last sent something in a conversation
- * (takeSentAt), within a transaction that writes `meta`: with its chat, or
- * with its record. Whatever deletes a conversation's record deletes this in
- * the same transaction, with what it remembers by keyed hashes.
- */
-export function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
-  return meta.delete(sentKey(conv));
+/** The time of something this device sent in a conversation, by its envelope's ID, if it's one of the last SENT_KEPT there (takeSentAt). */
+export async function sentEnvelopeAt(db: Database, conv: string, id: string): Promise<number | undefined> {
+  return ((await getMeta<SentEnvelope[]>(db, sentIdsKey(conv))) ?? []).find((e) => e.id === id)?.at;
 }
 
-/** Forgets when this device last sent something in a conversation: its chat was deleted. */
+/**
+ * Deletes when this device last sent something in a conversation, and the
+ * IDs and times of the last few things (takeSentAt), within a transaction
+ * that writes `meta`: with its chat, or with its record. Whatever deletes a
+ * conversation's record deletes these in the same transaction, with what it
+ * remembers by keyed hashes.
+ */
+export function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
+  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv))]);
+}
+
+/** Forgets when this device last sent something in a conversation, and what (deleteSentAt): its chat was deleted. */
 export function forgetSentAt(db: Database, conv: string): Promise<void> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');

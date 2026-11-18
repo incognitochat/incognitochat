@@ -497,10 +497,20 @@ envelopes in no set order, so it's this, not when they arrive, that keeps
 one side's messages, edits and reactions in order. Versions before this
 one sent the device's own clock, to the millisecond; recipients take both.
 
-The recipient shows a message at its `at`, but never later than the second
-it arrived in, and messages with the same time (from both sides, or from
-versions before this one) in the order they were written or taken in on
-this device. Where envelopes from the same side have the same `at`, the one
+The recipient shows a message at its `at`, with two bounds. It's shown no
+earlier than what it shows the sender had, as the recipient shows those:
+the message it answers (`replyTo`), the envelope `last` names (a message,
+or a receipt, reaction, edit or delete among the last few the recipient
+sent there, whose IDs and times it keeps), and the sender's previous
+message. Written after those, it shows after them, though the sender's
+clock may be a little behind the recipient's. And it's shown no later than
+it arrived: the second it arrived in, or the last thing the recipient sent
+there if a quick run of those was dated ahead of that second, unless that
+is a minute ahead or more (the clock went back, as above). This bound wins
+over the first, so a message can't be pushed later than it arrived by
+naming one dated further ahead. Messages with the same time (from both
+sides, or from versions before this one) show in the order they were
+written or taken in on this device. Where envelopes from the same side have the same `at`, the one
 taken in last counts as the later one: edits and reactions keep it, and so
 does the choice of key and mailbox (Replays and order).
 

@@ -862,19 +862,21 @@ export function createApp(deps: Deps) {
   /**
    * The messages an open chat shows (Screen, conversation): when it opens
    * (shown null), the newest PAGE; as it's redrawn, all from the oldest
-   * shown on, but no more than MAX_SHOWN or as many as were shown (a flood
-   * coming in while it's open pushes the oldest out); with older, PAGE more
-   * than shown, or, given a message's ID, all from that one on. Ours still
-   * going out, or failed (to send again), from before those, show first
-   * however old: the rest is reckoned without them. With the older messages
-   * those answer, for their quotes.
+   * shown on, or from the first if all were shown (so one that comes dated
+   * before those, out of order from the inbox, say, shows too), but no more
+   * than MAX_SHOWN or as many as were shown (a flood coming in while it's
+   * open pushes the oldest out); with older, PAGE more than shown, or, given a
+   * message's ID, all from that one on. Ours still going out, or failed (to
+   * send again), from before those, show first however old: the rest is
+   * reckoned without them. With the older messages those answer, for their
+   * quotes.
    */
   async function chatPage(
     conv: string,
-    shown: MessageView[] | null,
+    shown: { messages: MessageView[]; more: boolean } | null,
     older?: true | string,
   ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] }> {
-    const base = shown?.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
+    const base = shown?.messages.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
     let since = base?.[0]?.at;
     if (typeof older === 'string') {
       const target = await deps.db.get('messages', [conv, older]);
@@ -883,6 +885,9 @@ export function createApp(deps: Deps) {
     let page: { messages: MessageView[]; more: boolean };
     if (since === undefined || older === true) {
       page = await pageMessages(deps.db, conv, { count: (base?.length ?? 0) + PAGE });
+    } else if (older === undefined && shown?.more === false) {
+      // All of it shown: the newest of all of it, not only from the oldest shown on.
+      page = await pageMessages(deps.db, conv, { count: Math.max(base!.length, MAX_SHOWN) });
     } else {
       // A flood coming in while it's open: only the newest are read.
       page = await pageMessages(deps.db, conv, { since, ...(older === undefined ? { most: Math.max(base!.length, MAX_SHOWN) } : {}) });
@@ -907,7 +912,7 @@ export function createApp(deps: Deps) {
     for (let tries = 0; ; tries++) {
       const before = currentScreen();
       if (before.kind !== 'conversation' || before.id !== conv) return;
-      const page = await chatPage(conv, before.messages);
+      const page = await chatPage(conv, before);
       const now = currentScreen();
       if (now.kind !== 'conversation' || now.id !== conv) return;
       // Shown otherwise meanwhile (older ones loaded, say): read again for that.
@@ -927,7 +932,7 @@ export function createApp(deps: Deps) {
     if (current.kind !== 'conversation' || !current.more || loadingOlder) return false;
     loadingOlder = true;
     try {
-      const page = await chatPage(current.id, current.messages, until ?? true);
+      const page = await chatPage(current.id, current, until ?? true);
       const now = currentScreen();
       if (now.kind !== 'conversation' || now.id !== current.id) return false;
       screen.value = { ...now, ...page };
