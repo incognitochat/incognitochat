@@ -9,8 +9,12 @@
 //
 // An encryption key's signature covers devicesig.Message(LabelLinkKey,
 // suite, key, from, until), with times as 8-byte big-endian Unix seconds on a
-// whole hour. Signing keys are never reused between links, so the link ID
-// needn't be signed.
+// whole hour. The link ID isn't signed: a signing key belongs to one account,
+// which has one link at a time and keeps the key when it replaces the link,
+// and the server refuses a link whose signing key another account's link has
+// (directory.ErrKeyTaken), so a sender's tag, made from the key's
+// fingerprint, differs on every account's link. Links made before the server
+// checked this are covered from their next key rotation or replacement.
 package links
 
 import (

@@ -16,6 +16,7 @@ import (
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
@@ -384,5 +385,80 @@ func TestLinkChangesPerDay(t *testing.T) {
 	// The link is untouched.
 	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+current.id, nil, false); status != http.StatusOK {
 		t.Fatalf("link after the limit: %d", status)
+	}
+}
+
+// A link signing key is one account's: another account's link with it, a
+// copy of a bundle or a key shared on purpose, is refused, so a sender's
+// tag never matches across accounts. The owner keeps it when it replaces
+// its link.
+func TestSigningKeyIsOneAccounts(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	owner, other := h.account(t, userID), h.account(t, userID+1)
+	l := newLinkKeys(t)
+	create := l.create(t, h.now)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", create, true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+
+	// A copy of the bundle under another ID, and new keys signed with the
+	// same signing key.
+	clone := map[string]any{"id": b64(randomBytes(t, 8)), "signingKey": create["signingKey"], "keys": create["keys"]}
+	status, out := h.as(t, other, http.MethodPost, "/links", clone, true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	shared := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	status, out = h.as(t, other, http.MethodPost, "/links", shared.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	own := newLinkKeys(t)
+	if status, out := h.as(t, other, http.MethodPost, "/links", own.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("other's own link: %d %v", status, out)
+	}
+	body := shared.create(t, h.now)
+	body["replaces"] = own.id
+	status, out = h.as(t, other, http.MethodPost, "/links", body, true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+own.id, nil, false); status != http.StatusOK {
+		t.Fatalf("other's link after a refused replacement: %d", status)
+	}
+
+	// The owner replaces its link, keeping the key.
+	next := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	body = next.create(t, h.now)
+	body["replaces"] = l.id
+	if status, out := h.as(t, owner, http.MethodPost, "/links", body, true); status != http.StatusCreated {
+		t.Fatalf("replace keeping the key: %d %v", status, out)
+	}
+
+	// A link from before keys were recorded, whose key another account has
+	// now, can't be rotated.
+	early := newLinkKeys(t)
+	h.dir.links[early.id] = &memLink{owner: other.d.account, link: directory.Link{ID: early.id, SigningKey: raw(t, l.lsk), Mailbox: ids.New()}}
+	status, out = h.as(t, other, http.MethodPut, "/links/"+early.id+"/keys", map[string]any{"keys": []any{l.encryptionKey(t, h.now)}}, true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+}
+
+// The same, through the DynamoDB directory: refused while the owner's link
+// has the key, taken once the owner revokes it.
+func TestSigningKeyTakenInTheDirectory(t *testing.T) {
+	client := dynamotest.Client(t)
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Directory = &directory.Store{DB: client, Table: dynamotest.Table(t, client)}
+	h.router = httpapi.NewRouter()
+	h.server.Routes(h.router)
+	owner, other := h.account(t, userID), h.account(t, userID+1)
+	l := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	shared := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	status, out := h.as(t, other, http.MethodPost, "/links", shared.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	if status, out := h.as(t, owner, http.MethodDelete, "/links/"+l.id, nil, true); status != http.StatusOK {
+		t.Fatalf("revoke: %d %v", status, out)
+	}
+	if status, out := h.as(t, other, http.MethodPost, "/links", shared.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("a revoked link's key: %d %v", status, out)
 	}
 }

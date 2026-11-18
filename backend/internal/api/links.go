@@ -87,7 +87,9 @@ const LinkChangesPerDay = 5
 // createLink stores a link's bundle. The client chooses the link ID, so it
 // can sign and keep the link's keys before asking. An account has one link;
 // replacing it gives a new address, and the client keeps the signing key, so
-// senders' tags (and so blocks and labels) carry over.
+// senders' tags (and so blocks and labels) carry over. No other account's
+// link may have that signing key, or senders' tags would match across
+// accounts: signing_key_taken.
 func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "POST /links"
 	var in createLinkRequest
@@ -129,6 +131,9 @@ func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) 
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	case errors.Is(err, directory.ErrLimit):
 		return httpapi.Error(http.StatusConflict, "link_limit")
+	case errors.Is(err, directory.ErrKeyTaken):
+		// Another account's link has this signing key.
+		return httpapi.Error(http.StatusConflict, "signing_key_taken")
 	case errors.Is(err, directory.ErrConflict):
 		// The ID is taken (or a concurrent change won): pick another and retry.
 		return httpapi.Error(http.StatusConflict, "conflict")
@@ -168,6 +173,11 @@ func (s *Server) setLinkKeys(ctx context.Context, req httpapi.Request, c caller)
 	if errors.Is(err, directory.ErrNotFound) {
 		// Someone else's link answers exactly like a missing one.
 		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	if errors.Is(err, directory.ErrKeyTaken) {
+		// A link from before signing keys were recorded, whose key another
+		// account's link has now.
+		return httpapi.Error(http.StatusConflict, "signing_key_taken")
 	}
 	if err != nil {
 		return s.internal(route, err)

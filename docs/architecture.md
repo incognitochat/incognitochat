@@ -127,7 +127,9 @@ key (signed by it), and the link's intro mailbox.
   when you tap Join.
 - An account has one link at a time, and can replace it: the old link stops
   working at once, the new one keeps the same fingerprint, so blocks and labels
-  carry over.
+  carry over. No other account's link may have that signing key (the server
+  refuses it), so a sender's tag, made from the fingerprint, differs on every
+  account's link.
 - While the service is invite-only, owning a link needs an invitation.
   Anyone with Telegram can set up an account to write to a link.
 

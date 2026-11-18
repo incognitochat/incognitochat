@@ -175,8 +175,8 @@ func TestDeleteWhenTheTelegramItemIsNotItsOwn(t *testing.T) {
 }
 
 // A record in an account's partition that names someone else's mailbox,
-// link or code (nothing makes one, but nothing may trust it either) goes
-// when the account is deleted or replaced; their item stays.
+// link, code or signing key (nothing makes one, but nothing may trust it
+// either) goes when the account is deleted or replaced; their item stays.
 func TestStepsSpareOthersItems(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
@@ -199,6 +199,10 @@ func TestStepsSpareOthersItems(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		// And one naming the victim's signing key.
+		if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: linkRecord(accountID, linkID(), l.SigningKey)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	intact := func(how string) {
 		t.Helper()
@@ -212,6 +216,9 @@ func TestStepsSpareOthersItems(t *testing.T) {
 		}
 		if _, err := s.get(ctx, codePK("abcdefgh"), skCode, time.Time{}); err != nil {
 			t.Fatalf("%s: the victim's code: %v", how, err)
+		}
+		if got := keyOwner(t, client, s.Table, l.SigningKey); got != victim.ID {
+			t.Fatalf("%s: the victim's signing key's item names %q", how, got)
 		}
 	}
 

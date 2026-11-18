@@ -40,6 +40,9 @@ describe('api', () => {
     const err = await api.post('/session', {}, checkTokenResponse).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ status: 410, code: 'account_replaced' });
+    // Another account's link has the link signing key (POST /links).
+    const taken = createApi('https://api.example', fake(409, '{"error":"signing_key_taken"}'));
+    expect(await taken.post('/links', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'signing_key_taken' });
 
     const odd = createApi('https://api.example', fake(400, '{"error":"<script>"}'));
     expect(await odd.post('/x', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ code: 'unknown' });

@@ -6,10 +6,11 @@
 //	A#<account>  A           account: account key (ak), Telegram hash (th)
 //	A#<account>  D#<device>  device: signing key (k)
 //	A#<account>  I#<code>    marks an invitation code the account made (invitations.go)
-//	A#<account>  K#<link>    marks a link the account owns (links.go)
+//	A#<account>  K#<link>    marks a link the account owns, with its signing key's fingerprint (f) (links.go)
 //	A#<account>  L           signed device list: bytes (b), signature (s), sequence (q)
 //	A#<account>  M#<mailbox> marks a mailbox the account owns (mailboxes.go)
 //	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek)
+//	F#<fingerprint> F        one account per link signing key: the account (a) (links.go)
 //	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r)
 //	S#levels     S           invitation allowance per level (m), version (v)
 //	S#switches   S           the operator's emergency switches (switches.go)
@@ -92,6 +93,9 @@ const (
 	// something in its partition checks: an account, not the marker of a
 	// replaced one (which has no account key), and not being deleted.
 	live = "attribute_exists(ak) AND attribute_not_exists(dl)"
+	// ended is its opposite: gone (a missing item has no attributes),
+	// replaced, or being deleted. None of these is ever undone.
+	ended = "attribute_not_exists(ak) OR attribute_exists(dl)"
 
 	// labelTelegram keys the hash of Telegram user IDs.
 	labelTelegram = "incognitochat/v2/telegram-id"
@@ -318,13 +322,14 @@ const (
 // n; turns old's item into a marker (g = "r") that expires after
 // ReplacedTTL, and gives its device keys the same expiry, so its devices
 // can still be told; deletes its device list and its links (their bundles
-// then answer "not found"); and lists old among n's leftovers, with any old
-// had itself. From then on nothing else of old is used either: deliveries
-// to its mailboxes find no live owner (Recipients), nor do its invitation
-// codes (Redeem), and nothing new joins its partition (making anything
-// there checks its item, now a marker). What is left goes in steps
-// (CleanUp). It returns ErrConflict if the Telegram user's account changed
-// since old was read, or one of its links did.
+// then answer "not found", and their signing keys are free again); and
+// lists old among n's leftovers, with any old had itself. From then on
+// nothing else of old is used either: deliveries to its mailboxes find no
+// live owner (Recipients), nor do its invitation codes (Redeem), and
+// nothing new joins its partition (making anything there checks its item,
+// now a marker). What is left goes in steps (CleanUp). It returns
+// ErrConflict if the Telegram user's account changed since old was read,
+// or one of its links did.
 //
 // An old account being deleted (its own DELETE /account started) keeps no
 // marker: its item and devices become stubs with no keys (dl), so its device
@@ -403,22 +408,30 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 
 // endLinks returns the transaction items that delete an account's links
 // (at most maxSwapLinks; the steps take any more): each link the account
-// owns, only while it still does, and the account's record of it. A record
+// owns, only while it still does, the item recording its signing key as
+// the account's (releaseKey), and the account's record of it. A record
 // that names a link the account doesn't own (which nothing makes) goes
-// without it.
+// without it, and a signing key another account has keeps its item.
 func (s *Store) endLinks(ctx context.Context, accountID string) ([]types.TransactWriteItem, error) {
 	pk := accountPK(accountID)
-	records, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk", maxSwapLinks)
+	records, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk, f", maxSwapLinks)
 	if err != nil {
 		return nil, err
 	}
 	var writes []types.TransactWriteItem
+	released := map[string]bool{}
 	for _, r := range records.items {
 		sk, _ := str(r, "sk")
 		id := strings.TrimPrefix(sk, linkPrefix)
 		l, err := s.get(ctx, linkPK(id), skLink, time.Time{})
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
+		}
+		// The record's fingerprint, and the link's (a link from before
+		// records noted it).
+		var fingerprints []string
+		if f, ok := str(r, "f"); ok {
+			fingerprints = append(fingerprints, f)
 		}
 		if owner, _ := str(l, "a"); owner == accountID {
 			writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{
@@ -427,6 +440,20 @@ func (s *Store) endLinks(ctx context.Context, accountID string) ([]types.Transac
 				ConditionExpression:       aws.String("a = :a"),
 				ExpressionAttributeValues: attrs{":a": sv(accountID)},
 			}})
+			if k, ok := bin(l, "k"); ok {
+				fingerprints = append(fingerprints, devicesig.Fingerprint(k))
+			}
+		}
+		for _, f := range fingerprints {
+			if released[f] {
+				continue // a transaction takes each item once
+			}
+			released[f] = true
+			release, err := s.releaseKey(ctx, accountID, f)
+			if err != nil {
+				return nil, err
+			}
+			writes = append(writes, release...)
 		}
 		writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, sk)}})
 	}
@@ -529,14 +556,15 @@ func (s *Store) expireDevices(ctx context.Context, accountID string, marker map[
 }
 
 // MarkDeleting marks an account as being deleted (dl) and deletes its link
-// (its bundle then answers "not found"), in one transaction of a few
-// writes: the first thing DELETE /account does. From then on nothing is
-// delivered to it (Recipients), its invitation codes stop working
-// (Redeem), nothing new joins its partition (live), and it takes no request
-// but the rest of its deletion (api), which Delete carries out in steps. It
-// isn't undone. It returns ErrNotFound if the account is gone or replaced,
-// and ErrConflict if its links changed since it read them (lq): a link made
-// meanwhile isn't left behind; asking again marks it.
+// (its bundle then answers "not found", and its signing key is free
+// again), in one transaction of a few writes: the first thing DELETE
+// /account does. From then on nothing is delivered to it (Recipients), its
+// invitation codes stop working (Redeem), nothing new joins its partition
+// (live), and it takes no request but the rest of its deletion (api), which
+// Delete carries out in steps. It isn't undone. It returns ErrNotFound if
+// the account is gone or replaced, and ErrConflict if its links changed
+// since it read them (lq): a link made meanwhile isn't left behind; asking
+// again marks it.
 func (s *Store) MarkDeleting(ctx context.Context, accountID string) error {
 	acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
 	if err != nil {
@@ -753,50 +781,56 @@ const sharedParallel = 8
 // endSome deletes up to about max items an account owns, never its item or
 // its devices: links first, so first messages stop at once, then the rest
 // in sort order (invitation codes, the device list, mailboxes). Each goes
-// with its shared item, if any (a link's bundle, a code, a mailbox), which
-// is deleted first, and only if the account owns it (a record that names
-// someone else's goes without it), so a step that fails halfway leaves the
-// record, and the next one finds and finishes it.
+// with its shared items, if any (a link's bundle and its signing key's
+// item, a code, a mailbox), which are deleted first, and only if the
+// account owns them (a record that names someone else's goes without
+// them), so a step that fails halfway leaves the record, and the next one
+// finds and finishes it.
 //
 // It reads only what one step deletes, so a step costs about the same
 // however much is left: about max write units and a few read units. It
 // reports whether more may be left.
 func (s *Store) endSome(ctx context.Context, accountID string, max int) (bool, error) {
 	pk := accountPK(accountID)
-	links, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk", max)
+	links, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk, f", max)
 	if err != nil {
 		return false, err
 	}
-	rest, err := s.query(ctx, pk, "sk > :v", afterDevices, "sk", max)
+	rest, err := s.query(ctx, pk, "sk > :v", afterDevices, "sk, f", max)
 	if err != nil {
 		return false, err
 	}
-	var sks []string
+	var records []map[string]types.AttributeValue
 	listed := map[string]bool{}
 	for _, it := range append(links.items, rest.items...) {
 		if sk, ok := str(it, "sk"); ok && !listed[sk] {
 			listed[sk] = true
-			sks = append(sks, sk)
+			records = append(records, it)
 		}
 	}
 	var shared []ownedItem
 	var own []types.WriteRequest
 	n, i := 0, 0
-	for ; i < len(sks) && (n == 0 || n+2 <= max); i++ {
-		sk := sks[i]
+	for ; i < len(records); i++ {
+		sk, _ := str(records[i], "sk")
+		var theirs []ownedItem
 		switch {
 		case strings.HasPrefix(sk, linkPrefix):
-			shared = append(shared, ownedItem{key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), "a"})
-			n++
+			theirs = append(theirs, ownedItem{key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), "a"})
+			if f, ok := str(records[i], "f"); ok {
+				theirs = append(theirs, ownedItem{key(keyPK(f), skKey), "a"})
+			}
 		case strings.HasPrefix(sk, mailboxPrefix):
-			shared = append(shared, ownedItem{key(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), "o"})
-			n++
+			theirs = append(theirs, ownedItem{key(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), "o"})
 		case strings.HasPrefix(sk, codePrefix):
-			shared = append(shared, ownedItem{key(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), "o"})
-			n++
+			theirs = append(theirs, ownedItem{key(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), "o"})
 		}
+		if n > 0 && n+len(theirs)+1 > max {
+			break
+		}
+		shared = append(shared, theirs...)
 		own = append(own, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(pk, sk)}})
-		n++
+		n += len(theirs) + 1
 	}
 	if err := s.deleteOwned(ctx, accountID, shared); err != nil {
 		return false, err
@@ -804,7 +838,7 @@ func (s *Store) endSome(ctx context.Context, accountID string, max int) (bool, e
 	if err := s.batchWrite(ctx, own); err != nil {
 		return false, err
 	}
-	return i < len(sks) || links.more || rest.more, nil
+	return i < len(records) || links.more || rest.more, nil
 }
 
 // ownedItem is a shared item, and the attribute that names its owner.

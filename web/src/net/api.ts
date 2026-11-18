@@ -21,6 +21,7 @@ export type ErrorCode =
   | 'invitation_required'
   | 'invalid_link'
   | 'link_limit'
+  | 'signing_key_taken'
   | 'no_invitations_left'
   | 'invalid_invitation'
   | 'already_member'
@@ -57,6 +58,7 @@ const CODES = new Set<string>([
   'invitation_required',
   'invalid_link',
   'link_limit',
+  'signing_key_taken',
   'no_invitations_left',
   'invalid_invitation',
   'already_member',

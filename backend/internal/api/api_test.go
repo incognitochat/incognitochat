@@ -411,9 +411,23 @@ func (m *memDirectory) Grant(_ context.Context, linkID string, n int) error {
 	return nil
 }
 
+// keyTaken reports whether a live account other than account has a link
+// with the signing key (directory.ErrKeyTaken).
+func (m *memDirectory) keyTaken(account string, signingKey []byte) bool {
+	for _, l := range m.links {
+		if a, ok := m.accounts[l.owner]; ok && l.owner != account && !a.replaced && !a.deleting && bytes.Equal(l.link.SigningKey, signingKey) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *memDirectory) CreateLink(_ context.Context, account string, l directory.Link, max int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
+	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
 	}
@@ -433,6 +447,9 @@ func (m *memDirectory) ReplaceLink(_ context.Context, account, oldID string, l d
 	old, ok := m.links[oldID]
 	if !ok || old.owner != account {
 		return directory.ErrNotFound
+	}
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
 	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
@@ -464,6 +481,9 @@ func (m *memDirectory) SetLinkKeys(_ context.Context, account, id string, keys [
 	l, ok := m.links[id]
 	if !ok || l.owner != account {
 		return directory.ErrNotFound
+	}
+	if m.keyTaken(account, l.link.SigningKey) {
+		return directory.ErrKeyTaken
 	}
 	l.link.Keys = keys
 	return nil

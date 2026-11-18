@@ -25,7 +25,9 @@ version 2 moves all content out of Telegram and encrypts it on the device.
   directory to show which accounts got messages, or had the app open, when.
 - **Anonymous senders stay anonymous**, also to recipients who compare notes.
   Someone's anonymous conversation with you can't be linked to the
-  conversation they have with you through their own link.
+  conversation they have with you through their own link, and the tag their
+  app adds to a first message differs on every account's link (no two
+  accounts' links share a signing key).
 - **The app's code is verifiable**: built in public, reproducibly, with
   published hashes and provenance, and served the same to everyone
   ([verifying.md](verifying.md)).
@@ -281,6 +283,16 @@ it. This is how close it gets.
   the same person through the same link, using a tag the sender's app adds. A
   modified app could send a random tag and appear as someone new. Per-link
   caps, budgets and replacing the link bound this.
+- **Distinct sender tags rely on the server.** A sender's tag is the same on
+  every link with one signing key, so the server refuses a link whose signing
+  key another account's link has ([protocol.md](protocol.md#links)): link
+  owners who compare notes see different tags for the same sender. A sender's
+  app can't check this, since a replaced link shows the same key under a new
+  ID too, so an operator that let several accounts share a key would let
+  their owners match a sender who writes to each of them. Links made before
+  the server checked this are covered from their next key rotation or
+  replacement; until then another account could still take such a link's
+  key first, and the earlier link then can't be rotated or replaced with it.
 - **A blocked sender may still trigger a notice**: the server can't tell a
   blocked first message from any other, so the owner may be notified of a
   message their app then drops.

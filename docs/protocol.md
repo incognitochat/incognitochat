@@ -34,7 +34,7 @@ record exactly when anything happened.
 |---|---|---|
 | Account key | ECDSA P-256 | Copyable (sealed in the vault), never shown to other users |
 | Device signing key | ECDSA P-256 | Non-extractable, one device |
-| Link signing key | ECDSA P-256 | One per link, copyable |
+| Link signing key | ECDSA P-256 | One per account, kept when its link is replaced; no other account's link may have it; copyable |
 | Link encryption key | ECDH P-256 | Signed by the link signing key, rotated |
 | Conversation key | ECDH P-256 | One per conversation per side, rotated |
 
@@ -279,6 +279,29 @@ fingerprint, so the same people keep the same tags across replacements, which
 keeps blocks and labels. Conversations carry on, since after the first message
 they don't go through the link; a sender the owner hasn't answered yet keeps
 writing to the old intro mailbox until the owner replies.
+
+**One account per signing key.** Since a sender's tag is the same on every
+link with one signing key, accounts whose links shared a key could compare
+the tags they get and match a sender who writes to each of them. So the
+server records, with each link, that its signing key (by fingerprint) is
+that account's, and refuses another account's link with it: `POST /links`,
+with or without `replaces`, answers `409 {"error": "signing_key_taken"}`,
+and so does `PUT /links/{id}/keys` for a link whose key another account has
+(below). The same account may use its key again: rotating, replacing, or
+revoking and creating. The record goes with the account's link that has the
+key: when the link is revoked, replaced by one with another key, or ends
+with its account (deleted or replaced, in the write that ends it). A record
+left by an account that ended is taken over by the next account to use the
+key, so none blocks a key for good. A new account always makes a new
+signing key, so for links made since, `signing_key_taken` comes only from a
+modified app or a copied bundle; the app shows it as a failed request.
+
+Links made before the server recorded keys get their record at their next
+key rotation or replacement. Until then (at most about 9 days, for an app
+opened in that time), another account could still take such a link's key first; the
+earlier link then keeps its current keys until they expire but can't be
+rotated (`signing_key_taken`), or replaced with that key. It can still be
+revoked, and its account ended, without touching the other account's record.
 
 **A lost answer.** The client picks the new link's ID, and makes and signs
 its keys, before it asks. Without an answer (a timeout, a dropped

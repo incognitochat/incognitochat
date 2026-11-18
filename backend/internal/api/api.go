@@ -15,6 +15,7 @@
 //	invitation_required                   only members and admins can own links while invite-only
 //	invalid_link                          the link ID or bundle is malformed or badly signed
 //	link_limit                            the account has a link already (replace it instead)
+//	signing_key_taken                     another account's link has this link signing key (each account's links need their own)
 //	no_invitations_left                   the member has fewer invitations left than asked for
 //	invalid_invitation                    no such invitation code, or it is used up
 //	already_member                        the account already joined through an invitation, or is an admin
