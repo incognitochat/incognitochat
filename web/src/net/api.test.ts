@@ -74,6 +74,28 @@ describe('api', () => {
     }
   });
 
+  it('reads how long the server asks to wait (Retry-After), and nothing odd', async () => {
+    const answer = (retryAfter: string | null): Fetch => async () =>
+      new Response('{"error":"unavailable"}', { status: 503, headers: retryAfter === null ? {} : { 'Retry-After': retryAfter } });
+    const err = (await createApi('https://api.example', answer('2'))
+      .request('GET', '/inbox', {}, checkTokenResponse)
+      .catch((e: unknown) => e)) as ApiError;
+    expect(err).toMatchObject({ status: 503, code: 'unavailable', retryAfter: 2 });
+    for (const [header, want] of [
+      [null, undefined],
+      ['', undefined],
+      ['-1', undefined],
+      ['1.5', undefined],
+      ['Wed, 21 Oct 2026 07:28:00 GMT', undefined],
+      ['999999999', 86_400],
+    ] as const) {
+      const odd = (await createApi('https://api.example', answer(header))
+        .request('GET', '/inbox', {}, checkTokenResponse)
+        .catch((e: unknown) => e)) as ApiError;
+      expect(odd.retryAfter).toBe(want);
+    }
+  });
+
   it('reports unreachable servers and unexpected bodies as NetworkError', async () => {
     const down = createApi('https://api.example', async () => {
       throw new TypeError('Failed to fetch');

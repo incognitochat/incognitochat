@@ -5,6 +5,7 @@ go 1.27.0
 toolchain go1.27.4
 
 require (
+	filippo.io/bigmod v0.1.0
 	github.com/aws/aws-lambda-go v1.55.1
 	github.com/aws/aws-sdk-go-v2 v1.47.7
 	github.com/aws/aws-sdk-go-v2/config v1.33.15
@@ -14,6 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.114.2
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.8
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.81.4
+	github.com/aws/smithy-go v1.28.8
 	github.com/cloudflare/circl v1.6.5
 )
 
@@ -32,5 +34,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.39.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.8 // indirect
-	github.com/aws/smithy-go v1.28.8 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )

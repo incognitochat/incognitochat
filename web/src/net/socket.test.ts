@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPushSocket, HEARTBEAT_MS, REOPEN_MS, REOPEN_RETRY_MS } from './socket';
+import { createPushSocket, HEARTBEAT_MS, MAX_REOPEN_RETRY_MS, REOPEN_MS, REOPEN_RETRY_MS } from './socket';
 
 class FakeSocket {
   static CONNECTING = 0;
@@ -79,6 +79,25 @@ describe('push socket', () => {
     expect(ws.sent).toEqual(['{"action":"ping"}', '{"action":"ping"}']);
   });
 
+  it('says when a socket opens, apart from hints, if asked', async () => {
+    let hints = 0;
+    let opens = 0;
+    const socket = createPushSocket({
+      url: 'wss://ws.example/live',
+      token: async () => 'v1.token',
+      onHint: () => hints++,
+      onOpen: () => opens++,
+      WebSocket: FakeSocket as unknown as typeof WebSocket,
+    });
+    socket.start();
+    await flush();
+    FakeSocket.all[0]!.open();
+    expect([opens, hints]).toEqual([1, 0]);
+    FakeSocket.all[0]!.receive('{"t":"sync"}');
+    expect([opens, hints]).toEqual([1, 1]);
+    socket.stop();
+  });
+
   it('replaces an open socket about every half hour, opening the new one first', async () => {
     const { socket, hints } = make();
     socket.start();
@@ -130,6 +149,34 @@ describe('push socket', () => {
     FakeSocket.all[2]!.open();
     expect(first.readyState).toBe(FakeSocket.CLOSED);
     expect(socket.connected).toBe(true);
+  });
+
+  it('tries a refused replacement again less often each time, and starts over once one opens', async () => {
+    const { socket } = make();
+    socket.start();
+    await flush();
+    FakeSocket.all[0]!.open();
+    await vi.advanceTimersByTimeAsync(REOPEN_MS * 1.15);
+    // Refused four times: tried again after about 1, 2, 4 and 4 minutes.
+    for (const minutes of [1, 2, 4, 4]) {
+      FakeSocket.all.at(-1)!.drop();
+      const tries = FakeSocket.all.length;
+      await vi.advanceTimersByTimeAsync(minutes * REOPEN_RETRY_MS * 0.85);
+      expect(FakeSocket.all).toHaveLength(tries);
+      await vi.advanceTimersByTimeAsync(minutes * REOPEN_RETRY_MS * 0.3);
+      expect(FakeSocket.all).toHaveLength(tries + 1);
+    }
+    expect(MAX_REOPEN_RETRY_MS).toBe(4 * REOPEN_RETRY_MS);
+    // Through: the old one goes, and the next replacement's retry is a minute again.
+    FakeSocket.all.at(-1)!.open();
+    expect(FakeSocket.all[0]!.readyState).toBe(FakeSocket.CLOSED);
+    await vi.advanceTimersByTimeAsync(REOPEN_MS * 1.15);
+    FakeSocket.all.at(-1)!.drop();
+    const tries = FakeSocket.all.length;
+    await vi.advanceTimersByTimeAsync(REOPEN_RETRY_MS * 1.15);
+    expect(FakeSocket.all).toHaveLength(tries + 1);
+    expect(socket.connected).toBe(true);
+    socket.stop();
   });
 
   it('drops a replacement still opening when hidden', async () => {

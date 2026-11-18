@@ -16,9 +16,11 @@ locals {
     api = {
       timeout = 10
       # Measured on dev at 128 MB: most calls take ~20 ms waiting on DynamoDB,
-      # but a batch of 20 send tokens (RSA signing, pure CPU) took ~4.5 s.
-      # 256 MB doubles the CPU share; slow requests are logged with their
-      # route and duration (internal/api) to size this from data.
+      # but a batch of 20 send tokens (RSA signing, pure CPU) took ~4.5 s,
+      # and ~2.2 s at 256 MB. That was before signing used CRT, about 1.9
+      # times less CPU on arm64 (internal/tokens): measure again before
+      # resizing. 256 MB doubles the CPU share; slow requests are logged
+      # with their route and duration (internal/api) to size this from data.
       memory = 256
       # About 30 ms a request: room for roughly 3,000 requests a second.
       concurrency = 100
@@ -449,7 +451,11 @@ resource "aws_lambda_function_url" "api" {
     # for apps built before it); x-amz-content-sha256 is the body's hash,
     # which Lambda needs once CloudFront signs requests to this URL.
     allow_headers = ["authorization", "content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
-    max_age       = 3600
+    # So the app can read how long to wait after 503 unavailable or
+    # daily_limit; a browser hides other headers from a page on another
+    # origin.
+    expose_headers = ["retry-after"]
+    max_age        = 3600
   }
 }
 

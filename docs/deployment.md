@@ -249,13 +249,23 @@ written through Terraform's write-only arguments, so they never land in
 Terraform state or plans. Each function's role can read only the parameters
 it needs: only `bot` and `notify` can read the bot token.
 
+Each new instance of a function reads its parameters once, as it starts.
+SSM serves an account 40 such calls a second by default, so when many
+instances start at once (a deploy, a sudden rise in use) some are
+throttled: a function tries each call up to 5 times, after random waits
+that grow, within 4 seconds, before it gives up (and the request that
+started it fails).
+
 ## Cost guards
 
 The tables are on-demand, each capped at 400 read and 200 write request
 units a second in production, and at 200 and 100 in any other environment
 (`TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS`). Past a cap a table
 refuses requests, which cost nothing, and its `<table>-table-throttles`
-alarm fires. The caps bound the tables' bill. At eu-west-1's on-demand
+alarm fires. The functions then fail such calls fast (two tries, at most
+200 ms apart), the API answers `503 unavailable` with `Retry-After`, and
+apps back off their background syncs
+([protocol.md](protocol.md#registration-and-sessions), Overload). The caps bound the tables' bill. At eu-west-1's on-demand
 prices ($0.1415 per million read units, $0.705 per million write units):
 
 | | One table at both caps, a day | All three, a day |
