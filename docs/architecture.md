@@ -190,6 +190,18 @@ secret: one person keeps the same label through the same link.
 - **Key rotation:** conversation and link encryption keys are replaced every
   6 to 9 days, each on its own random schedule, and old private keys are
   deleted 35 days later.
+- **Link changes whose answer is lost:** a new link or link key is kept on
+  the device (sealed, indexed, and noted) before it's sent. Without an
+  answer, the app learns from the link's bundle whether the server made the
+  change, and takes that. The bundle read is eventually consistent, so "not
+  there" counts only 10 minutes after the change was last sent. A new
+  link's key is deleted when the server refuses the request, when that
+  time is up and the bundle still doesn't show it, when the ID turns out
+  to be someone else's, or when the key was never sealed (so the request
+  never went). A link key that wasn't taken is kept 35 days, like a
+  replaced one. When the user creates or replaces again meanwhile, the new
+  link is sent again with the same ID, which the server can't make twice
+  ([protocol.md](protocol.md#links), A lost answer).
 
 ## Sending, delivery and notices
 
@@ -200,7 +212,9 @@ secret: one person keeps the same label through the same link.
   buys at most three write units), not just how many there are. Tokens are
   RSA blind signatures (RFC 9474, in Privacy Pass's shape): the app fetches
   a batch while logged in (at most 1,000 a day), and the server can't link
-  a spent token to the account it signed it for. The issuer's public key is
+  a spent token to the account it signed it for. A token the server has
+  seen with one send is never used for another, even if the send failed,
+  so no token ties two sends together. The issuer's public key is
   published in [`web/issuer-keys.json`](../web/issuer-keys.json), and the
   app accepts no other, so the server can't tell users apart by key.
 - **Media tokens** pay for uploads the same way, one per started MiB, from a

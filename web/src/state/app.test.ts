@@ -912,6 +912,44 @@ describe('links', () => {
     expect(home(owner.app.screen.value).account?.canCreateLinks).toBe(false);
   });
 
+  it('shows a link the server made though the answer was lost, once upkeep finds it, here and in other copies', async () => {
+    const account: Outcome[] = [];
+    const server = fakeServer({ account });
+    const owner = await registered(server.api);
+    // Made on the server, but the answer is lost.
+    const request = server.api.request;
+    server.api.request = async function (method, path, init, check) {
+      if (method !== 'POST' || path !== '/links') return request(method, path, init, check);
+      server.api.request = request;
+      await request(method, path, init, check);
+      throw new NetworkError('answer lost');
+    } as Api['request'];
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'network', links: [] });
+    const [made] = [...server.bundles.keys()];
+
+    // The next launch: upkeep runs in the background soon after it opens.
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const { app, broadcasts } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db, issuer, background: true });
+      await app.start();
+      random.mockRestore();
+      expect(home(app.screen.value).links).toEqual([]);
+      const before = broadcasts.length;
+      await vi.waitFor(() => expect(home(app.screen.value).links.map((l) => l.id)).toEqual([made]), { timeout: 4_000, interval: 50 });
+      expect(broadcasts.slice(before)).toContainEqual({ type: 'data-changed' });
+      // Stops the background (and so this test's timers).
+      account.push(new ApiError(401, 'login_refused'));
+      await app.home();
+      expect(app.screen.value.kind).toBe('signed-out');
+    } finally {
+      random.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('continues to a link opened before setup', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);

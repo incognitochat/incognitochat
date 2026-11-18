@@ -504,6 +504,11 @@ export function createApp(deps: Deps) {
           onResume: () => {
             if (backgroundStarted) backgroundSync();
           },
+          // A link the server made though its answer was lost: shown here and in other copies.
+          onLinks: () => {
+            deps.broadcast({ type: 'data-changed' });
+            void refresh();
+          },
         });
       } catch {
         // Without a usable issuer key the app still works, but can't send.
@@ -660,7 +665,7 @@ export function createApp(deps: Deps) {
   async function refresh(): Promise<void> {
     const current = screen.value;
     if (current.kind === 'home' && !current.busy) {
-      screen.value = { ...current, conversations: await conversations() };
+      screen.value = { ...current, conversations: await conversations(), links: await linkViews() };
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
       screen.value = { ...current, messages: await listMessages(deps.db, current.id) };
@@ -1321,6 +1326,11 @@ export function createApp(deps: Deps) {
     return true;
   }
 
+  /** The account's links, as the home screen shows them. */
+  async function linkViews(): Promise<LinkView[]> {
+    return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, deps.config!.appName, l) }));
+  }
+
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
     if (options.tab) tab = options.tab;
     const { config, db } = deps;
@@ -1339,7 +1349,7 @@ export function createApp(deps: Deps) {
         offline = true;
       }
     }
-    const links = (await listLinks(db)).map((l) => ({ ...l, url: linkUrl(config!.botUsername, config!.appName, l) }));
+    const links = await linkViews();
     backButton(false);
     screen.value = {
       kind: 'home',
@@ -1755,9 +1765,9 @@ export function createApp(deps: Deps) {
     react,
     block,
     writeToLink,
-    createLink: () => linkAction(() => createLink(deps.db, session!), 'created'),
+    createLink: () => linkAction(() => createLink(deps.db, session!, deps.api!), 'created'),
     /** Gives the account a new link in place of its current one. */
-    replaceLink: () => linkAction(() => replaceLink(deps.db, session!), 'replaced'),
+    replaceLink: () => linkAction(() => replaceLink(deps.db, session!, deps.api!), 'replaced'),
     revokeLink: (id: string) => linkAction(() => revokeLink(deps.db, session!, id), 'revoked'),
     /** Opens Telegram's share sheet for a link. */
     share: (url: string) => deps.bridge?.post('web_app_open_tg_link', { path_full: `/share/url?url=${encodeURIComponent(url)}` }),
