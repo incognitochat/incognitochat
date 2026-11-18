@@ -111,7 +111,7 @@ export interface AccountInfo {
   maxLinks: number;
   /** Whether Telegram notices are set up and not turned off. */
   notices: boolean;
-  /** The account is being deleted (the app carries on with it). */
+  /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
   deleting: boolean;
   /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
   cleanup: boolean;
