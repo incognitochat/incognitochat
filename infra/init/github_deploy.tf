@@ -431,6 +431,8 @@ data "aws_iam_policy_document" "lambda_boundary" {
     resources = [local.arns.parameters]
   }
 
+  # Posting to sockets only (ws's push): GET @connections/{id} would return
+  # a client's IP address, and nothing deletes connections.
   statement {
     sid       = "PushToSockets"
     actions   = ["execute-api:ManageConnections"]
