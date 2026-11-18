@@ -43,6 +43,12 @@ locals {
     for f in local.functions : f => "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-${f}"
   }
 
+  # Their roles' ARNs, from the names (function_roles.tf), so that the deploy
+  # policies don't wait on roles that can never be destroyed.
+  function_role_arns = {
+    for f in local.functions : f => "arn:${local.partition}:iam::${local.account_id}:role/${local.prefix}-fn-${f}"
+  }
+
   arns = {
     functions     = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-*"
     notify        = local.function_arns["notify"]

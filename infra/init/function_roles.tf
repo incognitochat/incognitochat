@@ -29,6 +29,15 @@ resource "aws_iam_role" "fn" {
   tags = {
     Stack = "app"
   }
+
+  # Deleting a role the functions run with breaks them at once, and so would
+  # replacing one (a new name). To remove a function, or tear the
+  # environment down, delete the functions first (the app stack), then take
+  # this off; the state bucket already keeps a whole destroy of this stack
+  # from running unedited.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # The app stack created these roles before they moved here.

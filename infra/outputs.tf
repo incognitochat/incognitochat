@@ -80,3 +80,17 @@ output "permission_checks" {
     }
   }
 }
+
+# The only sources CloudFront and API Gateway may invoke the functions from,
+# as edge.tf and websocket.tf give them, for the deploy to check the
+# functions' resource policies against (scripts/check-function-roles.sh
+# policies): IAM can't keep the deploy role from naming others. ARNs name
+# the account.
+output "invoke_sources" {
+  description = "The CloudFront distribution and WebSocket API the functions' resource policies may name"
+  sensitive   = true
+  value = {
+    cloudfront = aws_lambda_permission.cloudfront_invoke.source_arn
+    websocket  = aws_lambda_permission.ws.source_arn
+  }
+}

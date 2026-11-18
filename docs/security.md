@@ -46,7 +46,7 @@ device.
 | A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when. |
 | The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
 | The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can set, at each login, the clock someone's app dates messages by, anywhere within a minute of the device's: a recipient working with it can read that in what the person sends, as a tag. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
-| A compromised deploy (a step of the CI job, or a deploy someone got approved) | Deploy code CI signs, change what Terraform manages, read the secrets' current values, invoke `bot` and `notify` | Through code it deploys, what the functions can reach, until the next deploy replaces it. Can't read the tables, logs or attachments itself, nor leave behind access that no Terraform plan shows (see Other limits). |
+| A compromised deploy (a step of the CI job, or a deploy someone got approved) | Deploy code CI signs, change what Terraform manages, read the secrets (older values too), invoke `bot` and `notify` | Through code it deploys, what the functions can reach, until the next deploy replaces it. Can't read the tables, logs or attachments itself. Most ways to leave access behind are denied; some IAM can't deny, and the next deploy finds only some of those (see Other limits). |
 | The bot-token holder | Everything Telegram's bot APIs allow | Who uses the bot, when notices go out. No content. Can send look-alike notices that open a look-alike page, which has none of the user's keys. |
 | The BotFather owner | Change the Mini App's address | Can point the app at a malicious page, for everyone or for chosen people. The largest remaining risk; see below. |
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
@@ -426,15 +426,15 @@ it. This is how close it gets.
   exposes at most about five weeks of messages a malicious server might have
   kept.
 - **What a compromised deploy can still do.** The CI deploy role may make
-  only the calls the app stack's Terraform makes, and is denied the rest
-  that matters: reading or writing table items, exporting or backing up
-  tables, reading logs or attachments, reading secrets' older versions,
-  invoking functions other than `bot` and `notify`, and anything that
-  would leave access behind that no Terraform plan shows (a role, a change
-  to whom a role trusts, a function permission for an account, a log
-  subscription, bucket versions, notifications or replication, a table
-  policy, provisioned concurrency). The functions' roles are created by
-  the bootstrap stack, which only an admin applies, and trust Lambda alone
+  only the calls the app stack's Terraform makes, and is denied much of the
+  rest that matters: reading or writing table items, exporting or backing
+  up tables, reading logs or attachments, invoking functions other than
+  `bot` and `notify`, and the plainest ways to leave access behind that no
+  Terraform plan shows (a role, a change to whom a role trusts, a function
+  permission for an account or role, a log subscription, bucket versions,
+  notifications or replication, a table policy, provisioned concurrency).
+  The functions' roles are created by the bootstrap stack, which only an
+  admin applies, and trust Lambda alone
   ([deployment.md](deployment.md#what-the-deploy-role-may-do)). What a
   compromised deploy keeps:
   - Code: it deploys whatever it builds and signs, and that code runs with
@@ -442,18 +442,34 @@ it. This is how close it gets.
     until the next deploy replaces it, and each deploy's public log shows
     the deployed code's hash ([verifying.md](verifying.md#the-backend)),
     though a compromised job can lie in its own log.
-  - Secrets: it reads each parameter's current value, since Terraform's
-    AWS provider reads every parameter it manages, decrypted, on each
-    plan, and the deploy job holds the bot token and the issuer keys. With
-    the bot token it can point the bot's webhook elsewhere, until the next
+  - Secrets: it reads each parameter, since Terraform's AWS provider reads
+    every parameter it manages, decrypted, on each plan, and the deploy job
+    holds the bot token and the issuer keys. That also reads older values,
+    for as long as SSM keeps them (a parameter's last 100 versions):
+    `GetParameter` takes a version, and no condition key refuses it. After
+    a leak, deleting the parameter drops them
+    ([deployment.md](deployment.md#replacing-a-generated-secret)). With the
+    bot token it can point the bot's webhook elsewhere, until the next
     deploy sets it back. Keeping the secrets from CI would mean writing them
     outside Terraform.
-  - The WebSocket API: IAM can't limit which routes or integrations it
-    adds, so it could add one that no plan shows, such as a route that
-    sends each closing socket's IP address elsewhere.
-  - Settings Terraform manages (the media bucket's policy, a function URL's
-    auth type, function settings): a change shows in the next plan, which
-    undoes it.
+  - Function permissions: IAM can't check which CloudFront distribution or
+    API Gateway API a permission names (AddPermission has no condition key
+    for the source), nor tell a permission for calls through a function's
+    URL from one for any direct invoke. So it could let another account's
+    distribution invoke `api`, another account's API invoke `ws`, or anyone
+    invoke `api` or `bot` directly with any event. Each deploy reads the
+    functions' resource policies after applying and fails on any such
+    statement, so one lasts until the next deploy, which shows it.
+  - The WebSocket API: IAM can't limit which routes, integrations or whole
+    APIs it adds, and nothing checks them, so it could add one that no plan
+    shows, such as a route that sends each closing socket's IP address
+    elsewhere.
+  - Cost: it can raise a table's capacity (provisioned capacity, or a
+    higher on-demand cap), since `UpdateTable` has no condition keys, or
+    change a function's memory and reservations. These show in the next
+    plan, which undoes them, but cost until then.
+  - Other settings Terraform manages (the media bucket's policy, a function
+    URL's auth type): a change shows in the next plan, which undoes it.
 - **Users can't verify the backend directly.** Its builds are reproducible
   and attested, Lambda runs only code CI signed, and each deploy's public log
   shows that the running code is the attested build

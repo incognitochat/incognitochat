@@ -109,7 +109,9 @@ data "aws_iam_policy_document" "deploy" {
   # Secrets and settings. Values are written through Terraform write-only
   # arguments, so they never land in state or plan files. GetParameter
   # stays: the AWS provider reads every parameter it manages, decrypted, on
-  # each plan, write-only or not. Older versions are denied (deploy_limits).
+  # each plan, write-only or not. It also reads older versions
+  # ("name:version"), which no condition key can refuse
+  # (docs/deployment.md, Replacing a generated secret).
   statement {
     sid = "Parameters"
     actions = [
@@ -130,7 +132,8 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["*"]
   }
 
-  # The functions' log groups, not what is in them (deploy_limits).
+  # The functions' log groups and the metric filters on them (../metrics.tf),
+  # not what is in them (deploy_limits).
   statement {
     sid = "LogGroups"
     actions = [
@@ -138,6 +141,9 @@ data "aws_iam_policy_document" "deploy" {
       "logs:DeleteLogGroup",
       "logs:PutRetentionPolicy",
       "logs:DeleteRetentionPolicy",
+      "logs:PutMetricFilter",
+      "logs:DescribeMetricFilters",
+      "logs:DeleteMetricFilter",
       "logs:ListTagsForResource",
       "logs:TagResource",
       "logs:UntagResource",
@@ -236,13 +242,13 @@ data "aws_iam_policy_document" "deploy_functions" {
       "iam:ListAttachedRolePolicies",
       "iam:ListRoleTags",
     ]
-    resources = [for r in aws_iam_role.fn : r.arn]
+    resources = values(local.function_role_arns)
   }
 
   statement {
     sid       = "FunctionRolePolicies"
     actions   = ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]
-    resources = [for r in aws_iam_role.fn : r.arn]
+    resources = values(local.function_role_arns)
 
     condition {
       test     = "StringEquals"
@@ -258,13 +264,13 @@ data "aws_iam_policy_document" "deploy_functions" {
   statement {
     sid       = "CheckRoles"
     actions   = ["iam:SimulatePrincipalPolicy"]
-    resources = concat([for r in aws_iam_role.fn : r.arn], [aws_iam_role.deploy.arn])
+    resources = concat(values(local.function_role_arns), [aws_iam_role.deploy.arn])
   }
 
   statement {
     sid       = "PassFunctionRolesToLambdaOnly"
     actions   = ["iam:PassRole"]
-    resources = [for r in aws_iam_role.fn : r.arn]
+    resources = values(local.function_role_arns)
 
     condition {
       test     = "StringEquals"
@@ -460,10 +466,10 @@ resource "aws_iam_role_policy_attachment" "deploy_no_items" {
 }
 
 # What a deploy never needs, denied outright whatever the policies above
-# allow: reading user data or secrets' history, and leaving access behind
-# that no Terraform plan shows (a role trusted by another account, a
-# function permission for one, a log subscription, a bucket notification).
-# The app stack's Terraform never makes these calls. IAM's policy simulator
+# allow: reading user data, and leaving access behind that no Terraform
+# plan shows (a role trusted by another account, a function permission for
+# one, a log subscription, a bucket notification). The app stack's
+# Terraform never makes these calls. IAM's policy simulator
 # checks that they are denied (scripts/check-function-roles.sh deploy-role),
 # after each bootstrap and before each deploy.
 data "aws_iam_policy_document" "deploy_limits" {
@@ -524,9 +530,14 @@ data "aws_iam_policy_document" "deploy_limits" {
     not_resources = [local.function_arns["api"], local.function_arns["bot"]]
   }
 
-  # Who a function's resource policy may let invoke it: anyone ("*") only
-  # through the URLs of api and bot, CloudFront on api, the WebSocket API
-  # on ws. No account or role, anywhere.
+  # Whom a function's resource policy may name: anyone ("*") on api and bot
+  # (their URLs), CloudFront on api, the WebSocket API on ws; no account or
+  # role. IAM can't say more: AddPermission has no condition key for the
+  # source ARN (so CloudFront or API Gateway in another account could be
+  # named), nor for invoking only through the URL (so "*" could be let
+  # invoke api or bot directly). The deploy reads the policies after
+  # applying and fails on anything else (scripts/check-function-roles.sh
+  # policies).
   statement {
     sid       = "PermissionsForTheStackOnly"
     effect    = "Deny"
@@ -553,36 +564,8 @@ data "aws_iam_policy_document" "deploy_limits" {
     }
   }
 
-  # A public URL needs two permissions for "*" (../functions.tf): calling a
-  # URL that needs no signature (auth type NONE), and invoking only through
-  # the URL. Not a direct invoke with any event...
-  statement {
-    sid       = "PublicOnlyThroughUrls"
-    effect    = "Deny"
-    actions   = ["lambda:AddPermission"]
-    resources = ["*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "lambda:Principal"
-      values   = ["*"]
-    }
-
-    condition {
-      test     = "Null"
-      variable = "lambda:FunctionUrlAuthType"
-      values   = ["true"]
-    }
-
-    condition {
-      test     = "BoolIfExists"
-      variable = "lambda:InvokedViaFunctionUrl"
-      values   = ["false"]
-    }
-  }
-
-  # ...nor calling a URL that needs AWS's signature, which any AWS account's
-  # would then pass (api's, behind CloudFront).
+  # "*" never for a URL that needs AWS's signature (api's, behind
+  # CloudFront), which any AWS account's would then pass.
   statement {
     sid       = "PublicUrlsWithoutAuthOnly"
     effect    = "Deny"
@@ -658,7 +641,7 @@ data "aws_iam_policy_document" "deploy_limits" {
     sid           = "PoliciesOnFunctionRolesOnly"
     effect        = "Deny"
     actions       = ["iam:PutRolePolicy"]
-    not_resources = [for r in aws_iam_role.fn : r.arn]
+    not_resources = values(local.function_role_arns)
   }
 
   # What the functions log, and copies of it elsewhere.
@@ -709,8 +692,10 @@ data "aws_iam_policy_document" "deploy_limits" {
     resources = ["${local.arns.media_buckets}/*"]
   }
 
-  # Terraform reads each parameter's current value (deploy policy); not its
-  # older ones (such as a replaced pepper), nor all at once, nor sharing.
+  # Terraform reads each parameter (deploy policy). Not listing a
+  # parameter's history, all parameters at once, or sharing them. This
+  # doesn't keep older values from it: GetParameter takes "name:version" on
+  # the same ARN, and no condition key refuses that.
   statement {
     sid       = "NoSecretHistoryOrSharing"
     effect    = "Deny"

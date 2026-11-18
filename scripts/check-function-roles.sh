@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Checks with IAM's policy simulator that the functions' roles may make the
 # calls the functions make to each other, and that the deploy role may not
-# do what a deploy never needs (docs/deployment.md). A refused call only
-# logs a warning in the function: sends would still succeed while pushes
-# and notices stopped. So the deploy runs this three times:
+# do what a deploy never needs; and checks whom the functions' resource
+# policies let invoke them (docs/deployment.md). A refused call only logs a
+# warning in the function: sends would still succeed while pushes and
+# notices stopped. So the deploy runs this four times:
 #
 #   boundary <function-prefix>
 #       Before applying: whether the Lambda permissions boundary (infra/init,
@@ -24,12 +25,20 @@
 #       After applying: every call in the JSON on standard input (Terraform's
 #       permission_checks output, at least 4), against each role's policy and
 #       its boundary together.
+#   policies <function-prefix>
+#       After applying: each function's resource policy, which says who may
+#       invoke it, must hold only the statements the app stack sets, as it
+#       sets them, with CloudFront and API Gateway limited to the sources
+#       in the JSON on standard input (Terraform's invoke_sources output).
+#       IAM can't keep the deploy role from adding others (another
+#       account's distribution or API, or anyone without a URL), so a
+#       deploy catches what an earlier one added. Prints statement IDs only.
 #
 # Role and function ARNs name the account: they are masked in GitHub
 # Actions' logs and never printed, nor is anything the AWS CLI says beyond
 # its error code. Needs the AWS CLI, jq, and credentials that may read the
-# roles and run the simulator on them (the deploy role, infra/init, or an
-# admin's).
+# roles and the functions' policies and run the simulator on the roles (the
+# deploy role, infra/init, or an admin's).
 set -euo pipefail
 
 errors=$(mktemp)
@@ -174,7 +183,7 @@ deploy-role)
   # An account that isn't this one (AWS's example account ID).
   outsider=111122223333
 
-  # User data and secrets.
+  # User data.
   check explicitDeny "reading a table item" "$role" dynamodb:GetItem "${table}-directory"
   check explicitDeny "scanning a table" "$role" dynamodb:Scan "${table}-directory"
   check explicitDeny "querying a table" "$role" dynamodb:Query "${table}-messages"
@@ -183,7 +192,7 @@ deploy-role)
   check explicitDeny "backing up a table" "$role" dynamodb:CreateBackup "${table}-directory"
   check explicitDeny "reading an attachment" "$role" s3:GetObject "${media}/m/check"
   check explicitDeny "reading logs" "$role" logs:FilterLogEvents "$log_group"
-  check explicitDeny "reading a secret's older values (the pepper's)" "$role" ssm:GetParameterHistory "$pepper"
+  check explicitDeny "listing a secret's history" "$role" ssm:GetParameterHistory "$pepper"
   check explicitDeny "invoking api" "$role" lambda:InvokeFunction "$(fn api)"
   check explicitDeny "invoking ws" "$role" lambda:InvokeFunction "$(fn ws)"
 
@@ -195,8 +204,6 @@ deploy-role)
   check explicitDeny "attaching a policy to its own role" "$role" iam:AttachRolePolicy "$role"
   check explicitDeny "letting anyone call notify through a URL" "$role" lambda:AddPermission "$(fn notify)" \
     --context-entries "$(context lambda:Principal string '*' lambda:FunctionUrlAuthType string NONE)"
-  check explicitDeny "letting anyone invoke api directly" "$role" lambda:AddPermission "$(fn api)" \
-    --context-entries "$(context lambda:Principal string '*')"
   check explicitDeny "letting any AWS account call api's URL" "$role" lambda:AddPermission "$(fn api)" \
     --context-entries "$(context lambda:Principal string '*' lambda:FunctionUrlAuthType string AWS_IAM)"
   check explicitDeny "letting another account invoke api" "$role" lambda:AddPermission "$(fn api)" \
@@ -208,19 +215,25 @@ deploy-role)
   check explicitDeny "keeping versions of attachments" "$role" s3:PutBucketVersioning "$media"
   check explicitDeny "getting notices of uploads" "$role" s3:PutBucketNotification "$media"
 
-  # What the deploy does need, so the denies don't reach too far.
+  # What the deploy does need, so the denies don't reach too far, and
+  # what Terraform calls through the narrowed allows.
   check allowed "invoking bot (it sets itself up)" "$role" lambda:InvokeFunction "$(fn bot)"
   check allowed "invoking notify (its check)" "$role" lambda:InvokeFunction "$(fn notify)"
   check allowed "letting anyone call bot's URL" "$role" lambda:AddPermission "$(fn bot)" \
     --context-entries "$(context lambda:Principal string '*' lambda:FunctionUrlAuthType string NONE)"
   check allowed "letting bot's URL invoke it" "$role" lambda:AddPermission "$(fn bot)" \
-    --context-entries "$(context lambda:Principal string '*' lambda:InvokedViaFunctionUrl boolean true)"
+    --context-entries "$(context lambda:Principal string '*')"
   check allowed "letting CloudFront invoke api" "$role" lambda:AddPermission "$(fn api)" \
     --context-entries "$(context lambda:Principal string cloudfront.amazonaws.com)"
   check allowed "letting the WebSocket API invoke ws" "$role" lambda:AddPermission "$(fn ws)" \
     --context-entries "$(context lambda:Principal string apigateway.amazonaws.com)"
+  check allowed "reading a function's code signing config" "$role" lambda:GetFunctionCodeSigningConfig "$(fn api)"
   check allowed "writing a function role's policy" "$role" iam:PutRolePolicy "${fn_role}-api" \
     --context-entries "$(context iam:PermissionsBoundary string "$boundary")"
+  check allowed "reading a table's backup settings" "$role" dynamodb:DescribeContinuousBackups "${table}-directory"
+  check allowed "changing a table" "$role" dynamodb:UpdateTable "${table}-directory"
+  check allowed "reading a log group's metric filters" "$role" logs:DescribeMetricFilters "$log_group"
+  check allowed "setting the media bucket's policy" "$role" s3:PutBucketPolicy "$media"
   finish "Checked the deploy role's limits"
   ;;
 roles)
@@ -240,8 +253,88 @@ roles)
   done <<<"$names"
   finish "Checked ${count} calls"
   ;;
+policies)
+  prefix=${2:?usage: $0 policies <function-prefix> < invoke_sources.json}
+  sources=$(cat)
+  if ! jq -e '(.cloudfront | type == "string") and (.websocket | type == "string")' <<<"$sources" >/dev/null 2>&1; then
+    echo "::error::The invoke sources are missing or malformed (Terraform output invoke_sources)"
+    exit 1
+  fi
+  while read -r arn; do mask "$arn"; done <<<"$(jq -r '.cloudfront, .websocket' <<<"$sources")"
+  # Each statement the app stack sets (infra/functions.tf, edge.tf,
+  # websocket.tf; the provider adds the FunctionURLAllow* pair itself when a
+  # URL is made with no auth), on which functions, and what it must say.
+  # Other conditions only narrow a statement, so they may be there too.
+  # shellcheck disable=SC2016 # jq's own variables
+  expected='
+    def anyone: .Principal == "*" or (.Principal | type == "object" and .AWS == "*");
+    def service($s): .Principal | type == "object" and .Service == $s and length == 1;
+    def cond($op; $key): [(.Condition[$op] // {}) | to_entries[]
+      | select(.key | ascii_downcase == ($key | ascii_downcase)) | .value]
+      | if length == 1 then .[0] | if type == "array" and length == 1 then .[0] else . end | tostring else null end;
+    def public_url: anyone and .Action == "lambda:InvokeFunctionUrl"
+      and cond("StringEquals"; "lambda:FunctionUrlAuthType") == "NONE";
+    def through_url: anyone and .Action == "lambda:InvokeFunction"
+      and cond("Bool"; "lambda:InvokedViaFunctionUrl") == "true";
+    def from($s; $action; $arn): service($s) and .Action == $action and cond("ArnLike"; "AWS:SourceArn") == $arn;
+    def as_set($f; $src):
+      .Effect == "Allow" and (
+        if ($f == "api" or $f == "bot") and (.Sid == "FunctionUrlPublic" or .Sid == "FunctionURLAllowPublicAccess") then public_url
+        elif ($f == "api" or $f == "bot") and (.Sid == "FunctionUrlInvoke" or .Sid == "FunctionURLAllowInvokeAction") then through_url
+        elif $f == "api" and .Sid == "CloudFrontUrl" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunctionUrl"; $src.cloudfront)
+        elif $f == "api" and .Sid == "CloudFrontInvoke" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunction"; $src.cloudfront)
+        elif $f == "ws" and .Sid == "WebSocketApi" then from("apigateway.amazonaws.com"; "lambda:InvokeFunction"; $src.websocket)
+        else false end);
+    [.Statement // [] | if type == "array" then .[] else . end
+      | {sid: (.Sid // "(no ID)" | tostring), ok: as_set($f; $src)}]'
+  checked=0
+  for f in api bot ws notify; do
+    policy="" status=0
+    for try in 1 2 3 4 5; do
+      if policy=$(aws lambda get-policy --function-name "${prefix}-${f}" --query Policy --output text 2>"$errors"); then
+        status=0
+        break
+      fi
+      c=$(code)
+      if [[ $c == ResourceNotFoundException ]]; then
+        # No resource policy: nobody else may invoke it.
+        policy='{"Statement":[]}' status=0
+        break
+      fi
+      if [[ $c == AccessDenied* ]]; then
+        status=1
+        break
+      fi
+      status=2
+      ((try < 5)) && sleep $((try * 5))
+    done
+    if ((status)); then
+      echo "::error::Couldn't read the ${f} function's resource policy (${c:-no error code})"
+      if ((status == 1)); then refused=1; else unavailable=1; fi
+      continue
+    fi
+    if ! results=$(jq -c --arg f "$f" --argjson src "$sources" "$expected" <<<"$policy" 2>/dev/null); then
+      echo "::error::The ${f} function's resource policy couldn't be read as a policy"
+      unavailable=1
+      continue
+    fi
+    good=$(jq -r '[.[] | select(.ok) | .sid] | sort | join(", ")' <<<"$results")
+    echo "${f}: ${good:-no statements}"
+    while read -r sid; do
+      [[ -n $sid ]] || continue
+      echo "::error::The ${f} function's resource policy has a statement the app stack doesn't set, or not as it sets it: ${sid}"
+      tampered=1
+    done <<<"$(jq -r '.[] | select(.ok | not) | .sid' <<<"$results")"
+    checked=$((checked + 1))
+  done
+  if ((${tampered:-0})); then
+    echo "::error::Someone added to who may invoke the functions. Find out who (CloudTrail, lambda AddPermission), then remove it as an admin: aws lambda remove-permission --function-name <function> --statement-id <ID>."
+    exit 1
+  fi
+  finish "Checked ${checked} functions' resource policies"
+  ;;
 *)
-  echo "usage: $0 boundary <function-prefix> | deploy-role <deploy-role-ARN> <function-prefix> | roles < permission_checks.json" >&2
+  echo "usage: $0 boundary <function-prefix> | deploy-role <deploy-role-ARN> <function-prefix> | roles < permission_checks.json | policies <function-prefix> < invoke_sources.json" >&2
   exit 2
   ;;
 esac

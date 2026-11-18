@@ -67,26 +67,6 @@ override_resource {
   values = { arn = "arn:aws:iam::123456789012:role/incognitochat-production-github-deploy" }
 }
 
-override_resource {
-  target = aws_iam_role.fn["api"]
-  values = { arn = "arn:aws:iam::123456789012:role/incognitochat-production-fn-api" }
-}
-
-override_resource {
-  target = aws_iam_role.fn["bot"]
-  values = { arn = "arn:aws:iam::123456789012:role/incognitochat-production-fn-bot" }
-}
-
-override_resource {
-  target = aws_iam_role.fn["ws"]
-  values = { arn = "arn:aws:iam::123456789012:role/incognitochat-production-fn-ws" }
-}
-
-override_resource {
-  target = aws_iam_role.fn["notify"]
-  values = { arn = "arn:aws:iam::123456789012:role/incognitochat-production-fn-notify" }
-}
-
 run "deploy_policies" {
   # Policy documents are read only once the resources they name exist,
   # which here means overridden in an apply.

@@ -284,6 +284,16 @@ jobs:
           set -o pipefail
           terraform output -json permission_checks | ../scripts/check-function-roles.sh roles
 
+      # Whom each function's resource policy lets invoke it: only what the
+      # app stack sets. IAM can't keep the deploy role from naming another
+      # account's CloudFront or API Gateway, or letting anyone invoke api or
+      # bot directly, so each deploy checks what earlier ones left.
+      - name: Check who may invoke the functions
+        working-directory: infra
+        run: |
+          set -o pipefail
+          terraform output -json invoke_sources | ../scripts/check-function-roles.sh policies "incognitochat-${ENVIRONMENT}"
+
       - name: Read endpoints
         working-directory: infra
         run: |
