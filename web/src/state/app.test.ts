@@ -501,6 +501,23 @@ describe('a device clock that is off', () => {
     });
   });
 
+  it("dates messages by the server's clock as the login's token tells it, within a minute of the device's", async () => {
+    const server = fakeServer();
+    for (const [off, dated] of [
+      [20_000, 0],
+      [-45_000, 0],
+      // Further off: the device's own, as before.
+      [90_000, 90_000],
+    ] as const) {
+      await withDeviceClockOff(off, async () => {
+        const { app } = await registered(server.api);
+        // Something that logs in.
+        await app.createLink();
+        expect(Math.abs(app.messageNow() - (realNow() + dated))).toBeLessThan(1500);
+      });
+    }
+  });
+
   it('logs in when hours behind, too', async () => {
     const server = fakeServer();
     await withDeviceClockOff(-3.5 * 3600_000, async () => {
@@ -1912,20 +1929,27 @@ describe('fetching attachments by themselves', () => {
    */
   async function triedThreeTimes(server: ReturnType<typeof fakeServer>, app: Awaited<ReturnType<typeof registered>>['app']) {
     const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
-    const reopen = async () => {
+    /**
+     * Opens c1 (again), and waits until it has been fetched `tries` times in
+     * all and the fetch is over: its failure counted, and the pause after it
+     * set by the clock of that moment. A slow answer must not leave it still
+     * under way at the next opening, which would then skip it.
+     */
+    const open = async (tries: number) => {
       await app.home();
       await app.openConversation('c1');
+      await vi.waitFor(() => expect(downloads()).toHaveLength(tries));
       await tick();
+      await vi.waitFor(() => expect(app.transfers.value).toEqual({}));
+      // And not once more.
+      expect(downloads()).toHaveLength(tries);
     };
-    await app.openConversation('c1');
-    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+    await open(1);
     // Not again at once.
-    await reopen();
-    expect(downloads()).toHaveLength(1);
+    await open(1);
     // Then a few minutes apart, three times in all.
     for (const [minutes, tries] of [[3, 2], [6, 3], [9, 3], [12, 3]] as const) {
-      await withDeviceClockOff(minutes * 60_000, reopen);
-      expect(downloads()).toHaveLength(tries);
+      await withDeviceClockOff(minutes * 60_000, () => open(tries));
     }
     expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
   }

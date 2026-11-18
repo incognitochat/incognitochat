@@ -240,6 +240,21 @@ describe('register', () => {
 });
 
 describe('logging in', () => {
+  it("learns from the token the server's clock that messages are dated by, as registering does", async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api } = fakeServer();
+    // 40 seconds fast: logins still go through on the device's own time.
+    const clock = createClock(() => (NOW + 40) * 1000);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock });
+    expect(Math.abs(clock.messageNow() - NOW * 1000)).toBeLessThanOrEqual(1000);
+    const again = createClock(() => (NOW + 40) * 1000);
+    expect(again.messageNow()).toBe((NOW + 40) * 1000);
+    await logIn(db, api, again);
+    expect(Math.abs(again.messageNow() - NOW * 1000)).toBeLessThanOrEqual(1000);
+    expect(again.now()).toBe((NOW + 40) * 1000);
+  });
+
   it('signs again by the server clock when this device is 5 minutes fast', async () => {
     const db = await fresh();
     const code = await prepareSetup(db);

@@ -26,7 +26,10 @@ import (
 )
 
 const (
-	// TTL is how long a session token is valid.
+	// TTL is how long a session token is valid. The web app learns the
+	// server's clock from a token's expiry less TTL (web/src/net/clock.ts,
+	// TOKEN_TTL_MS, which must stay equal to it;
+	// TestExpiryTellsTheWebAppTheServerClock).
 	TTL = 15 * time.Minute
 	// MaxSkew is how far a login timestamp may be from the server's clock.
 	MaxSkew = 60 * time.Second

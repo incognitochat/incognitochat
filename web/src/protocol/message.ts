@@ -29,6 +29,15 @@ export const MAX_DELETE = 100;
 export const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Receivers allow an edit this much later still: arrival times and clocks differ a little. */
 export const EDIT_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Whether one of our messages, sent at `at`, can still be edited at `now`
+ * (the clock messages are dated by, Unix ms), counted in whole seconds as
+ * `at` is: the app's menu and the sending engine both ask this.
+ */
+export function editable(at: number, now: number): boolean {
+  return Math.floor(now / 1000) * 1000 - at <= EDIT_WINDOW_MS;
+}
 /** The longest reaction, in UTF-16 units: one emoji, joined sequences included. */
 const MAX_REACTION = 32;
 
@@ -106,7 +115,11 @@ export interface Message {
   conv: string;
   /** Message ID, 16 random bytes. */
   id: string;
-  /** Sent time, Unix milliseconds, from the sender's clock. */
+  /**
+   * Sent time, Unix milliseconds: by the server's clock as the sender knows
+   * it, rounded down to the whole second (net/clock.ts). Older versions sent
+   * their own device's clock, to the millisecond.
+   */
   at: number;
   /** The sender's conversation public key (65 bytes); a new one means the sender rotated. */
   from: string;

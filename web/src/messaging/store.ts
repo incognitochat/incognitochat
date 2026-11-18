@@ -139,16 +139,66 @@ export async function saveConversation(db: Database, conversation: ConversationR
   await tx.done;
 }
 
-/** Their newest message here, by when they sent it (sentAt): for a conversation from before lastMessage was kept. */
+/**
+ * Their newest message here, by when they sent it (sentAt), and of those
+ * sent in the same second the last taken in: for a conversation from before
+ * lastMessage was kept.
+ */
 export async function newestTheirs(db: Database, conv: string): Promise<{ at: number; id: string } | undefined> {
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
-  let newest: { at: number; id: string } | undefined;
+  // Sent later; or shown later (`at`, never after it arrived); or, shown at
+  // the same time, taken in later (from before that was kept: the larger ID).
+  const after = (a: MessageRecord, b: MessageRecord) =>
+    (sentAt(a) - sentAt(b) || a.at - b.at || (a.order ?? 0) - (b.order ?? 0) || (a.id > b.id ? 1 : -1)) > 0;
+  let newest: MessageRecord | undefined;
   for (const m of await db.getAllFromIndex('messages', 'byConversation', range)) {
-    if (m.out) continue;
-    const at = sentAt(m);
-    if (!newest || at > newest.at || (at === newest.at && m.id > newest.id)) newest = { at, id: m.id };
+    if (!m.out && (!newest || after(m, newest))) newest = m;
   }
-  return newest;
+  return newest && { at: sentAt(newest), id: newest.id };
+}
+
+function sentKey(conv: string): string {
+  return `sent-at:${conv}`;
+}
+
+/**
+ * Takes the time for something this device sends in a conversation (`at`):
+ * choose gets the time of the last one sent there, from this device (also
+ * before a reload, and from any copy of the app), and returns the next.
+ * Kept apart from the conversation, under a lock of its own: two sends at
+ * once never get the same time, and a send going out (which holds the
+ * conversation's lock) doesn't hold up the next one being shown.
+ */
+export function takeSentAt(db: Database, conv: string, choose: (last: number | undefined) => number): Promise<number> {
+  return withLock(sentKey(conv), async () => {
+    const next = choose(await getMeta<number>(db, sentKey(conv)));
+    await putMeta(db, sentKey(conv), next);
+    return next;
+  });
+}
+
+/** The time of the last thing this device sent in a conversation (takeSentAt), if any. */
+export function lastSentAt(db: Database, conv: string): Promise<number | undefined> {
+  return getMeta<number>(db, sentKey(conv));
+}
+
+/**
+ * Deletes when this device last sent something in a conversation
+ * (takeSentAt), within a transaction that writes `meta`: with its chat, or
+ * with its record. Whatever deletes a conversation's record deletes this in
+ * the same transaction, with what it remembers by keyed hashes.
+ */
+export function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
+  return meta.delete(sentKey(conv));
+}
+
+/** Forgets when this device last sent something in a conversation: its chat was deleted. */
+export function forgetSentAt(db: Database, conv: string): Promise<void> {
+  return withLock(sentKey(conv), async () => {
+    const tx = db.transaction('meta', 'readwrite');
+    await deleteSentAt(tx.store, conv);
+    await tx.done;
+  });
 }
 
 /** Conversations, newest activity first. */
@@ -161,8 +211,23 @@ export async function hasMessage(db: Database, conv: string, id: string): Promis
   return (await db.getKey('messages', [conv, id])) !== undefined;
 }
 
-export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed'>, body: MessageBody): Promise<void> {
-  await db.put('messages', { ...record, sealed: await sealBody(db, record.id, body) });
+/**
+ * The place (MessageRecord.order) of a message stored now among those of
+ * its conversation with the same `at` (whole seconds, as senders date
+ * them): after all of them.
+ */
+function placeAfter(same: MessageRecord[]): number {
+  return same.reduce((last, m) => Math.max(last, m.order ?? 0), -1) + 1;
+}
+
+/** Stores a message, after any of its conversation with the same `at`. */
+export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed' | 'order'>, body: MessageBody): Promise<void> {
+  const sealed = await sealBody(db, record.id, body);
+  // Read and written in one transaction, so two stored at once don't take the same place.
+  const tx = db.transaction('messages', 'readwrite');
+  const order = placeAfter(await tx.store.index('byConversation').getAll([record.conv, record.at]));
+  await tx.store.put({ ...record, order, sealed });
+  await tx.done;
 }
 
 /** Whether one of our messages is still here and going out (status sending): not deleted meanwhile. */
@@ -172,10 +237,10 @@ export async function stillSending(db: Database, conv: string, id: string): Prom
 
 /**
  * Changes one of our messages that's going out, only if it's still here
- * with status `from`: its status, its time, or its attachment (with the
- * upload's fields, once uploaded). Returns whether it did. A message deleted
- * meanwhile isn't brought back, and one another copy of the app sent or
- * marked meanwhile is left as it is.
+ * with status `from`: its status, its time (then it goes after any with the
+ * same time), or its attachment (with the upload's fields, once uploaded).
+ * Returns whether it did. A message deleted meanwhile isn't brought back,
+ * and one another copy of the app sent or marked meanwhile is left as it is.
  */
 export async function patchMessage(
   db: Database,
@@ -202,7 +267,12 @@ export async function patchMessage(
     }
     return updateMessage(db, conv, id, (record) =>
       record.status === from
-        ? { ...record, ...(patch.status ? { status: patch.status } : {}), ...(patch.at !== undefined ? { at: patch.at } : {}), ...(sealed ? { sealed } : {}) }
+        ? {
+            ...record,
+            ...(patch.status ? { status: patch.status } : {}),
+            ...(patch.at !== undefined ? { at: patch.at } : {}),
+            ...(sealed ? { sealed } : {}),
+          }
         : null,
     );
   });
@@ -217,11 +287,13 @@ export async function setMessageStatus(db: Database, conv: string, id: string, s
  * Changes a stored message, read and written in one transaction, so it
  * can't write back a stale copy over another change (such as its file
  * moving from where version 3 kept it). change returns null to leave it.
+ * A new time puts it after the others of its conversation with that time.
  */
 async function updateMessage(db: Database, conv: string, id: string, change: (record: MessageRecord) => MessageRecord | null): Promise<boolean> {
   const tx = db.transaction('messages', 'readwrite');
   const record = await tx.store.get([conv, id]);
-  const next = record && change(record);
+  let next = record && change(record);
+  if (next && next.at !== record!.at) next = { ...next, order: placeAfter(await tx.store.index('byConversation').getAll([conv, next.at])) };
   if (next) await tx.store.put(next);
   await tx.done;
   return !!next;
@@ -333,14 +405,16 @@ export async function clearMedia(db: Database, which: { conv?: string; before?: 
 /**
  * Sets one side's reaction to a message (an empty emoji takes it back). One
  * set at an earlier time than the one there (a replay, or an old one
- * arriving late) changes nothing. Returns whether what's shown changed.
+ * arriving late) changes nothing; another one from the same second (times
+ * are whole seconds) replaces it, as it came later. Returns whether what's
+ * shown changed.
  */
 export async function setReaction(db: Database, conv: string, id: string, side: 'mine' | 'theirs', e: string, at: number): Promise<boolean> {
   return withLock(`message:${conv}:${id}`, async () => {
     const message = await getMessage(db, conv, id);
     if (!message) return false;
     const current = message.reactions?.[side];
-    if (current && current.at >= at) return false;
+    if (current && (current.at > at || (current.at === at && current.e === e))) return false;
     const body: MessageBody = {
       text: message.text,
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
@@ -361,12 +435,13 @@ export async function setReaction(db: Database, conv: string, id: string, side: 
 /**
  * Gives a message a new text, as edited at a time (the editor's clock). An
  * edit older than the last one changes nothing (a replay, or one arriving
- * late). Returns whether it changed.
+ * late); another one from the same second (times are whole seconds)
+ * replaces it, as it came later. Returns whether it changed.
  */
 export async function setText(db: Database, conv: string, id: string, text: string, at: number): Promise<boolean> {
   return withLock(`message:${conv}:${id}`, async () => {
     const message = await getMessage(db, conv, id);
-    if (!message || (message.edited ?? 0) >= at) return false;
+    if (!message || (message.edited ?? 0) > at || (message.edited === at && message.text === text)) return false;
     const body: MessageBody = {
       text,
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
@@ -439,9 +514,15 @@ export async function getMessage(db: Database, conv: string, id: string): Promis
   return { ...rest, ...(await openBody(db, id, sealed)) };
 }
 
-/** A conversation's messages, oldest first, with their text. */
+/**
+ * A conversation's messages, oldest first, with their text: by `at`, and
+ * those with the same `at` (whole seconds) in the order they were written
+ * or taken in here.
+ */
 export async function listMessages(db: Database, conv: string): Promise<MessageView[]> {
   const records = await db.getAllFromIndex('messages', 'byConversation', IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]));
+  // The index gives them by `at` already; a stable sort keeps that.
+  records.sort((a, b) => a.at - b.at || (a.order ?? 0) - (b.order ?? 0));
   return Promise.all(
     records.map(async ({ sealed, ...rest }) => ({ ...rest, ...(await openBody(db, rest.id, sealed)) })),
   );

@@ -21,7 +21,7 @@ import {
   type RoundRecorder,
   type RoundRecording,
 } from './media/record';
-import { EDIT_WINDOW_MS, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
+import { editable, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
 import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, type StickerInfo } from './stickers/catalog';
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
@@ -664,7 +664,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           canReact={canReact(screen, menu.value)}
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
-          canEdit={canEdit(screen, menu.value)}
+          canEdit={canEdit(screen, menu.value, app.messageNow())}
           canRetry={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value)}
           onRetry={(m) => void app.resendMedia(m.id)}
           onEdit={(m) => {
@@ -2904,9 +2904,14 @@ function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageV
   return !screen.blocked && !screen.ended && !screen.readOnly && !(m.out && (m.status === 'sending' || m.status === 'failed'));
 }
 
-/** Whether one of ours can be edited: sent, in an open conversation, with text or a caption to edit (not a sticker, voice or video message). */
-function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
-  if (!canReact(screen, m) || !m.out || m.sticker || Date.now() - m.at > EDIT_WINDOW_MS) return false;
+/**
+ * Whether one of ours can be edited: sent, in an open conversation, with
+ * text or a caption to edit (not a sticker, voice or video message), and
+ * not more than a day ago, as the engine counts it (now: the clock messages
+ * are dated by).
+ */
+function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView, now: number): boolean {
+  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.at, now)) return false;
   return m.text !== '' || (!!m.media && !['voice', 'round'].includes(shownAs(m.media)));
 }
 

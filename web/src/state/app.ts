@@ -350,7 +350,8 @@ export function createApp(deps: Deps) {
   // narrowed by an earlier assignment, across awaits).
   const currentScreen = (): Screen => screen.value;
   // The server's clock, learnt when it says this device's is off: logins,
-  // signed requests and registration are timed by it.
+  // signed requests and registration are timed by it. Messages are dated by
+  // it as each login's token tells it (messageNow).
   const clock = createClock();
   const session: AppSession | null = deps.api ? createSession(deps.db, deps.api, clock) : null;
   // Set while the server doesn't take this device (unverified, asked again).
@@ -611,6 +612,7 @@ export function createApp(deps: Deps) {
         session: session!,
         issuer,
         ...(mediaIssuer ? { mediaIssuer } : {}),
+        messageNow: () => clock.messageNow(),
         onTokens: () => void refreshBudget(),
         onWaiting: () => backgroundSync(),
         // Only while the app syncs in the background (not signed out).
@@ -2023,6 +2025,8 @@ export function createApp(deps: Deps) {
     },
     close: () => deps.bridge?.post('web_app_close'),
     retry: () => retry(),
+    /** The time messages are dated by now (Unix ms): what a message's age, for editing, is counted from. */
+    messageNow: () => clock.messageNow(),
     home: () => showHome(),
     /** The open conversation's newest messages are in view: tell the other side, while the user is using the app. */
     markSeen: () => {

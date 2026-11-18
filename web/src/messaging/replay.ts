@@ -136,9 +136,9 @@ export function tidy(c: ConversationRecord, t: number): ConversationRecord {
 
 /**
  * Whether an envelope (its `at` and tag) is newer than the newest taken in:
- * by `at`, their clock, and on the same millisecond by tag, so every copy of
- * the app picks the same one whatever order they come in.
+ * by `at`, their clock, and in the same second (times are whole seconds) by
+ * being taken in after it. The same envelope again is never newer.
  */
 export function isNewer(at: number, tag: string, newest: ConversationRecord['newest']): boolean {
-  return !newest || at > newest.at || (at === newest.at && tag > newest.tag);
+  return !newest || at > newest.at || (at === newest.at && tag !== newest.tag);
 }

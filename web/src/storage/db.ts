@@ -117,10 +117,12 @@ export interface ConversationRecord {
   lastReceived: string | null;
   /**
    * The newest envelope of theirs taken in: its `at` (their clock) and its
-   * keyed hash (idTag), which breaks ties. Only an envelope newer than this
-   * changes peerKey, sendTo and lastReceived, so one that comes late or
-   * again can't move us back to an older key or mailbox. Missing in
-   * conversations from before it was kept, until something comes.
+   * keyed hash (idTag). Only an envelope newer than this changes peerKey,
+   * sendTo and lastReceived, so one that comes late or again can't move us
+   * back to an older key or mailbox. Of envelopes from the same second
+   * (times are whole seconds), the one taken in last counts as newer.
+   * Missing in conversations from before it was kept, until something
+   * comes.
    */
   newest?: { at: number; tag: string };
   /**
@@ -157,11 +159,12 @@ export interface ConversationRecord {
   clearedBefore?: number;
   /**
    * Their latest delete of the whole conversation: its `at` (their clock),
-   * when we took it in (our clock), and, if its `last` named one of our
-   * messages, that message's time (our clock). Something of theirs from by
-   * then that shows they had more of ours takes those too, but never one we
-   * wrote after taking the delete in, nor one newer than the message `last`
-   * named: their app names the newest of ours it had. Forgotten with it.
+   * when we took it in (our clock, or the time of the last thing we sent
+   * there, if later), and, if its `last` named one of our messages, that
+   * message's time (our clock). Something of theirs from by then that shows
+   * they had more of ours takes those too, but never one we wrote after
+   * taking the delete in, nor one newer than the message `last` named:
+   * their app names the newest of ours it had. Forgotten with it.
    */
   theirClear?: { upTo: number; here: number; ours?: number };
   /**
@@ -194,8 +197,18 @@ export interface MessageRecord {
   id: string;
   /** The conversation's ID on this device. */
   conv: string;
-  /** Unix ms shown: the sender's time, but never later than when it arrived. */
+  /**
+   * Unix ms shown: the sender's time, but never later than when it arrived.
+   * Whole seconds from versions that date messages by the server's clock
+   * (net/clock.ts), milliseconds before.
+   */
   at: number;
+  /**
+   * Its place among the conversation's messages with the same `at` (0 for
+   * the first): they show in the order they were written or taken in here.
+   * Missing (0) in messages stored before it was kept.
+   */
+  order?: number;
   /**
    * Theirs: when they sent it, by their clock (its `at` on the wire), where
    * that's later than `at` (their clock runs ahead of ours). A delete of the
