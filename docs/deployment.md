@@ -205,6 +205,8 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `BOT_TOKEN` | secret | The bot's token from BotFather. Raise `BOT_TOKEN_VERSION` to push a changed token. |
 | `ISSUER_KEY` | secret | The send-token issuer's private key (below). Raise `ISSUER_KEY_VERSION` when it changes. |
 | `MEDIA_ISSUER_KEY` | secret | The media-token issuer's private key (below), a different key. Raise `MEDIA_ISSUER_KEY_VERSION` when it changes. |
+| `PREVIOUS_ISSUER_KEY`, `PREVIOUS_MEDIA_ISSUER_KEY` | secrets | Unset except while an issuer key is being replaced: the key it replaces, still held so that open apps keep working ([rotating an issuer key](#rotating-an-issuer-key)). Raise `PREVIOUS_ISSUER_KEY_VERSION` or `PREVIOUS_MEDIA_ISSUER_KEY_VERSION` (variables, 1 while unset) whenever one is set or deleted. |
+| `DROP_LIVE_ISSUER_KEY` | variable | Unset except for the deploy after a key leaks: `true` lets it drop a key the live site still names ([rotating an issuer key](#rotating-an-issuer-key)). |
 | `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins. A secret, so the IDs stay out of the public deploy logs; the API keeps only their keyed hashes. |
 | `CLIENT_ORIGINS` | variable | Origins allowed to call the API from a browser: the app's `https://<org>.github.io`. |
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
@@ -257,7 +259,10 @@ gh secret set ISSUER_KEY --env <env> < issuer.pem && shred -u issuer.pem  # or M
 
 Add the send key to `web/issuer-keys.json` under a new name with its `keyId`
 (the SHA-256 of the DER), the media key under `media` in the same entry, and
-set the hosting repository's `ISSUER_KEY` variable to that name.
+set the hosting repository's `ISSUER_KEY` variable to that name. Every
+deploy checks the keys, before it changes anything and after
+([what each deploy checks](#rotating-an-issuer-key)). To replace a key
+later: [rotating an issuer key](#rotating-an-issuer-key).
 
 ### The bot
 
@@ -356,7 +361,8 @@ deploy-role`), printing each check.
 
 Secrets are SSM parameters written through Terraform's write-only
 arguments, so they never land in Terraform state or plans: the bot token and
-the two issuer keys, from the environment's secrets, and four that Terraform
+the two issuer keys (and, while a rotation lasts, the keys they replaced;
+otherwise those parameters hold `none`), from the environment's secrets, and four that Terraform
 generates, the session key, the webhook secret, the chat key (which seals
 chat IDs) and the Telegram-ID pepper. Each function's role can read only the
 parameters it needs: only `bot` and `notify` can read the bot token.
@@ -455,6 +461,112 @@ retired, and the deploy stops if it is set, as a variable of the
 environment, the repository or the organization. If it is 1, deleting it is
 enough. Otherwise set the four versions above to its value first, so that
 nothing is replaced, then delete it.
+
+### Rotating an issuer key
+
+Replacing an issuer key is the only way to make the tokens already handed
+out worthless: after the key leaks, or to void tokens someone has stockpiled.
+Each kind (send, media) can be replaced on its own.
+
+The API holds each kind's current key (`ISSUER_KEY`, `MEDIA_ISSUER_KEY`)
+and, while a rotation lasts, the key it replaced (`PREVIOUS_ISSUER_KEY`,
+`PREVIOUS_MEDIA_ISSUER_KEY`). It accepts tokens of both, and signs each
+batch with the key the app asks for: the one its build names. An app counts
+and spends only its own key's tokens; it leaves others alone, for a copy of
+the app on the other build, until they expire. So apps still open on the
+old build keep working while the site switches, and an app on the new build
+never spends old-key tokens. An app whose key the API no longer holds can't
+get tokens, but isn't charged for asking, and its tokens are refused as a
+retired key's: it tells the user to close it and open it again
+([protocol](protocol.md#send-tokens-and-media-tokens)).
+
+A rotation has a cost to privacy ([security.md](security.md)): while both
+keys are held, the server sees which accounts still fetch tokens for the old
+key, and every old-key token it is paid with comes from one of them. Keep
+the window short.
+
+Each of these secrets has a version variable (`ISSUER_KEY_VERSION`,
+`PREVIOUS_ISSUER_KEY_VERSION`, and the same for media; 1 while unset). A
+deploy writes a secret into SSM, and restarts `api`, only when its version
+changes, so raise the version with every change, deleting a secret too.
+With no previous key set, nothing changes: the API holds the current keys
+alone. A deploy for production is a release, or a re-run of the latest
+release's CI run (which reads the secrets and variables afresh); for dev, a
+push to `main` or a run of CI on `main`.
+
+**The usual rotation.** The order matters: the API holds both keys before
+the site switches, and the old key goes only once the site is live.
+
+1. Make the new key and publish it: the first two commands in [the token
+   issuer keys](#the-token-issuer-keys), not the secret yet, and its
+   `keyId` from `openssl pkey -in issuer.pem -pubout -outform DER |
+   sha256sum`. Add a new entry to
+   [`web/issuer-keys.json`](../web/issuer-keys.json), named
+   `<env>-<year>-<month>`, with the new key and the other kind's current
+   key (an entry names both kinds; the kind not being replaced keeps its
+   key, which entries of one environment may share). Merge it, and for
+   production, release it. Nothing changes yet: the site still names the
+   old entry. Keep the new private key for step 2.
+2. Hold both keys and switch the site, in one deploy. The current key is
+   only in SSM (a secret can't be read back), so read it from there with
+   an admin profile. Set the secrets and their versions first, the previous
+   key before the new one:
+
+   ```shell
+   AWS_PROFILE=<profile> aws ssm get-parameter --region <aws-region> --with-decryption \
+     --name /incognitochat/<env>/issuer-key --query Parameter.Value --output text > previous.pem
+   gh secret set PREVIOUS_ISSUER_KEY --env <env> < previous.pem && shred -u previous.pem
+   gh variable set PREVIOUS_ISSUER_KEY_VERSION --env <env> --body <its value + 1>
+   gh secret set ISSUER_KEY --env <env> < issuer.pem && shred -u issuer.pem
+   gh variable set ISSUER_KEY_VERSION --env <env> --body <its value + 1>
+   ```
+
+   (For the media key: `media-issuer-key`, `PREVIOUS_MEDIA_ISSUER_KEY`,
+   `MEDIA_ISSUER_KEY` and their versions.) Only then set the hosting
+   repository's `ISSUER_KEY` variable to the new entry's name, and deploy.
+   Dev deploys at every push to `main`, so in this order a deploy that
+   starts in between never builds the site for a key the API doesn't hold
+   yet. The deploy applies the backend first, then has the site built, so
+   the new build only goes live once the API holds its key. If the site
+   still names the previous keys once it is live, the deploy warns.
+3. Retire the old key once the site serves the new build (the deploy waits
+   for it), and at least 10 minutes after that, for GitHub Pages' cache:
+   delete `PREVIOUS_ISSUER_KEY`, raise `PREVIOUS_ISSUER_KEY_VERSION` again,
+   and deploy. Until then the old key's tokens, stockpiled ones too, are
+   still accepted, so for a stockpile retire it as soon as that allows.
+   Apps still open on the old build then can't send until they are opened
+   again. The deploy refuses to drop a key the live site still names.
+
+**After a leak.** Don't hold the leaked key at all: anyone with it can make
+tokens. Make and publish the new key as in step 1 (or use a standby entry,
+below). Then set `ISSUER_KEY` to it and raise its version, leave
+`PREVIOUS_ISSUER_KEY` unset (delete it, and raise its version, if an earlier
+rotation left one), set the variable `DROP_LIVE_ISSUER_KEY` to `true` (the
+deploy otherwise refuses to drop the key the live site names), set the
+hosting variable to the new entry, and deploy. Delete
+`DROP_LIVE_ISSUER_KEY` afterwards (the next deploy warns while it is set).
+The leaked key's tokens are refused from the moment the backend is applied.
+Until the site is live (5 to 20 minutes) and each user opens the app again,
+apps on the old build can't send or upload. They aren't charged for trying,
+and they tell the user to close the app and open it again.
+
+**A standby entry** makes a rotation after a leak faster: no pull request
+or release first. Make the next keys ahead of time, publish them as an
+entry of their own that no site names yet, and keep their private keys
+offline (not in GitHub or AWS, where a leak of the current key might reach
+them too). A rotation then starts at step 2 with the latest release. The
+entry has a new key of each kind, so using it replaces both; the kind that
+didn't leak can keep its old key as the previous one, as in step 2.
+
+**What each deploy checks.** Before it changes anything: that each key is
+an RSA-2048 key the API can load, that no two of them are the same key,
+that the current keys are published together in one entry, and that the
+keys the live site names stay held (unless `DROP_LIVE_ISSUER_KEY`). After
+applying, it asks the API which keys it holds (`GET /tokens/keys`, public)
+and fails unless they are the secrets' keys, current first: a secret
+changed without raising its version never reaches the API. Once the site
+is live, that the keys its entry names are held. A re-run of a release
+from before these settings drops the previous keys.
 
 ## Cost guards
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -78,7 +79,8 @@ func main() {
 func setup(ctx context.Context) (*api.Server, error) {
 	env, err := config.Env(os.Getenv,
 		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
-		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY")
+		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY",
+		"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY")
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +90,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 	}
 	params, err := config.Load(ctx, ssm.NewFromConfig(aws),
 		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"],
-		env["PARAM_MEDIA_ISSUER_KEY"])
+		env["PARAM_MEDIA_ISSUER_KEY"], env["PARAM_PREVIOUS_ISSUER_KEY"], env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"])
 	if err != nil {
 		return nil, err
 	}
@@ -106,18 +108,23 @@ func setup(ctx context.Context) (*api.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokenIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_ISSUER_KEY"]]), tokens.LabelSend)
+	// Each kind's current key and, while a rotation lasts, its previous one
+	// (tokens.NoKey while there is none; docs/deployment.md, Rotating an
+	// issuer key).
+	tokenIssuer, err := tokens.LoadKeyring(params[env["PARAM_ISSUER_KEY"]], params[env["PARAM_PREVIOUS_ISSUER_KEY"]], tokens.LabelSend)
 	if err != nil {
 		return nil, err
 	}
-	mediaIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_MEDIA_ISSUER_KEY"]]), tokens.LabelMedia)
+	mediaIssuer, err := tokens.LoadKeyring(params[env["PARAM_MEDIA_ISSUER_KEY"]], params[env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"]], tokens.LabelMedia)
 	if err != nil {
 		return nil, err
 	}
 	// The two kinds of token must not share a key: a blind signer can't
 	// tell them apart, so one key would mean one budget.
-	if tokenIssuer.KeyID() == mediaIssuer.KeyID() {
-		return nil, errors.New("api: the send and media issuer keys are the same")
+	for _, send := range tokenIssuer.KeyIDs() {
+		if slices.Contains(mediaIssuer.KeyIDs(), send) {
+			return nil, errors.New("api: a send issuer key is also a media issuer key")
+		}
 	}
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same

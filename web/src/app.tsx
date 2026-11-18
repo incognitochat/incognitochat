@@ -89,6 +89,7 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
   'no-mailboxes': 'errorNoMailboxes',
   'rate-limited': 'errorTooFast',
   'media-paused': 'errorMediaPaused',
+  outdated: 'errorOutdated',
   network: 'errorNetwork',
   'too-big': 'errorTooBig',
   unreadable: 'errorUnreadable',

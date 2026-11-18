@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/media"
+	"github.com/incognitochat/incognitochat/backend/internal/tokens"
 )
 
 // DownloadsPerDay limits how often one upload can be fetched: the
@@ -88,24 +90,28 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 		nonce       []byte
 		forgetAfter time.Time
 	}
-	tokens := make([]checked, len(in.Tokens))
+	paid := make([]checked, len(in.Tokens))
 	for i, t := range in.Tokens {
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(t)
 		if err != nil {
 			return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 		}
 		nonce, forgetAfter, err := s.MediaIssuer.Check(raw, now)
+		if errors.Is(err, tokens.ErrUnknownKey) {
+			// A retired key's token: the app is told apart (sendTokens).
+			return httpapi.Error(http.StatusUnauthorized, "unknown_issuer_key")
+		}
 		if err != nil {
 			return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 		}
-		for _, prev := range tokens[:i] {
+		for _, prev := range paid[:i] {
 			if bytes.Equal(prev.nonce, nonce) {
 				return httpapi.Error(http.StatusUnauthorized, "invalid_token")
 			}
 		}
-		tokens[i] = checked{nonce, forgetAfter}
+		paid[i] = checked{nonce, forgetAfter}
 	}
-	for _, t := range tokens {
+	for _, t := range paid {
 		fresh, err := s.Spent.Spend(ctx, t.nonce, t.forgetAfter)
 		if err != nil {
 			return s.internal(route, err)

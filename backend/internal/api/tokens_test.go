@@ -1,9 +1,15 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/cloudflare/circl/blindsign/blindrsa"
 
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/tokens"
@@ -124,4 +130,143 @@ func TestIssueTokens(t *testing.T) {
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
 	status, out = h.call(t, nil, "", http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded(1)}, false)
 	wantError(t, status, out, http.StatusUnauthorized, "session_expired")
+}
+
+// fetchToken gets one token from path as an app does: it blinds a token
+// input for key, asks for it to be signed with the key named (keyId; none
+// if empty), and unblinds the signature, which fails unless key made it.
+func fetchToken(t *testing.T, h *harness, m member, path, label string, key *tokens.Issuer, named string) (string, error) {
+	t.Helper()
+	id := key.KeyID()
+	challenge := tokens.Challenge(label, tokens.EpochOf(h.now))
+	input := binary.BigEndian.AppendUint16(nil, tokens.Type)
+	input = append(append(append(input, randomBytes(t, 32)...), challenge[:]...), id[:]...)
+	client, err := blindrsa.NewClient(blindrsa.SHA384PSSDeterministic, key.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blinded, state, err := client.Blind(rand.Reader, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"blinded": []string{b64(blinded)}}
+	if named != "" {
+		body["keyId"] = named
+	}
+	status, out := h.as(t, m, http.MethodPost, path, body, false)
+	if status != http.StatusOK {
+		t.Fatalf("%s: %d %v", path, status, out)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(out["signatures"].([]any)[0].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := client.Finalize(state, sig)
+	if err != nil {
+		return "", err
+	}
+	return b64(append(input, final...)), nil
+}
+
+// While a rotation lasts the api holds the new key and the old one. Each
+// batch is signed with the key the app names, so an app still open on the
+// old build keeps getting tokens it can use, and tokens of both keys pay
+// for sends. A key it doesn't hold is refused before the batch counts
+// against the day's budget. Once the old key is retired, its tokens are
+// refused.
+func TestIssuerKeyRotation(t *testing.T) {
+	h, _, _, _ := mediaHarness(t)
+	m := h.account(t, userID)
+	env := clientEnvelope(t)
+	current, previous := testIssuer(), newTestIssuer(tokens.LabelSend)
+	h.server.Issuer = keyring(current, previous)
+	named := func(key *tokens.Issuer) string { id := key.KeyID(); return b64(id[:]) }
+	heldKeys := func() map[string]any {
+		t.Helper()
+		status, out := h.call(t, nil, "", http.MethodGet, "/tokens/keys", nil, false)
+		if status != http.StatusOK {
+			t.Fatalf("GET /tokens/keys: %d %v", status, out)
+		}
+		return out
+	}
+	// What the api holds, for the deploy to check: no login needed.
+	if got := fmt.Sprint(heldKeys()); got != fmt.Sprint(map[string]any{"send": []any{named(current), named(previous)}, "media": []any{named(testMediaIssuer())}}) {
+		t.Fatalf("held keys %s", got)
+	}
+
+	oldToken, err := fetchToken(t, h, m, "/tokens", tokens.LabelSend, previous, named(previous))
+	if err != nil {
+		t.Fatalf("a batch for the previous key wasn't signed with it: %v", err)
+	}
+	newToken, err := fetchToken(t, h, m, "/tokens", tokens.LabelSend, current, named(current))
+	if err != nil {
+		t.Fatalf("a batch for the current key wasn't signed with it: %v", err)
+	}
+	// An app from before keys were named was built for the key that was
+	// current then: the previous one, while it is held.
+	if _, err := fetchToken(t, h, m, "/tokens", tokens.LabelSend, previous, ""); err != nil {
+		t.Fatalf("a batch naming no key wasn't signed with the previous one: %v", err)
+	}
+	unspent, err := fetchToken(t, h, m, "/tokens", tokens.LabelSend, previous, named(previous))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, token := range map[string]string{"current": newToken, "previous": oldToken} {
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": env, "token": token}); status != http.StatusOK {
+			t.Fatalf("send with the %s key's token: %d %v", name, status, out)
+		}
+	}
+
+	// Unknown and malformed key IDs cost nothing: 4 counted so far.
+	blinded := make([]string, TokenBatch)
+	for i := range blinded {
+		b := randomBytes(t, current.BlindedLen())
+		b[0] = 0
+		blinded[i] = b64(b)
+	}
+	status, out := h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded, "keyId": b64(randomBytes(t, 32))}, false)
+	wantError(t, status, out, http.StatusConflict, "unknown_issuer_key")
+	for _, bad := range []string{b64(randomBytes(t, 31)), b64(randomBytes(t, 33)), "not base64!"} {
+		status, out := h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded, "keyId": bad}, false)
+		wantError(t, status, out, http.StatusBadRequest, "bad_request")
+	}
+	// Nor is another kind's key one of these: the media key isn't a send
+	// key, nor the send key a media key.
+	mediaID := testMediaIssuer().KeyID()
+	status, out = h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded, "keyId": b64(mediaID[:])}, false)
+	wantError(t, status, out, http.StatusConflict, "unknown_issuer_key")
+	status, out = h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded, "keyId": named(current)}, false)
+	wantError(t, status, out, http.StatusConflict, "unknown_issuer_key")
+	status, out = h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded[:1], "keyId": named(current)}, false)
+	if status != http.StatusOK || out["left"] != float64(TokensPerDay-5) {
+		t.Fatalf("send tokens after refused key IDs: %d %v", status, out)
+	}
+	status, out = h.as(t, m, http.MethodPost, "/tokens/media", map[string]any{"blinded": blinded[:1], "keyId": b64(mediaID[:])}, false)
+	if status != http.StatusOK || out["left"] != float64(MediaTokensPerDay-1) {
+		t.Fatalf("media tokens after a refused key ID: %d %v", status, out)
+	}
+
+	// The previous key retired: its tokens, even unspent ones, are refused,
+	// told apart from bad ones so that the app can say to open it again,
+	// and so is a batch for it. A batch naming no key gets the current one.
+	h.server.Issuer = keyring(current, nil)
+	if got := fmt.Sprint(heldKeys()["send"]); got != fmt.Sprint([]any{named(current)}) {
+		t.Fatalf("held send keys after retiring %s", got)
+	}
+	status, out = h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": env, "token": unspent})
+	wantError(t, status, out, http.StatusUnauthorized, "unknown_issuer_key")
+	status, out = h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": env, "token": b64(randomBytes(t, 354))})
+	wantError(t, status, out, http.StatusUnauthorized, "invalid_token")
+	status, out = h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": blinded[:1], "keyId": named(previous)}, false)
+	wantError(t, status, out, http.StatusConflict, "unknown_issuer_key")
+	if _, err := fetchToken(t, h, m, "/tokens", tokens.LabelSend, current, ""); err != nil {
+		t.Fatalf("a batch naming no key, outside a rotation: %v", err)
+	}
+	if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": env, "token": mintToken(t, h.now)}); status != http.StatusOK {
+		t.Fatalf("send with the current key's token after retiring the previous: %d %v", status, out)
+	}
+	// Uploads likewise, with a media token of a key retired.
+	h.server.MediaIssuer = keyring(newTestIssuer(tokens.LabelMedia), nil)
+	status, out = h.pay(t, 16<<10, mintMediaToken(t, h.now))
+	wantError(t, status, out, http.StatusUnauthorized, "unknown_issuer_key")
 }

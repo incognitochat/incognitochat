@@ -29,6 +29,11 @@ variables {
   lambda_builds_bucket           = "test"
   lambda_signing_profile         = "test"
   lambda_code_signing_config_arn = "test"
+  # No previous keys, as the deploy passes them while their secrets are
+  # unset. Given, since an ephemeral variable left to its default fails
+  # terraform test's apply.
+  previous_issuer_key       = ""
+  previous_media_issuer_key = ""
 }
 
 override_data {

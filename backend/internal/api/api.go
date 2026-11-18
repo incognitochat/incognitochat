@@ -25,6 +25,7 @@
 //	invalid_envelope                      the envelope's layout can't be valid
 //	mailbox_limit                         the account has the most mailboxes allowed
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
+//	unknown_issuer_key                    a token batch names, or a token is for, an issuer key the server doesn't hold (an app built for a retired key)
 //	uploads_paused                        the operator has paused uploads of attachments for now (switches.go); try later
 //	downloads_paused                      the operator has paused downloads of attachments for now (switches.go); try later
 //	in_progress                           the account, or what is left of one it replaced, is being deleted in steps (or another step runs now); repeat the request
@@ -227,6 +228,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodPost, "/send", s.send)
 	r.Handle(http.MethodPost, "/tokens", s.withDevice("POST /tokens", s.issueTokens))
 	r.Handle(http.MethodPost, "/tokens/media", s.withDevice("POST /tokens/media", s.issueMediaTokens))
+	r.Handle(http.MethodGet, "/tokens/keys", s.issuerKeys)
 	r.Handle(http.MethodGet, "/inbox", s.withDevice("GET /inbox", s.listInbox))
 	r.Handle(http.MethodPost, "/ack", s.withDevice("POST /ack", s.ack))
 	r.Handle(http.MethodPost, "/notices", s.withDevice("POST /notices", s.setNotices))

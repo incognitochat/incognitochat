@@ -99,6 +99,13 @@ func newIssuer(t *testing.T) (*Issuer, *rsa.PublicKey) {
 // mint does what a client does: blind a token input, have it signed, unblind.
 func mint(t *testing.T, issuer *Issuer, pub *rsa.PublicKey, epoch uint64, keyID [32]byte) []byte {
 	t.Helper()
+	return mintWith(t, issuer.Sign, pub, epoch, keyID)
+}
+
+// mintWith mints a token signed by sign, for the key pub (finalizing fails
+// for a signature by another key).
+func mintWith(t *testing.T, sign func([]byte) ([]byte, error), pub *rsa.PublicKey, epoch uint64, keyID [32]byte) []byte {
+	t.Helper()
 	input := binary.BigEndian.AppendUint16(nil, Type)
 	nonce := make([]byte, 32)
 	_, _ = rand.Read(nonce)
@@ -112,7 +119,7 @@ func mint(t *testing.T, issuer *Issuer, pub *rsa.PublicKey, epoch uint64, keyID 
 	if err != nil {
 		t.Fatal(err)
 	}
-	blindSig, err := issuer.Sign(blinded)
+	blindSig, err := sign(blinded)
 	if err != nil {
 		t.Fatal(err)
 	}

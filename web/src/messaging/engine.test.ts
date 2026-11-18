@@ -347,6 +347,8 @@ async function fakeBackend() {
           return check({ mailboxes: ids });
         }
         if (path === '/tokens' || path === '/tokens/media') {
+          // Signed with the key the request names, the only one held here.
+          if (b.keyId !== toBase64Url(issuer.keyId)) throw new ApiError(409, 'unknown_issuer_key');
           if (path === '/tokens/media') mediaSigned += (b.blinded as string[]).length;
           else signed += (b.blinded as string[]).length;
           return check({
@@ -659,7 +661,7 @@ describe('messaging between two people', () => {
 
     await owner.messaging.maintain();
     expect(await poolSize(owner.db)).toBeGreaterThanOrEqual(POOL_LOW);
-    expect(await countTokens(owner.db)).toBeGreaterThanOrEqual(LOW_WATER);
+    expect(await countTokens(owner.db, backend.issuer.keyId)).toBeGreaterThanOrEqual(LOW_WATER);
 
     await sender.messaging.startConversation(ref, bundle, 'still reaches you');
     expect(await owner.messaging.sync()).toBe(1);
@@ -677,7 +679,7 @@ describe('paying for sends by size', () => {
     const mine = await across(sender.db, conv, owner.db);
     /** Send tokens fetched and neither spent nor in a wallet: lost. */
     const lost = async () =>
-      backend.signed() - backend.sendPayments.reduce((a, b) => a + b, 0) - (await countTokens(owner.db)) - (await countTokens(sender.db));
+      backend.signed() - backend.sendPayments.reduce((a, b) => a + b, 0) - (await countTokens(owner.db, backend.issuer.keyId)) - (await countTokens(sender.db, backend.issuer.keyId));
     return { backend, owner, sender, conv, mine, lost };
   }
 
@@ -719,7 +721,7 @@ describe('paying for sends by size', () => {
 
   it('fetches more tokens when the wallet has fewer than a send costs', async () => {
     const { backend, sender, conv, lost } = await chat();
-    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    const held = (await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId)))!;
     await returnTokens(sender.db, held.slice(0, 2));
     const signed = backend.signed();
     await sender.messaging.send(conv, 'a'.repeat(5000));
@@ -813,13 +815,13 @@ describe('paying for sends by size', () => {
       await sender.messaging.send(conv, 'a'.repeat(5000));
       expect(backend.sendAttempts.slice(-3).flatMap((a) => a.tokens).filter((t) => shown.includes(t))).toEqual([]);
       expect(tiedSends(backend)).toEqual([]);
-      expect(await countTokens(sender.db)).toBeGreaterThan(0);
+      expect(await countTokens(sender.db, backend.issuer.keyId)).toBeGreaterThan(0);
     });
   }
 
   it('fetches more in the background once the wallet runs low, not with a send', async () => {
     const { backend, sender, conv, lost } = await chat();
-    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    const held = (await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId)))!;
     await returnTokens(sender.db, held.slice(0, LOW_WATER + 1));
     backend.later.length = 0;
     const signed = backend.signed();
@@ -835,14 +837,14 @@ describe('paying for sends by size', () => {
     expect(backend.signed()).toBe(signed);
     // When it runs: a batch, with no send near it.
     backend.later.shift()!.fn();
-    await vi.waitFor(async () => expect(await countTokens(sender.db)).toBeGreaterThanOrEqual(LOW_WATER));
+    await vi.waitFor(async () => expect(await countTokens(sender.db, backend.issuer.keyId)).toBeGreaterThanOrEqual(LOW_WATER));
     expect(backend.signed()).toBeGreaterThan(signed);
     expect(await lost()).toBe(held.length - LOW_WATER - 1);
   });
 
   it("asks for only the day's last few when fewer than a batch are left", async () => {
     const { backend, sender, conv } = await chat();
-    const held = (await takeTokens(sender.db, await countTokens(sender.db)))!;
+    const held = (await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId)))!;
     await returnTokens(sender.db, held.slice(0, 2));
     // The server said it will sign 5 more today: a batch of 20 would be refused.
     await rememberLeft(sender.db, 'send', 5);
@@ -2179,7 +2181,7 @@ describe('attachments', () => {
 
     // 6 MiB, padded to 7: seven media tokens, and no send token beyond the
     // message's own; the bucket only takes the padded, encrypted size.
-    const sendTokens = await countTokens(sender.db);
+    const sendTokens = await countTokens(sender.db, backend.issuer.keyId);
     const file = crypto.getRandomValues(new Uint8Array(65536));
     const big = new Uint8Array(6 * 1024 * 1024);
     big.set(file);
@@ -2189,9 +2191,9 @@ describe('attachments', () => {
     const [upload] = [...backend.uploads.values()];
     expect(upload!.body!.length).toBe(7 * 1024 * 1024);
     expect(backend.mediaSigned()).toBeGreaterThanOrEqual(7);
-    expect(await countTokens(sender.db)).toBe(sendTokens - 1);
+    expect(await countTokens(sender.db, backend.issuer.keyId)).toBe(sendTokens - 1);
     // What the batch brought beyond the upload's cost stays in the media wallet.
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(backend.mediaSigned() - 7);
+    expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(backend.mediaSigned() - 7);
     // The server's copy is ciphertext: the file's bytes aren't in it.
     const needle = toBase64Url(file.slice(0, 48));
     expect(toBase64Url(upload!.body!).includes(needle)).toBe(false);
@@ -3435,7 +3437,7 @@ describe('uploading and downloading attachments', () => {
     };
     /** The sender's message, and whether its tokens were paid only once. */
     const mine = async () => (await listMessages(sender.db, conv)).at(-1)!;
-    const paidOnce = async () => (await countTokens(sender.db, undefined, 'media')) === backend.mediaSigned() - 1;
+    const paidOnce = async () => (await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')) === backend.mediaSigned() - 1;
     return { backend, owner, sender, conv, photo, send, received, mine, paidOnce };
   }
 
@@ -3732,10 +3734,10 @@ describe('deleting an attachment or message while it goes out', () => {
 
   it("doesn't upload or pay for an attachment deleted before its upload starts", async () => {
     const { backend, sender, conv, out, reached } = await chat();
-    const tokens = await countTokens(sender.db, undefined, 'media');
+    const tokens = await countTokens(sender.db, backend.issuer.keyId, undefined, 'media');
     await sender.messaging.sendMedia(conv, out, '', undefined, (id) => sender.messaging.deleteHere(conv, id));
     expect(backend.mediaCalls).toEqual([]);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(tokens);
+    expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(tokens);
     expect(await listMessages(sender.db, conv)).toHaveLength(1);
     expect(await reached()).toEqual(['hello']);
   });
@@ -3798,7 +3800,7 @@ describe('attachments paused by the operator', () => {
     const send = () => sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } }, 'a cat');
     const mine = async () => (await listMessages(sender.db, conv)).at(-1)!;
     /** Every media token signed for the sender is still in its wallet, or paid for exactly the uploads made. */
-    const tokensLeft = async () => backend.mediaSigned() - (await countTokens(sender.db, undefined, 'media'));
+    const tokensLeft = async () => backend.mediaSigned() - (await countTokens(sender.db, backend.issuer.keyId, undefined, 'media'));
     return { backend, owner, sender, conv, photo, send, mine, tokensLeft };
   }
 

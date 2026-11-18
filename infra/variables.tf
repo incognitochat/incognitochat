@@ -64,6 +64,51 @@ variable "media_issuer_key_version" {
   default     = 1
 }
 
+# While a rotation lasts, the api also holds each kind's previous key
+# (docs/deployment.md, Rotating an issuer key): tokens of both keys are
+# accepted, and each batch is signed with the key the app names, so apps
+# still open on a build for the old key keep working. Unset (or empty, as
+# an unset GitHub secret is), there is none.
+variable "previous_issuer_key" {
+  description = "The send-token issuer's previous private key (PKCS#8 PEM), held only while a rotation lasts; unset or empty for none. Ephemeral: written to SSM, never stored in Terraform state or plan files."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  default     = null
+
+  validation {
+    condition     = var.previous_issuer_key == null || var.previous_issuer_key == "" || can(regex("^-----BEGIN PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PRIVATE KEY-----\\n?$", var.previous_issuer_key))
+    error_message = "previous_issuer_key must be a PKCS#8 PEM private key, or empty for none."
+  }
+}
+
+variable "previous_issuer_key_version" {
+  description = "Increase to push a changed previous send-token issuer key into SSM: when one is set, and again when it is removed"
+  type        = number
+  default     = 1
+  nullable    = false
+}
+
+variable "previous_media_issuer_key" {
+  description = "The media-token issuer's previous private key (PKCS#8 PEM), held only while a rotation lasts; unset or empty for none. Ephemeral: written to SSM, never stored in Terraform state or plan files."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  default     = null
+
+  validation {
+    condition     = var.previous_media_issuer_key == null || var.previous_media_issuer_key == "" || can(regex("^-----BEGIN PRIVATE KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PRIVATE KEY-----\\n?$", var.previous_media_issuer_key))
+    error_message = "previous_media_issuer_key must be a PKCS#8 PEM private key, or empty for none."
+  }
+}
+
+variable "previous_media_issuer_key_version" {
+  description = "Increase to push a changed previous media-token issuer key into SSM: when one is set, and again when it is removed"
+  type        = number
+  default     = 1
+  nullable    = false
+}
+
 variable "bot_token_version" {
   description = "Increase to push a changed bot token into SSM (write-only values can't be compared with what's stored)"
   type        = number

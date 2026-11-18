@@ -39,7 +39,7 @@ func TestThrottlingAnswersUnavailable(t *testing.T) {
 // faultyIssuer's signatures all fail their check (tokens.ErrSign).
 type faultyIssuer struct{ Issuer }
 
-func (faultyIssuer) Sign([]byte) ([]byte, error) { return nil, tokens.ErrSign }
+func (faultyIssuer) Sign([32]byte, []byte) ([]byte, error) { return nil, tokens.ErrSign }
 
 // A signature that fails its check is a server failure, and none is sent;
 // a message that can't be signed is the client's.
@@ -48,14 +48,14 @@ func TestFaultySignatureIsInternal(t *testing.T) {
 	m := h.account(t, userID)
 	blinded := randomBytes(t, testIssuer().BlindedLen())
 	blinded[0] = 0
-	h.server.Issuer = faultyIssuer{testIssuer()}
+	h.server.Issuer = faultyIssuer{keyring(testIssuer(), nil)}
 	status, out := h.as(t, m, http.MethodPost, "/tokens", map[string]any{"blinded": []string{b64(blinded)}}, false)
 	wantError(t, status, out, http.StatusInternalServerError, "internal")
 	if _, ok := out["signatures"]; ok {
 		t.Fatalf("signatures sent: %v", out)
 	}
 
-	h.server.Issuer = testIssuer()
+	h.server.Issuer = keyring(testIssuer(), nil)
 	tooBig := make([]byte, testIssuer().BlindedLen())
 	for i := range tooBig {
 		tooBig[i] = 0xff

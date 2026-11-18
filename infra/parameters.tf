@@ -65,6 +65,10 @@ locals {
     "chat-key"           = var.chat_key_version
     "issuer-key"         = var.issuer_key_version
     "media-issuer-key"   = var.media_issuer_key_version
+    # Each kind's previous issuer key, held only while a rotation lasts
+    # (docs/deployment.md, Rotating an issuer key).
+    "previous-issuer-key"       = var.previous_issuer_key_version
+    "previous-media-issuer-key" = var.previous_media_issuer_key_version
   }
 
   # The bot ID is the token's numeric prefix. Writing it here means nobody
@@ -79,6 +83,10 @@ locals {
     "chat-key"           = ephemeral.random_password.chat_key.result
     "issuer-key"         = var.issuer_key
     "media-issuer-key"   = var.media_issuer_key
+    # "none" while there is no previous key (tokens.NoKey in the backend):
+    # SSM can't store an empty value.
+    "previous-issuer-key"       = coalesce(var.previous_issuer_key, "none")
+    "previous-media-issuer-key" = coalesce(var.previous_media_issuer_key, "none")
   }
 }
 
