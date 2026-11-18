@@ -92,18 +92,34 @@ it. This is how close it gets.
 
 - Serve app code that differs from this repository. Builds are public,
   reproducible, attested and hashed, so anyone can compare what is served with
-  what is in the repository ([verifying.md](verifying.md)).
+  what is in the repository ([verifying.md](verifying.md)). The verification
+  script also checks that the build came from a commit on `main`, made by an
+  unchanged copy of the hosting workflow.
+- Put another page on the app's origin. Every Pages site of the hosting
+  organization is served from the app's origin, `https://<org>.github.io`,
+  and a page there could use the keys the app keeps in the browser. So the
+  organization hosts nothing but the app, and the verification script fails
+  if any other of its repositories has a Pages site. One gap remains: whoever
+  controls the hosting repository can add pages the manifest doesn't list to
+  the app's own site (through a changed or added workflow, or by deploying
+  Pages from a branch), and nothing the script checks would catch it. The
+  change may show in the hosting repository's public history, but an admin
+  can rewrite that history and delete the runs
+  ([verifying.md](verifying.md#what-this-proves-and-what-it-doesnt)).
 
 **What still requires trusting the operator**
 
 1. **A swapped page inside Telegram.** Whoever controls the bot in BotFather
    decides which web page Telegram opens, for everyone or, through the bot,
-   for chosen people, and Telegram offers no way to lock it. A swapped page
-   has no access to the keys already on a user's device, so past messages
-   stay safe. But anyone who types into it, for example a sender opening a
-   link, is typing into the operator's page. A user it talks into "setting up
-   again" loses their account. What limits the damage:
-   - keys are tied to the real app's address, so another page can't use them;
+   for chosen people, and Telegram offers no way to lock it. A page on
+   another address has no access to the keys already on a user's device, so
+   past messages stay safe. But anyone who types into it, for example a
+   sender opening a link, is typing into the operator's page. A user it talks
+   into "setting up again" loses their account. What limits the damage:
+   - keys are tied to the app's origin, `https://<org>.github.io`, so a page
+     on any other address can't use them. A page on that origin could, which
+     is why nothing else may be served there, and the verification script
+     checks it (above);
    - setting up again replaces the account loudly: the old device says at once
      that the account was replaced, and that this may mean tampering;
    - the old device keeps its chats, readable. No answer from the server
