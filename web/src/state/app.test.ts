@@ -1,10 +1,11 @@
 import 'fake-indexeddb/auto';
+import { openDB } from 'idb';
 import { describe, expect, it, vi } from 'vitest';
 import { logIn, prepareSetup, readAccount } from '../account/account';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
-import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
+import { DB_VERSION, deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
 import { addMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import type { SyncEvent } from '../sync/locks';
@@ -1250,6 +1251,51 @@ describe('deleting the account', () => {
     expect(server.calls.slice(asked)).toEqual([]);
     expect(await readAccount(owner.db)).toBeUndefined();
     expect(await listMessages(owner.db, 'c1')).toHaveLength(0);
+  });
+
+  it('deletes the database itself, and another copy of the app starts over on the fresh one', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    // Another copy, with its own connection to the same database.
+    let other: Awaited<ReturnType<typeof setup>> | null = null;
+    const db = await openDatabase(owner.db.name, { onErased: (reopened) => void other?.app.erasedElsewhere(reopened) });
+    other = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await other.app.start();
+    expect(home(other.app.screen.value).conversations).toHaveLength(1);
+
+    const deleted = vi.spyOn(indexedDB, 'deleteDatabase');
+    try {
+      owner.app.askDeleteAccount();
+      await owner.app.deleteAccount();
+      expect(deleted).toHaveBeenCalledWith(owner.db.name);
+    } finally {
+      deleted.mockRestore();
+    }
+    expect(owner.app.screen.value).toEqual({ kind: 'welcome', mismatch: false, deleted: true });
+    expect(await readAccount(owner.db)).toBeUndefined();
+    // The other copy let go at once, and starts over on the fresh database.
+    await vi.waitFor(() => expect(other.app.screen.value).toEqual({ kind: 'welcome', mismatch: false }));
+    expect(await listMessages(db, 'c1')).toEqual([]);
+  });
+
+  it('says so while another copy keeps the database open, and finishes once that copy closes', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api, { blockedDelayMs: 0 });
+    await chatOnDevice(owner.db);
+    // A copy that ignores the request to close (frozen, say).
+    const stuck = await openDB<unknown>(owner.db.name, DB_VERSION);
+    owner.app.askDeleteAccount();
+    const deleting = owner.app.deleteAccount();
+    await vi.waitFor(() => expect(owner.app.screen.value).toEqual({ kind: 'storage-blocked' }));
+    // Cleared already, while the delete waits.
+    expect(await stuck.count('messages')).toBe(0);
+    expect(await stuck.get('meta', 'account')).toBeUndefined();
+
+    stuck.close();
+    await deleting;
+    expect(owner.app.screen.value).toEqual({ kind: 'welcome', mismatch: false, deleted: true });
+    expect(await readAccount(owner.db)).toBeUndefined();
   });
 
   it('carries on a deletion confirmed here (in another copy) when the server says it is under way', async () => {

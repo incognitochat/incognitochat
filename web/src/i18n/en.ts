@@ -251,7 +251,7 @@ export const en = {
   clearMediaConfirm: 'Clear this media from this device? The messages stay.',
   storageCleared: 'Cleared {size}.',
   storageNote:
-    "Cleared photos, videos and files stay in their chats with a download button. They can be downloaded again only while the server still keeps them: at most 30 days after they were sent, and not once the recipient has deleted them. After that they're gone for good, since nothing is kept anywhere else.",
+    'Cleared photos, videos and files stay in their chats with a download button. They can be downloaded again only while the server still keeps them: at most 30 days after they were sent, and not once the recipient has deleted them.',
   blockedConversation: "You blocked this conversation. Nothing they send arrives, and they aren't told.",
   noticeUnblocked: 'Unblocked. They can write to you again; anything they sent while blocked is lost.',
   block: 'Block',
@@ -290,12 +290,14 @@ export const en = {
   deleteHereOnly: 'Delete from this device only',
   deleteHereOnlyNote:
     "If the server can't finish it, you can delete everything on this device now. What the server still holds stays unused until you set up again, which ends it.",
-  accountDeletedHere: 'Everything was deleted from this device. What the server still holds stays unused until you set up again.',
+  accountDeletedHere:
+    'The app deleted its data on this device. A backup or copy of the device made earlier, or traces left in its storage, may still hold it. What the server still holds stays unused until you set up again.',
   deleteHereOnlyConfirm: "Delete all your chats and keys from this device now? This can't be undone.",
   deletionPausedNotice: "Your account's deletion couldn't finish yet. Your chats are read-only until it does.",
   deletePhrase: 'delete my account',
   deleteAccountConfirm: 'Delete my account',
-  accountDeleted: 'Your account was deleted, from the server and from this device.',
+  accountDeleted:
+    'Your account was deleted from the server, and the app deleted its data on this device. A backup or copy of the device made earlier, or traces left in its storage, may still hold it.',
 
   replacedTitle: 'Your account was replaced',
   replacedBody:

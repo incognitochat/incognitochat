@@ -5,7 +5,7 @@
 // indexes: a WebKit bug breaks index queries on records that contain a
 // CryptoKey. Each schema change is a new version with its own upgrade step.
 
-import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
+import { deleteDB, openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
 
 export const DB_NAME = 'incognitochat';
 export const DB_VERSION = 4;
@@ -330,16 +330,70 @@ async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[],
   db.deleteObjectStore('messages-v3');
 }
 
+/** What a copy of the app hears about its database (openDatabase). */
+export interface DatabaseEvents {
+  /**
+   * Opening it waits for another copy of the app, on an older version, that
+   * keeps it open: the upgrade has to wait for that copy to close.
+   */
+  onBlocked?: () => void;
+  /**
+   * Another copy of the app deleted it (erase: the account was deleted, or
+   * set up again). This copy closed its connection at once, so the delete
+   * could go ahead, and opens the fresh database once it's done: reopened
+   * resolves then, or rejects (after onLost). Until then nothing here can
+   * use it.
+   */
+  onErased?: (reopened: Promise<void>) => void;
+  /**
+   * After a delete (erase, here or in another copy), the fresh database
+   * couldn't be opened: nothing can use it until the app is opened again.
+   */
+  onLost?: (err: StorageError) => void;
+}
+
+/** A copy of the app's connection to its database: replaced by a fresh one when the database is deleted (erase). */
+interface Connection {
+  readonly name: string;
+  readonly events: DatabaseEvents;
+  current: IDBPDatabase<Schema>;
+}
+
+/** The connection behind each Database that openDatabase made. */
+const connections = new WeakMap<Database, Connection>();
+
 /**
  * Opens (and if needed creates or upgrades) the app's database. If that
  * fails, it rejects with a StorageError and the database is as it was.
+ *
+ * What it returns goes on working when the database is deleted and opened
+ * fresh (erase, in this copy of the app or another): everything that holds
+ * it uses the fresh one from then on.
+ */
+export async function openDatabase(name = DB_NAME, events: DatabaseEvents = {}): Promise<Database> {
+  const conn = { name, events } as Connection;
+  conn.current = await connect(conn, events.onBlocked);
+  const db = new Proxy({} as Database, {
+    // Each use goes to the connection open now, which idb's methods need as `this`.
+    get(_, prop) {
+      const value: unknown = Reflect.get(conn.current, prop);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(conn.current) : value;
+    },
+    has: (_, prop) => Reflect.has(conn.current, prop),
+  });
+  connections.set(db, conn);
+  return db;
+}
+
+/**
+ * Opens a connection to the database, creating or upgrading it if needed.
  * onBlocked runs if another copy of the app, on an older version, keeps it
  * open, so the upgrade has to wait for that copy to close.
  */
-export async function openDatabase(name = DB_NAME, { onBlocked }: { onBlocked?: () => void } = {}): Promise<Database> {
+async function connect(conn: Connection, onBlocked?: () => void): Promise<IDBPDatabase<Schema>> {
   let failure: unknown;
   try {
-    return await openDB<Schema>(name, DB_VERSION, {
+    return await openDB<Schema>(conn.name, DB_VERSION, {
       async upgrade(db, oldVersion, _newVersion, tx) {
         // How it ends is what openDB resolves or rejects with; nothing waits on tx.done.
         tx.done.catch(() => {});
@@ -364,17 +418,38 @@ export async function openDatabase(name = DB_NAME, { onBlocked }: { onBlocked?: 
       blocked() {
         onBlocked?.();
       },
-      // Another copy of the app is running a newer version: close at once, so
-      // it needn't wait for the reload, which then brings that version.
-      blocking(_current, _blocked, event) {
+      // Another copy of the app needs it: closed at once, so that copy
+      // needn't wait.
+      blocking(_current, next, event) {
         (event.target as IDBDatabase).close();
-        location.reload();
+        // It's deleting it (erase): the fresh one opens once that's done.
+        if (next === null) erased(conn);
+        // It's running a newer version: the reload brings that version.
+        else location.reload();
       },
     });
   } catch (err) {
     // Opened before by a newer version, which upgraded it past ours.
     if (failure === undefined && (err as { name?: unknown } | null)?.name === 'VersionError') throw new StorageError('newer', err);
     throw new StorageError('failed', failure ?? err);
+  }
+}
+
+/** Another copy of the app deleted the database (erase): opens the fresh one, and says so. */
+function erased(conn: Connection): void {
+  const reopened = reopen(conn);
+  // A failure is said through onLost.
+  reopened.catch(() => {});
+  conn.events.onErased?.(reopened);
+}
+
+/** Opens the fresh database after a delete (erase); onLost says so if it can't be. */
+async function reopen(conn: Connection): Promise<void> {
+  try {
+    conn.current = await connect(conn);
+  } catch (err) {
+    conn.events.onLost?.(err as StorageError);
+    throw err;
   }
 }
 
@@ -422,10 +497,9 @@ export async function deleteMeta(db: Database, name: string): Promise<void> {
 }
 
 /**
- * Deletes everything stored for the previous account on this device: keys,
+ * Clears everything stored for the previous account on this device: keys,
  * sealed keys, conversations, messages and settings, except the settings
- * named in keep. A new account must not inherit any of it: the server
- * deleted that account's mailboxes and links.
+ * named in keep. The app erases instead, which also deletes the database.
  */
 export async function wipe(db: Database, keep: string[] = []): Promise<void> {
   const tx = db.transaction(['keys', 'vault', 'meta', 'conversations', 'messages', 'media'], 'readwrite');
@@ -440,6 +514,47 @@ export async function wipe(db: Database, keep: string[] = []): Promise<void> {
   for (const name of await meta.getAllKeys()) {
     if (!keep.includes(String(name))) await meta.delete(name);
   }
+  await tx.done;
+}
+
+/**
+ * Deletes everything stored for the previous account on this device, and
+ * the database itself, then opens a fresh one with only the settings named
+ * in keep; db goes on working, on the fresh one. A new account must not
+ * inherit any of it: the server deleted that account's mailboxes and links.
+ *
+ * Clearing alone isn't enough: some engines (Chromium's) only mark what's
+ * cleared as deleted, and the old keys and records stay in the database's
+ * files, readable next to the new account's, until the engine compacts
+ * them. Deleting the database lets it drop those files. That's all the app
+ * can do: a copy of the device's storage made before, or what its flash
+ * memory keeps of deleted files, may still hold them.
+ *
+ * Every other copy of the app closes its connection at once (openDatabase),
+ * so the delete can go ahead. If one doesn't (one that's frozen, say), the
+ * delete waits for it: onBlocked runs, and this resolves only once that copy
+ * has closed. Everything is cleared first, so nothing of the old account is
+ * used meanwhile.
+ */
+export async function erase(db: Database, keep: string[] = [], { onBlocked }: { onBlocked?: () => void } = {}): Promise<void> {
+  const conn = connections.get(db);
+  if (!conn) throw new Error('storage: erase needs a database from openDatabase');
+  const kept = new Map<string, unknown>();
+  for (const name of keep) {
+    const value = await getMeta(db, name);
+    if (value !== undefined) kept.set(name, value);
+  }
+  await wipe(db, keep);
+  conn.current.close();
+  try {
+    await deleteDB(conn.name, { blocked: () => onBlocked?.() });
+  } catch {
+    // Not deleted: the fresh one is the old one, cleared above.
+  }
+  await reopen(conn);
+  if (kept.size === 0) return;
+  const tx = db.transaction('meta', 'readwrite');
+  await Promise.all([...kept].map(([name, value]) => tx.store.put(value, name)));
   await tx.done;
 }
 

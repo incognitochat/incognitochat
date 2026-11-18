@@ -102,11 +102,17 @@ func (b *Bucket) UploadURL(ctx context.Context, id string, size int64) (string, 
 // DownloadURL returns a URL that fetches id's ciphertext. S3 answers it with
 // "Content-Encoding: identity" and the one type, whatever the upload claimed,
 // so a sender can't have the recipient's browser unpack a compressed bomb
-// while it downloads.
+// while it downloads. It also answers "Cache-Control: no-store", so the
+// browser keeps no copy of the ciphertext in its cache, where the file's key
+// (which its message keeps) would open it after the app cleared the file and
+// the bucket deleted it. Each fetch asks for a fresh URL anyway, so a cached
+// copy would never be used. All three are signed query parameters, which add
+// no CORS preflight.
 func (b *Bucket) DownloadURL(ctx context.Context, id string) (string, error) {
 	req, err := b.Presign.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket:                  &b.Name,
 		Key:                     key(id),
+		ResponseCacheControl:    aws.String("no-store"),
 		ResponseContentEncoding: aws.String("identity"),
 		ResponseContentType:     aws.String(ContentType),
 	}, s3.WithPresignExpires(DownloadURLTTL))

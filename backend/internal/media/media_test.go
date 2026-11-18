@@ -109,6 +109,26 @@ func TestDownloadURLFixesTheAnswersEncodingAndType(t *testing.T) {
 	}
 }
 
+func TestDownloadURLKeepsTheAnswerOutOfTheCache(t *testing.T) {
+	bucket, rec := newBucket()
+	raw, err := bucket.DownloadURL(context.Background(), "IDIDIDIDIDIDIDIDIDIDID")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, q := parse(t, raw)
+	// S3 answers with this Cache-Control, so the browser stores no copy of
+	// the ciphertext. In the signed query: no header, so no CORS preflight.
+	if got := q.Get("response-cache-control"); got != "no-store" {
+		t.Errorf("response-cache-control = %q", got)
+	}
+	if signed := strings.Split(q.Get("X-Amz-SignedHeaders"), ";"); len(signed) != 1 || signed[0] != "host" {
+		t.Errorf("signed headers = %v", signed)
+	}
+	if rec.last.Method != http.MethodGet {
+		t.Errorf("method = %s", rec.last.Method)
+	}
+}
+
 func TestStored(t *testing.T) {
 	// What S3 answers a HEAD for each key: without s3:ListBucket, a missing
 	// key is 403, not 404.

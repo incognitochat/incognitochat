@@ -1,6 +1,8 @@
 // Conversations and history on this device (design D6: history lives on the
 // device only). Message text is encrypted under the device's storage key, a
-// non-extractable AES-GCM key, and bound to the message ID.
+// non-extractable AES-GCM key, and bound to the message ID. The key is kept
+// in the same database, so a copy of the app's storage opens the history
+// too (crypto/vault.ts).
 //
 // Message and conversation IDs are chosen by the other side, so they count
 // only within their conversation: messages and attachments are kept by

@@ -22,13 +22,28 @@ A change to what the code stores updates this page in the same change.
 ## On the device
 
 Keys, conversations, their history, attachments received or sent, labels, and
-blocks. History and attachments are encrypted under a key that can't leave the
-device. None of it leaves the device in readable form. It's deleted when the
-user deletes the account or sets up again, or when Telegram or the phone
-clears the app's storage. Deleting a conversation deletes its history and
-attachments; its record (keys and mailboxes included) stays, out of the list,
-so it can come back if either side writes again. Attachments can also be
-cleared on their own (Data and storage), and their messages stay.
+blocks, in the app's storage (IndexedDB) in Telegram's web view. The app sends
+none of it anywhere in readable form.
+
+History and attachments are encrypted under a storage key, but that key is
+kept in the same storage, with the account's other keys. They're
+non-extractable WebCrypto keys, which only means code can't read them out: on
+Android, Windows and Linux, at least, the web view writes them to disk as
+they are. So a copy of the app's storage (an image of the device, say, or of
+Telegram Desktop's folder) holds the keys with the data. It opens the whole
+history, and can use the account as this device.
+
+When the user deletes the account or sets up again, the app deletes its whole
+database, not just what's in it, so the system can drop the files. A backup
+or copy of the device made before then may still hold it, and deleted data
+can linger in the device's flash storage until it's overwritten. The same
+goes for Telegram or the phone clearing the app's storage.
+
+Deleting a conversation deletes its history and attachments; its record
+(keys and mailboxes included) stays, out of the list, so it can come back if
+either side writes again. Attachments can also be cleared on their own (Data
+and storage); their messages stay, with each file's key, to fetch it again.
+Downloads are marked not to be kept in the web view's cache.
 
 So that a message delivered again, or late, can't undo anything (bring back
 something deleted, wipe newer history, or move the app back to an older key
@@ -146,8 +161,10 @@ The services the software runs on:
 - **GitHub Pages** serves the app's files. It sees the IP address of every app
   load, and the link being opened, which is part of the page address.
 - **The device's browser**, when an attachment is saved outside Telegram,
-  opens a save page; the address may stay in its history (it opens nothing
-  once the upload is gone).
+  opens a save page; the address, which holds the file's key, may stay in its
+  history. The download is marked not to be cached, so once the upload is
+  gone the link fetches nothing; but its key still opens any copy of the
+  encrypted file kept elsewhere.
 
 None of them receive message content. The app loads no third-party code and
 has no analytics or trackers.
@@ -180,8 +197,9 @@ explained in [security.md](security.md#what-still-leaks).
 - **Delete their account** in the app (on the Link tab). It ends at once, and
   everything the server holds for it is deleted within minutes (the link,
   mailboxes, waiting messages and attachments, invitation codes, keys, and
-  the hash of the Telegram ID), then everything on the device. They can set
-  up a new account later.
+  the hash of the Telegram ID), then the app's database on the device (see
+  On the device for what that can't reach). They can set up a new account
+  later.
 - **Set up again on another device** if they can't use theirs any more. This
   replaces the old account: its link goes and its mailboxes stop at once, and
   they're deleted within minutes while the new device's app is open.

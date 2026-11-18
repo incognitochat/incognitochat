@@ -9,8 +9,12 @@
 // Keys on this device:
 // - account key: copyable (sealed in the vault for linking devices later),
 //   used through a non-extractable working copy;
-// - device signing key: non-extractable, never leaves this device;
+// - device signing key: non-extractable, never sent anywhere;
 // - vault key: non-extractable, seals the copyable keys.
+// Non-extractable only stops code from reading a key out. All of them are
+// kept in the app's storage, which the web view writes to disk (on Android,
+// Windows and Linux with the keys as they are): a copy of that storage
+// clones the account (docs/data.md).
 
 import { randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, fingerprint, generateCopyableSigningKey, generateSigningKey, SIGNING_IMPORT } from '../crypto/keys';
@@ -19,7 +23,7 @@ import { generateVaultKey, seal, unseal } from '../crypto/vault';
 import { ApiError, checkTokenResponse, NetworkError, type Api, type TokenResponse } from '../net/api';
 import { createClock, withServerTime, type Clock } from '../net/clock';
 import { encodeDeviceList, firstList } from '../protocol/device-list';
-import { deleteMeta, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair, wipe } from '../storage/db';
+import { deleteMeta, erase, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair } from '../storage/db';
 import { withLock } from '../sync/locks';
 
 /** The start parameter prefix of a registration launch. */
@@ -97,13 +101,15 @@ export function isSetUp(record: AccountRecord | undefined): record is Extract<Ac
 /**
  * Prepares a setup and returns the start parameter the registration launch
  * must carry. A pending setup is reused, so asking again reopens with the same
- * code; otherwise new keys are created, and everything of an account before
- * is deleted from this device. Over a device with an account (registered,
- * replaced or refused, which includes being deleted elsewhere) that takes
- * restart, which only the typed confirmation gives: no answer from the
- * server alone ever deletes a device's chats.
+ * code; otherwise new keys are created, in a fresh database: everything of
+ * an account before is deleted from this device, the database included
+ * (erase; onBlocked runs if another copy of the app holds that up). Over a
+ * device with an account (registered, replaced or refused, which includes
+ * being deleted elsewhere) that takes restart, which only the typed
+ * confirmation gives: no answer from the server alone ever deletes a
+ * device's chats.
  */
-export function prepareSetup(db: Database, options: { restart?: boolean } = {}): Promise<string> {
+export function prepareSetup(db: Database, options: { restart?: boolean; onBlocked?: () => void } = {}): Promise<string> {
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
     if (isSetUp(current) && !options.restart) throw new Error('already set up');
@@ -114,7 +120,7 @@ export function prepareSetup(db: Database, options: { restart?: boolean } = {}):
     // A new account starts with nothing from an earlier one on this device
     // (its mailboxes and links are gone on the server), except a link opened
     // just before and the choice to start over.
-    await wipe(db, [META_PENDING_LINK, META_START_OVER]);
+    await erase(db, [META_PENDING_LINK, META_START_OVER], options);
     const vaultKey = await generateVaultKey();
     const account = await generateCopyableSigningKey();
     const sealed = await seal(vaultKey, account.privateKey, KEY_ACCOUNT);

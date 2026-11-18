@@ -21,7 +21,22 @@ import {
   setFile,
   type MessageBody,
 } from '../messaging/store';
-import { DB_VERSION, getKey, getKeyPair, getMeta, getSealed, openDatabase, putKey, putMeta, putSealed, StorageError, type Database } from './db';
+import {
+  DB_VERSION,
+  erase,
+  getKey,
+  getKeyPair,
+  getMeta,
+  getSealed,
+  openDatabase,
+  putKey,
+  putMeta,
+  putSealed,
+  StorageError,
+  type ConversationRecord,
+  type Database,
+  type DatabaseEvents,
+} from './db';
 
 let n = 0;
 const fresh = () => openDatabase(`test-${n++}`);
@@ -407,5 +422,102 @@ describe('upgrades', () => {
     });
     expect(blocked).toBe(1);
     expect(db.version).toBe(DB_VERSION);
+  });
+});
+
+describe('erasing', () => {
+  /** A database with something in every store. */
+  async function filled(name: string, events: DatabaseEvents = {}): Promise<Database> {
+    const db = await openDatabase(name, events);
+    await putKey(db, 'vault-key', await generateVaultKey());
+    await putSealed(db, 'account-key', new Uint8Array([1, 2, 3]));
+    await putMeta(db, 'account', { state: 'registered' });
+    await putMeta(db, 'pending-link', 'L');
+    await db.put('conversations', { id: 'c', wire: 'c', link: { id: 'l', fingerprint: 'f' } } as ConversationRecord);
+    await addMessage(db, { id: 'm', conv: 'c', at: 1, out: false, status: 'received' }, { text: 'hi' });
+    await putMedia(db, 'c', 'm', new Uint8Array(4));
+    return db;
+  }
+
+  it('deletes the database itself, and goes on with a fresh one at the current version, keeping only the settings asked for', async () => {
+    const name = `erase-test-${n++}`;
+    const db = await filled(name);
+    const deleted = vi.spyOn(indexedDB, 'deleteDatabase');
+    try {
+      await erase(db, ['pending-link', 'not-there']);
+      expect(deleted).toHaveBeenCalledWith(name);
+    } finally {
+      deleted.mockRestore();
+    }
+    // The same handle, on the fresh database, made as a new install's.
+    expect(db.version).toBe(DB_VERSION);
+    expect([...db.objectStoreNames].sort()).toEqual(['conversations', 'keys', 'media', 'messages', 'meta', 'vault']);
+    expect(db.transaction('messages').store.keyPath).toEqual(['conv', 'id']);
+    expect([...db.transaction('conversations').store.indexNames]).toEqual(['byWire']);
+    for (const store of ['keys', 'vault', 'conversations', 'messages', 'media'] as const) expect(await db.count(store)).toBe(0);
+    expect(await db.getAllKeys('meta')).toEqual(['pending-link']);
+    expect(await getMeta(db, 'pending-link')).toBe('L');
+
+    await putMeta(db, 'account', { state: 'pending' });
+    db.close();
+    const reopened = await openDatabase(name);
+    expect(await getMeta(reopened, 'account')).toEqual({ state: 'pending' });
+    reopened.close();
+  });
+
+  it('has another copy of the app close at once, and go on with the fresh database', async () => {
+    const name = `erase-test-${n++}`;
+    let reopened: Promise<void> | undefined;
+    const other = await openDatabase(name, { onErased: (r) => (reopened = r) });
+    const db = await filled(name);
+    await erase(db);
+    expect(reopened).toBeDefined();
+    await reopened;
+    expect(await other.count('conversations')).toBe(0);
+    // Both use the same, fresh one.
+    await putMeta(db, 'account', { state: 'pending' });
+    expect(await getMeta(other, 'account')).toEqual({ state: 'pending' });
+    expect(other.version).toBe(DB_VERSION);
+    other.close();
+    db.close();
+  });
+
+  it('waits for a copy that keeps the database open, saying so, with everything cleared meanwhile', async () => {
+    const name = `erase-test-${n++}`;
+    const db = await filled(name);
+    // A copy that ignores the request to close (frozen, say).
+    const stuck = await openDB<unknown>(name, DB_VERSION);
+    let blocked = 0;
+    let done = false;
+    const erasing = erase(db, [], { onBlocked: () => blocked++ }).then(() => (done = true));
+    await vi.waitFor(() => expect(blocked).toBe(1));
+    expect(done).toBe(false);
+    for (const store of ['keys', 'vault', 'meta', 'conversations', 'messages', 'media']) expect(await stuck.count(store)).toBe(0);
+
+    stuck.close();
+    await erasing;
+    expect(db.version).toBe(DB_VERSION);
+    await putMeta(db, 'account', { state: 'pending' });
+    expect(await getMeta(db, 'account')).toEqual({ state: 'pending' });
+    db.close();
+  });
+
+  it('says so when the fresh database cannot be opened, here and in another copy', async () => {
+    const name = `erase-test-${n++}`;
+    const lost: StorageError[] = [];
+    let reopened: Promise<void> | undefined;
+    const other = await openDatabase(name, { onErased: (r) => (reopened = r), onLost: (err) => lost.push(err) });
+    const db = await filled(name, { onLost: (err) => lost.push(err) });
+    const open = vi.spyOn(indexedDB, 'open').mockImplementation(() => {
+      throw new DOMException('no space', 'QuotaExceededError');
+    });
+    try {
+      await expect(erase(db)).rejects.toBeInstanceOf(StorageError);
+      await expect(reopened).rejects.toBeInstanceOf(StorageError);
+    } finally {
+      open.mockRestore();
+    }
+    expect(lost).toHaveLength(2);
+    expect(lost.map((err) => err.kind)).toEqual(['failed', 'failed']);
   });
 });

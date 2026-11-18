@@ -1,10 +1,13 @@
 // The vault seals keys that must be copyable to a new device, under a
-// non-extractable AES-GCM key that never leaves this device.
+// non-extractable AES-GCM key kept in the app's storage on this device.
 //
-// Honest limit: any script running on the app's origin can ask the vault key
-// to unseal. The non-extractable flag really protects only per-device keys;
+// Honest limits: any script running on the app's origin can ask the vault key
+// to unseal. The non-extractable flag only stops code from reading a key out;
 // sealing keeps copyable keys out of plain sight in storage and limits them to
-// this origin.
+// this origin. Neither protects against a copy of the storage itself: the
+// vault key is kept next to what it seals, and on Android, Windows and Linux
+// the web view writes non-extractable keys to disk as they are, so a copy of
+// the app's storage holds every key and clones the account (docs/data.md).
 
 import { concat, randomBytes } from './encoding';
 

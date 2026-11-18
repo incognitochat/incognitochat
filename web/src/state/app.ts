@@ -54,7 +54,7 @@ import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
-import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
+import { deleteMeta, erase, getMeta, putMeta, type Database } from '../storage/db';
 import type { SyncEvent } from '../sync/locks';
 
 /** Whether the device says it's offline (its saying online proves nothing). */
@@ -218,6 +218,11 @@ export type Screen =
   | { kind: 'deleting'; error: ErrorKind | null }
   /** This Telegram account is set up on another device (one device per account). */
   | { kind: 'elsewhere' }
+  /**
+   * Deleting this device's database waits for another copy of the app that
+   * keeps it open (storage/db.ts, erase): until that copy closes.
+   */
+  | { kind: 'storage-blocked' }
   | {
       kind: 'home';
       tab: 'chats' | 'links';
@@ -298,6 +303,8 @@ export interface Deps {
   background?: boolean;
   /** The pause between steps of a deletion or cleanup, instead of a second (tests). */
   stepPauseMs?: number;
+  /** How long a blocked erase waits before saying so, instead of BLOCKED_DELAY_MS (tests). */
+  blockedDelayMs?: number;
 }
 
 /** How often an open app checks its inbox (until sockets arrive in phase 3). */
@@ -318,6 +325,11 @@ export interface LinkView extends LinkRecord {
 
 /** How long the old copy waits before closing, so Telegram handles the link first (tested in phase 0). */
 const CLOSE_DELAY_MS = 400;
+/**
+ * How long deleting the database may wait for another copy of the app
+ * before the app says so: a copy that lets go closes within moments.
+ */
+const BLOCKED_DELAY_MS = 500;
 /** GIFs up to this size are fetched without a tap, like photos. */
 const AUTO_GIF_BYTES = 10 * 1024 * 1024;
 /**
@@ -1512,13 +1524,68 @@ export function createApp(deps: Deps) {
   async function finishDeletion(accountId: string, hereOnly = false): Promise<void> {
     if (!(await stillDeleting(accountId))) return start();
     stopMessaging();
-    await wipe(deps.db);
+    backButton(false);
+    await erasing((onBlocked) => erase(deps.db, [], { onBlocked }));
     signedOut = null;
     deletionPaused = false;
     readOnly.value = false;
     deps.broadcast({ type: 'account-changed' });
-    backButton(false);
     screen.value = hereOnly ? { kind: 'welcome', mismatch: false, deletedHere: true } : { kind: 'welcome', mismatch: false, deleted: true };
+  }
+
+  /**
+   * Runs an erase (storage/db.ts), which deletes the database. If another
+   * copy of the app keeps it open and doesn't let go, the delete waits for
+   * that copy: after a moment the screen says so, until it goes through.
+   */
+  async function erasing<T>(run: (onBlocked: () => void) => Promise<T>): Promise<T> {
+    let shown: ReturnType<typeof setTimeout> | undefined;
+    const onBlocked = () => {
+      shown ??= setTimeout(() => (screen.value = { kind: 'storage-blocked' }), deps.blockedDelayMs ?? BLOCKED_DELAY_MS);
+    };
+    try {
+      return await run(onBlocked);
+    } finally {
+      clearTimeout(shown);
+    }
+  }
+
+  /**
+   * Another copy of the app deleted the database (storage/db.ts, erase: it
+   * deleted the account, or set up again), and this copy's connection closed
+   * for it. Everything here stops at once; once the fresh database is open,
+   * the app starts over on it, as when another copy changed the account. If
+   * it can't be opened, the app's storage screen says so (main.tsx).
+   */
+  async function erasedElsewhere(reopened: Promise<void>): Promise<void> {
+    endDeletionRun();
+    stopMessaging();
+    signedOut = null;
+    readOnly.value = false;
+    backButton(false);
+    screen.value = { kind: 'loading' };
+    try {
+      await reopened;
+    } catch {
+      return;
+    }
+    return accountChanged();
+  }
+
+  /** Ends the deletion run under way here, if any: the account it was for may be gone, or another set up. */
+  function endDeletionRun(): void {
+    deletionRun++;
+    deletionRunning = false;
+    deletionPaused = false;
+  }
+
+  /** Another copy changed the account (finished setting up, say): catch up. A login refused in the next few seconds is tried once more. */
+  function accountChanged(): Promise<void> {
+    // A deletion under way here stops: the account it was for may be gone
+    // (another copy finished it) or another set up. start() looks again.
+    endDeletionRun();
+    session?.setUp();
+    return start();
   }
 
   /**
@@ -1883,7 +1950,7 @@ export function createApp(deps: Deps) {
   async function setUp(options: { restart?: boolean } = {}): Promise<void> {
     const { config, bridge, db } = deps;
     if (!config || !bridge) return;
-    const code = await prepareSetup(db, options);
+    const code = await erasing((onBlocked) => prepareSetup(db, { ...options, onBlocked }));
     screen.value = { kind: 'reopening' };
     bridge.post('web_app_open_tg_link', { path_full: registrationPath(config.botUsername, config.appName, code) });
     // The new launch is a second copy of the app; this one steps aside.
@@ -1924,16 +1991,9 @@ export function createApp(deps: Deps) {
   return {
     screen,
     start,
-    /** Another copy changed the account (finished setting up, say): catch up. A login refused in the next few seconds is tried once more. */
-    accountChanged(): Promise<void> {
-      // A deletion under way here stops: the account it was for may be gone
-      // (another copy finished it) or another set up. start() looks again.
-      deletionRun++;
-      deletionRunning = false;
-      deletionPaused = false;
-      session?.setUp();
-      return start();
-    },
+    accountChanged,
+    /** Another copy deleted the database: stops, and starts over once the fresh one is open (reopened). */
+    erasedElsewhere,
     setUp: () => setUp(),
     /** Asks the server again whether it takes this device. */
     recheck,
