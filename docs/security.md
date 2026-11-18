@@ -188,8 +188,12 @@ it. This is how close it gets.
   can't swap it after sending, and once the recipient deleted it, it can
   come back only from a link given in that same minute, as a copy that
   still expires within 30 days. The link used to save a file in the device's
-  browser can stay in that browser's history; it carries no delete secret,
-  and once the upload is gone it opens nothing.
+  browser can stay in that browser's history, with the file's key; it
+  carries no delete secret. Once the upload is gone the link fetches
+  nothing, but its key still opens any copy of the encrypted file kept
+  elsewhere. Downloads are marked not to be cached (`Cache-Control:
+  no-store`), so the browser keeps no copy of its own; one cached before
+  downloads were marked so may remain.
 - **"Seen" right after a link.** Opening a link from Telegram never opens a
   chat or sends "seen" by itself, so a link's owner can't send someone their
   link and watch for a "seen" to learn whether that person writes to them.
@@ -249,6 +253,20 @@ it. This is how close it gets.
   If Telegram or the phone clears the app's storage, the account is gone.
   Whether iPhones keep the app's storage over long periods is still being
   tested.
+- **Keys are stored with the data.** The app's keys are non-extractable
+  WebCrypto keys, which only stops code from reading them out. They live in
+  the web view's storage, next to the history they encrypt, and on Android,
+  Windows and Linux the web view writes them to disk as they are. So an image
+  of the device's app storage (a forensic copy of an unlocked phone, or a copy
+  of Telegram Desktop's folder) clones the account: it opens the whole
+  history and can use the account as this device. Deleting the account or
+  setting up again clears the app's storage, but that isn't erasure: on some
+  systems (Android and Windows at least, with Chromium's engine) the cleared
+  keys and records stay in the storage files until the engine compacts them,
+  and a copy of the device made before may still hold them. Real erasure
+  needs crypto-shredding: a key kept outside the app's storage (the phone's
+  secure storage, or a passphrase), deleted with the account. The app
+  doesn't do that yet.
 - **Edits rely on honest apps too.** An edit asks the other side's app to
   replace a message's text and mark it edited; a modified app could keep the
   original, as anyone can keep a screenshot. Only the sender's own messages

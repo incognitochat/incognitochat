@@ -304,7 +304,9 @@ the server never sees a key, name or type.
 - **Downloads.** A download URL also starts within a minute, and S3 answers
   it uncompressed whatever the upload claimed. The app reads only the padded
   size the message says and stops at once otherwise, so an upload can't
-  unpack into something huge on the recipient's device.
+  unpack into something huge on the recipient's device. S3 also answers it
+  with `Cache-Control: no-store`, and the app asks not to cache it either, so
+  the web view keeps no copy of the ciphertext in its cache.
 - Photos are redrawn on the device (up to 1280 px), which drops their
   metadata; videos keep their pictures but lose location and time metadata;
   voice and video messages are recorded in the app and carry none. Files are
@@ -346,7 +348,13 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - **Storage:** IndexedDB only. Private keys are non-extractable WebCrypto keys
   where possible; keys that must stay copyable are sealed under a
   non-extractable vault key. History and attachments are encrypted under a
-  non-extractable storage key.
+  non-extractable storage key. Non-extractable only stops code from reading a
+  key out: the keys live in the web view's storage, next to the data, and on
+  Android, Windows and Linux the web view writes them to disk as they are. So
+  an image of the device's app storage clones the account. Deleting the
+  account or setting up again clears the storage, but some engines
+  (Chromium's) keep cleared data in their files until they compact them
+  ([data.md](data.md#on-the-device)).
 - **Several copies at once** (a reopened app, several windows) share storage,
   so they coordinate with Web Locks and announce changes over a
   BroadcastChannel.

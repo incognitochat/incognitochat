@@ -1,10 +1,11 @@
 // P-256 keys in WebCrypto.
 //
 // Device keys are generated non-extractable: they can be used, but never read
-// out, not even by our own code. Keys that must be copied to a new device
-// (the account key, link keys, persona keys) are generated once as
-// extractable, sealed into the vault (vault.ts), and then used through a
-// non-extractable working copy.
+// out by code, not even by our own. That's all the flag does: the web view
+// still stores them in the app's storage, readable to a copy of it (see
+// vault.ts). Keys that must be copied to a new device (the account key, link
+// keys, persona keys) are generated once as extractable, sealed into the
+// vault (vault.ts), and then used through a non-extractable working copy.
 
 import { concat, toBase64Url } from './encoding';
 import { message } from './signing';

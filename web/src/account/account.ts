@@ -9,8 +9,12 @@
 // Keys on this device:
 // - account key: copyable (sealed in the vault for linking devices later),
 //   used through a non-extractable working copy;
-// - device signing key: non-extractable, never leaves this device;
+// - device signing key: non-extractable, never sent anywhere;
 // - vault key: non-extractable, seals the copyable keys.
+// Non-extractable only stops code from reading a key out. All of them are
+// kept in the app's storage, which the web view writes to disk (on Android,
+// Windows and Linux with the keys as they are): a copy of that storage
+// clones the account (docs/data.md).
 
 import { randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, fingerprint, generateCopyableSigningKey, generateSigningKey, SIGNING_IMPORT } from '../crypto/keys';

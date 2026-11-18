@@ -59,6 +59,8 @@ export function createTransfer(fetchImpl: Fetch = (input, init) => fetch(input, 
       const stop = new AbortController();
       let response: Response;
       try {
+        // no-store: the browser keeps no copy of the ciphertext in its cache;
+        // the bucket answers Cache-Control: no-store as well.
         response = await fetchImpl(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', mode: 'cors', redirect: 'error', signal: stop.signal });
       } catch {
         throw new TransferError(0, 'media GET failed');

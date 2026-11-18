@@ -917,8 +917,10 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   is the permission; at most 5 a day per file), fetches and decrypts the file and
   keeps it on the device. The URL starts a download within a minute, and S3
   answers it with `Content-Encoding: identity` and type
-  `application/octet-stream` whatever the upload claimed (both are in its
-  signed query), so no browser unpacks a compressed upload. The app reads
+  `application/octet-stream` whatever the upload claimed, so no browser
+  unpacks a compressed upload, and with `Cache-Control: no-store`, so no
+  browser keeps a copy of the ciphertext in its cache (all three are in its
+  signed query). The app fetches it with `cache: 'no-store'` too. The app reads
   at most the padded size of `s`: it stops at once if `Content-Length` says
   otherwise or more bytes arrive, and refuses a shorter answer. The upload
   stays, downloaded or saved, until the
