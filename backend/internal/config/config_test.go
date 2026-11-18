@@ -133,13 +133,19 @@ func TestLoadRetries(t *testing.T) {
 	if _, err := Load(context.Background(), f, "/a"); !errors.Is(err, throttled) || f.calls != loadAttempts {
 		t.Fatalf("Load = %v after %d calls", err, f.calls)
 	}
-	var total time.Duration
-	for _, d := range *waited {
-		total += d
-	}
-	if len(*waited) != loadAttempts-1 || total >= loadBudget {
+	// Each random wait stays under its ceiling. Their sum may pass the
+	// budget: the budget is Load's deadline, which ends a real wait early
+	// (this test's waits return at once).
+	if len(*waited) != loadAttempts-1 {
 		t.Fatalf("waits %v", *waited)
 	}
+	ceilings := []time.Duration{firstWait, 2 * firstWait, maxWait, maxWait}
+	for i, d := range *waited {
+		if d < 0 || d >= ceilings[i] {
+			t.Fatalf("wait %d is %v, want under %v (waits %v)", i, d, ceilings[i], *waited)
+		}
+	}
+	var total time.Duration
 
 	// The waits' ceilings grow to maxWait and together reach past the
 	// budget, so tries spread over all of it.
