@@ -361,10 +361,10 @@ The panel under the message box has emoji and stickers, as in Telegram.
 
 | Function | Entry | Can read |
 |---|---|---|
-| `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token |
+| `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token and the webhook secret |
 | `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket. Invokes `ws` (each send, without waiting) and `notify` (to seal a chat ID); posts to no socket |
 | `ws` | WebSocket connect (one record each, about 5 a minute per account; closing isn't routed); the push after each send, from `api` | the session key; socket records only. Posts hints to sockets; invokes `notify` (a notice, without waiting) when no open app took one |
-| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the key that opens chat IDs; of the directory, only account partitions, for its reads of the notice fields (sealed chat ID, language, last notice, "notices off") and updates of the last two (IAM can't limit sort keys, so not only account items: see [security.md](security.md#other-limits), What `notify` can reach); its quiet periods. No listing, deleting or other table; no sockets or socket records |
+| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the chat key, which seals and opens chat IDs; of the directory, only account partitions, for its reads of the notice fields (sealed chat ID, language, last notice, "notices off") and updates of the last two (IAM can't limit sort keys, so not only account items: see [security.md](security.md#other-limits), What `notify` can reach); its quiet periods. No listing, deleting or other table; no sockets or socket records |
 
 | Table | Holds | Expires |
 |---|---|---|

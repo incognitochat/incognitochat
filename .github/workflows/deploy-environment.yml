@@ -54,6 +54,7 @@ jobs:
           LAMBDA_BUILDS_BUCKET: ${{ secrets.LAMBDA_BUILDS_BUCKET }}
           LAMBDA_SIGNING_PROFILE: ${{ secrets.LAMBDA_SIGNING_PROFILE }}
           LAMBDA_CODE_SIGNING_CONFIG: ${{ secrets.LAMBDA_CODE_SIGNING_CONFIG }}
+          SECRETS_VERSION: ${{ vars.SECRETS_VERSION }}
         run: |
           missing=0
           for name in BOT_TOKEN ISSUER_KEY MEDIA_ISSUER_KEY AWS_ROLE_ARN AWS_ACCOUNT_ID TF_STATE_BUCKET AWS_REGION CLIENT_ORIGINS \
@@ -76,6 +77,13 @@ jobs:
           done
           if [ -n "$ISSUER_KEY" ] && [ "$ISSUER_KEY" = "$MEDIA_ISSUER_KEY" ]; then
             echo "::error::ISSUER_KEY and MEDIA_ISSUER_KEY must be different keys"
+            missing=1
+          fi
+          # Retired: it replaced all four generated secrets at once, the
+          # Telegram-ID pepper too. Each has its own version now, starting
+          # at 1, so ignoring a value left set would replace them all.
+          if [ -n "$SECRETS_VERSION" ]; then
+            echo "::error::SECRETS_VERSION is retired. To keep the generated secrets, set SESSION_KEY_VERSION, WEBHOOK_SECRET_VERSION, CHAT_KEY_VERSION and TELEGRAM_ID_PEPPER_VERSION to its value (${SECRETS_VERSION}), then delete it (docs/deployment.md)"
             missing=1
           fi
           exit "$missing"
@@ -194,7 +202,12 @@ jobs:
           TF_VAR_issuer_key_version: ${{ vars.ISSUER_KEY_VERSION || '1' }}
           TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
           TF_VAR_media_issuer_key_version: ${{ vars.MEDIA_ISSUER_KEY_VERSION || '1' }}
-          TF_VAR_secrets_version: ${{ vars.SECRETS_VERSION || '1' }}
+          # One version per generated secret (docs/deployment.md, Replacing a
+          # generated secret).
+          TF_VAR_session_key_version: ${{ vars.SESSION_KEY_VERSION || '1' }}
+          TF_VAR_webhook_secret_version: ${{ vars.WEBHOOK_SECRET_VERSION || '1' }}
+          TF_VAR_chat_key_version: ${{ vars.CHAT_KEY_VERSION || '1' }}
+          TF_VAR_telegram_id_pepper_version: ${{ vars.TELEGRAM_ID_PEPPER_VERSION || '1' }}
           TF_VAR_client_origins: ${{ vars.CLIENT_ORIGINS }}
           TF_VAR_deletion_protection: ${{ vars.DELETION_PROTECTION || 'true' }}
           TF_VAR_invite_only: ${{ vars.INVITE_ONLY || 'true' }}

@@ -177,7 +177,8 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
 | `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
-| `SECRETS_VERSION` | variable | Raise it to replace the generated secrets (session key, Telegram-ID pepper, webhook secret, chat key). Replacing the pepper starts every account over. The short-lived records named with keys from these secrets just start afresh: every rate limit for its minute, hour or day; socket records, so open apps get a notice instead of a push until they reopen their sockets (within about half an hour); and the 3-minute gap between notices. |
+| `SESSION_KEY_VERSION`, `WEBHOOK_SECRET_VERSION`, `CHAT_KEY_VERSION`, `TELEGRAM_ID_PEPPER_VERSION` | variables | Unset by default (1). Raise one to replace that generated secret alone: [what each does](#replacing-a-generated-secret). The pepper's is only for starting over. |
+| `SECRETS_VERSION` | variable | Retired: leave it unset, or the deploy stops ([below](#replacing-a-generated-secret)). |
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
 | `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
 
@@ -243,11 +244,12 @@ own. How to create and configure it, and the variables it needs (`API_URL`,
 
 ## Secrets at rest
 
-Secrets (the bot token, the session key, the Telegram-ID pepper, the webhook
-secret, the issuer key, the key that seals chat IDs) are SSM parameters
-written through Terraform's write-only arguments, so they never land in
-Terraform state or plans. Each function's role can read only the parameters
-it needs: only `bot` and `notify` can read the bot token.
+Secrets are SSM parameters written through Terraform's write-only
+arguments, so they never land in Terraform state or plans: the bot token and
+the two issuer keys, from the environment's secrets, and four that Terraform
+generates, the session key, the webhook secret, the chat key (which seals
+chat IDs) and the Telegram-ID pepper. Each function's role can read only the
+parameters it needs: only `bot` and `notify` can read the bot token.
 
 Each new instance of a function reads its parameters once, as it starts.
 SSM serves an account 40 such calls a second by default, so when many
@@ -255,6 +257,54 @@ instances start at once (a deploy, a sudden rise in use) some are
 throttled: a function tries each call up to 5 times, after random waits
 that grow, within 4 seconds, before it gives up (and the request that
 started it fails).
+
+### Replacing a generated secret
+
+Each generated secret has a version of its own, a variable of the
+environment that is 1 while unset. Raise one, and the environment's next
+deploy (for dev, the next push to `main`; for production, the next release,
+or a re-run of the latest release's CI run) writes a new random value for
+that secret alone and restarts the functions that read it; the other
+secrets keep theirs. For example:
+
+```shell
+gh variable set SESSION_KEY_VERSION --env <env> --body 2
+```
+
+A version only says when to write a new value: raise it again (3, 4…) to
+replace the secret again. Setting an earlier number writes yet another new
+value, never the old one.
+
+| Secret | Version | Read by | What replacing it does |
+|---|---|---|---|
+| Session key | `SESSION_KEY_VERSION` | `api`, `ws` | Every session ends, and apps log in again by themselves with their device keys: users notice nothing. Socket records are named with a key derived from it, so open apps get a Telegram notice instead of a push until they replace their sockets (within about half an hour), and the old records expire within 40 minutes. Replace it if it may have leaked: it can make a session for any account. |
+| Webhook secret | `WEBHOOK_SECRET_VERSION` | `bot` | The same deploy registers the webhook again with the new secret, when it sets up the bot. Updates Telegram sends in the minute or so between are refused, and Telegram sends them again. Nothing for users to do. |
+| Chat key | `CHAT_KEY_VERSION` | `notify` | The sealed chat IDs no longer open. Each account's next notice isn't sent and turns its notices off. The app turns them on again by itself the next time the user opens it other than through a link or an invitation, if the bot may still write to them (otherwise it offers to turn them on). Until then the account gets no notices, so users who wait for one must open the app once. The 3-minute gaps between notices start afresh. |
+| Telegram-ID pepper | `TELEGRAM_ID_PEPPER_VERSION` | `api` | Only to start over (below). Practically irreversible. |
+
+**The pepper is only for starting over.** Each account's Telegram user is
+kept as a keyed hash under the pepper, never as the ID, and no stored hash
+matches a new pepper. Terraform can't write the old value back, and every
+account set up after the change would hash the new way. Existing accounts
+keep working (logging in, links, sending and receiving don't use the
+pepper), but for every one of them:
+
+- Notices can never be turned on again: setting them up checks the launch's
+  Telegram user against the stored hash, and is refused (401) for good.
+  Notices that are on stay on until they go off (the user blocks the bot, or
+  the chat key changes).
+- Admins lose admin: `ADMIN_TELEGRAM_IDS` are hashed with the new pepper, so
+  they match no existing account.
+- One account per Telegram user no longer holds: a user who sets the app up
+  again (a new device, or after clearing its data) gets a second account
+  instead of replacing the first, which stays live with its links. The
+  check for an account on another device finds nothing.
+- Every rate limit starts afresh for its minute, hour or day (counters are
+  named with the pepper), including those per Telegram user.
+
+`SECRETS_VERSION` once replaced all four at once, the pepper included. It is
+retired, and the deploy stops if it is set: set the four versions above to
+its value first, so that nothing is replaced, then delete it.
 
 ## Cost guards
 

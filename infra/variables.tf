@@ -70,10 +70,38 @@ variable "bot_token_version" {
   default     = 1
 }
 
-variable "secrets_version" {
-  description = "Increase to replace the generated secrets (session key, Telegram ID pepper, webhook secret). Replacing the pepper starts every account over."
+# The generated secrets (parameters.tf) each have a version of their own:
+# raising one writes a new random value for that secret alone, at the next
+# deploy. What each change does is in docs/deployment.md (Replacing a
+# generated secret). They replace SECRETS_VERSION, which changed all four
+# at once and was 1 while unset, as each of these is; the deploy now stops
+# while it is set.
+variable "session_key_version" {
+  description = "Increase to replace the session key: every session ends and apps log in again by themselves; pushes go out as Telegram notices for up to about half an hour"
   type        = number
   default     = 1
+  nullable    = false
+}
+
+variable "webhook_secret_version" {
+  description = "Increase to replace the webhook secret; the same deploy registers the webhook again with it"
+  type        = number
+  default     = 1
+  nullable    = false
+}
+
+variable "chat_key_version" {
+  description = "Increase to replace the chat key, which seals the chat IDs notices go to: each account's next notice isn't sent and turns its notices off, until the app sets them up again the next time the user opens it"
+  type        = number
+  default     = 1
+  nullable    = false
+}
+
+variable "telegram_id_pepper_version" {
+  description = "Only to start over; practically irreversible. Increase to replace the Telegram-ID pepper: no stored Telegram hash matches again, so existing accounts can never turn notices on again, admins lose admin, and a user setting up again gets a second account instead of replacing the first"
+  type        = number
+  default     = 1
+  nullable    = false
 }
 
 variable "client_origins" {
