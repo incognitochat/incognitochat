@@ -43,8 +43,9 @@ resource "aws_iam_role_policy_attachment" "deploy" {
 }
 
 # Least privilege: the deploy role can manage only the app stack's own
-# resources (by name prefix) and read/write only the app/ prefix of the state
-# bucket.
+# resources (by name prefix), with only the calls Terraform makes for them,
+# and read/write only the app/ prefix of the state bucket. Data and lasting
+# access are denied outright (deploy_no_items and deploy_limits, below).
 data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "StateBucketList"
@@ -59,7 +60,9 @@ data "aws_iam_policy_document" "deploy" {
   }
 
   # The media bucket's configuration, not its contents: the deploy role can't
-  # read, write or delete the encrypted attachments.
+  # read, write or delete the encrypted attachments (deploy_limits). Only the
+  # settings the app stack manages (../media.tf), so a change to any of them
+  # shows in the next plan and is undone.
   statement {
     sid = "MediaBucket"
     actions = [
@@ -67,7 +70,11 @@ data "aws_iam_policy_document" "deploy" {
       "s3:DeleteBucket",
       "s3:ListBucket",
       "s3:GetBucket*",
-      "s3:PutBucket*",
+      "s3:PutBucketPublicAccessBlock",
+      "s3:PutBucketOwnershipControls",
+      "s3:PutBucketCORS",
+      "s3:PutBucketPolicy",
+      "s3:PutBucketTagging",
       "s3:DeleteBucketPolicy",
       "s3:GetAccelerateConfiguration",
       "s3:GetEncryptionConfiguration",
@@ -82,27 +89,34 @@ data "aws_iam_policy_document" "deploy" {
     resources = [local.arns.media_buckets]
   }
 
-  # Functions, their versions and their function URLs.
+  # Tables, not their items (deploy_no_items, deploy_limits).
   statement {
-    sid       = "Lambda"
-    actions   = ["lambda:*"]
-    resources = [local.arns.functions, "${local.arns.functions}:*"]
-  }
-
-  statement {
-    sid       = "DynamoDB"
-    actions   = ["dynamodb:*"]
+    sid = "DynamoDB"
+    actions = [
+      "dynamodb:CreateTable",
+      "dynamodb:UpdateTable",
+      "dynamodb:DeleteTable",
+      "dynamodb:Describe*",
+      "dynamodb:UpdateTimeToLive",
+      "dynamodb:UpdateContinuousBackups",
+      "dynamodb:ListTagsOfResource",
+      "dynamodb:TagResource",
+      "dynamodb:UntagResource",
+    ]
     resources = [local.arns.tables, "${local.arns.tables}/*"]
   }
 
   # Secrets and settings. Values are written through Terraform write-only
-  # arguments, so they never land in state or plan files.
+  # arguments, so they never land in state or plan files. GetParameter
+  # stays: the AWS provider reads every parameter it manages, decrypted, on
+  # each plan, write-only or not. It also reads older versions
+  # ("name:version"), which no condition key can refuse
+  # (docs/deployment.md, Replacing a generated secret).
   statement {
     sid = "Parameters"
     actions = [
       "ssm:PutParameter",
       "ssm:GetParameter",
-      "ssm:GetParameters",
       "ssm:DeleteParameter",
       "ssm:AddTagsToResource",
       "ssm:RemoveTagsFromResource",
@@ -118,9 +132,26 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["*"]
   }
 
+  # The functions' log groups and the metric filters on them (../metrics.tf),
+  # not what is in them (deploy_limits).
   statement {
-    sid       = "LogGroups"
-    actions   = ["logs:*"]
+    sid = "LogGroups"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:PutRetentionPolicy",
+      "logs:DeleteRetentionPolicy",
+      "logs:PutMetricFilter",
+      "logs:DescribeMetricFilters",
+      "logs:DeleteMetricFilter",
+      "logs:ListTagsForResource",
+      "logs:TagResource",
+      "logs:UntagResource",
+      # Older names of the same, which creating a tagged log group may need.
+      "logs:ListTagsLogGroup",
+      "logs:TagLogGroup",
+      "logs:UntagLogGroup",
+    ]
     resources = [local.arns.log_groups, "${local.arns.log_groups}:*"]
   }
 
@@ -149,22 +180,77 @@ data "aws_iam_policy_document" "deploy" {
       "${local.arns.apigateway}/tags/*",
     ]
   }
+}
 
-  # The deploy role may create the functions' execution roles and change their
-  # policies only while the permissions boundary below is attached. That
-  # boundary caps what any function can ever do, so the deploy role can't use
-  # a role it creates to escalate its own privileges.
+resource "aws_iam_policy" "deploy" {
+  name        = "${local.prefix}-github-deploy"
+  description = "Least-privilege permissions for deploying the Incognito Chat app stack (${var.github_environment})"
+  policy      = data.aws_iam_policy_document.deploy.json
+
+  # Changed only once the statements that moved out of it are attached in
+  # their new policy, so a deploy is never without them.
+  depends_on = [aws_iam_role_policy_attachment.deploy_functions]
+}
+
+# The functions: their code (built, signed and deployed), settings, URLs and
+# permissions, and their roles' policies. A policy of its own, for room.
+data "aws_iam_policy_document" "deploy_functions" {
+  # Only the calls Terraform makes for the functions (../functions.tf,
+  # ../edge.tf, ../websocket.tf), and reads.
   statement {
-    sid = "LambdaRolesWithBoundary"
+    sid = "Lambda"
     actions = [
-      "iam:CreateRole",
-      "iam:PutRolePolicy",
-      "iam:DeleteRolePolicy",
-      "iam:AttachRolePolicy",
-      "iam:DetachRolePolicy",
-      "iam:PutRolePermissionsBoundary",
+      "lambda:Get*",
+      "lambda:List*",
+      "lambda:CreateFunction",
+      "lambda:DeleteFunction",
+      "lambda:UpdateFunctionCode",
+      "lambda:UpdateFunctionConfiguration",
+      "lambda:PutFunctionConcurrency",
+      "lambda:DeleteFunctionConcurrency",
+      "lambda:PutFunctionCodeSigningConfig",
+      "lambda:PutFunctionEventInvokeConfig",
+      "lambda:DeleteFunctionEventInvokeConfig",
+      "lambda:CreateFunctionUrlConfig",
+      "lambda:UpdateFunctionUrlConfig",
+      "lambda:DeleteFunctionUrlConfig",
+      "lambda:AddPermission",
+      "lambda:RemovePermission",
+      "lambda:TagResource",
+      "lambda:UntagResource",
     ]
-    resources = [local.arns.lambda_roles]
+    resources = [local.arns.functions, "${local.arns.functions}:*"]
+  }
+
+  # The deploy invokes bot to set itself up and notify to check it starts
+  # (deploy-environment.yml); no other function (deploy_limits).
+  statement {
+    sid     = "InvokeForChecks"
+    actions = ["lambda:InvokeFunction"]
+    # Unqualified and qualified: an invoke of the latest code is authorized
+    # against the ARN with ":$LATEST" (InvokeOnlyChecks below).
+    resources = flatten([for f in ["bot", "notify"] : [local.function_arns[f], "${local.function_arns[f]}:*"]])
+  }
+
+  # The functions' roles (function_roles.tf): read them, and write their
+  # own policies, which the permissions boundary below caps. Nothing else:
+  # the deploy role can't create a role or change whom one trusts.
+  statement {
+    sid = "FunctionRolesRead"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRoleTags",
+    ]
+    resources = values(local.function_role_arns)
+  }
+
+  statement {
+    sid       = "FunctionRolePolicies"
+    actions   = ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]
+    resources = values(local.function_role_arns)
 
     condition {
       test     = "StringEquals"
@@ -173,51 +259,26 @@ data "aws_iam_policy_document" "deploy" {
     }
   }
 
+  # The deploy asks IAM's policy simulator whether each function's role,
+  # permissions boundary included, allows what it calls the others for, and
+  # whether its own role still has the denies below
+  # (scripts/check-function-roles.sh), before and after applying.
   statement {
-    sid = "LambdaRolesManage"
-    actions = [
-      "iam:GetRole",
-      "iam:DeleteRole",
-      "iam:UpdateRole",
-      "iam:UpdateAssumeRolePolicy",
-      "iam:TagRole",
-      "iam:UntagRole",
-      "iam:ListRoleTags",
-      "iam:GetRolePolicy",
-      "iam:ListRolePolicies",
-      "iam:ListAttachedRolePolicies",
-      "iam:ListInstanceProfilesForRole",
-    ]
-    resources = [local.arns.lambda_roles]
-  }
-
-  # After applying, the deploy asks IAM's policy simulator whether each
-  # function's role, permissions boundary included, allows what it calls
-  # the others for (deploy-environment.yml), so a boundary that wasn't
-  # updated fails the deploy instead of silently stopping pushes.
-  statement {
-    sid       = "CheckLambdaRoles"
+    sid       = "CheckRoles"
     actions   = ["iam:SimulatePrincipalPolicy"]
-    resources = [local.arns.lambda_roles]
+    resources = concat(values(local.function_role_arns), [aws_iam_role.deploy.arn])
   }
 
   statement {
-    sid       = "PassLambdaRolesToLambdaOnly"
+    sid       = "PassFunctionRolesToLambdaOnly"
     actions   = ["iam:PassRole"]
-    resources = [local.arns.lambda_roles]
+    resources = values(local.function_role_arns)
 
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
       values   = ["lambda.amazonaws.com"]
     }
-  }
-
-  statement {
-    sid       = "KeepBoundaryAttached"
-    effect    = "Deny"
-    actions   = ["iam:DeleteRolePermissionsBoundary"]
-    resources = ["*"]
   }
 
   # Code signing (lambda_signing.tf): upload builds, have them signed, and
@@ -290,10 +351,15 @@ data "aws_iam_policy_document" "deploy" {
   }
 }
 
-resource "aws_iam_policy" "deploy" {
-  name        = "${local.prefix}-github-deploy"
-  description = "Least-privilege permissions for deploying the Incognito Chat app stack (${var.github_environment})"
-  policy      = data.aws_iam_policy_document.deploy.json
+resource "aws_iam_policy" "deploy_functions" {
+  name        = "${local.prefix}-github-deploy-functions"
+  description = "Permissions for deploying the Incognito Chat functions and their code (${var.github_environment})"
+  policy      = data.aws_iam_policy_document.deploy_functions.json
+}
+
+resource "aws_iam_role_policy_attachment" "deploy_functions" {
+  role       = aws_iam_role.deploy.name
+  policy_arn = aws_iam_policy.deploy_functions.arn
 }
 
 # The edge in front of the API: CloudFront and its firewall. A policy of its
@@ -399,6 +465,259 @@ resource "aws_iam_policy" "deploy_no_items" {
 resource "aws_iam_role_policy_attachment" "deploy_no_items" {
   role       = aws_iam_role.deploy.name
   policy_arn = aws_iam_policy.deploy_no_items.arn
+}
+
+# What a deploy never needs, denied outright whatever the policies above
+# allow: reading user data, and leaving access behind that no Terraform
+# plan shows (a role trusted by another account, a function permission for
+# one, a log subscription, a bucket notification). The app stack's
+# Terraform never makes these calls. IAM's policy simulator
+# checks that they are denied (scripts/check-function-roles.sh deploy-role),
+# after each bootstrap and before each deploy.
+data "aws_iam_policy_document" "deploy_limits" {
+  # Items, streams, exports, backups and anything that copies a table or
+  # shows its keys. Writes: deploy_no_items.
+  statement {
+    sid    = "NoTableData"
+    effect = "Deny"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:BatchGetItem",
+      "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:ConditionCheckItem",
+      "dynamodb:PartiQLSelect",
+      "dynamodb:GetRecords",
+      "dynamodb:GetShardIterator",
+      "dynamodb:Export*",
+      "dynamodb:Import*",
+      "dynamodb:CreateBackup",
+      "dynamodb:Restore*",
+      "dynamodb:PutResourcePolicy",
+      "dynamodb:CreateTableReplica",
+      "dynamodb:EnableKinesisStreamingDestination",
+      "dynamodb:UpdateContributorInsights",
+    ]
+    resources = ["*"]
+  }
+
+  # Invoking runs a function with whatever event is sent: only the two the
+  # deploy's checks invoke.
+  statement {
+    sid     = "InvokeOnlyChecks"
+    effect  = "Deny"
+    actions = ["lambda:InvokeFunction"]
+    # Lambda authorizes an invoke of a function's latest code against the
+    # ARN with ":$LATEST" (and a version or alias against its own), so each
+    # name needs the qualified form too.
+    not_resources = flatten([for f in ["bot", "notify"] : [local.function_arns[f], "${local.function_arns[f]}:*"]])
+  }
+
+  # Provisioned concurrency is billed every hour, used or not.
+  statement {
+    sid       = "NoOtherInvokesOrReservations"
+    effect    = "Deny"
+    actions   = ["lambda:InvokeAsync", "lambda:InvokeFunctionUrl", "lambda:PutProvisionedConcurrencyConfig"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid           = "OnlyTheStackFunctions"
+    effect        = "Deny"
+    actions       = ["lambda:CreateFunction"]
+    not_resources = values(local.function_arns)
+  }
+
+  statement {
+    sid           = "UrlsForApiAndBotOnly"
+    effect        = "Deny"
+    actions       = ["lambda:CreateFunctionUrlConfig"]
+    not_resources = [local.function_arns["api"], local.function_arns["bot"]]
+  }
+
+  # Whom a function's resource policy may name: anyone ("*") on api and bot
+  # (their URLs), CloudFront on api, the WebSocket API on ws; no account or
+  # role. IAM can't say more: AddPermission has no condition key for the
+  # source ARN (so CloudFront or API Gateway in another account could be
+  # named), nor for invoking only through the URL (so "*" could be let
+  # invoke api or bot directly). The deploy reads the policies after
+  # applying and fails on anything else (scripts/check-function-roles.sh
+  # policies).
+  statement {
+    sid       = "PermissionsForTheStackOnly"
+    effect    = "Deny"
+    actions   = ["lambda:AddPermission"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "lambda:Principal"
+      values   = ["*", "cloudfront.amazonaws.com", "apigateway.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid           = "PublicOnlyApiAndBot"
+    effect        = "Deny"
+    actions       = ["lambda:AddPermission"]
+    not_resources = [local.function_arns["api"], local.function_arns["bot"]]
+
+    condition {
+      test     = "StringEquals"
+      variable = "lambda:Principal"
+      values   = ["*"]
+    }
+  }
+
+  # "*" never for a URL that needs AWS's signature (api's, behind
+  # CloudFront), which any AWS account's would then pass.
+  statement {
+    sid       = "PublicUrlsWithoutAuthOnly"
+    effect    = "Deny"
+    actions   = ["lambda:AddPermission"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "lambda:Principal"
+      values   = ["*"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "lambda:FunctionUrlAuthType"
+      values   = ["false"]
+    }
+
+    condition {
+      test     = "StringNotEquals"
+      variable = "lambda:FunctionUrlAuthType"
+      values   = ["NONE"]
+    }
+  }
+
+  statement {
+    sid           = "CloudFrontOnlyApi"
+    effect        = "Deny"
+    actions       = ["lambda:AddPermission"]
+    not_resources = [local.function_arns["api"]]
+
+    condition {
+      test     = "StringEquals"
+      variable = "lambda:Principal"
+      values   = ["cloudfront.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid           = "ApiGatewayOnlyWs"
+    effect        = "Deny"
+    actions       = ["lambda:AddPermission"]
+    not_resources = [local.function_arns["ws"]]
+
+    condition {
+      test     = "StringEquals"
+      variable = "lambda:Principal"
+      values   = ["apigateway.amazonaws.com"]
+    }
+  }
+
+  # No new roles, users, keys or policy versions, no change to whom a role
+  # trusts, and the boundary stays on the functions' roles.
+  statement {
+    sid    = "NoNewAccess"
+    effect = "Deny"
+    actions = [
+      "iam:CreateRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:CreateUser",
+      "iam:CreateAccessKey",
+      "iam:CreateLoginProfile",
+      "iam:CreatePolicyVersion",
+      "iam:SetDefaultPolicyVersion",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid           = "PoliciesOnFunctionRolesOnly"
+    effect        = "Deny"
+    actions       = ["iam:PutRolePolicy"]
+    not_resources = values(local.function_role_arns)
+  }
+
+  # What the functions log, and copies of it elsewhere.
+  statement {
+    sid    = "NoLogReadsOrCopies"
+    effect = "Deny"
+    actions = [
+      "logs:GetLogEvents",
+      "logs:FilterLogEvents",
+      "logs:GetLogRecord",
+      "logs:StartQuery",
+      "logs:StartLiveTail",
+      "logs:Unmask",
+      "logs:PutSubscriptionFilter",
+      "logs:PutAccountPolicy",
+      "logs:PutDestination*",
+      "logs:CreateExportTask",
+      "logs:CreateDelivery",
+    ]
+    resources = ["*"]
+  }
+
+  # Bucket settings the app stack doesn't manage, so no plan would show
+  # them: versions (deleted attachments would stay), notices of each upload
+  # and request logs elsewhere, copies and object lists elsewhere.
+  statement {
+    sid    = "NoBucketSideChannels"
+    effect = "Deny"
+    actions = [
+      "s3:PutBucketVersioning",
+      "s3:PutBucketObjectLockConfiguration",
+      "s3:PutBucketNotification",
+      "s3:PutBucketLogging",
+      "s3:PutBucketWebsite",
+      "s3:PutBucketAcl",
+      "s3:PutReplicationConfiguration",
+      "s3:PutInventoryConfiguration",
+      "s3:PutAnalyticsConfiguration",
+      "s3:PutAccountPublicAccessBlock",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "NoAttachments"
+    effect    = "Deny"
+    actions   = ["s3:GetObject*", "s3:PutObject*", "s3:DeleteObject*"]
+    resources = ["${local.arns.media_buckets}/*"]
+  }
+
+  # Terraform reads each parameter (deploy policy). Not listing a
+  # parameter's history, all parameters at once, or sharing them. This
+  # doesn't keep older values from it: GetParameter takes "name:version" on
+  # the same ARN, and no condition key refuses that.
+  statement {
+    sid       = "NoSecretHistoryOrSharing"
+    effect    = "Deny"
+    actions   = ["ssm:GetParameterHistory", "ssm:GetParametersByPath", "ssm:PutResourcePolicy"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "deploy_limits" {
+  name        = "${local.prefix}-github-deploy-limits"
+  description = "Keeps deploys of the Incognito Chat app stack (${var.github_environment}) from reading user data or leaving access behind"
+  policy      = data.aws_iam_policy_document.deploy_limits.json
+}
+
+resource "aws_iam_role_policy_attachment" "deploy_limits" {
+  role       = aws_iam_role.deploy.name
+  policy_arn = aws_iam_policy.deploy_limits.arn
 }
 
 # The most any function's execution role can ever be allowed to do. Each

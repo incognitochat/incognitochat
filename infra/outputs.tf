@@ -59,24 +59,38 @@ output "permission_checks" {
   sensitive   = true
   value = {
     "api invokes ws (the push after each send)" = {
-      role     = aws_iam_role.fn["api"].arn
+      role     = data.aws_iam_role.fn["api"].arn
       action   = "lambda:InvokeFunction"
       resource = aws_lambda_function.fn["ws"].arn
     }
     "api invokes notify (sealing chat IDs)" = {
-      role     = aws_iam_role.fn["api"].arn
+      role     = data.aws_iam_role.fn["api"].arn
       action   = "lambda:InvokeFunction"
       resource = aws_lambda_function.fn["notify"].arn
     }
     "ws invokes notify (notices)" = {
-      role     = aws_iam_role.fn["ws"].arn
+      role     = data.aws_iam_role.fn["ws"].arn
       action   = "lambda:InvokeFunction"
       resource = aws_lambda_function.fn["notify"].arn
     }
     "ws posts to sockets" = {
-      role     = aws_iam_role.fn["ws"].arn
+      role     = data.aws_iam_role.fn["ws"].arn
       action   = "execute-api:ManageConnections"
       resource = "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/check"
     }
+  }
+}
+
+# The only sources CloudFront and API Gateway may invoke the functions from,
+# as edge.tf and websocket.tf give them, for the deploy to check the
+# functions' resource policies against (scripts/check-function-roles.sh
+# policies): IAM can't keep the deploy role from naming others. ARNs name
+# the account.
+output "invoke_sources" {
+  description = "The CloudFront distribution and WebSocket API the functions' resource policies may name"
+  sensitive   = true
+  value = {
+    cloudfront = aws_lambda_permission.cloudfront_invoke.source_arn
+    websocket  = aws_lambda_permission.ws.source_arn
   }
 }

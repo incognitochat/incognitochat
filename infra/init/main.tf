@@ -35,19 +35,32 @@ locals {
   # applied by scripts/bootstrap.sh or directly.
   monthly_budget_usd = coalesce(var.monthly_budget_usd, var.github_environment == "production" ? 50 : 15)
 
+  # The app stack's functions (../functions.tf). Their roles are created
+  # here (function_roles.tf), and the deploy role may create no others.
+  functions = toset(["api", "bot", "ws", "notify"])
+
+  function_arns = {
+    for f in local.functions : f => "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-${f}"
+  }
+
+  # Their roles' ARNs, from the names (function_roles.tf), so that the deploy
+  # policies don't wait on roles that can never be destroyed.
+  function_role_arns = {
+    for f in local.functions : f => "arn:${local.partition}:iam::${local.account_id}:role/${local.prefix}-fn-${f}"
+  }
+
   arns = {
-    functions  = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-*"
-    notify     = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-notify"
-    ws         = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-ws"
-    tables     = "arn:${local.partition}:dynamodb:${local.region}:${local.account_id}:table/${local.prefix}-*"
-    parameters = "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter${local.parameter_path}/*"
-    # Function roles have their own prefix, so the deploy role ("<prefix>-github-deploy")
-    # can never match it and change itself.
-    lambda_roles  = "arn:${local.partition}:iam::${local.account_id}:role/${local.prefix}-fn-*"
+    functions     = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.prefix}-*"
+    notify        = local.function_arns["notify"]
+    ws            = local.function_arns["ws"]
+    tables        = "arn:${local.partition}:dynamodb:${local.region}:${local.account_id}:table/${local.prefix}-*"
+    parameters    = "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter${local.parameter_path}/*"
     log_groups    = "arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:/aws/lambda/${local.prefix}-*"
     apigateway    = "arn:${local.partition}:apigateway:${local.region}::"
     ws_management = "arn:${local.partition}:execute-api:${local.region}:${local.account_id}:*/*/POST/@connections/*"
-    state_bucket  = aws_s3_bucket.state.arn
+    # From its name, as the bucket itself can never be destroyed (so the
+    # policies' tests don't have to create it).
+    state_bucket  = "arn:${local.partition}:s3:::${var.state_bucket_name}"
     media_buckets = "arn:${local.partition}:s3:::${local.prefix}-media-*"
   }
 }

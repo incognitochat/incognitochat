@@ -18,7 +18,10 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   stored AWS keys), builds the Lambda bundles reproducibly and attests them,
   and applies `infra/` with Terraform, which uploads each bundle, has AWS
   Signer sign it, and deploys the signed copy. The deploy role is limited by
-  the bootstrap stack and can't change its own permissions.
+  the bootstrap stack and can't change its own permissions or read user
+  data itself. Most ways to leave access behind unseen are denied, and each
+  deploy checks for some of the rest
+  ([what it may do](#what-the-deploy-role-may-do)).
 - It checks that each function runs the attested bundle plus its signature
   ([verifying.md](verifying.md#the-backend)).
 - It then sets up the bot (the function registers its own webhook, menu
@@ -81,12 +84,24 @@ AWS_PROFILE=<profile> DEPLOY_TAGS='v*.*.*' REVIEWERS=<login> scripts/bootstrap.s
 ```
 
 It creates the Terraform state bucket, the GitHub OIDC provider, the deploy
-role, the Lambda permissions boundary, code signing and the alerts below
-(`infra/init`), and the GitHub environment `<env>`, which accepts deploys from `main` only (dev)
+role, the functions' roles and their permissions boundary, code signing and
+the alerts below (`infra/init`), and the GitHub environment `<env>`, which accepts deploys from `main` only (dev)
 or from release tags only, with required reviewers (production), with the
 secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 `TF_STATE_BUCKET`, `LAMBDA_BUILDS_BUCKET`, `LAMBDA_SIGNING_PROFILE`,
-`LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`).
+`LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`). Then it asks IAM's policy
+simulator whether the deploy role is denied what it should be
+([below](#what-the-deploy-role-may-do)), and stops if not.
+
+The functions' execution roles (`<prefix>-fn-api`, `-bot`, `-ws` and
+`-notify`, trusted by Lambda alone) belong to the bootstrap stack, so the
+deploy role never creates a role or changes whom one trusts; the app stack
+writes their policies. A new function needs its role added there
+(`infra/init/main.tf`, `functions`) and applied first. In environments set
+up before, the app stack created these roles: the bootstrap imports those
+that exist instead of creating them (it passes them as
+`existing_function_roles`), and the app stack's next deploy forgets them
+without deleting them.
 
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
@@ -98,14 +113,20 @@ stopped.
 - Before applying anything, it asks whether the permissions boundary lets
   the existing roles make the invokes this code makes (`api` invoking `ws`
   and `notify`, `ws` invoking `notify`), as if the roles' own policies
-  allowed them. A first deploy, with no roles yet, skips this.
+  allowed them. Roles not created yet are skipped; the check after applying
+  covers them.
+- Before applying, it also asks whether the deploy role itself is denied
+  what it should be, and allowed what the deploy does with the functions
+  ([below](#what-the-deploy-role-may-do)), as the bootstrap does.
 - After applying, it asks whether each function's role, its policy and the
   boundary together, allows every call the functions make to each other
   (those, and `ws` posting to sockets).
 
-Either fails the deploy if a call is refused, or if the deploy role may not
-ask (an older `infra/init`), and asks again a few times when IAM is slow or
-throttles.
+Each fails the deploy if a call isn't decided as it should be, or if the
+deploy role may not ask (an older `infra/init`), and asks again a few times
+when IAM is slow or throttles. Last, it reads each function's resource
+policy, and fails if one lets anyone invoke the function whom the app stack
+doesn't ([below](#what-the-deploy-role-may-do)).
 
 The simulator can't check the conditions on `notify`'s directory access
 (which items and attributes; [infra/functions.tf](../infra/functions.tf)),
@@ -256,6 +277,81 @@ own. How to create and configure it, and the variables it needs (`API_URL`,
 `WS_URL`, `MEDIA_ORIGIN` from Terraform's outputs, `BOT_USERNAME`,
 `APP_NAME`, `ISSUER_KEY`), is in [hosting/README.md](../hosting/README.md).
 
+### What the deploy role may do
+
+The deploy role ([`infra/init/github_deploy.tf`](../infra/init/github_deploy.tf))
+may make only the calls the app stack's Terraform makes, on the app stack's
+own resources. What a deploy never needs is denied outright (the
+`<prefix>-github-deploy-limits` and `-github-deploy-no-items` policies), so
+that a compromised deploy job, or a deploy someone got approved, can't read
+user data itself, and most ways to leave access behind that no Terraform
+plan would show are closed. What IAM can't close is listed below, and in
+[security.md](security.md#other-limits).
+
+- **Tables**: it manages them, but can't read or write their items, scan,
+  query, export, back up or restore them, stream their changes, or give
+  them a resource policy. It can still change their capacity (`UpdateTable`
+  has no condition keys): a change shows in the next plan, which undoes it,
+  but costs until then.
+- **Functions**: it deploys signed code and changes their settings. It
+  invokes only `bot` (setting it up) and `notify` (its check), creates no
+  other function, gives URLs only to `api` and `bot`, and buys no
+  provisioned concurrency.
+- **Function permissions** (who may invoke a function): it may name only
+  anyone ("*", on `api` and `bot`, for their URLs, and never for a URL that
+  needs AWS's signature), CloudFront (on `api`) and API Gateway (on `ws`);
+  no account or role. IAM can't check more than that. A permission for anyone can't be
+  told from one for calls through the URL alone, so it could let anyone
+  invoke `api` or `bot` directly, with any event. And AddPermission has no
+  condition key for the source, so it could let another account's
+  distribution invoke `api`, or another account's API invoke `ws`. So each
+  deploy, after applying, reads every function's resource policy and fails
+  on any statement the app stack doesn't set, as it sets it, with
+  CloudFront and API Gateway limited to this stack's distribution and API
+  (`scripts/check-function-roles.sh policies`). Such a statement lasts until
+  the next deploy finds it; remove it as an admin with
+  `aws lambda remove-permission`.
+- **Roles**: it may only write the four functions' roles' own policies,
+  which the permissions boundary caps, and pass those roles to Lambda. It
+  can't create a role, user or access key, change whom a role trusts, or
+  attach a policy, its own roles' included.
+- **Logs**: it manages the functions' log groups and the metric filters on
+  them, but can't read them, subscribe to them or export them.
+- **The media bucket**: it manages only the settings `infra/media.tf` sets,
+  so a change to any of them shows in the next plan, which undoes it. It
+  can't turn on versions, notifications, request logs, replication or
+  inventories, nor read, write or delete attachments.
+- **Parameters**: it writes them, and reads their values: the AWS provider
+  reads every parameter it manages, decrypted, on each plan, write-only ones
+  too. That takes `GetParameter`, which also reads older versions
+  (`<name>:<version>`) on the same ARN, with no condition key to refuse
+  them, for as long as the parameter keeps them (its last 100). It can't
+  list their history, read them all by path, or share them. After a leak,
+  [delete the parameter](#replacing-a-generated-secret) to drop its history.
+- **The WebSocket API**: it manages it, and IAM can't limit which routes,
+  integrations or other APIs it adds. Nothing checks these yet.
+
+The bootstrap and every deploy check the denies and the calls the deploy
+needs with IAM's policy simulator (`scripts/check-function-roles.sh
+deploy-role`), printing each check.
+
+**Applying the change that brought this** (the functions' roles moving to
+`infra/init`, and the denies), in each environment in turn, dev first:
+
+1. Rerun the bootstrap, while no deploy runs. Its plan should import the
+   four roles and change nothing in them (no role created or destroyed),
+   add the `-github-deploy-functions` and `-github-deploy-limits` policies
+   and narrow `-github-deploy`; then every simulator check should pass. A
+   deploy from before the change still works with it: its plan finds
+   nothing to change in the roles.
+2. Deploy the change (dev: merge it; production: release it). Its plan
+   should say the four `aws_iam_role.fn` "will no longer be managed by
+   Terraform" and destroy nothing, and the deploy's own checks should pass.
+   A deploy of the change against a bootstrap from before it stops at the
+   deploy role's check, before applying anything. If the resource policies'
+   check fails on a statement left from long ago, remove it as an admin
+   (or, if it is one this stack should set, fix the check).
+
 ## Secrets at rest
 
 Secrets are SSM parameters written through Terraform's write-only
@@ -290,6 +386,27 @@ A version only says when to write a new value: any change writes one,
 never an old one. Raise it again (3, 4…) to replace the secret again. Keep
 a raised version set. Deleting it means 1, which replaces the secret again,
 as lowering it does.
+
+**After a leak**, replacing a secret leaves its old value readable: SSM
+keeps a parameter's last 100 versions, and whoever may read the parameter
+can read an older one by number (`<name>:<version>`): the functions that use
+it, and the deploy role, since Terraform reads every parameter it manages.
+To drop them, delete the parameter as an admin right before the deploy that
+replaces the secret; the deploy finds it gone and creates it again, with
+the new value and no history. For example, for the chat key (the bot token
+and the issuer keys work the same, with their secrets changed first):
+
+```shell
+gh variable set CHAT_KEY_VERSION --env <env> --body 3   # one above its current version
+AWS_PROFILE=<profile> aws ssm delete-parameter --region <aws-region> \
+  --name /incognitochat/<env>/chat-key
+```
+
+Then deploy at once, as for any version change. Until the deploy has
+written the parameter again, a function instance that starts can't read it
+and its requests fail; warm instances keep the old value until the deploy
+replaces them. Never for the pepper: its old value, from the history, is
+the only way back (below).
 
 Only a release that includes these versions reads them; one from before
 them reads only `SECRETS_VERSION`. So in production a raised version takes
