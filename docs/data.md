@@ -45,8 +45,12 @@ the app's storage.
 
 Deleting a conversation deletes its history and attachments; its record
 (keys and mailboxes included) stays, out of the list, so it can come back if
-either side writes again. Attachments can also be cleared on their own (Data
-and storage); their messages stay, with each file's key, to fetch it again.
+either side writes again. Each conversation also keeps what the chat list
+shows of its newest message (the start of its text, or what its attachment
+or sticker is), sealed under the storage key like the message, until a
+newer one replaces it or the message goes. Attachments can also be cleared
+on their own (Data and storage); their messages stay, with each file's
+key, to fetch it again.
 Downloads are marked not to be kept in the web view's cache.
 
 So that a message delivered again, or late, can't undo anything (bring back
@@ -64,9 +68,19 @@ or mailbox), each conversation also keeps, without any content:
 | The time and ID of their newest message it took in | Until a delete for both sides names it, or they delete it for both sides; otherwise while the conversation is kept |
 | For a received message, when it was sent by the other side's clock, if that's later than when it arrived; for a sent one, the earliest time (their clock) something of theirs showed they had it | With the message |
 | A reaction that arrived before its message, sealed like message text | Until the message arrives, or 31 days |
+| An edit that arrived before its message, sealed like message text: at most 20 per conversation, 64 KB in all (the newest); in conversations started through the user's link that they haven't answered, 64 KB across all of them (those an edit came to most recently) | Until the message arrives, or 31 days; in a conversation the user hasn't answered, until they delete or block it |
+| A conversation started through the user's link that they never opened or answered, with no messages (its first message was dropped, deleted or cleared before it came, or the sender cleared it for both sides): its record, out of the list | 31 days after the newest envelope it took in |
 
-The keyed hashes are kept apart from the conversation itself (one item per
-chat and kind), so the chat list doesn't read them.
+And, before a conversation through the user's link has started, the
+sender's edits, reactions and deletes that overtook its first message,
+sealed like message text, in one store for all: at most 50 edits and
+reactions, 64 KB in all, and apart from them at most 50 deletes, 32 KB in
+all (past either, the oldest of that kind go). Each is kept until its
+message arrives (then it's taken in, like anything else in that
+conversation), or until 31 days after it was sent.
+
+The keyed hashes and the edits are kept apart from the conversation itself
+(one item per chat and kind), so the chat list doesn't read them.
 
 ## On the server
 

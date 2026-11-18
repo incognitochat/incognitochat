@@ -136,6 +136,12 @@ export interface Message {
   replyTo?: string;
   /** For kind "seen": the IDs of messages read. */
   seen?: string[];
+  /**
+   * For kind "seen": the recipient's messages written up to the oldest of
+   * those named (that second too) were read too. A chat with more unread than one receipt
+   * names says so in one, naming the newest, not one for every 50.
+   */
+  earlier?: true;
   /** An attachment (kind "message"). */
   media?: Media;
   /** A sticker (kind "message"), on its own: no text or attachment with it. */
@@ -266,6 +272,7 @@ export function checkMessage(value: unknown): Message {
   }
   if (m.kind !== 'delete' && m.delete !== undefined) throw new MessageError(`bad ${m.kind}`);
   if (m.all !== undefined && (m.all !== true || m.kind !== 'delete')) throw new MessageError(`bad ${m.kind}`);
+  if (m.earlier !== undefined && (m.earlier !== true || m.kind !== 'seen')) throw new MessageError(`bad ${m.kind}`);
   if (m.edit !== undefined) {
     const e = m.edit as Record<string, unknown> | null;
     if (!e || typeof e !== 'object' || Array.isArray(e)) throw new MessageError('bad edit');

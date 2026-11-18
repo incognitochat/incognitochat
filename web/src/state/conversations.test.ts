@@ -1,18 +1,18 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readAccount } from '../account/account';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
-import { ApiError, type Api } from '../net/api';
+import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { listConversations, listMessages } from '../messaging/store';
+import { listConversations, listMessages, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
-import { createApp, type Screen } from './app';
+import { createApp, MAX_SHOWN, type Screen } from './app';
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -597,6 +597,112 @@ describe('conversations in the app', () => {
     await owner.home();
     expect(screenOf(owner.screen.value, 'home').blockedCount).toBe(0);
   });
+
+  it('opens a long chat at its newest messages, loads older ones on the way up, quotes ones not shown, and reads it all in one receipt', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    // Each in a millisecond of its own, so their order is theirs.
+    const tick = () => new Promise((r) => setTimeout(r, 2));
+    await sender.writeToLink('first question');
+    for (let i = 0; i < 60; i++) {
+      await tick();
+      await sender.sendMessage(`m${i}`);
+    }
+    await owner.showTab('chats');
+    await owner.sync();
+    const home = screenOf(owner.screen.value, 'home');
+    expect(home.conversations[0]).toMatchObject({ unread: 61, last: { text: 'm59', out: false } });
+    const sends = b.sends.length;
+    await owner.openConversation(home.conversations[0]!.id);
+    let chat = screenOf(owner.screen.value, 'conversation');
+    expect(chat.messages.map((m) => m.text)).toEqual(Array.from({ length: PAGE }, (_, i) => `m${i + 10}`));
+    expect(chat.more).toBe(true);
+    // All 61 read, in one receipt, in the background.
+    for (let i = 0; i < 100 && b.sends.length < sends + 1; i++) await new Promise((r) => setTimeout(r, 50));
+    expect(b.sends.slice(sends).map((s) => s.quiet)).toEqual([true]);
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.filter((m) => m.status !== 'seen')).toEqual([]);
+
+    // Answering the first question, which isn't shown: its quote is.
+    const question = (await listMessages(owner.db, chat.id))[0]!;
+    await tick();
+    await owner.sendMessage('the answer', question.id);
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect(chat.messages.at(-1)).toMatchObject({ text: 'the answer', replyTo: question.id });
+    expect(chat.quoted.map((m) => m.text)).toEqual(['first question']);
+    // The list shows it last, from its preview.
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations[0]!.last).toMatchObject({ text: 'the answer', out: true });
+
+    // Scrolling up: PAGE more (here, the rest).
+    await owner.openConversation(chat.id);
+    expect(await owner.loadOlder()).toBe(true);
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect([chat.messages[0]!.text, chat.messages.length, chat.more, chat.quoted]).toEqual(['first question', 62, false, []]);
+    expect(await owner.loadOlder()).toBe(false);
+    // Jumping to a quote not shown: all from it on.
+    await owner.openConversation(chat.id);
+    expect(screenOf(owner.screen.value, 'conversation').messages).toHaveLength(PAGE);
+    expect(await owner.loadOlder(question.id)).toBe(true);
+    expect(screenOf(owner.screen.value, 'conversation').messages[0]!.id).toBe(question.id);
+    // New ones as they come are added, and what's shown stays.
+    await tick();
+    await sender.sendMessage('one more');
+    await owner.sync();
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect([chat.messages[0]!.id, chat.messages.at(-1)!.text]).toEqual([question.id, 'one more']);
+  });
+
+  it('keeps a failed message of ours shown through a flood, reading only what it shows', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    // Ours fails: the server can't be reached.
+    const post = b.api.post;
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') throw new NetworkError('unreachable');
+      return post(path, body, check);
+    };
+    await owner.sendMessage('mine');
+    b.api.post = post;
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => [m.text, m.status])).toEqual([
+      ['hello', 'read'],
+      ['mine', 'failed'],
+    ]);
+    // A flood comes in while it's open.
+    for (let i = 0; i < MAX_SHOWN + 10; i++) await sender.sendMessage(`flood ${i}`);
+    await owner.sync();
+    // Message texts opened while it's drawn again for one more (message IDs are what they're bound to).
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
+    const opened = () =>
+      decrypt.mock.calls.filter(([algorithm]) => {
+        const aad = (algorithm as AesGcmParams).additionalData;
+        return aad !== undefined && /^[A-Za-z0-9_-]{22}$/.test(new TextDecoder().decode(aad as Uint8Array));
+      }).length;
+    for (let round = 0; round < 3; round++) {
+      await sender.sendMessage(`one more ${round}`);
+      // Only the owner's app counts (the sender's redraws its own chat).
+      decrypt.mockClear();
+      await owner.sync();
+      const chat = screenOf(owner.screen.value, 'conversation');
+      // The newest 200, and ours failed first, however old: no more each time.
+      expect(chat.messages).toHaveLength(MAX_SHOWN + 1);
+      expect([chat.messages[0]!.text, chat.messages[0]!.status, chat.messages.at(-1)!.text, chat.more]).toEqual(['mine', 'failed', `one more ${round}`, true]);
+      // What it shows, and the new one as it's taken in: not the flood behind them.
+      expect(opened()).toBeLessThanOrEqual(MAX_SHOWN + 1 + 5);
+    }
+    decrypt.mockRestore();
+  }, 60_000);
 
   it('sends replies that quote a message, and deletes one message on this device', async () => {
     const b = await backend();

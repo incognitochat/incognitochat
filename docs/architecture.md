@@ -185,7 +185,9 @@ secret: one person keeps the same label through the same link.
   is sent the moment a message is read: in a chat opened with a tap in the
   app, while it's in view. After the app was hidden or minimised, "seen"
   waits for the next touch, since bringing it back can be someone else's
-  doing (a link). A reaction is one emoji per side per
+  doing (a link). One receipt covers everything read, however much: it
+  names the newest 50 and says the earlier ones were read too. A reaction
+  is one emoji per side per
   message, from a quick row in the long-press menu or the full emoji picker;
   a double-tap reacts with ❤️, as in Telegram.
   Deleting one of your own messages deletes it on both sides by default (the
@@ -366,7 +368,19 @@ The panel under the message box has emoji and stickers, as in Telegram.
   ([data.md](data.md#on-the-device)).
 - **Several copies at once** (a reopened app, several windows) share storage,
   so they coordinate with Web Locks and announce changes over a
-  BroadcastChannel.
+  BroadcastChannel. A copy of an older version still running closes (and
+  reloads) when a newer one changes how storage is laid out.
+- **Floods.** Anyone with a link can write, so what one person sends can't
+  make the app slow or fill the device without bound. The chat list reads
+  one small sealed preview per chat, not its messages; a chat opens at its
+  newest 50 messages and loads older ones as it's scrolled up. Only a
+  message starts a chat: an edit, reaction or delete that overtakes it
+  waits in a small store of its own (31 days at most; edits and reactions
+  50 and 64 KB, deletes 50 and 32 KB apart from them), and a chat keeps at
+  most 20 edits (64 KB) for messages still on their way, chats not
+  answered 64 KB of them together. An empty chat through the link that was
+  never opened or answered goes 31 days after the last thing came for it.
+  How many messages one chat keeps isn't limited yet.
 - **Lockdown:** a strict Content Security Policy (only the app's own scripts;
   connections only to the API, the socket and the bucket), Trusted Types, one
   deterministic JavaScript file, and no code or settings loaded from the

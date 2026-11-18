@@ -113,23 +113,23 @@ export function forgetOld(days: IdDays | undefined, t: number): IdDays | undefin
 /**
  * The conversation without what can no longer matter at `t`: times it's
  * cleared up to that are so old that nothing sent by then can still be
- * taken in, and edits and reactions kept for messages that, being older
- * still, can no longer come. The same object if nothing changed.
+ * taken in, and reactions kept for messages that, being older still, can
+ * no longer come. The same object if nothing changed. (Edits waiting for
+ * their messages are kept apart from it, and go the same way: engine.ts,
+ * tidied.)
  */
 export function tidy(c: ConversationRecord, t: number): ConversationRecord {
   const since = t - MAX_AGE;
   const old = (at: number | undefined) => at !== undefined && at < since;
-  const edits = c.edits?.filter((e) => e.at >= since);
   const reactions = c.reactions?.filter((r) => r.at >= since);
   const same = (a: unknown[] | undefined, b: unknown[] | undefined) => (a?.length ?? 0) === (b?.length ?? 0);
-  if (!old(c.clearedBefore) && !old(c.theirClear?.upTo) && !old(c.droppedBefore) && same(edits, c.edits) && same(reactions, c.reactions)) return c;
-  const { clearedBefore, theirClear, droppedBefore, edits: _e, reactions: _r, ...rest } = c;
+  if (!old(c.clearedBefore) && !old(c.theirClear?.upTo) && !old(c.droppedBefore) && same(reactions, c.reactions)) return c;
+  const { clearedBefore, theirClear, droppedBefore, reactions: _r, ...rest } = c;
   return {
     ...rest,
     ...(clearedBefore !== undefined && !old(clearedBefore) ? { clearedBefore } : {}),
     ...(theirClear && !old(theirClear.upTo) ? { theirClear } : {}),
     ...(droppedBefore !== undefined && !old(droppedBefore) ? { droppedBefore } : {}),
-    ...(edits?.length ? { edits } : {}),
     ...(reactions?.length ? { reactions } : {}),
   };
 }

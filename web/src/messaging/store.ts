@@ -11,8 +11,27 @@
 // nothing the other side could notice.
 
 import { concat, randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
-import type { Media, Sticker } from '../protocol/message';
-import { deleteMeta, getKey, getMeta, putKey, putMeta, type ConversationRecord, type Database, type IdDays, type MessageRecord } from '../storage/db';
+import type { Media, Message, Sticker } from '../protocol/message';
+import {
+  capEdits,
+  deleteMeta,
+  EDITS_LEDGER,
+  editBytes,
+  editsKey,
+  getKey,
+  getMeta,
+  LEDGER_ENTRY_COST,
+  MAX_UNANSWERED_EDIT_BYTES,
+  putKey,
+  putMeta,
+  type ConversationRecord,
+  type Database,
+  type IdDays,
+  type LedgerEntry,
+  type MessageRecord,
+  type PendingEdit,
+  unanswered,
+} from '../storage/db';
 import { withLock } from '../sync/locks';
 
 const STORAGE_KEY = 'storage-key';
@@ -53,19 +72,28 @@ async function storageKey(db: Database): Promise<CryptoKey> {
   });
 }
 
-async function sealBody(db: Database, id: string, body: MessageBody): Promise<Uint8Array<ArrayBuffer>> {
+/** Seals a value, as JSON, under the storage key, bound to a name (a message's ID, say). */
+async function seal(db: Database, name: string, value: unknown): Promise<Uint8Array<ArrayBuffer>> {
   const iv = randomBytes(IV);
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(id) }, await storageKey(db), utf8(JSON.stringify(body)));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(name) }, await storageKey(db), utf8(JSON.stringify(value)));
   return concat(iv, new Uint8Array(ct));
 }
 
-async function openBody(db: Database, id: string, sealed: Uint8Array<ArrayBuffer>): Promise<MessageBody> {
+async function unseal<T>(db: Database, name: string, sealed: Uint8Array<ArrayBuffer>): Promise<T> {
   const pt = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: sealed.slice(0, IV), additionalData: utf8(id) },
+    { name: 'AES-GCM', iv: sealed.slice(0, IV), additionalData: utf8(name) },
     await storageKey(db),
     sealed.slice(IV),
   );
-  return JSON.parse(new TextDecoder().decode(pt)) as MessageBody;
+  return JSON.parse(new TextDecoder().decode(pt)) as T;
+}
+
+function sealBody(db: Database, id: string, body: MessageBody): Promise<Uint8Array<ArrayBuffer>> {
+  return seal(db, id, body);
+}
+
+function openBody(db: Database, id: string, sealed: Uint8Array<ArrayBuffer>): Promise<MessageBody> {
+  return unseal<MessageBody>(db, id, sealed);
 }
 
 /** A new ID for a conversation on this device: random, and never sent. */
@@ -123,11 +151,84 @@ export async function getIds(db: Database, conv: string): Promise<ConversationId
 }
 
 /**
- * Writes a conversation and, in the same transaction, the kinds of what it
- * remembers by keyed hashes that changed from `before` (by identity): all
- * of it happens, or none.
+ * A conversation's edits of their messages that came before the messages
+ * (oldest first): in `meta`, apart from the conversation record, which is
+ * read whenever the chat list is shown and written with everything that
+ * comes. At most MAX_PENDING_EDITS, MAX_PENDING_EDIT_BYTES in all.
  */
-export async function saveConversation(db: Database, conversation: ConversationRecord, ids: ConversationIds = {}, before: ConversationIds = ids): Promise<void> {
+export async function getPendingEdits(db: Database, conv: string): Promise<PendingEdit[]> {
+  return ((await db.get('meta', editsKey(conv))) as PendingEdit[] | undefined) ?? [];
+}
+
+/**
+ * Pending edits as they are now, and as they were read: written only if
+ * they changed (by identity). at: when (our clock) one of them came, if one
+ * just did.
+ */
+export interface EditsChange {
+  now: PendingEdit[];
+  before: PendingEdit[];
+  at?: number;
+}
+
+/** The `meta` and `conversations` stores, as a transaction gives them. */
+interface MetaStore {
+  get(key: string): Promise<unknown>;
+  put(value: unknown, key: string): Promise<unknown>;
+  delete(key: string): Promise<unknown>;
+}
+interface ConversationStore {
+  get(key: string): Promise<ConversationRecord | undefined>;
+}
+
+/**
+ * Keeps the budget conversations we haven't answered share for their
+ * pending edits (MAX_UNANSWERED_EDIT_BYTES, in EDITS_LEDGER), with `conv`'s
+ * as now (shares: how much it has, and when one came if one just did; null
+ * if it has none, or no longer shares it). Past it, the edits of those one
+ * came to longest ago go, never `conv`'s own. Each is read first: one we
+ * have answered since (our first reply takes a mailbox, and isn't written
+ * here) or that's gone no longer counts, and keeps its edits. In the
+ * caller's transaction.
+ */
+async function keepBudget(conversations: ConversationStore, meta: MetaStore, conv: string, shares: { bytes: number; at?: number } | null): Promise<void> {
+  const ledger = ((await meta.get(EDITS_LEDGER)) as LedgerEntry[] | undefined) ?? [];
+  const was = ledger.find((e) => e.conv === conv);
+  if (!shares && !was) return;
+  let next = ledger.filter((e) => e !== was);
+  if (shares) next.push({ conv, bytes: shares.bytes + LEDGER_ENTRY_COST, at: shares.at ?? was?.at ?? Date.now() });
+  const total = () => next.reduce((n, e) => n + e.bytes, 0);
+  if (total() > MAX_UNANSWERED_EDIT_BYTES) {
+    const still = await Promise.all(next.map(async (e) => e.conv === conv || unansweredHere(await conversations.get(e.conv))));
+    next = next.filter((_, i) => still[i]);
+    for (const e of next.filter((x) => x.conv !== conv).sort((a, b) => a.at - b.at)) {
+      if (total() <= MAX_UNANSWERED_EDIT_BYTES) break;
+      await meta.delete(editsKey(e.conv));
+      next = next.filter((x) => x !== e);
+    }
+  }
+  if (next.length > 0) await meta.put(next, EDITS_LEDGER);
+  else await meta.delete(EDITS_LEDGER);
+}
+
+function unansweredHere(c: ConversationRecord | undefined): boolean {
+  return !!c && unanswered(c);
+}
+
+/**
+ * Writes a conversation and, in the same transaction, the kinds of what it
+ * remembers by keyed hashes that changed from `before` (by identity), and
+ * its pending edits if they changed (the newest that fit: capEdits, and in
+ * one we haven't answered, within the budget those share): all of it
+ * happens, or none.
+ */
+export async function saveConversation(
+  db: Database,
+  conversation: ConversationRecord,
+  ids: ConversationIds = {},
+  before: ConversationIds = ids,
+  edits?: EditsChange,
+): Promise<void> {
   const tx = db.transaction(['conversations', 'meta'], 'readwrite');
   await tx.objectStore('conversations').put(conversation);
   for (const kind of ID_KINDS) {
@@ -136,7 +237,43 @@ export async function saveConversation(db: Database, conversation: ConversationR
     if (days && days.length > 0) await tx.objectStore('meta').put(days, idsKey(conversation.id, kind));
     else await tx.objectStore('meta').delete(idsKey(conversation.id, kind));
   }
+  if (edits && edits.now !== edits.before) {
+    const meta = tx.objectStore('meta');
+    const kept = capEdits(edits.now);
+    if (kept.length > 0) await meta.put(kept, editsKey(conversation.id));
+    else await meta.delete(editsKey(conversation.id));
+    const shares = unanswered(conversation) && kept.length > 0;
+    await keepBudget(tx.objectStore('conversations'), meta, conversation.id, shares ? { bytes: editBytes(kept), ...(edits.at !== undefined ? { at: edits.at } : {}) } : null);
+  }
   await tx.done;
+}
+
+/** Forgets a conversation's pending edits (it was blocked, say). */
+export async function dropPendingEdits(db: Database, conv: string): Promise<void> {
+  const tx = db.transaction(['conversations', 'meta'], 'readwrite');
+  await tx.objectStore('meta').delete(editsKey(conv));
+  await keepBudget(tx.objectStore('conversations'), tx.objectStore('meta'), conv, null);
+  await tx.done;
+}
+
+/**
+ * Deletes a conversation with no messages, and everything kept for it apart
+ * from its record (what it remembers by keyed hashes, its pending edits), in
+ * one transaction; not if a message came meanwhile. Returns whether it did.
+ */
+export async function dropEmptyConversation(db: Database, conv: string): Promise<boolean> {
+  const tx = db.transaction(['conversations', 'meta', 'messages'], 'readwrite');
+  if ((await tx.objectStore('messages').index('byConversation').openKeyCursor(allOf(conv))) !== null) {
+    await tx.done;
+    return false;
+  }
+  await tx.objectStore('conversations').delete(conv);
+  for (const kind of ID_KINDS) await tx.objectStore('meta').delete(idsKey(conv, kind));
+  await tx.objectStore('meta').delete(editsKey(conv));
+  await deleteSentAt(tx.objectStore('meta'), conv);
+  await keepBudget(tx.objectStore('conversations'), tx.objectStore('meta'), conv, null);
+  await tx.done;
+  return true;
 }
 
 /**
@@ -514,18 +651,255 @@ export async function getMessage(db: Database, conv: string, id: string): Promis
   return { ...rest, ...(await openBody(db, id, sealed)) };
 }
 
+function opened(db: Database, { sealed, ...rest }: MessageRecord): Promise<MessageView> {
+  return openBody(db, rest.id, sealed).then((body) => ({ ...rest, ...body }));
+}
+
+/** All of a conversation's messages, in the byConversation index. */
+function allOf(conv: string): IDBKeyRange {
+  return IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
+}
+
 /**
- * A conversation's messages, oldest first, with their text: by `at`, and
- * those with the same `at` (whole seconds) in the order they were written
- * or taken in here.
+ * The order messages show in: by `at`, and those with the same `at` (whole
+ * seconds) in the order they were written or taken in here (`order`). The
+ * byConversation index gives them by `at` already, and stable sorts keep
+ * that; `order` isn't in its key, so records from before it was kept stay
+ * in the index.
  */
+function byTime(a: Pick<MessageRecord, 'at' | 'order'>, b: Pick<MessageRecord, 'at' | 'order'>): number {
+  return a.at - b.at || (a.order ?? 0) - (b.order ?? 0);
+}
+
+/** A conversation's messages, oldest first (byTime), with their text: all of them (a chat on screen shows a page: pageMessages). */
 export async function listMessages(db: Database, conv: string): Promise<MessageView[]> {
-  const records = await db.getAllFromIndex('messages', 'byConversation', IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]));
-  // The index gives them by `at` already; a stable sort keeps that.
-  records.sort((a, b) => a.at - b.at || (a.order ?? 0) - (b.order ?? 0));
+  const records = (await db.getAllFromIndex('messages', 'byConversation', allOf(conv))).sort(byTime);
+  return Promise.all(records.map((r) => opened(db, r)));
+}
+
+/** A conversation's messages without their text (none is opened), oldest first (byTime). */
+export async function listRecords(db: Database, conv: string): Promise<MessageRecord[]> {
+  return (await db.getAllFromIndex('messages', 'byConversation', allOf(conv))).sort(byTime);
+}
+
+/** The attachments of these messages: only those with a file are opened. */
+export function attachmentsOf(db: Database, records: MessageRecord[]): Promise<{ out: boolean; media?: LocalMedia }[]> {
   return Promise.all(
-    records.map(async ({ sealed, ...rest }) => ({ ...rest, ...(await openBody(db, rest.id, sealed)) })),
+    records
+      .filter((r) => r.file !== undefined)
+      .map(async (r) => {
+        const { media } = await openBody(db, r.id, r.sealed);
+        return { out: r.out, ...(media ? { media } : {}) };
+      }),
   );
+}
+
+/** How many messages a chat shows when it opens, and how many more each time it's scrolled to the top. */
+export const PAGE = 50;
+
+/**
+ * A page of a conversation's messages, oldest first (byTime), with their
+ * text: its newest `count`; or, with `since`, all from then on (by `at`),
+ * but no more than `most` (the newest). And whether it has older ones.
+ * Which are newest within a second goes by `order`, which the index doesn't
+ * know, so the whole second at the cut-off is read to choose. Only those
+ * shown are opened, so a chat flooded with thousands opens as fast as one
+ * with a few.
+ */
+export async function pageMessages(
+  db: Database,
+  conv: string,
+  { count = PAGE, since, most = Infinity }: { count?: number; since?: number; most?: number } = {},
+): Promise<{ messages: MessageView[]; more: boolean }> {
+  const tx = db.transaction('messages');
+  const index = tx.store.index('byConversation');
+  let records: MessageRecord[] = [];
+  let more: boolean;
+  if (since !== undefined) {
+    records = (await index.getAll(IDBKeyRange.bound([conv, since], [conv, Number.MAX_SAFE_INTEGER]))).sort(byTime);
+    more = (await index.openKeyCursor(IDBKeyRange.bound([conv, 0], [conv, since], false, true), 'prev')) !== null;
+    if (records.length > most) {
+      records = records.slice(-most);
+      more = true;
+    }
+  } else {
+    let cursor = await index.openCursor(allOf(conv), 'prev');
+    for (; cursor && records.length < count; cursor = await cursor.continue()) records.push(cursor.value);
+    // And the rest of the oldest second read: the newest of it are chosen below.
+    const edge = records.at(-1)?.at;
+    for (; cursor && cursor.value.at === edge; cursor = await cursor.continue()) records.push(cursor.value);
+    records.sort(byTime);
+    more = cursor !== null || records.length > count;
+    records = records.slice(-count);
+  }
+  await tx.done;
+  return { messages: await Promise.all(records.map((r) => opened(db, r))), more };
+}
+
+/** A conversation's messages with one status, up to a time (`at`), in the byStatus index. */
+function withStatus(conv: string, status: MessageRecord['status'], upTo = Infinity): IDBKeyRange {
+  return IDBKeyRange.bound([conv, status, -Infinity], [conv, status, upTo]);
+}
+
+/**
+ * Our messages in a conversation still going out, or failed (to send
+ * again), written up to a time (that second included), oldest first
+ * (byTime), with their text, but those in `shown`: found by the index, so
+ * only they are opened.
+ */
+export async function unsentBefore(db: Database, conv: string, upTo: number, shown: ReadonlySet<string> = new Set()): Promise<MessageView[]> {
+  const keys = [
+    ...(await db.getAllKeysFromIndex('messages', 'byStatus', withStatus(conv, 'sending', upTo))),
+    ...(await db.getAllKeysFromIndex('messages', 'byStatus', withStatus(conv, 'failed', upTo))),
+  ].filter((key) => !shown.has(key[1]));
+  const records = (await Promise.all(keys.map((key) => db.get('messages', key)))).filter((m): m is MessageRecord => !!m?.out);
+  return Promise.all(records.sort(byTime).map((r) => opened(db, r)));
+}
+
+/** The IDs of their messages in a conversation not marked read yet. Only the index is read. */
+export async function unreadIds(db: Database, conv: string): Promise<string[]> {
+  return (await db.getAllKeysFromIndex('messages', 'byStatus', withStatus(conv, 'received'))).map((key) => key[1]);
+}
+
+/**
+ * Their messages in a conversation not marked read yet: all their IDs, and
+ * the newest `count` (byTime, oldest first), for a receipt to name. Only the
+ * index is read, but for the newest and the rest of the oldest second of
+ * them (`order` decides within a second).
+ */
+export async function unread(db: Database, conv: string, count: number): Promise<{ ids: string[]; newest: string[] }> {
+  const ids = await unreadIds(db, conv);
+  if (ids.length <= count) {
+    if (ids.length <= 1) return { ids, newest: ids };
+    const records = (await Promise.all(ids.map((id) => db.get('messages', [conv, id])))).filter((m): m is MessageRecord => !!m);
+    return { ids, newest: records.sort(byTime).map((m) => m.id) };
+  }
+  const tx = db.transaction('messages');
+  const records: MessageRecord[] = [];
+  let cursor = await tx.store.index('byStatus').openCursor(withStatus(conv, 'received'), 'prev');
+  for (; cursor && records.length < count; cursor = await cursor.continue()) records.push(cursor.value);
+  const edge = records.at(-1)?.at;
+  for (; cursor && cursor.value.at === edge; cursor = await cursor.continue()) records.push(cursor.value);
+  await tx.done;
+  return { ids, newest: records.sort(byTime).slice(-count).map((m) => m.id) };
+}
+
+/** Sets these messages' status, in one transaction; with from, only of those that have that status now. */
+export async function setStatuses(db: Database, conv: string, ids: string[], status: MessageRecord['status'], from?: MessageRecord['status']): Promise<void> {
+  const tx = db.transaction('messages', 'readwrite');
+  // Asked for all at once: one by one, a chat flooded with thousands takes long.
+  await Promise.all(
+    [...new Set(ids)].map(async (id) => {
+      const record = await tx.store.get([conv, id]);
+      if (record && record.status !== status && (from === undefined || record.status === from)) await tx.store.put({ ...record, status });
+    }),
+  );
+  await tx.done;
+}
+
+/**
+ * A receipt saying they read the earlier messages too (`earlier`): ours
+ * written up to `upTo` (our clock; that second too, since times are whole
+ * seconds) that show as sent now show as seen. Returns how many.
+ */
+export async function noteSeenBefore(db: Database, conv: string, upTo: number): Promise<number> {
+  let seen = 0;
+  const tx = db.transaction('messages', 'readwrite');
+  // Found by the index: only those it marks are read.
+  const keys = await tx.store.index('byStatus').getAllKeys(withStatus(conv, 'sent', upTo));
+  await Promise.all(
+    keys.map(async (key) => {
+      const m = await tx.store.get(key);
+      if (!m?.out || m.status !== 'sent') return;
+      await tx.store.put({ ...m, status: 'seen' });
+      seen++;
+    }),
+  );
+  await tx.done;
+  return seen;
+}
+
+/** What the chat list shows of a conversation's newest message: who wrote it, and the start of it. */
+export interface PreviewView {
+  out: boolean;
+  text: string;
+  media?: { t: string; n?: string; m?: string };
+  sticker?: Sticker;
+}
+
+/** How much of a text a preview keeps, in characters: the list shows a line. */
+const PREVIEW_CHARS = 200;
+
+function previewName(conv: string, id: string): string {
+  return `preview:${conv}:${id}`;
+}
+
+/** The ID of a conversation's newest message, if it has any: only the index is read (and the records of its second, if it shares that). */
+async function newestId(db: Database, conv: string): Promise<string | undefined> {
+  const index = db.transaction('messages').store.index('byConversation');
+  const cursor = await index.openKeyCursor(allOf(conv), 'prev');
+  if (!cursor) return undefined;
+  // More than one in its second: `order` decides, which only the records hold.
+  const second = IDBKeyRange.only(cursor.key);
+  if ((await index.count(second)) === 1) return (cursor.primaryKey as [string, string])[1];
+  return (await index.getAll(second)).sort(byTime).at(-1)!.id;
+}
+
+/**
+ * A conversation with its preview (ConversationRecord.preview) of its newest
+ * message as stored now. The same object if it has that one's already,
+ * unless that's `touched` (its text changed): then it's sealed again.
+ */
+export async function withPreview(db: Database, c: ConversationRecord, touched?: string): Promise<ConversationRecord> {
+  const newest = await newestId(db, c.id);
+  if (newest === undefined) return c.preview === null ? c : { ...c, preview: null };
+  if (c.preview?.id === newest && touched !== newest) return c;
+  const record = await db.get('messages', [c.id, newest]);
+  if (!record) return c;
+  const body = await openBody(db, newest, record.sealed);
+  const shown: PreviewView = {
+    out: record.out,
+    text: Array.from(body.text).slice(0, PREVIEW_CHARS).join(''),
+    ...(body.media ? { media: { t: body.media.t, ...(body.media.n ? { n: body.media.n } : {}), ...(body.media.m ? { m: body.media.m } : {}) } } : {}),
+    ...(body.sticker ? { sticker: body.sticker } : {}),
+  };
+  return { ...c, preview: { id: newest, sealed: await seal(db, previewName(c.id, newest), shown) } };
+}
+
+/**
+ * What the chat list shows of a conversation's newest message, null if it
+ * has none: its preview, and for one of ours its status (the ticks). A
+ * conversation from before previews were kept gets one, kept from then on;
+ * so does one whose preview names a message that's gone (a change that
+ * didn't reach the preview).
+ */
+export async function lastShown(db: Database, c: ConversationRecord): Promise<(PreviewView & { status?: MessageRecord['status'] }) | null> {
+  let preview = c.preview === undefined ? await fillPreview(db, c) : c.preview;
+  for (let tries = 0; preview; tries++) {
+    const shown = await unseal<PreviewView>(db, previewName(c.id, preview.id), preview.sealed);
+    // Its message still here: ours read for its status, theirs only by its key.
+    const status = shown.out ? (await db.get('messages', [c.id, preview.id]))?.status : undefined;
+    const here = shown.out ? status !== undefined : (await db.getKey('messages', [c.id, preview.id])) !== undefined;
+    if (here || tries > 0) return { ...shown, ...(status ? { status } : {}) };
+    preview = await fillPreview(db, c);
+  }
+  return null;
+}
+
+/** Makes a conversation's preview afresh and keeps it, unless the record's changed meanwhile (it then has its own). */
+async function fillPreview(db: Database, c: ConversationRecord): Promise<NonNullable<ConversationRecord['preview']> | null> {
+  const { preview: _, ...unknown } = c;
+  const preview = (await withPreview(db, unknown)).preview ?? null;
+  const tx = db.transaction('conversations', 'readwrite');
+  const now = await tx.store.get(c.id);
+  if (now && samePreview(now.preview, c.preview)) await tx.store.put({ ...now, preview });
+  await tx.done;
+  return preview;
+}
+
+function samePreview(a: ConversationRecord['preview'], b: ConversationRecord['preview']): boolean {
+  if (!a || !b) return a === b;
+  return a.id === b.id && a.sealed.length === b.sealed.length && a.sealed.every((x, i) => x === b.sealed[i]);
 }
 
 /** When one of their messages was sent, by their clock (MessageRecord.sent). */
@@ -646,5 +1020,92 @@ export function forgetUploadDeletes(db: Database, ids: string[]): Promise<void> 
   return withLock(UPLOAD_DELETES, async () => {
     const done = new Set(ids);
     await writeUploadDeletes(db, (await readUploadDeletes(db)).filter((u) => !done.has(u.id)));
+  });
+}
+
+// Envelopes through a link that came before the message starting their
+// conversation: an edit, reaction or delete of the sender's that overtook it
+// (the inbox gives envelopes in no set order). They start no conversation,
+// so someone with the link can't fill the device with hidden ones; a few are
+// kept here instead, sealed under the storage key, and taken in when that
+// message starts the conversation (or forgotten once it can no longer come).
+const EARLY = 'early-envelopes';
+/**
+ * The most edits and reactions kept so, in number and in bytes (as JSON):
+ * past either, the oldest go. Deletes have a budget of their own, so a
+ * flood of big edits (from anyone with the link) can't push out a delete,
+ * which would let the deleted message show; one names at most 100 IDs,
+ * about 2.5 KB.
+ */
+export const MAX_EARLY = 50;
+export const MAX_EARLY_BYTES = 64 * 1024;
+export const MAX_EARLY_DELETES = 50;
+export const MAX_EARLY_DELETE_BYTES = 32 * 1024;
+
+/** An envelope kept for a conversation not started yet: the link it came through, and what it said (its `conv` and `from` say which conversation). */
+interface Early {
+  link: string;
+  message: Message;
+}
+
+async function readEarly(db: Database): Promise<Early[]> {
+  const sealed = await getMeta<Uint8Array<ArrayBuffer>>(db, EARLY);
+  if (!sealed) return [];
+  try {
+    return await unseal<Early[]>(db, EARLY, sealed);
+  } catch {
+    return [];
+  }
+}
+
+async function writeEarly(db: Database, list: Early[]): Promise<void> {
+  if (list.length === 0) await deleteMeta(db, EARLY);
+  else await putMeta(db, EARLY, await seal(db, EARLY, list));
+}
+
+/** Whether a kept envelope is for the conversation through `link` with this wire ID, started from this key. */
+function earlyMatch(e: Early, link: string, wire: string, from: string): boolean {
+  return e.link === link && e.message.conv === wire && e.message.from === from;
+}
+
+/**
+ * Keeps an envelope for a conversation through a link that hasn't started
+ * yet. Those sent before `since` go (their message can no longer come), and
+ * past their kind's budget (MAX_EARLY and MAX_EARLY_BYTES, or for deletes
+ * MAX_EARLY_DELETES and MAX_EARLY_DELETE_BYTES) the oldest of that kind go.
+ */
+export function keepEarly(db: Database, link: string, message: Message, since: number): Promise<void> {
+  return withLock(EARLY, async () => {
+    const list = (await readEarly(db)).filter((e) => e.message.at >= since && !(earlyMatch(e, link, message.conv, message.from) && e.message.id === message.id));
+    list.push({ link, message });
+    const size = (e: Early) => utf8(JSON.stringify(e)).length + 1;
+    const deletes = message.kind === 'delete';
+    const [count, most] = deletes ? [MAX_EARLY_DELETES, MAX_EARLY_DELETE_BYTES] : [MAX_EARLY, MAX_EARLY_BYTES];
+    const same = list.filter((e) => (e.message.kind === 'delete') === deletes);
+    let bytes = same.reduce((n, e) => n + size(e), 0);
+    const gone = new Set<Early>();
+    while (same.length - gone.size > count || bytes > most) {
+      const oldest = same[gone.size]!;
+      gone.add(oldest);
+      bytes -= size(oldest);
+    }
+    await writeEarly(db, gone.size > 0 ? list.filter((e) => !gone.has(e)) : list);
+  });
+}
+
+/** The envelopes kept for the conversation through `link` with this wire ID, started from this key, sent from `since` on: oldest first. */
+export async function earlyFor(db: Database, link: string, wire: string, from: string, since: number): Promise<Message[]> {
+  return (await readEarly(db))
+    .filter((e) => earlyMatch(e, link, wire, from) && e.message.at >= since)
+    .map((e) => e.message)
+    .sort((a, b) => a.at - b.at);
+}
+
+/** Forgets the envelopes kept that were sent before `since`, and those for one conversation (taken in now). */
+export function forgetEarly(db: Database, since: number, taken?: { link: string; wire: string; from: string }): Promise<void> {
+  return withLock(EARLY, async () => {
+    const list = await readEarly(db);
+    const kept = list.filter((e) => e.message.at >= since && !(taken && earlyMatch(e, taken.link, taken.wire, taken.from)));
+    if (kept.length !== list.length) await writeEarly(db, kept);
   });
 }

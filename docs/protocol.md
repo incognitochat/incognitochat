@@ -464,6 +464,7 @@ JSON fields:
 | `text` | the text (`message` only; at most 12,000 UTF-8 bytes) |
 | `replyTo` | ID of the message this answers |
 | `seen` | IDs read (`seen` only, 1–100) |
+| `earlier` | `true`: the recipient's messages written up to the oldest one named in `seen` (that second included) were read too (`seen` only; see Receipts) |
 | `media` | an attachment (`message` only, with or without text): `{t, id, k, d, s, n?, m?, w?, h?, l?, v?, p?}`, see Media |
 | `sticker` | a sticker (`message` only, with no text or attachment): `{id, e?}`, see Stickers |
 | `reaction` | a reaction (`reaction` only): `{to, e}`, where `to` is the ID of a message in the conversation, from either side, and `e` one emoji (one grapheme with an emoji code point, at most 32 UTF-16 units) or empty to take the reaction back |
@@ -474,8 +475,8 @@ JSON fields:
 Unknown fields are ignored but covered by the tag. `message` needs non-blank
 text, an attachment or a sticker; `seen` needs `seen` and no text;
 `reaction` needs `reaction`, `edit` needs `edit`, and `delete` needs
-`delete` or `all` (one of them), and nothing else;
-`key_update` and `end` carry none of these.
+`delete` or `all` (one of them), and nothing else; `earlier` goes only
+with `seen`; `key_update` and `end` carry none of these.
 
 **Times.** `at` is the server's clock as the sender's app knows it (Clocks,
 above), rounded down to the whole second: the device's own clock, to the
@@ -568,10 +569,21 @@ from that side in that conversation; a `delete` naming one of the
 recipient's own messages changes nothing. Each message it names is
 remembered as deleted, so it's dropped if it comes, also when the `delete`
 arrives before it (delivery has no set order), until it's too old to come
-(Replays and order). A conversation started by anything but a `message`
-stays out of the list until one arrives. With `all`, the recipient deletes
-the conversation as it was when the sender deleted it, both sides'
-messages, as in Telegram: the sender's messages sent by the `delete`'s
+(Replays and order). Only a `message` starts a conversation: a `delete`,
+`edit` or reaction through a link before the first `message` of its
+conversation (its `conv`, from its `from`) is kept aside, sealed, and
+taken in just before that message, when it comes. At most 50 edits and
+reactions are kept so on the device, 64 KB in all, and apart from them 50
+deletes, 32 KB (past either, the oldest of that kind go, so edits can't
+push out a delete), each until 31 days after its `at`; anything else that
+comes first is dropped. A conversation through the link with no messages
+(its first message dropped, deleted or cleared before it came, or cleared
+by the sender's `delete` with `all`) stays out of the list; if the
+recipient never opened or answered it, and hasn't blocked it, it goes once
+nothing more can come for it: 31 days after the newest envelope it took
+in. With `all`,
+the recipient deletes the conversation as it was when the sender deleted
+it, both sides' messages, as in Telegram: the sender's messages sent by the `delete`'s
 `at`, and its own up to the newest one the sender had then (Replays and
 order: the two clocks are never compared). Anything written after it, by either
 side, stays, whatever order it all arrives in. Messages from that side sent
@@ -590,8 +602,25 @@ nothing; the message shows as edited. An `edit` that arrives before its
 message is kept, sealed under the storage key like any text, for at most 31
 days, and applied when the message comes; not one for a message deleted on
 the recipient's device, nor one from before the conversation was cleared
-(its message would be dropped). Like deleting for both sides, it relies on
-the recipient's app.
+(its message would be dropped). A conversation keeps at most 20 such
+edits, 64 KB in all, the newest, apart from its record; conversations
+through the recipient's link that it hasn't answered keep at most 64 KB
+of them together (those an edit came to most recently keep theirs), and
+none once deleted or blocked. One before the conversation's first message
+is kept aside with the envelopes above. Like deleting for both sides, it
+relies on the recipient's app.
+
+**Receipts.** A `seen` names the messages read, up to 100; the app names
+at most 50, the newest it hasn't marked read yet, and sends one receipt
+however many there are. With more than 50, it adds `earlier`: the
+recipient also marks as seen its messages written up to the oldest one
+named (its own clock, that second included, since times are whole
+seconds) that it still shows as sent (not one still sending). So reading
+a chat flooded with thousands costs one send, not one per 50. One of the
+recipient's messages written by then but still on its way shows as seen
+before it arrives. Versions without `earlier` ignore it, as they ignore
+any unknown field, and mark only the messages named: the older ones stay
+shown as sent there.
 
 **Reactions.** Each side has at most one reaction per message, as on Telegram
 without Premium; a new one replaces it. The recipient keeps the one with the
@@ -1224,7 +1253,8 @@ envelopes (one wrap):
 | 16384 | 16,535 bytes | texts up to 12,000 bytes | 7 |
 
 The largest envelope there can be (16 wraps, 18,350 bytes) costs 8. The
-app names at most 50 messages in one receipt, so a receipt costs one.
+app names at most 50 messages in one receipt, so a receipt costs one, and
+sends one however many messages it marks read (`earlier`, Receipts).
 
 A send pays with one token as `token`, or several as a list, `tokens`
 (`token` is taken like `tokens` with one; the app sends one as `token`,

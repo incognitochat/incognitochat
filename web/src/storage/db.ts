@@ -8,7 +8,7 @@
 import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
 
 export const DB_NAME = 'incognitochat';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export interface StoredKeyPair {
   privateKey: CryptoKey;
@@ -28,7 +28,7 @@ interface Schema extends DBSchema {
    * Message history, by conversation and message ID, text encrypted under
    * the device's storage key (messaging/store.ts).
    */
-  messages: { key: [string, string]; value: MessageRecord; indexes: { byConversation: [string, number] } };
+  messages: { key: [string, string]; value: MessageRecord; indexes: { byConversation: [string, number]; byStatus: [string, string, number] } };
   /**
    * Attachments on this device, by conversation and message ID, encrypted
    * under the storage key (messaging/store.ts). Files from before version 4
@@ -134,8 +134,29 @@ export interface ConversationRecord {
    * here stands in.
    */
   lastMessage?: { at: number; id: string };
-  /** Deleted on this device: out of the list, with no messages, until a new one comes or goes. */
+  /**
+   * Out of the list, with no messages, until a message comes or goes:
+   * deleted on this device, cleared by their delete of the whole
+   * conversation, or started by a message that was dropped (deleted or
+   * cleared before it came). One someone started through our link that we
+   * never opened or answered goes once nothing more can come for it
+   * (upkeep); one we opened stays, so it comes back if either side writes
+   * again.
+   */
   hidden?: boolean;
+  /**
+   * The user opened it here. Missing in conversations from before it was
+   * kept: of those, one opened shows it by our key, which its "seen" made.
+   */
+  opened?: true;
+  /**
+   * What the chat list shows of the newest message: its ID, and its start
+   * (who wrote it, the text, what attachment or sticker), sealed under the
+   * storage key like message text (messaging/store.ts), so the list opens
+   * one small item per chat. null: no messages. Missing in conversations
+   * from before it was kept, until the list fills it in.
+   */
+  preview?: { id: string; sealed: Uint8Array<ArrayBuffer> } | null;
   /** Unix ms when our conversation key is next replaced (weekly, jittered per conversation). */
   rotateAt?: number;
   /** For a sender not answered yet: Unix ms when the link's current key was last fetched. */
@@ -174,14 +195,78 @@ export interface ConversationRecord {
    * Forgotten after 31 days.
    */
   droppedBefore?: number;
-  /** Edits of their messages that came before the messages did, sealed under the storage key (messaging/store.ts). */
-  edits?: { id: string; at: number; sealed: Uint8Array<ArrayBuffer> }[];
   /**
    * Their reactions to messages that weren't here yet (one of theirs still
    * on its way), sealed under the storage key, by the message's keyed hash
    * (idTag): applied when it comes. The newest per message.
    */
   reactions?: { tag: string; at: number; sealed: Uint8Array<ArrayBuffer> }[];
+}
+
+/**
+ * An edit of one of their messages that came before the message did, sealed
+ * under the storage key (messaging/store.ts). Kept in `meta`, apart from the
+ * conversation record (editsKey), since version 5.
+ */
+export interface PendingEdit {
+  id: string;
+  /** The edit's `at` (their clock). */
+  at: number;
+  sealed: Uint8Array<ArrayBuffer>;
+}
+
+/** The most edits waiting for their messages that a conversation keeps: in number, and in bytes sealed. */
+export const MAX_PENDING_EDITS = 20;
+export const MAX_PENDING_EDIT_BYTES = 64 * 1024;
+
+/** Where a conversation's edits waiting for their messages are kept in `meta`. */
+export function editsKey(conv: string): string {
+  return `edits:${conv}`;
+}
+
+/** The newest edits (the last ones) that fit in MAX_PENDING_EDITS and MAX_PENDING_EDIT_BYTES, oldest first. */
+export function capEdits(edits: PendingEdit[]): PendingEdit[] {
+  let bytes = 0;
+  let from = edits.length;
+  while (from > 0 && edits.length - from < MAX_PENDING_EDITS) {
+    const next = bytes + edits[from - 1]!.sealed.length;
+    if (next > MAX_PENDING_EDIT_BYTES) break;
+    bytes = next;
+    from--;
+  }
+  return from === 0 ? edits : edits.slice(from);
+}
+
+/** How much a conversation's pending edits take, sealed. */
+export function editBytes(edits: PendingEdit[]): number {
+  return edits.reduce((n, e) => n + e.sealed.length, 0);
+}
+
+/**
+ * Conversations someone started through our link that we haven't answered
+ * share one budget for their pending edits, MAX_UNANSWERED_EDIT_BYTES in
+ * all, so starting many can't fill the device. EDITS_LEDGER, in `meta`,
+ * lists those that have some: how many bytes (with LEDGER_ENTRY_COST for
+ * the entry itself, so the list is bounded too), and when (our clock) one
+ * last came, which decides whose go first (messaging/store.ts).
+ */
+export const MAX_UNANSWERED_EDIT_BYTES = 64 * 1024;
+export const LEDGER_ENTRY_COST = 256;
+export const EDITS_LEDGER = 'edits-unanswered';
+export interface LedgerEntry {
+  conv: string;
+  bytes: number;
+  /** Unix ms, our clock. */
+  at: number;
+}
+
+/**
+ * Whether a conversation's pending edits share that budget: someone wrote to
+ * our link, and we never took a mailbox for it (none now, none it moved on
+ * from, and not being unblocked). Our first reply takes one.
+ */
+export function unanswered(c: Pick<ConversationRecord, 'role' | 'myMailbox' | 'formerMailboxes' | 'unblocking'>): boolean {
+  return c.role === 'owner' && c.myMailbox === null && !c.unblocking && !c.formerMailboxes?.length;
 }
 
 /**
@@ -286,6 +371,12 @@ const upgrades: Upgrade[] = [
   },
   // Version 4: IDs count only within their conversation.
   (db, tx) => scopeIds(db as unknown as IDBPDatabase, tx as unknown as IDBPTransaction<unknown, string[], 'versionchange'>),
+  // Version 5: edits waiting for their messages move off the conversation
+  // record; messages can be found by status without reading them.
+  (_db, tx) => {
+    tx.objectStore('messages').createIndex('byStatus', ['conv', 'status', 'at']);
+    return moveEdits(tx as unknown as IDBPTransaction<unknown, string[], 'versionchange'>);
+  },
 ];
 
 /**
@@ -313,15 +404,15 @@ async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[],
 
   // In batches, each one's writes sent together: waiting for every request in
   // turn takes seconds for a long history on some engines.
-  const all = (await conversations.getAll()) as Omit<ConversationRecord, 'wire'>[];
-  await Promise.all(
-    all.map((c) => {
-      // Someone we never answered can't have changed keys: theirs is still
-      // their first. Once answered, it may have changed (firstKey stays unknown).
-      const firstKey = c.role === 'owner' && c.myKey === null ? { firstKey: c.peerKey } : {};
-      return conversations.put({ ...c, wire: c.id, ...firstKey });
-    }),
-  );
+  // Conversations one at a time: a record may hold a lot (edits kept for
+  // later, up to 6 MB), and all of them at once may not fit in memory.
+  for (let cursor = await conversations.openCursor(); cursor; cursor = await cursor.continue()) {
+    const c = cursor.value as Omit<ConversationRecord, 'wire'>;
+    // Someone we never answered can't have changed keys: theirs is still
+    // their first. Once answered, it may have changed (firstKey stays unknown).
+    const firstKey = c.role === 'owner' && c.myKey === null ? { firstKey: c.peerKey } : {};
+    await cursor.update({ ...c, wire: c.id, ...firstKey });
+  }
   const files = new Set(await media.getAllKeys());
   const kept = new Set<IDBValidKey>();
   for (let after: string | undefined; ; ) {
@@ -343,6 +434,47 @@ async function scopeIds(db: IDBPDatabase, tx: IDBPTransaction<unknown, string[],
   // space. One whose message can fetch it downloads it again.
   for (const key of files) if (!kept.has(key)) await media.delete(key);
   db.deleteObjectStore('messages-v3');
+}
+
+/**
+ * Version 5. Edits of their messages that came before the messages did were
+ * kept on the conversation record, up to 500 of up to 12 KB each, and the
+ * record is read for the chat list and written with everything that comes:
+ * they move to an item of their own in `meta` (editsKey), the newest that
+ * fit within MAX_PENDING_EDITS and MAX_PENDING_EDIT_BYTES; in conversations
+ * we haven't answered, those whose newest edit is newest (dated no later
+ * than now: their clock may run ahead), as many as fit in
+ * MAX_UNANSWERED_EDIT_BYTES together (the rest go). They stay sealed as
+ * they are (bound to the message's ID, not to where they're kept). One
+ * record at a time: on a device someone flooded, all of them at once may
+ * not fit in memory. The messages get an index by status (byStatus).
+ * Opening version 5 also closes older copies of the app still running
+ * (openDatabase, blocking), which would keep writing to the record.
+ * Untyped: it reads the records as version 4 left them.
+ */
+async function moveEdits(tx: IDBPTransaction<unknown, string[], 'versionchange'>): Promise<void> {
+  const meta = tx.objectStore('meta');
+  const shared: LedgerEntry[] = [];
+  for (let cursor = await tx.objectStore('conversations').openCursor(); cursor; cursor = await cursor.continue()) {
+    const { edits, ...c } = cursor.value as ConversationRecord & { edits?: PendingEdit[] };
+    if (edits === undefined) continue;
+    const kept = capEdits(edits);
+    await cursor.update(c);
+    if (kept.length === 0) continue;
+    await meta.put(kept, editsKey(c.id));
+    if (unanswered(c)) shared.push({ conv: c.id, bytes: editBytes(kept) + LEDGER_ENTRY_COST, at: Math.min(Math.max(...kept.map((e) => e.at)), Date.now()) });
+  }
+  const ledger: LedgerEntry[] = [];
+  let total = 0;
+  for (const e of shared.sort((a, b) => b.at - a.at)) {
+    if (total + e.bytes > MAX_UNANSWERED_EDIT_BYTES) {
+      await meta.delete(editsKey(e.conv));
+      continue;
+    }
+    total += e.bytes;
+    ledger.push(e);
+  }
+  if (ledger.length > 0) await meta.put(ledger, EDITS_LEDGER);
 }
 
 /**
