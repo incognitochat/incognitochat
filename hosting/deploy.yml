@@ -10,8 +10,8 @@
 #
 # It builds nothing but what was asked for: a tag is checked out by its full
 # name and must exist as that tag, the commit must be on RELEASE_BRANCH's own
-# (first-parent) history, and when the request names the commit (CI sends the
-# one it deployed the backend from), the checkout must be exactly that commit.
+# (first-parent) history, and the checkout must be exactly the commit the
+# request names (CI sends the one it deployed the backend from).
 #
 # Repository variables:
 #   CODE_REPOSITORY  e.g. incognitochat/incognitochat
@@ -30,12 +30,10 @@ on:
         description: Commit SHA or release tag of the code repository to build
         required: true
         type: string
-      # Optional, so that a caller that doesn't send it yet still works.
       commit:
         description: The full commit SHA the ref must resolve to
-        required: false
+        required: true
         type: string
-        default: ""
 
 permissions: {}
 
@@ -67,7 +65,7 @@ jobs:
             tags) [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && checkout=refs/tags/$REF ;;
             *) false ;;
           esac || { echo "::error::This site only builds ${REFS:-nothing}; got an unexpected ref"; exit 1; }
-          if [ -n "$COMMIT" ] && ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+          if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::The expected commit isn't a full commit SHA"
             exit 1
           fi
@@ -107,7 +105,7 @@ jobs:
             echo "::error::The checkout (${head}) isn't ${REF}"
             exit 1
           fi
-          if [ -n "$COMMIT" ] && [ "$head" != "$COMMIT" ]; then
+          if [ "$head" != "$COMMIT" ]; then
             echo "::error::The checkout (${head}) isn't the requested commit ${COMMIT}"
             exit 1
           fi
