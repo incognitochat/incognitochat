@@ -225,6 +225,17 @@ it. This is how close it gets.
 - **Telegram** sees who opens which link, and when notices are sent.
 - **Recipients are known to the server.** It must know a mailbox's owner to
   deliver to it. Only senders and pairings are hidden.
+- **Who is still on the old build, while an issuer key is replaced.**
+  Replacing a key ([deployment.md](deployment.md#rotating-an-issuer-key))
+  splits senders in two while both keys are held. `POST /tokens` names the
+  key it wants, so the server sees which logged-in accounts still fetch
+  tokens for the old key, and every send paid with an old-key token comes
+  from one of them: a set that only shrinks as people open the app again,
+  and can be small near the end. Keep that window short, minutes to an
+  hour, and retire the old key as soon as the site serves the new build.
+  (Signing each batch with every key held, and letting the app keep its own
+  key's signatures, would keep `POST /tokens` from saying which build an
+  account is on, at twice the signing work; it isn't done.)
 - **Which messages are quiet.** "Seen" receipts, reactions, edits, deletes
   and key updates are marked so they don't trigger a notice. The server sees the mark, not
   which of these it is or who sent it.

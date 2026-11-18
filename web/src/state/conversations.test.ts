@@ -106,6 +106,8 @@ async function backend() {
       }
       if (path === '/send') {
         if (auth) throw new Error('sends must not carry a login');
+        // The tokens of a retired key, told apart from bad ones.
+        if (state.keyRetired) throw new ApiError(401, 'unknown_issuer_key');
         sends.push(body);
         const owner = owners.get(body.mailbox as string);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: body.mailbox as string, envelope: body.envelope as string });
@@ -800,5 +802,29 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('outdated');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it('says so too when the tokens it holds are of the retired key, at once', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    expect(screenOf(sender.screen.value, 'conversation').messages.at(-1)).toMatchObject({ text: 'hello', status: 'sent' });
+    // Retired while the app is open: the server refuses its tokens as
+    // those of a key it no longer holds, and nothing else is tried.
+    b.state.keyRetired = true;
+    let tries = 0;
+    const post = b.api.post;
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') tries++;
+      return post(path, body, check);
+    };
+    await sender.sendMessage('again');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('outdated');
+    expect(conv.messages.at(-1)).toMatchObject({ text: 'again', status: 'failed' });
+    expect(tries).toBe(1);
   });
 });

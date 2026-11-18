@@ -33,13 +33,15 @@ const (
 // Issuer signs and checks anonymous tokens of one kind (tokens.Keyring):
 // with the current issuer key and, while a rotation lasts, the previous one.
 type Issuer interface {
-	// Current is the current key's ID.
-	Current() [32]byte
+	// KeyIDs returns the IDs of the keys held: the current one, then the
+	// previous one while a rotation lasts.
+	KeyIDs() [][32]byte
 	// Holds reports whether a key is held.
 	Holds(keyID [32]byte) bool
 	// Sign signs a blinded message with the held key keyID names.
 	Sign(keyID [32]byte, blinded []byte) ([]byte, error)
-	// Check verifies a token of any key held.
+	// Check verifies a token of any key held; tokens.ErrUnknownKey for one
+	// of a key that isn't.
 	Check(token []byte, now time.Time) (nonce []byte, forgetAfter time.Time, err error)
 	BlindedLen() int
 }
@@ -64,7 +66,10 @@ type Spent interface {
 //     app from before a price cut sends more);
 //   - both token and tokens: bad_request;
 //   - any that isn't a valid send token of this week or last, or one twice:
-//     invalid_token.
+//     invalid_token;
+//   - one of an issuer key the server no longer holds (retired):
+//     unknown_issuer_key, so that an app still on that key's build can say
+//     to open it again.
 //
 // The app sends one token as token, and several as tokens.
 func (s *Server) sendTokens(in sendRequest, size int, now time.Time) ([]ephemeral.TokenNonce, *httpapi.Response) {
@@ -90,6 +95,9 @@ func (s *Server) sendTokens(in sendRequest, size int, now time.Time) ([]ephemera
 			return refuse(httpapi.Error(http.StatusUnauthorized, "invalid_token"))
 		}
 		nonce, forgetAfter, err := s.Issuer.Check(token, now)
+		if errors.Is(err, tokens.ErrUnknownKey) {
+			return refuse(httpapi.Error(http.StatusUnauthorized, "unknown_issuer_key"))
+		}
 		if err != nil {
 			return refuse(httpapi.Error(http.StatusUnauthorized, "invalid_token"))
 		}
@@ -139,12 +147,34 @@ func (s *Server) issueMediaTokens(ctx context.Context, req httpapi.Request, c ca
 	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok", c.person(), MediaTokensPerDay)
 }
 
+// issuerKeys answers GET /tokens/keys, without a login: the IDs of the
+// issuer keys this instance holds, of each kind, the current one first and
+// then, while a rotation lasts, the previous one. Key IDs are public
+// (web/issuer-keys.json). The deploy reads them to check what the api
+// actually loaded, which a secret changed without its version doesn't
+// reach.
+func (s *Server) issuerKeys(context.Context, httpapi.Request) httpapi.Response {
+	ids := func(issuer Issuer) []string {
+		var out []string
+		for _, id := range issuer.KeyIDs() {
+			out = append(out, base64.RawURLEncoding.EncodeToString(id[:]))
+		}
+		return out
+	}
+	out := map[string]any{"send": ids(s.Issuer)}
+	if s.MediaIssuer != nil {
+		out["media"] = ids(s.MediaIssuer)
+	}
+	return httpapi.JSON(http.StatusOK, out)
+}
+
 // signTokens signs a batch with the issuer key the app names, its build's
 // (keyId), so an app never gets tokens for a key it can't use. An app from
-// before keys were named sends none, and gets the current key. A key the
-// server doesn't hold (a build for a retired key, or for one not deployed
-// yet) is refused with 409 unknown_issuer_key, before the batch is counted
-// against the day's budget.
+// before keys were named sends none: it was built for the key that was
+// current then, so it gets the oldest key held, the previous one while a
+// rotation lasts. A key the server doesn't hold (a build for a retired key,
+// or for one not deployed yet) is refused with 409 unknown_issuer_key,
+// before the batch is counted against the day's budget.
 func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, kind, person string, perDay int) httpapi.Response {
 	var in struct {
 		Blinded []string `json:"blinded"`
@@ -156,7 +186,8 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 	if len(in.Blinded) == 0 || len(in.Blinded) > TokenBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
-	keyID := issuer.Current()
+	held := issuer.KeyIDs()
+	keyID := held[len(held)-1]
 	if in.KeyID != "" {
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(in.KeyID)
 		if err != nil || len(raw) != len(keyID) {

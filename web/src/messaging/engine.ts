@@ -1260,6 +1260,9 @@ export function createMessaging(deps: MessagingDeps) {
             if (dropped <= MAX_SEND_TOKENS) continue;
             throw err;
           }
+          // unknown_issuer_key: the server no longer holds this build's key
+          // (it was replaced), so no token here would do; the user is told
+          // to open the app again (app.ts, sendError).
           // Pay what the server asks, more or less, once, if it's no more
           // than an envelope can cost: the same envelope to the same
           // mailbox, with the tokens it saw (none was spent) and more if

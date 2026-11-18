@@ -21,8 +21,8 @@ func TestKeyringRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ring.Current() != current.KeyID() || len(ring.KeyIDs()) != 2 || ring.KeyIDs()[1] != previous.KeyID() {
-		t.Fatalf("key IDs %x, current %x", ring.KeyIDs(), ring.Current())
+	if ids := ring.KeyIDs(); len(ids) != 2 || ids[0] != current.KeyID() || ids[1] != previous.KeyID() {
+		t.Fatalf("key IDs %x", ids)
 	}
 	if !ring.Holds(current.KeyID()) || !ring.Holds(previous.KeyID()) || ring.Holds([32]byte{1}) {
 		t.Fatal("Holds is wrong")
@@ -47,16 +47,32 @@ func TestKeyringRotation(t *testing.T) {
 		t.Fatalf("signing with a key not held: %v", err)
 	}
 	// Signed by one key but naming the other: refused by both.
-	if _, _, err := ring.Check(mint(t, previous, previousPub, epoch, current.KeyID()), now); err == nil {
-		t.Error("accepted a token naming another key than its signer")
+	if _, _, err := ring.Check(mint(t, previous, previousPub, epoch, current.KeyID()), now); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a token naming another key than its signer: %v", err)
 	}
-	// A key that isn't held, and a token too short to name one.
+	// A key that isn't held is told apart; something not in a token's shape
+	// isn't, whatever key it names.
 	other, otherPub := newIssuer(t)
-	if _, _, err := ring.Check(mint(t, other, otherPub, epoch, other.KeyID()), now); err == nil {
-		t.Error("accepted a token of a key not held")
+	otherToken := mint(t, other, otherPub, epoch, other.KeyID())
+	if _, _, err := ring.Check(otherToken, now); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("a token of a key not held: %v", err)
 	}
-	if _, _, err := ring.Check(newToken[:inputLen-1], now); err == nil {
-		t.Error("accepted a truncated token")
+	media, err := NewKeyring(&Issuer{label: LabelMedia, keyID: [32]byte{9}, k: current.k}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := media.Check(otherToken, now); !errors.Is(err, ErrInvalid) {
+		t.Errorf("another kind's token, of a key not held: %v", err)
+	}
+	for name, bad := range map[string][]byte{
+		"truncated":     newToken[:inputLen-1],
+		"short":         otherToken[:inputLen+10],
+		"other type":    append([]byte{0, 1}, otherToken[2:]...),
+		"two weeks old": mint(t, other, otherPub, epoch-2, other.KeyID()),
+	} {
+		if _, _, err := ring.Check(bad, now); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 
 	// The previous key retired.
@@ -67,8 +83,8 @@ func TestKeyringRotation(t *testing.T) {
 	if retired.Holds(previous.KeyID()) || len(retired.KeyIDs()) != 1 {
 		t.Fatal("still holds the retired key")
 	}
-	if _, _, err := retired.Check(mint(t, previous, previousPub, epoch, previous.KeyID()), now); err == nil {
-		t.Error("accepted a retired key's token")
+	if _, _, err := retired.Check(mint(t, previous, previousPub, epoch, previous.KeyID()), now); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("a retired key's token: %v", err)
 	}
 	if _, _, err := retired.Check(mint(t, current, currentPub, epoch, current.KeyID()), now); err != nil {
 		t.Errorf("current key's token after retiring the previous: %v", err)
@@ -103,11 +119,11 @@ func TestLoadKeyring(t *testing.T) {
 	previousID, _ := KeyID(previousPub)
 
 	ring, err := LoadKeyring(string(currentPEM), NoKey, LabelSend)
-	if err != nil || len(ring.KeyIDs()) != 1 || ring.Current() != currentID {
+	if err != nil || len(ring.KeyIDs()) != 1 || ring.KeyIDs()[0] != currentID {
 		t.Fatalf("without a previous key: %v", err)
 	}
 	ring, err = LoadKeyring(string(currentPEM), string(previousPEM), LabelSend)
-	if err != nil || ring.Current() != currentID || !ring.Holds(previousID) {
+	if err != nil || ring.KeyIDs()[0] != currentID || !ring.Holds(previousID) {
 		t.Fatalf("with a previous key: %v", err)
 	}
 	for name, keys := range map[string][2]string{

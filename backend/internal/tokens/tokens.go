@@ -62,7 +62,7 @@ var (
 	// ErrKey is returned for an unusable issuer key.
 	ErrKey = errors.New("tokens: invalid issuer key")
 	// ErrUnknownKey is returned for a request to sign with a key that isn't
-	// held.
+	// held, and for a token of one (Keyring).
 	ErrUnknownKey = errors.New("tokens: issuer key not held")
 )
 

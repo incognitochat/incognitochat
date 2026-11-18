@@ -1,6 +1,9 @@
 package tokens
 
-import "time"
+import (
+	"encoding/binary"
+	"time"
+)
 
 // NoKey stands for no key where an optional one (the previous key) is read
 // from configuration: SSM can't store an empty value (infra/parameters.tf).
@@ -50,10 +53,8 @@ func NewKeyring(current, previous *Issuer) (*Keyring, error) {
 	return &Keyring{held: held}, nil
 }
 
-// Current returns the current key's ID.
-func (r *Keyring) Current() [32]byte { return r.held[0].keyID }
-
-// KeyIDs returns the IDs of the keys held, the current one first.
+// KeyIDs returns the IDs of the keys held, the current one first, then the
+// previous one if there is one.
 func (r *Keyring) KeyIDs() [][32]byte {
 	ids := make([][32]byte, len(r.held))
 	for i, k := range r.held {
@@ -89,14 +90,20 @@ func (r *Keyring) Sign(keyID [32]byte, blinded []byte) ([]byte, error) {
 }
 
 // Check verifies a token of any key held (Issuer.Check), the one its key
-// ID names.
+// ID names. A token of this kind and of this week or last, but for a key
+// that isn't held, gets ErrUnknownKey, so that an app still on a build for
+// a retired key can be told so; anything else that isn't valid (another
+// kind's token among them), ErrInvalid.
 func (r *Keyring) Check(token []byte, now time.Time) (nonce []byte, forgetAfter time.Time, err error) {
-	if len(token) < inputLen {
+	if len(token) != inputLen+r.BlindedLen() || binary.BigEndian.Uint16(token) != Type {
 		return nil, time.Time{}, ErrInvalid
 	}
-	k := r.key([32]byte(token[66:98]))
-	if k == nil {
-		return nil, time.Time{}, ErrInvalid
+	if k := r.key([32]byte(token[66:98])); k != nil {
+		return k.Check(token, now)
 	}
-	return k.Check(token, now)
+	label, epoch, challenge := r.held[0].label, EpochOf(now), [32]byte(token[34:66])
+	if challenge == Challenge(label, epoch) || challenge == Challenge(label, epoch-1) {
+		return nil, time.Time{}, ErrUnknownKey
+	}
+	return nil, time.Time{}, ErrInvalid
 }

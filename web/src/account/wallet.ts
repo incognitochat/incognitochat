@@ -8,10 +8,12 @@
 // otherwise see an account fetch one and, a moment later, an anonymous send.
 //
 // Each build names one issuer key of each kind (config.ts): its tokens are
-// fetched for that key, which the request names, and those of any other key
-// are dropped. After the keys are replaced, the server takes the old key's
+// fetched for that key, which the request names, and only those are counted
+// and spent. After the keys are replaced, the server takes the old key's
 // tokens only for a while, then not at all (docs/deployment.md, Rotating an
-// issuer key), so they would fail sends.
+// issuer key), so they would fail sends. Other keys' tokens are kept until
+// they expire, all the same: another copy of the app, on the other build,
+// may be spending them.
 
 import { blind, finalize, type IssuerKey } from '../crypto/blindrsa';
 import { concat, fromBase64Url, toBase64Url } from '../crypto/encoding';
@@ -99,13 +101,19 @@ async function stored(db: Database, kind: TokenKind): Promise<StoredToken[]> {
 }
 
 /**
- * Tokens still accepted: this week's and last week's, for the build's
- * issuer key (keyId). Those of another key are left out, and dropped where
- * the wallet is written back.
+ * Tokens still in date, of any key: this week's and last week's. What the
+ * wallet is written back with, so that a copy of the app on another build
+ * (another key, while keys are being replaced) keeps its tokens; those of a
+ * retired key are gone within two weeks.
  */
-function usable(tokens: StoredToken[], now: number, keyId: Uint8Array): StoredToken[] {
+function inDate(tokens: StoredToken[], now: number): StoredToken[] {
   const epoch = epochOf(now);
-  return tokens.filter((t) => (t.epoch === epoch || t.epoch === epoch - 1) && forKey(t.token, keyId));
+  return tokens.filter((t) => t.epoch === epoch || t.epoch === epoch - 1);
+}
+
+/** Tokens still accepted, for the build's issuer key (keyId): the only ones counted or spent. */
+function usable(tokens: StoredToken[], now: number, keyId: Uint8Array): StoredToken[] {
+  return inDate(tokens, now).filter((t) => forKey(t.token, keyId));
 }
 
 /** Whether a token is for the issuer key keyId: the key ID it carries (protocol/token.ts). */
@@ -166,21 +174,25 @@ export function refillTokens(
       const sig = await finalize(issuer.key, inputs[i]!, fromBase64Url(signatures[i]!), states[i]!);
       fresh.push({ token: toBase64Url(concat(inputs[i]!, sig)), epoch });
     }
-    const kept = usable(await stored(db, kind), now, issuer.keyId);
+    const kept = inDate(await stored(db, kind), now);
     await putMeta(db, meta, [...kept, ...fresh]);
-    return kept.length + fresh.length;
+    return usable(kept, now, issuer.keyId).length + fresh.length;
   });
 }
 
 /**
  * Takes `count` tokens to spend (the oldest still accepted, for the build's
- * key keyId), all or none: null if fewer are left.
+ * key keyId), all or none: null if fewer are left, and then the wallet is
+ * left as it is. Other keys' tokens stay, for another copy of the app.
  */
 export function takeTokens(db: Database, keyId: Uint8Array, count: number, now = nowSeconds(), kind: TokenKind = 'send'): Promise<StoredToken[] | null> {
   return withLock(KINDS[kind].lock, async () => {
-    const tokens = usable(await stored(db, kind), now, keyId).sort((a, b) => a.epoch - b.epoch);
-    const taken = tokens.length >= count ? tokens.splice(0, count) : null;
-    await putMeta(db, KINDS[kind].meta, tokens);
+    const all = inDate(await stored(db, kind), now);
+    const mine = usable(all, now, keyId).sort((a, b) => a.epoch - b.epoch);
+    if (mine.length < count) return null;
+    const taken = mine.slice(0, count);
+    const gone = new Set(taken);
+    await putMeta(db, KINDS[kind].meta, all.filter((t) => !gone.has(t)));
     return taken;
   });
 }

@@ -5,7 +5,7 @@ import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
 import { ApiError } from '../net/api';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
-import { openDatabase } from '../storage/db';
+import { getMeta, openDatabase } from '../storage/db';
 import { batchFor, budgetLeft, countTokens, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
 
 let n = 0;
@@ -133,7 +133,7 @@ describe('token wallet', () => {
     expect(await takeTokens(db, issuer.keyId, 4, NOW)).toEqual(four);
   });
 
-  it("drops tokens of any key but the build's, even older ones it would hand out first", async () => {
+  it("counts and spends only the build's key's tokens, even with older ones of another key", async () => {
     const db = await openDatabase(`wallet-test-${n++}`);
     // Last week's tokens of the old key, from before the keys were
     // replaced; a standby key published for the next rotation, which this
@@ -159,9 +159,38 @@ describe('token wallet', () => {
       expect(await verify(current.issuer.key, raw.slice(0, TOKEN_INPUT_LENGTH), raw.slice(TOKEN_INPUT_LENGTH))).toBe(true);
     }
     expect(await takeToken(db, current.issuer.keyId, NOW)).toBeNull();
-    // Dropped, not just skipped: gone for a build of either other key too.
-    expect(await countTokens(db, old.issuer.keyId, NOW)).toBe(0);
-    expect(await countTokens(db, standby.issuer.keyId, NOW)).toBe(0);
+    // Kept, not dropped: a copy of the app on the old build still has its
+    // tokens, until they expire.
+    expect(await countTokens(db, old.issuer.keyId, NOW)).toBe(3);
+    expect(await countTokens(db, standby.issuer.keyId, NOW)).toBe(2);
+    expect(await countTokens(db, old.issuer.keyId, NOW + EPOCH_SECONDS)).toBe(0);
+    await refillTokens(db, current.session, current.issuer, 1, NOW + EPOCH_SECONDS);
+    await refillTokens(db, current.session, current.issuer, 1, NOW + 2 * EPOCH_SECONDS);
+    expect(await getMeta<unknown[]>(db, 'send-tokens')).toHaveLength(2);
+  });
+
+  it("leaves another copy's tokens alone, on another build, while keys are replaced", async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    // One copy of the app on the old build, one on the new, one device.
+    const oldBuild = await issuerAndSession();
+    const newBuild = await issuerAndSession();
+    await refillTokens(db, oldBuild.session, oldBuild.issuer, 4, NOW);
+    await refillTokens(db, newBuild.session, newBuild.issuer, 4, NOW);
+    expect(await countTokens(db, oldBuild.issuer.keyId, NOW)).toBe(4);
+    expect(await countTokens(db, newBuild.issuer.keyId, NOW)).toBe(4);
+    // Each one's sends take only its own.
+    expect(await takeTokens(db, newBuild.issuer.keyId, 3, NOW)).toHaveLength(3);
+    expect(await takeTokens(db, oldBuild.issuer.keyId, 2, NOW)).toHaveLength(2);
+    expect(await countTokens(db, oldBuild.issuer.keyId, NOW)).toBe(2);
+    expect(await countTokens(db, newBuild.issuer.keyId, NOW)).toBe(1);
+    // Too few for a send: nothing taken, and nothing written either.
+    const before = await getMeta<unknown[]>(db, 'send-tokens');
+    expect(await takeTokens(db, newBuild.issuer.keyId, 2, NOW)).toBeNull();
+    expect(await getMeta<unknown[]>(db, 'send-tokens')).toEqual(before);
+    // After the old key is retired, the old copy's tries take nothing of
+    // the new copy's however often they come.
+    for (let i = 0; i < 50; i++) await takeTokens(db, oldBuild.issuer.keyId, 3, NOW);
+    expect(await countTokens(db, newBuild.issuer.keyId, NOW)).toBe(1);
   });
 
   it("names the build's key, and a server without it signs and counts nothing", async () => {

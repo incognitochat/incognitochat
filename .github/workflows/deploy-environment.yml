@@ -72,24 +72,14 @@ jobs:
             missing=1
           fi
           # The previous keys are set only while a rotation lasts
-          # (docs/deployment.md, Rotating an issuer key).
-          keys=(ISSUER_KEY MEDIA_ISSUER_KEY PREVIOUS_ISSUER_KEY PREVIOUS_MEDIA_ISSUER_KEY)
-          for name in "${keys[@]}"; do
+          # (docs/deployment.md, Rotating an issuer key). Each key is read
+          # and checked, and the keys compared, once the code is checked out
+          # (Check the issuer keys).
+          for name in ISSUER_KEY MEDIA_ISSUER_KEY PREVIOUS_ISSUER_KEY PREVIOUS_MEDIA_ISSUER_KEY; do
             if [ -n "${!name}" ] && [[ "${!name}" != "-----BEGIN PRIVATE KEY-----"* ]]; then
               echo "::error::$name isn't a PKCS#8 PEM private key"
               missing=1
             fi
-          done
-          # A key that signed both kinds would give them one budget, and a
-          # previous key the same as the current one is a mistake.
-          for ((i = 0; i < ${#keys[@]}; i++)); do
-            for ((j = i + 1; j < ${#keys[@]}; j++)); do
-              a=${keys[i]} b=${keys[j]}
-              if [ -n "${!a}" ] && [ "${!a}" = "${!b}" ]; then
-                echo "::error::$a and $b must be different keys"
-                missing=1
-              fi
-            done
           done
           # Retired: it replaced all four generated secrets at once, the
           # Telegram-ID pepper too. Each has its own version now, 1 while
@@ -147,36 +137,87 @@ jobs:
             exit 1
           fi
 
-      # The site names its issuer keys by an entry of web/issuer-keys.json,
-      # so the current keys must be published there, as one entry, before
-      # it can switch to them (docs/deployment.md, Rotating an issuer key).
-      # The IDs of every key the API will hold, the previous ones too, are
-      # kept for the check once the site is live. Key IDs are public.
-      - name: Check the issuer keys are published
+      # Before anything changes (docs/deployment.md, Rotating an issuer key):
+      # - each key is one the API can load (an RSA-2048 key that openssl
+      #   reads and checks), and no two are the same key: one key for both
+      #   kinds would give them one budget, and the API refuses that at
+      #   startup;
+      # - the current keys are published together, as one entry of
+      #   web/issuer-keys.json, so the site can switch to them;
+      # - the keys the live site names stay held, unless DROP_LIVE_ISSUER_KEY
+      #   is true (after a leak): otherwise its open apps get no tokens.
+      # The IDs of the keys the API will hold, current first, are kept for
+      # the checks after the deploy. Key IDs are public.
+      - name: Check the issuer keys
         env:
           ISSUER_KEY: ${{ secrets.ISSUER_KEY }}
           MEDIA_ISSUER_KEY: ${{ secrets.MEDIA_ISSUER_KEY }}
           PREVIOUS_ISSUER_KEY: ${{ secrets.PREVIOUS_ISSUER_KEY }}
           PREVIOUS_MEDIA_ISSUER_KEY: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
+          PAGES_URL: ${{ vars.PAGES_URL }}
+          DROP_LIVE_ISSUER_KEY: ${{ vars.DROP_LIVE_ISSUER_KEY }}
         run: |
-          # The SHA-256 of the public key's SubjectPublicKeyInfo (DER), as published.
-          key_id() { printf '%s\n' "$1" | openssl pkey -pubout -outform DER | sha256sum | cut -d' ' -f1; }
-          send=$(key_id "$ISSUER_KEY")
-          media=$(key_id "$MEDIA_ISSUER_KEY")
+          set -o pipefail
+          names=(ISSUER_KEY MEDIA_ISSUER_KEY PREVIOUS_ISSUER_KEY PREVIOUS_MEDIA_ISSUER_KEY)
+          declare -A id
+          for name in "${names[@]}"; do
+            [ -n "${!name}" ] || continue
+            text=$(printf '%s\n' "${!name}" | openssl pkey -noout -text_pub 2>/dev/null || true)
+            if ! printf '%s\n' "${!name}" | openssl pkey -noout -check >/dev/null 2>&1 \
+              || [[ "$text" != "Public-Key: (2048 bit)"$'\n'"Modulus:"* ]]; then
+              echo "::error::$name isn't an RSA private key of 2048 bits that openssl can read and check"
+              exit 1
+            fi
+            # The SHA-256 of the public key's SubjectPublicKeyInfo (DER), as published.
+            id[$name]=$(printf '%s\n' "${!name}" | openssl pkey -pubout -outform DER | sha256sum | cut -d' ' -f1)
+          done
+          for ((i = 0; i < ${#names[@]}; i++)); do
+            for ((j = i + 1; j < ${#names[@]}; j++)); do
+              a=${names[i]} b=${names[j]}
+              if [ -n "${id[$a]:-}" ] && [ "${id[$a]}" = "${id[$b]:-}" ]; then
+                echo "::error::$a and $b are the same key (key ID ${id[$a]}); they must be different keys"
+                exit 1
+              fi
+            done
+          done
+
+          send=${id[ISSUER_KEY]} media=${id[MEDIA_ISSUER_KEY]}
           entry=$(jq -r --arg send "$send" --arg media "$media" \
-            'to_entries[] | select(.value | type == "object") | select(.value.keyId == $send and .value.media.keyId == $media) | .key' \
-            web/issuer-keys.json | head -n 1)
+            '[to_entries[] | select(.value | type == "object") | select(.value.keyId == $send and .value.media.keyId == $media) | .key][0] // empty' \
+            web/issuer-keys.json)
           if [ -z "$entry" ]; then
             echo "::error::No entry of web/issuer-keys.json has ISSUER_KEY's public key (key ID ${send}) with MEDIA_ISSUER_KEY's (${media}) under media: publish them first (docs/deployment.md, Rotating an issuer key)"
             exit 1
           fi
           echo "The current issuer keys are published as ${entry}"
-          held_send=$send
-          held_media=$media
-          if [ -n "$PREVIOUS_ISSUER_KEY" ]; then held_send+=" $(key_id "$PREVIOUS_ISSUER_KEY")"; fi
-          if [ -n "$PREVIOUS_MEDIA_ISSUER_KEY" ]; then held_media+=" $(key_id "$PREVIOUS_MEDIA_ISSUER_KEY")"; fi
+          held_send="$send${id[PREVIOUS_ISSUER_KEY]:+ ${id[PREVIOUS_ISSUER_KEY]}}"
+          held_media="$media${id[PREVIOUS_MEDIA_ISSUER_KEY]:+ ${id[PREVIOUS_MEDIA_ISSUER_KEY]}}"
           echo "The API will hold the send keys ${held_send} and the media keys ${held_media}"
           { echo "HELD_SEND_KEY_IDS=${held_send}"; echo "HELD_MEDIA_KEY_IDS=${held_media}"; } >> "$GITHUB_ENV"
+
+          manifest=$(curl -sS --max-time 10 "${PAGES_URL%/}/manifest.json?v=${GITHUB_SHA}-${RANDOM}" || true)
+          live=$(jq -r '.build.VITE_ISSUER_KEY // empty' <<<"$manifest" 2>/dev/null || true)
+          if [ -z "$live" ]; then
+            echo "::warning::Couldn't read the live site's manifest (none yet?): the keys it names aren't checked"
+            exit 0
+          fi
+          live_send=$(jq -r --arg name "$live" '.[$name] | objects | .keyId // empty' web/issuer-keys.json)
+          live_media=$(jq -r --arg name "$live" '.[$name] | objects | .media.keyId // empty' web/issuer-keys.json)
+          if [ -n "$live_send" ] && [[ " $held_send " == *" $live_send "* ]] \
+            && { [ -z "$live_media" ] || [[ " $held_media " == *" $live_media "* ]]; }; then
+            echo "The live site names ${live}, whose keys stay held"
+            if [ "$DROP_LIVE_ISSUER_KEY" = true ]; then
+              echo "::warning::DROP_LIVE_ISSUER_KEY is set but not needed: delete it"
+            fi
+          elif [ "$DROP_LIVE_ISSUER_KEY" = true ]; then
+            echo "::warning::The live site names ${live}, whose keys this deploy drops (DROP_LIVE_ISSUER_KEY): its open apps get no tokens until they load the new build. Delete DROP_LIVE_ISSUER_KEY afterwards"
+          elif [ -z "$live_send" ]; then
+            echo "::error::The live site names ${live}, which this commit doesn't publish, so its keys can't be checked. Keep the entry until no site names it; after a leak, set DROP_LIVE_ISSUER_KEY to true for this deploy"
+            exit 1
+          else
+            echo "::error::The live site names ${live}, whose keys the API wouldn't hold after this deploy, so its open apps would get no tokens. Keep them as the previous keys until the site serves the new entry; after a leak, set DROP_LIVE_ISSUER_KEY to true for this deploy (docs/deployment.md, Rotating an issuer key)"
+            exit 1
+          fi
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -413,6 +454,24 @@ jobs:
           fi
           echo "Sends need a token (HTTP 401 invalid_token)"
 
+      # What the API actually loaded, not what the secrets say: a changed
+      # secret reaches SSM only when its version is raised. The same keys,
+      # the current one first (HELD_*_KEY_IDS, from Check the issuer keys).
+      - name: Smoke test – the API holds the expected issuer keys
+        run: |
+          set -o pipefail
+          keys=$(curl -sS --fail --max-time 30 "${API_URL%/}/tokens/keys")
+          # Unpadded base64url to hex, the form issuer-keys.json uses.
+          hex() { local s=$1; while (( ${#s} % 4 )); do s+='='; done; printf '%s' "$s" | basenc --base64url -d | od -An -v -tx1 | tr -d ' \n'; }
+          held() { jq -r --arg kind "$1" '.[$kind][]?' <<<"$keys" | while read -r id; do hex "$id"; echo; done | paste -sd' ' -; }
+          send=$(held send)
+          media=$(held media)
+          if [ "$send" != "$HELD_SEND_KEY_IDS" ] || [ "$media" != "$HELD_MEDIA_KEY_IDS" ]; then
+            echo "::error::The API holds the send keys '${send}' and the media keys '${media}', not '${HELD_SEND_KEY_IDS}' and '${HELD_MEDIA_KEY_IDS}' as the secrets say: raise the version of each issuer key secret that changed (docs/deployment.md, Rotating an issuer key)"
+            exit 1
+          fi
+          echo "The API holds the expected issuer keys"
+
       - name: Smoke test – webhook is reachable
         run: |
           status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST -d '{}' "$WEBHOOK_URL")
@@ -480,14 +539,18 @@ jobs:
                 exit 1
               fi
               # Apps ask for tokens of the keys their build names: keys the
-              # API doesn't hold get them none (HELD_*_KEY_IDS, above).
+              # API doesn't hold get them none (HELD_*_KEY_IDS: what the API
+              # holds, checked above, the current key first).
               name=$(jq -r '.build.VITE_ISSUER_KEY' <<<"$manifest")
-              send=$(jq -r --arg name "$name" '.[$name].keyId // empty' web/issuer-keys.json)
-              media=$(jq -r --arg name "$name" '.[$name].media.keyId // empty' web/issuer-keys.json)
-              if [[ " ${HELD_SEND_KEY_IDS} " != *" ${send} "* ]] \
+              send=$(jq -r --arg name "$name" '.[$name] | objects | .keyId // empty' web/issuer-keys.json)
+              media=$(jq -r --arg name "$name" '.[$name] | objects | .media.keyId // empty' web/issuer-keys.json)
+              if [ -z "$send" ] || [[ " ${HELD_SEND_KEY_IDS} " != *" ${send} "* ]] \
                 || { [ -n "$media" ] && [[ " ${HELD_MEDIA_KEY_IDS} " != *" ${media} "* ]]; }; then
                 echo "::error::The site names issuer keys (${name}) the API doesn't hold, so its apps get no tokens: set the hosting repository's ISSUER_KEY to the entry of the current keys (docs/deployment.md, Rotating an issuer key)"
                 exit 1
+              fi
+              if [ "$send" != "${HELD_SEND_KEY_IDS%% *}" ] || { [ -n "$media" ] && [ "$media" != "${HELD_MEDIA_KEY_IDS%% *}" ]; }; then
+                echo "::warning::The site still names the previous issuer keys (${name}): set the hosting repository's ISSUER_KEY to the entry of the current keys and deploy again before retiring them (docs/deployment.md, Rotating an issuer key)"
               fi
               echo "The client built from this commit is live"
               exit 0
