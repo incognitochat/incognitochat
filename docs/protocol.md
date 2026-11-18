@@ -203,29 +203,41 @@ writing to the old intro mailbox until the owner replies.
 its keys, before it asks. Without an answer (a timeout, a dropped
 connection, a failure without the server's own error, or the app closing),
 the server may have made the change all the same, so the app keeps what it
-sent: the new private key, sealed and indexed before the request (first
-messages to it open whatever the server did), and a note of the request. It
+sent: a note of the request, then the new private key, sealed and indexed
+before the request (first messages to it open whatever the server did). It
 deletes them at once only when the server refuses it (a 4xx answer, which
 the server gives before changing anything). It settles the change at the next
 upkeep, and before the next create or replace, from the link's bundle
-(`GET /links/{id}`, checked like any bundle against the link signing key):
+(`GET /links/{id}`, checked like any bundle against the link signing key).
+That read is eventually consistent: a change made about a second before may
+not show yet, so "not there" is never taken as final on its own.
 
 - The new key is in it: the change was made, and is taken as if the answer
   had come (a new link becomes the account's link, in place of the one it
   replaced, whose keys stay 35 days; a new key becomes the link's, and its
-  older keys go 35 days later).
+  older keys go 35 days later). The app shows a link it learns of this way
+  at once.
 - A new key for a link that isn't there, or isn't listed: it wasn't taken.
-  The key is kept 35 days all the same (a bundle read can lag a moment),
-  and the next rotation makes another. The app doesn't rotate while a
-  change is unsettled.
+  The key is kept 35 days all the same (in case the read lagged), and the
+  next rotation makes another. The app doesn't rotate while a change is
+  unsettled, and never gives a new key the hour (its `from`, which names it
+  on the device) of any key the link still has, kept ones included: with no
+  hour free after them, the rotation waits for the next upkeep.
 - A new link that isn't there: when the user creates or replaces again, the
   same request goes again, with the same ID, so the server can't make two
   links of one. If that's refused (the ID taken, the account at its limit,
   the link it replaces gone), the first may have been made after all, and
-  the bundle is asked once more. Upkeep doesn't send it again; it gives the
-  change up 10 minutes after it was sent, when no request can still be on
-  its way.
+  the bundle is asked once more; if it still doesn't show, the app keeps
+  the change and says the request was refused, and the next try or upkeep
+  looks again. Upkeep doesn't send it again; it gives the change up 10
+  minutes after it was last sent, when no request can still be on its way
+  and the read has long caught up.
 - A link of that ID that isn't ours: ours wasn't made.
+- A note whose key isn't sealed: the app closed (or storage failed) before
+  the request went, so it was never sent, and is dropped.
+
+Revoking a link also revokes a replacement of it whose answer was lost, and
+deletes every key of the link on the device.
 
 An older app deleted the key after any failure, and could close between
 publishing a key and indexing it. Upkeep indexes a sealed key that the index

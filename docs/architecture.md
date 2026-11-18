@@ -190,6 +190,14 @@ secret: one person keeps the same label through the same link.
 - **Key rotation:** conversation and link encryption keys are replaced every
   6 to 9 days, each on its own random schedule, and old private keys are
   deleted 35 days later.
+- **Link changes whose answer is lost:** a new link or link key is kept on
+  the device (sealed, indexed, and noted) before it's sent, and deleted only
+  if the server refuses it. The app then learns from the link's bundle
+  whether the server made the change and takes that. The bundle read is
+  eventually consistent, so "not there" counts only at upkeep, 10 minutes
+  after the change was last sent; until then a new link is sent again with
+  the same ID, which the server can't make twice
+  ([protocol.md](protocol.md#links), A lost answer).
 
 ## Sending, delivery and notices
 

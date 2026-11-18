@@ -216,6 +216,8 @@ export interface MessagingDeps {
   onWaiting?: () => void;
   /** Called when a pause the server asked for ends (rate_limited), so the app syncs then: pushes that came meanwhile weren't acted on. */
   onResume?: () => void;
+  /** Called when upkeep found the account's link changed: a create or replace whose answer was lost, which the server had made. */
+  onLinks?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -1852,7 +1854,9 @@ export function createMessaging(deps: MessagingDeps) {
       async () => {
         if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
       },
-      () => settleLinkChange(db, session, api, Math.floor(now() / 1000)),
+      async () => {
+        if (await settleLinkChange(db, session, api, Math.floor(now() / 1000))) deps.onLinks?.();
+      },
       backfillLinks,
       backfillIntros,
       () => rotateLinkKey(db, session, Math.floor(now() / 1000)),

@@ -14,12 +14,12 @@ import { checkBundle, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
 import { MAX_TEXT_BYTES, newId } from '../protocol/message';
-import { deleteMeta, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
+import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
 import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
-import { KEY_RETENTION_MS, scheduleKeyDeletion, unindexKeys, type KeyEntry } from './keys';
+import { KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
 
 // A modified app chooses its IDs: tests make it reuse some (nextIds).
 vi.mock('../protocol/message', async (importOriginal) => {
@@ -340,8 +340,9 @@ async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account:
   await putKey(db, 'vault-key', await generateVaultKey());
   const session = backend.session(account);
   /** The app on this device, as it starts (again, after it was closed). */
-  const open = () =>
+  const open = (extra: Partial<MessagingDeps> = {}) =>
     createMessaging({
+      ...extra,
       db,
       api: backend.api,
       session,
@@ -1186,7 +1187,10 @@ describe('link changes whose answer was lost', () => {
     await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
     expect(await listLinks(owner.db)).toEqual([]);
     const [ghost] = [...backend.bundles.keys()];
-    await owner.messaging.maintain();
+    // The app hears of it, to show it.
+    let shown = 0;
+    await owner.open({ onLinks: () => shown++ }).maintain();
+    expect(shown).toBe(1);
     const [link] = await listLinks(owner.db);
     const bundle = await bundleOf(backend, ghost!);
     expect(link).toMatchObject({ id: ghost, mailbox: bundle.mailbox });
@@ -1282,6 +1286,149 @@ describe('link changes whose answer was lost', () => {
     expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
     expect(await listSealed(owner.db, `link:${change.id}:`)).toEqual([]);
     expect(await linkKeys(owner.db, change.id)).toEqual([]);
+  });
+
+  it('never write a new link key over one kept from a change that was not taken', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    /** The link's keys here: each under a name of its own, sealed as the private half of the key indexed. */
+    const ownKeys = async () => {
+      const entries = await linkKeys(owner.db, ref.id);
+      expect(new Set(entries.map((e) => e.name)).size).toBe(entries.length);
+      for (const e of entries) expect(await sealedMatches(owner.db, e.name, fromBase64Url(e.pub))).toBe(true);
+      return entries.map((e) => e.pub);
+    };
+    // No back-dating: keys made in the same hour would get the same name.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      // Never got there; the next upkeep finds it wasn't taken and keeps it
+      // 35 days, and in the same hour has no hour free for another.
+      failRequest(owner, 'PUT', /^\/links\/.+\/keys$/, new NetworkError('offline'));
+      await expect(owner.messaging.maintain()).rejects.toThrow(NetworkError);
+      const kept = (await getMeta<{ key: { key: string; from: number } }>(owner.db, 'link-change'))!.key;
+      await owner.messaging.maintain();
+      expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+      expect(await ownKeys()).toHaveLength(2);
+      expect(await ownKeys()).toContain(kept.key);
+      // An hour on: rotated, after the kept key.
+      clock += 3600_000;
+      await owner.messaging.maintain();
+      expect(await ownKeys()).toHaveLength(3);
+      expect((await bundleOf(backend, ref.id)).keys[0]!.from).toBeGreaterThan(kept.from);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('make a fresh link when the one noted was never sealed, and so never sent', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    const noted = (await getMeta<{ id: string; key: { from: number } }>(owner.db, 'link-change'))!;
+    // As if the app closed, or storage failed, between noting it and sealing its key.
+    await deleteSealed(owner.db, keyName(noted.id, noted.key.from));
+    await unindexKeys(owner.db, (e) => e.link?.id === noted.id);
+    const record = await createLink(owner.db, owner.session, backend.api);
+    expect(record.id).not.toBe(noted.id);
+    expect(await sealedMatches(owner.db, keyName(record.id, record.keys[0]!.from), fromBase64Url(record.keys[0]!.pub!))).toBe(true);
+    expect([...backend.bundles.keys()]).toEqual([record.id]);
+  });
+
+  it('keep a new link that a refused second send and lagging reads leave unseen, and take it once they catch up', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    const [ghost] = [...backend.bundles.keys()];
+    // Both reads of the bundle lag behind: not found.
+    const request = backend.api.request;
+    let lagging = 2;
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/') && lagging > 0) {
+        lagging--;
+        throw new ApiError(404, 'not_found');
+      }
+      return request(method, path, init, check);
+    };
+    await expect(createLink(owner.db, owner.session, backend.api)).rejects.toMatchObject({ code: 'link_limit' });
+    expect(lagging).toBe(0);
+    expect((await getMeta<{ id: string }>(owner.db, 'link-change'))!.id).toBe(ghost);
+    const record = await createLink(owner.db, owner.session, backend.api);
+    expect(record.id).toBe(ghost);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([ghost]);
+  });
+
+  it('count the 10 minutes from the last time a new link was sent', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    let clock = Date.now();
+    const seconds = () => Math.floor(clock / 1000);
+    const owner = await person(backend, 'owner', () => clock);
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(createLink(owner.db, owner.session, backend.api, seconds)).rejects.toThrow(NetworkError);
+    // Asked again 20 minutes on: made this time, but the answer lost.
+    clock += 20 * 60 * 1000;
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(createLink(owner.db, owner.session, backend.api, seconds)).rejects.toThrow(NetworkError);
+    const [ghost] = [...backend.bundles.keys()];
+    // An upkeep at once, its read lagging behind: too soon to give it up.
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'GET' || !path.startsWith('/links/')) return request(method, path, init, check);
+      backend.api.request = request;
+      throw new ApiError(404, 'not_found');
+    };
+    await owner.messaging.maintain();
+    expect(await getMeta(owner.db, 'link-change')).toBeDefined();
+    await owner.messaging.maintain();
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([ghost]);
+  });
+
+  it('revoke a replacement whose answer was lost along with the link it replaced', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    const owner = await person(backend, 'owner');
+    const old = await linkOf(backend, owner);
+    loseAnswer(owner, 'POST', /^\/links$/);
+    await expect(replaceLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    expect([...backend.bundles.keys()]).not.toContain(old.ref.id);
+    await revokeLink(owner.db, owner.session, old.ref.id);
+    expect(backend.bundles.size).toBe(0);
+    expect(await listLinks(owner.db)).toEqual([]);
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    expect(await listSealed(owner.db, 'link:')).toEqual([]);
+    // Nothing comes back at upkeep, and a new link can be made.
+    await owner.messaging.maintain();
+    expect(await listLinks(owner.db)).toEqual([]);
+    await createLink(owner.db, owner.session, backend.api);
+    expect(backend.bundles.size).toBe(1);
+  });
+
+  it('revoke a link with a new key unsettled, and keep none of its keys, loose ones included', async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const { ref, bundle } = await linkOf(backend, owner);
+    clock += 10 * DAY;
+    loseAnswer(owner, 'PUT', /^\/links\/.+\/keys$/);
+    await expect(owner.messaging.maintain()).rejects.toThrow(NetworkError);
+    // And a loose key an older version left.
+    const vaultKey = (await getKey(owner.db, 'vault-key'))!;
+    const stray = keyName(ref.id, bundle.keys[0]!.from - 3600);
+    await putSealed(owner.db, stray, await seal(vaultKey, (await generateCopyableAgreementKey()).privateKey, stray));
+    await revokeLink(owner.db, owner.session, ref.id);
+    expect(backend.bundles.size).toBe(0);
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    expect(await linkKeys(owner.db, ref.id)).toEqual([]);
+    expect(await listSealed(owner.db, 'link:')).toEqual([]);
+    await owner.messaging.maintain();
+    expect(await listLinks(owner.db)).toEqual([]);
   });
 
   it('drop the new key at once when the server refuses the change', async () => {
