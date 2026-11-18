@@ -193,7 +193,7 @@ deploy-role)
   check explicitDeny "reading an attachment" "$role" s3:GetObject "${media}/m/check"
   check explicitDeny "reading logs" "$role" logs:FilterLogEvents "$log_group"
   check explicitDeny "listing a secret's history" "$role" ssm:GetParameterHistory "$pepper"
-  check explicitDeny "invoking api" "$role" lambda:InvokeFunction "$(fn api)"
+  check explicitDeny "invoking api" "$role" lambda:InvokeFunction "$(fn api):\$LATEST"
   check explicitDeny "invoking ws" "$role" lambda:InvokeFunction "$(fn ws)"
 
   # Access that would outlast the deploy, and no Terraform plan would show.
@@ -217,8 +217,9 @@ deploy-role)
 
   # What the deploy does need, so the denies don't reach too far, and
   # what Terraform calls through the narrowed allows.
-  check allowed "invoking bot (it sets itself up)" "$role" lambda:InvokeFunction "$(fn bot)"
-  check allowed "invoking notify (its check)" "$role" lambda:InvokeFunction "$(fn notify)"
+  # As Lambda authorizes the deploy's invokes: against the latest code.
+  check allowed "invoking bot (it sets itself up)" "$role" lambda:InvokeFunction "$(fn bot):\$LATEST"
+  check allowed "invoking notify (its check)" "$role" lambda:InvokeFunction "$(fn notify):\$LATEST"
   check allowed "letting anyone call bot's URL" "$role" lambda:AddPermission "$(fn bot)" \
     --context-entries "$(context lambda:Principal string '*' lambda:FunctionUrlAuthType string NONE)"
   check allowed "letting bot's URL invoke it" "$role" lambda:AddPermission "$(fn bot)" \

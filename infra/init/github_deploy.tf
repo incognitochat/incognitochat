@@ -225,9 +225,11 @@ data "aws_iam_policy_document" "deploy_functions" {
   # The deploy invokes bot to set itself up and notify to check it starts
   # (deploy-environment.yml); no other function (deploy_limits).
   statement {
-    sid       = "InvokeForChecks"
-    actions   = ["lambda:InvokeFunction"]
-    resources = [local.function_arns["bot"], local.function_arns["notify"]]
+    sid     = "InvokeForChecks"
+    actions = ["lambda:InvokeFunction"]
+    # Unqualified and qualified: an invoke of the latest code is authorized
+    # against the ARN with ":$LATEST" (InvokeOnlyChecks below).
+    resources = flatten([for f in ["bot", "notify"] : [local.function_arns[f], "${local.function_arns[f]}:*"]])
   }
 
   # The functions' roles (function_roles.tf): read them, and write their
@@ -502,10 +504,13 @@ data "aws_iam_policy_document" "deploy_limits" {
   # Invoking runs a function with whatever event is sent: only the two the
   # deploy's checks invoke.
   statement {
-    sid           = "InvokeOnlyChecks"
-    effect        = "Deny"
-    actions       = ["lambda:InvokeFunction"]
-    not_resources = [local.function_arns["bot"], local.function_arns["notify"]]
+    sid     = "InvokeOnlyChecks"
+    effect  = "Deny"
+    actions = ["lambda:InvokeFunction"]
+    # Lambda authorizes an invoke of a function's latest code against the
+    # ARN with ":$LATEST" (and a version or alias against its own), so each
+    # name needs the qualified form too.
+    not_resources = flatten([for f in ["bot", "notify"] : [local.function_arns[f], "${local.function_arns[f]}:*"]])
   }
 
   # Provisioned concurrency is billed every hour, used or not.
