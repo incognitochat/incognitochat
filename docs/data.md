@@ -96,7 +96,7 @@ unused. If the app is never opened again, that stays too: the account,
 marked and unused, with what is left of it. The same if the server can't
 finish and the user deletes everything from the device only; setting up
 again later replaces that account (without asking: it isn't in use) and
-deletes what is left of it, as for any replacement. Only short-lived rate
+deletes what is left of it, keeping no marker of it. Only short-lived rate
 counters (and a quiet period, for a few minutes) are left. They expire on
 their own within about a day, though DynamoDB can take some days more to
 delete them, and an expired one is never used again. Until then, that day's

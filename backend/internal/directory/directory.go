@@ -217,7 +217,12 @@ func (s *Store) AccountExists(ctx context.Context, telegramHash string) (bool, e
 	}
 	acct, err := s.read(ctx, accountPK(id), skAccount, time.Time{}, false)
 	if errors.Is(err, ErrNotFound) {
-		return false, nil
+		// The Telegram item names it, and the read is eventually
+		// consistent: an account set up in about the last second may not
+		// show yet. Saying there is one is the cautious answer (the app then
+		// says "on another device" rather than offer a setup that replaces
+		// it).
+		return true, nil
 	}
 	if err != nil {
 		return false, err
@@ -321,6 +326,10 @@ const (
 // (CleanUp). It returns ErrConflict if the Telegram user's account changed
 // since old was read, or one of its links did.
 //
+// An old account being deleted (its own DELETE /account started) keeps no
+// marker: its item and devices become stubs with no keys (dl), so its device
+// is refused as after a deletion, and CleanUp deletes them with the rest.
+//
 // It reads only old's devices and links, never its whole partition, which
 // can hold thousands of mailboxes. A link that replaced old's between that
 // read and the swap is left to CleanUp, which takes links first; its intro
@@ -358,21 +367,31 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 	// Only if old's links are as they were when it was read: a link made
 	// meanwhile isn't left behind.
 	unchanged, values := linksUnchanged(old.linkChange)
-	marker := &types.Put{
-		TableName:           &s.Table,
-		Item:                item(pk, skAccount, attrs{"g": sv(goneReplaced), "e": expires}),
-		ConditionExpression: aws.String(unchanged),
+	// Being deleted, as its own signed DELETE /account asked, which keeps
+	// nothing: no marker of the replacement, and its devices lose their
+	// keys, so its device is refused as for any deleted account, not told it
+	// was replaced. Its item and devices stay only as stubs (dl, no keys), so
+	// that its mailboxes' lookups read what any account's do (Recipients)
+	// and the cleanup finds what waits for its device, until the cleanup
+	// deletes them with the rest.
+	end := attrs{"g": sv(goneReplaced), "e": expires}
+	cond := unchanged
+	if old.Deleting {
+		end = attrs{"dl": nv(1), "e": expires}
+		cond = "attribute_exists(dl) AND " + unchanged
 	}
+	swap := &types.Put{TableName: &s.Table, Item: item(pk, skAccount, end), ConditionExpression: aws.String(cond)}
 	if len(values) > 0 {
-		marker.ExpressionAttributeValues = values
+		swap.ExpressionAttributeValues = values
 	}
-	writes = append(writes,
-		types.TransactWriteItem{Put: marker},
-		types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, skDeviceList)}},
-	)
+	writes = append(writes, types.TransactWriteItem{Put: swap}, types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, skDeviceList)}})
 	for _, d := range devices.items {
 		sk, _ := str(d, "sk")
-		if k, ok := bin(d, "k"); ok {
+		if old.Deleting {
+			// Without its key: it can't log in (Device), but the cleanup
+			// still finds it to delete what waits for it.
+			writes = append(writes, types.TransactWriteItem{Put: &types.Put{TableName: &s.Table, Item: item(pk, sk, attrs{"e": expires})}})
+		} else if k, ok := bin(d, "k"); ok {
 			writes = append(writes, types.TransactWriteItem{Put: &types.Put{
 				TableName: &s.Table,
 				Item:      item(pk, sk, attrs{"k": bv(k), "e": expires}),
@@ -438,6 +457,32 @@ func (s *Store) CleanUp(ctx context.Context, accountID, old string, max int) (bo
 		}
 		if err := s.expireDevices(ctx, old, marker); err != nil {
 			return false, err
+		}
+		// The stubs of an account that was being deleted (Replace): they
+		// stood in only while its mailboxes and envelopes were left, and go
+		// with them, its devices first.
+		if _, stub := marker["dl"]; stub {
+			devices, err := s.prefixed(ctx, old, devicePrefix, "sk")
+			if err != nil {
+				return false, err
+			}
+			requests := make([]types.WriteRequest, 0, len(devices))
+			for _, d := range devices {
+				sk, _ := str(d, "sk")
+				requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(accountPK(old), sk)}})
+			}
+			if err := s.batchWrite(ctx, requests); err != nil {
+				return false, err
+			}
+			_, err = s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+				TableName:           &s.Table,
+				Key:                 key(accountPK(old), skAccount),
+				ConditionExpression: aws.String("attribute_exists(dl) AND attribute_not_exists(ak)"),
+			})
+			var failed *types.ConditionalCheckFailedException
+			if err != nil && !errors.As(err, &failed) {
+				return false, err
+			}
 		}
 	}
 	_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{

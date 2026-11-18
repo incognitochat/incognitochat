@@ -156,7 +156,7 @@ registration itself, the rest as the new device's app asks, `POST
 left, or while another step for the account runs, and `200 {}` once nothing
 is (also when nothing was); the app repeats it a second later, in the
 background (waiting out a busy server, as for a deletion, below; at most 400
-steps a launch). `GET /account` says `cleanup: true` while anything is left, so
+steps a run). `GET /account` says `cleanup: true` while anything is left, so
 the app carries on at its next launch if it closed first. Until then the new
 account's item lists the old account's ID; replacing the new account carries
 the list over, and deleting it finishes the cleanup first. Each step reads
@@ -170,9 +170,13 @@ launch, never one that names a link or an invitation, and stores nothing. An
 account being deleted (below) doesn't count: a lookup says there is none,
 and setting up again replaces it without `replace`, so without the warning
 about taking an account over; what is left of it goes with the new
-account's cleanup, as for any replacement. Only the account's own signed
-`DELETE /account` marks it so, and nothing undoes that, so this can't take
-over an account in use.
+account's cleanup, as for any replacement. Unlike other replacements, and
+as its deletion would have, it keeps no marker: its item and devices lose
+their keys (they stay only as stubs, until the cleanup deletes them), so
+its device is refused like a deleted account's (`login_refused`), not told
+it was replaced; the app that confirmed the deletion takes either answer
+as done. Only the account's own signed `DELETE /account` marks it so, and
+nothing undoes that, so this can't take over an account in use.
 
 **Deleting an account:** `DELETE /account`, signed. The server deletes the
 account's waiting envelopes, links (their bundles then answer "not found"),
@@ -180,7 +184,8 @@ mailboxes (sends to them get the usual answer and are dropped), invitation
 codes, device list, devices and the account itself, and the item that keeps
 one account per Telegram user, so the same user can set up again, and, in
 the last step, its socket records. Unlike a replacement, it keeps no
-marker; only rate-limit counters remain until they expire (within about a
+marker, also when setting up again replaces it before it's done (above);
+only rate-limit counters remain until they expire (within about a
 day; DynamoDB can take longer to delete them). The daily limits (send and
 media tokens, new mailboxes, link changes, notice setups, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that

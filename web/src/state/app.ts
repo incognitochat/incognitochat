@@ -80,8 +80,9 @@ const META_DELETING = 'deleting';
  * The most steps one run of a deletion, or of a cleanup, asks for (an
  * account with 4,000 mailboxes takes about 160), and the longest it goes
  * on: past either, a deletion shows its error screen (Try again, the chats,
- * or deleting from this device only), and a cleanup stops until the next
- * launch. A server that keeps answering "more" can't keep the user waiting.
+ * or deleting from this device only), and a cleanup stops, until a new run
+ * (the next time the home screen finds something left). A server that keeps
+ * answering "more" can't keep the user waiting.
  */
 const STEPS_PER_RUN = 400;
 const RUN_FOR_MS = 10 * 60_000;
@@ -496,12 +497,19 @@ export function createApp(deps: Deps) {
     try {
       session!.use(await logIn(deps.db, deps.api!, clock));
       signedOut = null;
+      // Reading the chats while a deletion couldn't finish ends here too:
+      // the deletion, if still confirmed, carries on below.
+      deletionPaused = false;
       readOnly.value = false;
     } catch (err) {
       // It finished, and its answer was lost: the device no longer exists.
       // Only for a deletion the user confirmed: a refusal alone deletes
       // nothing.
-      if (deleting && isSetUp(recorded) && err instanceof ApiError && err.code === 'login_refused') return finishDeletion(recorded.accountId);
+      // Replaced, likewise: set up again elsewhere, which replaces an
+      // account being deleted without asking.
+      if (deleting && isSetUp(recorded) && err instanceof ApiError && (err.code === 'login_refused' || err.code === 'account_replaced')) {
+        return finishDeletion(recorded.accountId);
+      }
       // Replaced once, still replaced: the server forgets a replacement
       // (its marker expires) and then only refuses the device, but the
       // warning stays.
@@ -1470,13 +1478,19 @@ export function createApp(deps: Deps) {
         }
       }
     } catch (err) {
+      // A run another copy's change ended, or one whose account this device
+      // no longer holds: its error isn't for whatever is here now.
+      if (run !== deletionRun) return;
+      const ours = !(err instanceof AccountChanged) && (await stillDeleting(target));
       // Refused as a device that no longer exists: an earlier step finished
-      // it, and its answer was lost. Done; the user asked for the rest.
-      if (err instanceof ApiError && err.code === 'login_refused') finished = true;
-      // Otherwise, unless the device holds another account now (start()
-      // below looks again), the error screen.
-      else if (!(err instanceof AccountChanged)) {
-        if (run === deletionRun) deletionRunning = false;
+      // it, and its answer was lost. Or replaced: set up again elsewhere,
+      // which replaced it without asking, since it was being deleted. Done
+      // either way; the user asked for the rest, for this account.
+      if (ours && err instanceof ApiError && (err.code === 'login_refused' || err.code === 'account_replaced')) finished = true;
+      // Otherwise the error screen, unless the device holds another account
+      // now (start() below looks again).
+      else if (ours) {
+        deletionRunning = false;
         if (handleGone(err)) return;
         showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
         return;
@@ -1916,6 +1930,7 @@ export function createApp(deps: Deps) {
       // (another copy finished it) or another set up. start() looks again.
       deletionRun++;
       deletionRunning = false;
+      deletionPaused = false;
       session?.setUp();
       return start();
     },

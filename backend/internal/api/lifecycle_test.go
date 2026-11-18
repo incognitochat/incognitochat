@@ -297,12 +297,11 @@ func TestDeleteAccountResumes(t *testing.T) {
 	}
 }
 
-// Deleting an account first finishes deleting what is left of the account
-// it replaced, which deleting its item would forget.
 // An account being deleted (its own signed DELETE /account started) isn't
 // in use: a lookup says the Telegram user has none, and setting up again
-// replaces it without the replace flag; what is left of it goes with the
-// new account's cleanup. A live account still needs the flag.
+// replaces it without the replace flag, keeping no marker of it (its
+// device is then refused, as for any deleted account); what is left of it
+// goes with the new account's cleanup. A live account still needs the flag.
 func TestSetUpAgainOverAnAccountBeingDeleted(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false
@@ -339,7 +338,7 @@ func TestSetUpAgainOverAnAccountBeingDeleted(t *testing.T) {
 		t.Fatalf("set up again: %d %v", status, out)
 	}
 	status, out = h.post(t, "/session", old.d.login(t, h.now))
-	wantError(t, status, out, http.StatusGone, "account_replaced")
+	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
 	m := member{d: fresh, token: h.token(t, fresh)}
 	if status, out := h.as(t, m, http.MethodGet, "/account", nil, false); status != http.StatusOK || out["cleanup"] != true || out["deleting"] != false {
 		t.Fatalf("new account: %d %v", status, out)
@@ -360,6 +359,8 @@ func TestSetUpAgainOverAnAccountBeingDeleted(t *testing.T) {
 	}
 }
 
+// Deleting an account first finishes deleting what is left of the account
+// it replaced, which deleting its item would forget.
 func TestDeleteAccountFinishesALeftover(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false

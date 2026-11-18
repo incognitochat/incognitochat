@@ -3,7 +3,7 @@
 // key on top of the token. Times the server checks come from the server's
 // clock as this device knows it (clock.ts), not the device's own.
 
-import { AccountChanged, isSetUp, logIn, readAccount, recordRefusal, signRequest } from '../account/account';
+import { AccountChanged, logIn, recordRefusal, signRequest } from '../account/account';
 import type { Database } from '../storage/db';
 import { ApiError, NetworkError, type Api, type Method, type TokenResponse } from './api';
 import { createClock, type Clock } from './clock';
@@ -88,8 +88,8 @@ export function createSession(
     }
   }
 
-  /** A token, of expected's account if set (otherwise AccountChanged). */
-  async function token(expected?: string): Promise<string> {
+  /** A current session, of expected's account if set (otherwise AccountChanged): its token and the account it is for. */
+  async function tokenFor(expected?: string): Promise<TokenResponse> {
     // The expiry is the server's time, so it's compared with the server's clock.
     if (!current || current.expires - MARGIN_SECONDS <= clock.seconds()) {
       // Until the wait is over, the last failure again, without a request.
@@ -98,7 +98,11 @@ export function createSession(
       current = await pending;
     }
     if (expected !== undefined && current.account !== expected) throw new AccountChanged();
-    return current.token;
+    return current;
+  }
+
+  async function token(): Promise<string> {
+    return (await tokenFor()).token;
   }
 
   return {
@@ -113,7 +117,7 @@ export function createSession(
       // A login may be refused just after a setup and is tried again (JUST_SET_UP_MS): not held back.
       retryAt = -Infinity;
     },
-    token: () => token(),
+    token,
     async call(method, path, body, check, options = {}) {
       const text = body === undefined ? '' : JSON.stringify(body);
       let renewed = false;
@@ -121,8 +125,9 @@ export function createSession(
       for (;;) {
         // Each attempt checks the account again (account): a retry comes
         // later, maybe after another copy of the app set up another.
-        const headers: Record<string, string> = { 'X-Session': await token(options.account) };
-        if (options.sign) headers['X-Device-Signature'] = await signRequest(db, method, path, text, () => clock.seconds(), options.account);
+        const sent = await tokenFor(options.account);
+        const headers: Record<string, string> = { 'X-Session': sent.token };
+        if (options.sign) headers['X-Device-Signature'] = await signRequest(db, method, path, text, () => clock.seconds(), sent.account);
         try {
           return await api.request(method, path, text === '' ? { headers } : { body: text, headers }, check);
         } catch (err) {
@@ -136,10 +141,12 @@ export function createSession(
             retimed = true;
             continue;
           }
-          // Replaced, or no longer accepted: recorded, and asked again at the next launch.
+          // Replaced, or no longer accepted: recorded, and asked again at the
+          // next launch. Against the account the request was sent as: if the
+          // device holds another by now (another copy of the app set one up
+          // while this request was on its way), nothing is recorded for it.
           if (err instanceof ApiError && (err.code === 'account_replaced' || err.code === 'login_refused')) {
-            const account = await readAccount(db);
-            if (isSetUp(account)) await recordRefusal(db, account.accountId, err);
+            await recordRefusal(db, sent.account, err);
           }
           throw err;
         }

@@ -1054,7 +1054,6 @@ async function confirmSwitch(app: AppState, language: Language, which: 'uploads'
   if (choice === 'switch') await app.setSwitch(which, paused);
 }
 
-/** Asks, in Telegram's own popup, before swapping the link for a new one. */
 /** Deleting from this device only wipes everything here at once: asked once more, in a popup. */
 async function confirmDeleteHereOnly(app: AppState, language: Language): Promise<void> {
   const choice = await app.popup({
@@ -1067,6 +1066,7 @@ async function confirmDeleteHereOnly(app: AppState, language: Language): Promise
   if (choice === 'delete') await app.deleteHereOnly();
 }
 
+/** Asks, in Telegram's own popup, before swapping the link for a new one. */
 async function confirmReplace(app: AppState, language: Language): Promise<void> {
   const choice = await app.popup({
     message: t(language, 'newLinkConfirm'),

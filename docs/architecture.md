@@ -69,7 +69,10 @@ flowchart LR
   on another device replaces the account, after a typed confirmation: the old
   account's links and mailboxes end at once, and the old device says so, and
   that it may mean tampering. A second device that finds an account elsewhere
-  says "your account is on another device" instead of offering setup.
+  says "your account is on another device" instead of offering setup. The
+  one exception is an account being deleted (its own signed request started
+  that): it isn't in use, so setting up again replaces it without asking,
+  and its device is refused as after a deletion, not told it was replaced.
 - **Accounts end in a few writes, and are taken apart in steps.** Replacing
   or deleting an account changes only its account item and its link (and,
   for a replacement, its device list), however much it owns: a delivery

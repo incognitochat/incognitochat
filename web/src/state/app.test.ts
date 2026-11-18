@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it, vi } from 'vitest';
-import { readAccount } from '../account/account';
+import { logIn, prepareSetup, readAccount } from '../account/account';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
@@ -143,8 +143,10 @@ function fakeServer(
         // A request that stalls on its way, until the test lets it through.
         await state.deleteGate;
         needsSignature();
-        state.deleting = true;
-        take(outcomes.deleteAccount);
+        // Marked by a step that went through (done, or more to do).
+        const outcome = outcomes.deleteAccount?.shift() ?? 'ok';
+        if (outcome === 'ok' || (outcome instanceof ApiError && outcome.code === 'in_progress')) state.deleting = true;
+        if (outcome !== 'ok') throw outcome;
         state.deleted = true;
         bundles.clear();
         return check({});
@@ -1374,8 +1376,9 @@ describe('deleting the account', () => {
   });
 
   it('sets up again as new after deleting from this device only: no other-device screen, no takeover warning', async () => {
-    const server = fakeServer({ deleteAccount: [new ApiError(500, 'internal')], elsewhere: true });
-    const owner = await registered(server.api);
+    // The first step marked it; the next failed, and kept failing.
+    const server = fakeServer({ deleteAccount: [new ApiError(409, 'in_progress'), new ApiError(500, 'internal')], elsewhere: true });
+    const owner = await registered(server.api, { stepPauseMs: 0 });
     owner.app.askDeleteAccount();
     await owner.app.deleteAccount();
     await owner.app.deleteHereOnly();
@@ -1391,6 +1394,87 @@ describe('deleting the account', () => {
     expect(reg.app.screen.value.kind).not.toBe('confirm-replace');
     expect(server.calls.filter((c) => c.startsWith('POST /register')).at(-1)).toBe('POST /register');
     expect(await readAccount(owner.db)).toMatchObject({ state: 'registered' });
+  });
+
+  /** Another copy of the app wipes the device and sets up a new account, Y, on db. */
+  async function setUpAnother(api: Api, server: ReturnType<typeof fakeServer>, db: Awaited<ReturnType<typeof openDatabase>>) {
+    await wipe(db);
+    server.state.deleting = false;
+    server.state.accountId = 'CCCCCCCCCCCCCCCCCCCCCC';
+    await (await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(''), db })).app.setUp();
+    const code = 'reg' + (await readAccount(db))!.fingerprint;
+    await (await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(code), db })).app.start();
+  }
+
+  it("records a stalled request's refusal against the account it was sent as, and shows none of it over the new one", async () => {
+    // Copy 1's DELETE for X stalls; copy 2 deletes from this device only
+    // and sets up Y, which replaces X. The stalled request then comes back
+    // replaced: that's X's, not Y's.
+    const server = fakeServer({ deleteAccount: [new ApiError(410, 'account_replaced')] });
+    const owner = await registered(server.api);
+    let release!: () => void;
+    server.state.deleteGate = new Promise<void>((resolve) => (release = resolve));
+    owner.app.askDeleteAccount();
+    const deleting = owner.app.deleteAccount();
+    await vi.waitFor(() => expect(server.calls.filter((c) => c === 'DELETE /account')).toHaveLength(1));
+    await setUpAnother(server.api, server, owner.db);
+    server.state.deleteGate = null;
+    release();
+    await deleting;
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'registered', accountId: 'CCCCCCCCCCCCCCCCCCCCCC' });
+    expect(owner.app.screen.value).not.toMatchObject({ kind: 'signed-out' });
+    expect(owner.app.screen.value.kind).not.toBe('deleting');
+    expect(owner.app.screen.value).not.toMatchObject({ kind: 'welcome', deleted: true });
+  });
+
+  it('reads the new account normally after another copy sets one up while this one read the chats of a deletion', async () => {
+    const server = fakeServer({ deleteAccount: [new ApiError(500, 'internal')] });
+    const owner = await registered(server.api);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    await owner.app.readDuringDeletion();
+    expect(owner.app.readOnly.value).toBe(true);
+    await setUpAnother(server.api, server, owner.db);
+    await owner.app.accountChanged();
+    expect(home(owner.app.screen.value)).toMatchObject({ deletionPaused: false, signedOut: null });
+    expect(owner.app.readOnly.value).toBe(false);
+  });
+
+  it('takes "replaced" as done for a deletion confirmed here (set up again elsewhere), during it and at a launch', async () => {
+    const replaced = new ApiError(410, 'account_replaced');
+    const server = fakeServer({ deleteAccount: [replaced] });
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'welcome', mismatch: false, deleted: true });
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(0);
+
+    const later = fakeServer({ deleteAccount: [new NetworkError('offline')] });
+    const second = await registered(later.api);
+    second.app.askDeleteAccount();
+    await second.app.deleteAccount();
+    later.outcomes.session = [replaced];
+    const again = await setup({ api: later.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: second.db });
+    await again.app.start();
+    expect(again.app.screen.value).toEqual({ kind: 'welcome', mismatch: false, deleted: true });
+    expect(await readAccount(second.db)).toBeUndefined();
+  });
+
+  it('takes a login answered for another account as no answer, waited out, never as that account', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    server.state.accountId = 'CCCCCCCCCCCCCCCCCCCCCC';
+    await expect(logIn(owner.db, server.api)).rejects.toBeInstanceOf(NetworkError);
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'registered', accountId: 'BBBBBBBBBBBBBBBBBBBBBB' });
+  });
+
+  it('reads a "deleting" state stored by builds before refused + deleting as refused, so setup asks first', async () => {
+    const owner = await registered(fakeServer().api);
+    const record = await getMeta<Record<string, unknown>>(owner.db, 'account');
+    await putMeta(owner.db, 'account', { ...record, state: 'deleting' });
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'refused', deleting: true, accountId: 'BBBBBBBBBBBBBBBBBBBBBB' });
+    await expect(prepareSetup(owner.db)).rejects.toThrow('already set up');
   });
 
   it('starts nothing in the background when the first sync finds the account being deleted', async () => {

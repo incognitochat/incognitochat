@@ -342,3 +342,44 @@ func TestDeleteWaitsForLeftovers(t *testing.T) {
 		t.Fatalf("telegram item: %v", err)
 	}
 }
+
+// Replacing an account being deleted keeps no marker, as its deletion
+// wouldn't have: its item and devices go in the swap (its device is then
+// refused like a deleted account's, not told it was replaced), and the rest
+// with the new account's cleanup, leaving nothing.
+func TestReplaceAnAccountBeingDeleted(t *testing.T) {
+	s, client := store(t)
+	ctx := context.Background()
+	first := newAccount(t, "th-1")
+	if err := s.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	boxes := grow(t, client, s.Table, first.ID, 30)
+	if err := s.MarkDeleting(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
+	if err != nil || !old.Deleting {
+		t.Fatalf("ByTelegram = %+v, %v", old, err)
+	}
+	second := newAccount(t, "th-1")
+	if err := s.Replace(ctx, old, second, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Device(ctx, first.ID, first.DeviceID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the old device: %v", err)
+	}
+	if devices, err := s.Recipients(ctx, first.ID, now); err != nil || len(devices) != 0 {
+		t.Fatalf("the old account's mailboxes deliver to %v, %v", devices, err)
+	}
+	if dev, err := s.Device(ctx, second.ID, second.DeviceID, now); err != nil || len(dev.Leftovers) != 1 || dev.Leftovers[0] != first.ID {
+		t.Fatalf("new device = %+v, %v", dev, err)
+	}
+	cleanUp(t, s, second.ID, first.ID)
+	if sks := partitionKeys(t, client, s.Table, first.ID); len(sks) != 0 {
+		t.Fatalf("left of the old account: %v", sks)
+	}
+	if _, err := s.Mailbox(ctx, boxes[0]); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an old mailbox: %v", err)
+	}
+}

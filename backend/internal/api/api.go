@@ -53,7 +53,6 @@ import (
 
 // Directory is the account store.
 type Directory interface {
-	AccountOf(ctx context.Context, telegramHash string) (string, error)
 	ByTelegram(ctx context.Context, telegramHash, deviceID string) (directory.Account, error)
 	Create(ctx context.Context, n directory.NewAccount) error
 	Replace(ctx context.Context, old directory.Account, n directory.NewAccount, now time.Time) error

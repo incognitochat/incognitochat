@@ -16,7 +16,7 @@ import { randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, fingerprint, generateCopyableSigningKey, generateSigningKey, SIGNING_IMPORT } from '../crypto/keys';
 import { LABEL_REGISTER, LABEL_REQUEST, LABEL_SESSION, sign, signEncoded } from '../crypto/signing';
 import { generateVaultKey, seal, unseal } from '../crypto/vault';
-import { ApiError, checkTokenResponse, type Api, type TokenResponse } from '../net/api';
+import { ApiError, checkTokenResponse, NetworkError, type Api, type TokenResponse } from '../net/api';
 import { createClock, withServerTime, type Clock } from '../net/clock';
 import { encodeDeviceList, firstList } from '../protocol/device-list';
 import { deleteMeta, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair, wipe } from '../storage/db';
@@ -79,7 +79,11 @@ export async function readAccount(db: Database): Promise<AccountRecord | undefin
   const { state, deviceId, fingerprint: fp, accountId, deleting } = value;
   if (typeof deviceId !== 'string' || !ID.test(deviceId) || typeof fp !== 'string' || !FINGERPRINT.test(fp)) return undefined;
   if (state === 'pending') return { state, deviceId, fingerprint: fp };
-  if (SET_UP.includes(state) && typeof accountId === 'string' && ID.test(accountId)) {
+  if (typeof accountId !== 'string' || !ID.test(accountId)) return undefined;
+  // Written as a state of its own by builds before refused + deleting:
+  // still an account, so setting up again asks for the typed confirmation.
+  if (state === 'deleting') return { state: 'refused', deviceId, fingerprint: fp, accountId, deleting: true };
+  if (SET_UP.includes(state)) {
     return { state: state as SetUpState, deviceId, fingerprint: fp, accountId, ...(state === 'refused' && deleting === true ? { deleting } : {}) };
   }
   return undefined;
@@ -245,6 +249,10 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
       await new Promise((resolve) => setTimeout(resolve, REFUSED_RETRY_MS));
       result = await attempt();
     }
+    // A token for another account than the one that logged in is an answer
+    // that can't be right: taken like one that never came (NetworkError),
+    // which the session waits out before logging in again.
+    if (result.account !== current.accountId) throw new NetworkError('login answered for another account');
     await setState(db, current.accountId, ['replaced', 'refused'], 'registered');
     return result;
   } catch (err) {

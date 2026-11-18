@@ -591,6 +591,10 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	m.put(n)
 	m.accounts[n.ID].leftovers = append([]string{old.ID}, prev.leftovers...)
 	prev.leftovers = nil
+	// One being deleted keeps no marker: its item and devices go.
+	if old.Deleting {
+		delete(m.accounts, old.ID)
+	}
 	return nil
 }
 
