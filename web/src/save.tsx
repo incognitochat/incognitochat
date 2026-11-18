@@ -42,6 +42,7 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
         maximumFractionDigits: 1,
       }).format(ticket.s < 1024 * 1024 ? Math.max(1, Math.round(ticket.s / 1024)) : ticket.s / 1024 / 1024)
     : '';
+  // Raster images only: fetchForSaving gives no other image type.
   const image = file.value && file.value.file.type.startsWith('image/');
   return (
     <main class="page">

@@ -214,10 +214,12 @@ export interface MessageRecord {
   status: 'sending' | 'sent' | 'failed' | 'seen' | 'received' | 'read';
   /**
    * An attachment's file: on this device, still to fetch, cleared from this
-   * device (fetched again only on a tap, while the server keeps it), or gone
-   * (expired).
+   * device (fetched again only on a tap, while the server keeps it), gone
+   * (the server no longer has it: expired, or deleted), or broken (the
+   * bucket refused it, or it wasn't what the message says: another size, or
+   * it didn't decrypt; tried again only on a tap).
    */
-  file?: 'local' | 'remote' | 'cleared' | 'gone';
+  file?: 'local' | 'remote' | 'cleared' | 'gone' | 'broken';
   /** AES-GCM under the storage key: nonce ‖ ciphertext of {text, replyTo}. */
   sealed: Uint8Array<ArrayBuffer>;
   /**

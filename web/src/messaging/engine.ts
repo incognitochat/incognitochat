@@ -37,7 +37,7 @@ import type { Session } from '../net/session';
 import { MAX_ENVELOPE, sendTokensFor } from '../protocol/envelope';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import { EDIT_GRACE_MS, EDIT_WINDOW_MS, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
-import { getMeta, putMeta, type ConversationRecord, type Database } from '../storage/db';
+import { getMeta, putMeta, type ConversationRecord, type Database, type MessageRecord } from '../storage/db';
 import { withLock, withLockIfFree } from '../sync/locks';
 import {
   conversationKey,
@@ -76,6 +76,7 @@ import {
   noteHad,
   openPendingEdit,
   openPendingReaction,
+  patchMessage,
   pendingUploadDeletes,
   putConversation,
   putMedia,
@@ -88,13 +89,15 @@ import {
   setMessageStatus,
   setReaction,
   setText,
+  stillSending,
+  triedUploadDeletes,
   type ConversationIds,
   type LocalMedia,
   type MessageBody,
   type MessageView,
 } from './store';
 import { decryptFile, encryptFile, newFileKey, uploadSize } from '../crypto/media';
-import { httpTransfer, TransferError, type Transfer } from '../net/transfer';
+import { httpTransfer, TransferError, WrongSize, type Transfer } from '../net/transfer';
 
 /** The most edits for messages not here yet that a conversation keeps. */
 const MAX_PENDING_EDITS = 500;
@@ -102,6 +105,12 @@ const MAX_PENDING_EDITS = 500;
 const MAX_PENDING_REACTIONS = 100;
 /** How many uploads are deleted from the server at once. */
 const UPLOAD_DELETE_PARALLEL = 6;
+/**
+ * How long before an upload of ours, deleted just after it was made, is
+ * asked for again when the server said it didn't know it: the server looks
+ * uploads up from a copy that can lag a moment behind.
+ */
+const UPLOAD_DELETE_AGAIN_MS = 30_000;
 const MAX_INBOX_PAGES = 10;
 /** After the server limits this device's inbox fetches, they pause this long, plus up to as much again (its limits are per minute). */
 const SYNC_PAUSE_MS = 30_000;
@@ -186,6 +195,14 @@ export class NoMailboxes extends Error {
   constructor() {
     super('no mailboxes');
     this.name = 'NoMailboxes';
+  }
+}
+
+/** A message of ours was deleted here (or its chat) before it went out: it isn't sent. */
+class Cancelled extends Error {
+  constructor() {
+    super('send cancelled');
+    this.name = 'Cancelled';
   }
 }
 
@@ -391,10 +408,12 @@ export function createMessaging(deps: MessagingDeps) {
     await onStored?.();
     await update(conversation.id, (c) => ({ ...c, lastAt: at, hidden: false }));
     try {
-      await transmit(conversation.id, { kind: 'message', id, at, ...content, ...answer });
+      // Not if it was deleted meanwhile.
+      await transmit(conversation.id, { kind: 'message', id, at, ...content, ...answer }, { still: () => stillSending(db, conversation.id, id) });
       // Unless their receipt came in first.
       await setMessageStatus(db, conversation.id, id, 'sent', 'sending');
     } catch (err) {
+      if (err instanceof Cancelled) return;
       await setMessageStatus(db, conversation.id, id, 'failed');
       throw err;
     }
@@ -404,6 +423,8 @@ export function createMessaging(deps: MessagingDeps) {
    * Sends an attachment, with an optional caption. Like a message, it's
    * stored and shown first (as sending); then the file is encrypted and
    * uploaded, paid with media tokens, and the message carries its key.
+   * Deleting it here (or its chat) before it goes out cancels it: nothing
+   * is sent, and its upload, if it was made, is deleted.
    */
   async function sendMedia(
     conv: string,
@@ -447,7 +468,8 @@ export function createMessaging(deps: MessagingDeps) {
       if (!file) throw new Error('attachment missing');
       const at = now();
       const { text, replyTo, media } = message;
-      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(text, replyTo, media!));
+      // Unless it was deleted meanwhile.
+      if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at }))) return;
       await onStored?.();
       // Only these two change, on the chat as it is then (under the send
       // lock), so a message that arrived meanwhile isn't undone.
@@ -456,7 +478,13 @@ export function createMessaging(deps: MessagingDeps) {
     });
   }
 
-  /** Uploads a stored attachment and sends its message; marks it failed if either fails. */
+  /**
+   * Uploads a stored attachment and sends its message; marks it failed if
+   * either fails. If the message was deleted meanwhile (here, or with its
+   * chat), it stops quietly, with no error to show: before the upload, if
+   * that's still waiting its turn, or after it, or once it failed; an upload
+   * that was made is then deleted from the server.
+   */
   async function deliverMedia(
     conv: string,
     id: string,
@@ -466,12 +494,19 @@ export function createMessaging(deps: MessagingDeps) {
     replyTo: string | undefined,
     onProgress?: (fraction: number) => void,
   ): Promise<void> {
+    /** The upload, once paid for: deleted if the message is. */
+    let made: Media | undefined;
     try {
-      const media = await upload(out, onProgress);
-      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, media));
-      await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media });
+      const media = await upload(out, () => stillSending(db, conv, id), (m) => (made = m), onProgress);
+      // Checked and stored under the chat's send lock, which deleting it
+      // takes too: it's either deleted before this, and not sent, or after
+      // it was sent.
+      await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media }, {
+        still: () => patchMessage(db, conv, id, 'sending', { media }),
+      });
       await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
+      if (err instanceof Cancelled || !(await stillSending(db, conv, id))) return deleteUploadsLater([made], true);
       await setMessageStatus(db, conv, id, 'failed');
       throw err;
     }
@@ -491,11 +526,17 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  /** Encrypts and uploads a file; returns the attachment with its upload ID, key and delete secret. */
-  function upload(out: Outgoing, onProgress?: (fraction: number) => void): Promise<Media> {
+  /**
+   * Encrypts and uploads a file; returns the attachment with its upload ID,
+   * key and delete secret, which onPaid also gets as soon as the server has
+   * made the upload (before the PUT). Throws Cancelled, before paying for
+   * anything, if `still` says its message is gone once its turn comes.
+   */
+  function upload(out: Outgoing, still: () => Promise<boolean>, onPaid: (media: Media) => void, onProgress?: (fraction: number) => void): Promise<Media> {
     // Its URL is asked for only when it can be used at once: it only starts
     // a PUT within a minute.
     return uploadSlot(async () => {
+      if (!(await still())) throw new Cancelled();
       const key = newFileKey();
       const secret = crypto.getRandomValues(new Uint8Array(16));
       // Encrypted before asking where to put it, for the same reason.
@@ -513,8 +554,10 @@ export function createMessaging(deps: MessagingDeps) {
         if (isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
         throw err;
       }
+      const media = { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+      onPaid(media);
       await put(created.id, created.url, body, secret, onProgress);
-      return { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
+      return media;
     });
   }
 
@@ -556,26 +599,51 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Fetches an attachment: downloads, decrypts and keeps it on this device.
    * A received one, or one of either side's that was cleared from this
-   * device. The upload stays, saved or not, until the recipient deletes the
+   * device, or one that was broken. Fetching by itself (auto) takes only a
+   * received one still to fetch: one cleared or broken meanwhile waits for
+   * a tap. The upload stays, saved or not, until the recipient deletes the
    * message or the conversation, or it expires.
-   * Returns where the file is now.
+   *
+   * Returns where the file is now: 'gone' if the server has no such upload
+   * (expired, or deleted); 'broken' if the bucket refuses it (S3 answers 403
+   * or 404 for a file never uploaded, but also for a URL that expired
+   * before it was used: a tap tries again, with a fresh URL), or if the
+   * upload isn't what the message says (another size, or it doesn't decrypt
+   * with the message's key). Throws if it may work later: the server or the
+   * bucket out of reach, failing or busy, downloads paused, or the file
+   * couldn't be stored.
    */
-  function fetchMedia(conv: string, id: string, onProgress?: (fraction: number) => void): Promise<'local' | 'gone'> {
+  function fetchMedia(conv: string, id: string, onProgress?: (fraction: number) => void, auto = false): Promise<NonNullable<MessageRecord['file']>> {
     return withLock(mediaLock(conv, id), async () => {
       const message = await getMessage(db, conv, id);
-      if (!message?.media || (message.file !== 'remote' && message.file !== 'cleared')) return message?.file === 'local' ? 'local' : 'gone';
+      if (!message?.media || !message.file) return 'gone';
+      const from: MessageRecord['file'][] = auto ? ['remote'] : ['remote', 'cleared', 'broken'];
+      if (!from.includes(message.file)) return message.file;
       const m = message.media as Media;
+      const mark = async (file: 'gone' | 'broken') => {
+        await setFile(db, conv, id, file);
+        return file;
+      };
       let url: string;
       try {
         url = await api.request('GET', `/media/${m.id}`, {}, checkUrl);
       } catch (err) {
-        if (err instanceof ApiError && err.code === 'not_found') {
-          await setFile(db, conv, id, 'gone');
-          return 'gone';
-        }
+        if (err instanceof ApiError && err.code === 'not_found') return mark('gone');
         throw err;
       }
-      const file = await decryptFile(await transfer.get(url, uploadSize(m.s), onProgress), fromBase64Url(m.k), m.s);
+      let upload: Uint8Array<ArrayBuffer>;
+      try {
+        upload = await transfer.get(url, uploadSize(m.s), onProgress);
+      } catch (err) {
+        if (err instanceof WrongSize || (err instanceof TransferError && (err.status === 403 || err.status === 404))) return mark('broken');
+        throw err;
+      }
+      let file: Uint8Array<ArrayBuffer>;
+      try {
+        file = await decryptFile(upload, fromBase64Url(m.k), m.s);
+      } catch {
+        return mark('broken');
+      }
       await putMedia(db, conv, id, file);
       await setFile(db, conv, id, 'local');
       return 'local';
@@ -587,8 +655,8 @@ export function createMessaging(deps: MessagingDeps) {
    * on a list first, so a chat with many attachments disappears at once and
    * the rest is finished on the next start if the app closes halfway.
    */
-  async function deleteUploadsLater(media: (LocalMedia | undefined)[]): Promise<void> {
-    const items = media.flatMap((m) => (m?.id && m.d ? [{ id: m.id, d: m.d }] : []));
+  async function deleteUploadsLater(media: (LocalMedia | undefined)[], recent = false): Promise<void> {
+    const items = media.flatMap((m) => (m?.id && m.d ? [{ id: m.id, d: m.d, ...(recent ? { recent: true as const } : {}) }] : []));
     if (items.length === 0) return;
     await queueUploadDeletes(db, items);
     void flushUploadDeletes();
@@ -602,10 +670,14 @@ export function createMessaging(deps: MessagingDeps) {
    */
   function flushUploadDeletes(): Promise<void> {
     flushing ??= withLock('upload-deletes-flush', async () => {
+      // Our own uploads, just made, that the server said it didn't know:
+      // asked again later, not in this run.
+      const deferred = new Set<string>();
       for (;;) {
-        const items = await pendingUploadDeletes(db);
-        if (items.length === 0) return;
+        const items = (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
+        if (items.length === 0) break;
         const done: string[] = [];
+        const again: string[] = [];
         let stop = false;
         let next = 0;
         const worker = async () => {
@@ -615,15 +687,18 @@ export function createMessaging(deps: MessagingDeps) {
               await api.post(`/media/${item.id}/delete`, { secret: item.d }, checkObject);
               done.push(item.id);
             } catch (err) {
-              if (err instanceof ApiError && err.code === 'not_found') done.push(item.id);
+              if (err instanceof ApiError && err.code === 'not_found') (item.recent ? again : done).push(item.id);
               else stop = true;
             }
           }
         };
         await Promise.all(Array.from({ length: UPLOAD_DELETE_PARALLEL }, worker));
         await forgetUploadDeletes(db, done);
-        if (stop) return;
+        await triedUploadDeletes(db, again);
+        for (const id of again) deferred.add(id);
+        if (stop) break;
       }
+      if (deferred.size > 0) later(() => void flushUploadDeletes(), UPLOAD_DELETE_AGAIN_MS);
     }).finally(() => (flushing = null));
     return flushing;
   }
@@ -682,10 +757,18 @@ export function createMessaging(deps: MessagingDeps) {
    * first receipt) creates one key, and the first reply takes one mailbox.
    * `last` names the newest envelope of theirs taken in, unless options.last
    * names another of theirs (a delete of the whole conversation names their
-   * newest message here).
+   * newest message here). With options.still, a message of ours goes only
+   * if that says, first thing under the lock, that it's still to be sent;
+   * otherwise this throws Cancelled before anything is taken, and before
+   * any token is shown to the server.
    */
-  function transmit(conv: string, fields: Omit<Draft, 'conv' | 'reply' | 'last' | 'tag'>, options: { last?: string } = {}): Promise<void> {
+  function transmit(
+    conv: string,
+    fields: Omit<Draft, 'conv' | 'reply' | 'last' | 'tag'>,
+    options: { last?: string; still?: () => Promise<boolean> } = {},
+  ): Promise<void> {
     return withLock(`send:${conv}`, async () => {
+      if (options.still && !(await options.still())) throw new Cancelled();
       let c = await getConversation(db, conv);
       if (!c) throw new Error('unknown conversation');
       if (c.myKey === null || (c.lastReceived !== null && now() >= (c.rotateAt ?? 0))) {

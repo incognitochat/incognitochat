@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { concat, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
 import { keyId, sealEnvelope, sendTokensFor } from './envelope';
-import { checkMessage, fileName, MAX_TEXT_BYTES, MessageError, newId, openMessage, sealMessage, shownAs, type ConversationKey, type Draft } from './message';
+import { checkMessage, fileName, MAX_TEXT_BYTES, MessageError, newId, openMessage, passiveType, sealMessage, shownAs, type ConversationKey, type Draft } from './message';
 
 async function conversationKey(): Promise<ConversationKey & { id: Uint8Array }> {
   const pair = await generateCopyableAgreementKey();
@@ -215,7 +215,26 @@ describe('checkMessage', () => {
   it('accepts kinds from newer versions and shows them as files', () => {
     const voice = checkMessage({ ...valid, media: { ...media, t: 'voice_note' } }).media!;
     expect(shownAs(voice)).toBe('file');
-    expect(shownAs({ t: 'gif' })).toBe('gif');
+    expect(shownAs({ t: 'gif', m: 'image/gif' })).toBe('gif');
+  });
+
+  it('shows only raster images in the chat: anything else called a photo or GIF is a file', () => {
+    for (const m of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+      expect(shownAs({ t: 'photo', m })).toBe('photo');
+      expect(shownAs({ t: 'gif', m })).toBe('gif');
+    }
+    for (const m of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'image/bmp', undefined]) {
+      expect(shownAs({ t: 'photo', ...(m ? { m } : {}) })).toBe('file');
+      expect(shownAs({ t: 'gif', ...(m ? { m } : {}) })).toBe('file');
+    }
+    // Checked as a received message would be.
+    expect(shownAs(checkMessage({ ...valid, media: { ...media, t: 'photo', m: 'image/svg+xml' } }).media!)).toBe('file');
+  });
+
+  it('hands the browser only passive types: images, audio and video', () => {
+    expect(passiveType(undefined)).toBeUndefined();
+    for (const m of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/quicktime', 'audio/ogg', 'audio/mp4']) expect(passiveType(m)).toBe(m);
+    for (const m of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/pdf', 'text/plain']) expect(passiveType(m)).toBe('application/octet-stream');
   });
 
   it('names attachments for saving', () => {

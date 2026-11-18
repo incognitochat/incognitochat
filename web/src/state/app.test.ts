@@ -14,6 +14,8 @@ import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
 import type { MessagingDeps } from '../messaging/engine';
 import { confirmationMatches, createApp, type Deps, type Screen } from './app';
+import { encryptFile, newFileKey } from '../crypto/media';
+import { toBase64Url } from '../crypto/encoding';
 
 // The engine as it is, but what the app gives it is kept, so tests can call
 // its callbacks (onWaiting, onResume) as the engine would.
@@ -25,6 +27,19 @@ vi.mock('../messaging/engine', async (importOriginal) => {
     createMessaging: (deps: MessagingDeps) => {
       engines.deps.push(deps);
       return original.createMessaging(deps);
+    },
+  };
+});
+
+// Storing an attachment can fail as it would on a full device (storeFaults.putMedia).
+const storeFaults = vi.hoisted(() => ({ putMedia: null as Error | null }));
+vi.mock('../messaging/store', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../messaging/store')>();
+  return {
+    ...original,
+    putMedia: async (...args: Parameters<typeof original.putMedia>) => {
+      if (storeFaults.putMedia) throw storeFaults.putMedia;
+      return original.putMedia(...args);
     },
   };
 });
@@ -99,6 +114,10 @@ function fakeServer(
     switchesDown: false,
     // Fetches of the (empty) inbox wait for this, if set.
     inboxGate: null as Promise<void> | null,
+    // How GET /media/{id} answers: with this download URL, or failing so, or
+    // (neither set) not_found, no such upload.
+    mediaUrl: null as string | null,
+    media: null as ApiError | NetworkError | null,
   };
   let nextCode = 0;
   const take = (queue: Outcome[] | undefined) => {
@@ -213,7 +232,8 @@ function fakeServer(
       }
       if (method === 'GET' && path.startsWith('/media/')) {
         if (state.switches.downloadsPaused) throw new ApiError(503, 'downloads_paused');
-        throw new ApiError(404, 'not_found');
+        if (state.mediaUrl) return check({ url: state.mediaUrl });
+        throw state.media ?? new ApiError(404, 'not_found');
       }
       if (path === '/admin/grant') {
         needsSignature();
@@ -622,7 +642,7 @@ describe('when the server stops taking this device', () => {
     await addMessage(
       db,
       { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
-      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
     );
     const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
     await app.start();
@@ -1566,7 +1586,7 @@ describe('data and storage', () => {
     await addMessage(
       db,
       { id, conv: 'c1', at: Date.now() - daysAgo * DAY, out: false, status: 'read', file: 'local' },
-      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
     );
     await putMedia(db, 'c1', id, new Uint8Array(1000));
   }
@@ -1816,6 +1836,107 @@ describe('invitations', () => {
   });
 });
 
+describe('fetching attachments by themselves', () => {
+  const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+  const MiB = 1024 * 1024;
+  /** A received attachment, not on this device yet. */
+  const received = (db: Awaited<ReturnType<typeof openDatabase>>, id: string, at: number, media: { t: string; s: number; m?: string }, file: 'remote' | 'broken' = 'remote') =>
+    addMessage(db, { id, conv: 'c1', at, out: false, status: 'received', file }, { text: '', media: { ...media, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } });
+
+  it('fetches photos, voice and video messages and GIFs up to a size for each, and raster images only', async () => {
+    const server = fakeServer();
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    await received(db, 'photo', 2, { t: 'photo', s: 5 * MiB, m: 'image/jpeg' });
+    await received(db, 'bigPhoto', 3, { t: 'photo', s: 5 * MiB + 1, m: 'image/jpeg' });
+    await received(db, 'svg', 4, { t: 'photo', s: 1000, m: 'image/svg+xml' });
+    await received(db, 'voice', 5, { t: 'voice', s: 10 * MiB, m: 'audio/mp4' });
+    await received(db, 'bigRound', 6, { t: 'round', s: 10 * MiB + 1, m: 'video/mp4' });
+    await received(db, 'gif', 7, { t: 'gif', s: 1000, m: 'image/gif' });
+    await received(db, 'bigGif', 8, { t: 'gif', s: 10 * MiB + 1, m: 'image/gif' });
+    await received(db, 'video', 9, { t: 'video', s: 1000, m: 'video/mp4' });
+    await received(db, 'broken', 10, { t: 'photo', s: 1000, m: 'image/jpeg' }, 'broken');
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(3));
+    await tick();
+    expect(downloads()).toEqual(['GET /media/upload-photo', 'GET /media/upload-voice', 'GET /media/upload-gif']);
+    // The rest wait for a tap: a broken one too, which a tap tries again.
+    await app.fetchMedia({ conv: 'c1', id: 'broken' });
+    expect(downloads().at(-1)).toBe('GET /media/upload-broken');
+  });
+
+  /**
+   * Opens chat c1, whose photo p1 fails to fetch, again and again: once at
+   * once, then minutes apart. The photo is fetched by itself three times in
+   * all, then left for a tap.
+   */
+  async function triedThreeTimes(server: ReturnType<typeof fakeServer>, app: Awaited<ReturnType<typeof registered>>['app']) {
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+    const reopen = async () => {
+      await app.home();
+      await app.openConversation('c1');
+      await tick();
+    };
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+    // Not again at once.
+    await reopen();
+    expect(downloads()).toHaveLength(1);
+    // Then a few minutes apart, three times in all.
+    for (const [minutes, tries] of [[3, 2], [6, 3], [9, 3], [12, 3]] as const) {
+      await withDeviceClockOff(minutes * 60_000, reopen);
+      expect(downloads()).toHaveLength(tries);
+    }
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
+  }
+
+  it.each([
+    ['the server failing', new ApiError(500, 'internal')],
+    ['the server out of reach', new NetworkError('down')],
+    ['the server refusing it', new ApiError(400, 'bad_request')],
+  ])('tries one again by itself only a few times while it keeps failing: %s', async (_, failure) => {
+    const server = fakeServer();
+    server.state.media = failure;
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    await received(db, 'p1', 2, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await triedThreeTimes(server, app);
+    // A tap still asks.
+    await app.fetchMedia({ conv: 'c1', id: 'p1' });
+    expect(server.calls.filter((c) => c.startsWith('GET /media/'))).toHaveLength(4);
+  });
+
+  it('tries one again by itself only a few times while the device is too full to keep it', async () => {
+    const server = fakeServer();
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    // A real upload, which downloads and decrypts; only storing it fails.
+    const file = crypto.getRandomValues(new Uint8Array(1000));
+    const key = newFileKey();
+    const upload = await encryptFile(file, key);
+    await addMessage(
+      db,
+      { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
+      { text: '', media: { t: 'photo', s: file.length, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p1', k: toBase64Url(key), d: 'c2VjcmV0' } },
+    );
+    server.state.mediaUrl = 'https://bucket.example/m/upload-p1';
+    vi.stubGlobal('fetch', async () => new Response(upload.slice(), { headers: { 'Content-Length': String(upload.length) } }));
+    storeFaults.putMedia = new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    try {
+      await triedThreeTimes(server, app);
+      // Room again: a tap stores it.
+      storeFaults.putMedia = null;
+      await app.fetchMedia({ conv: 'c1', id: 'p1' });
+      expect(await getMedia(db, 'c1', 'p1')).toEqual(file);
+    } finally {
+      storeFaults.putMedia = null;
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('attachments paused by the operator', () => {
   const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
 
@@ -1829,7 +1950,7 @@ describe('attachments paused by the operator', () => {
       await addMessage(
         db,
         { id, conv: 'c1', at, out: false, status: 'received', file: 'remote' },
-        { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+        { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
       );
     }
     const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
@@ -1871,7 +1992,7 @@ describe('attachments paused by the operator', () => {
     await addMessage(
       db,
       { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },
-      { text: '', media: { t: 'photo', s: 1000, w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p1', k: 'a2V5', d: 'c2VjcmV0' } },
     );
     const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
     await app.openConversation('c1');

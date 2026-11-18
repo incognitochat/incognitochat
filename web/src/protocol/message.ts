@@ -331,9 +331,32 @@ function checkSticker(value: unknown): void {
   if (a.e !== undefined && (typeof a.e !== 'string' || a.e.length === 0 || a.e.length > 16)) throw new MessageError('bad sticker emoji');
 }
 
-/** How an attachment is shown: its kind, or as a file if this version doesn't know the kind. */
-export function shownAs(media: { t: string }): MediaKind {
-  return MEDIA_KINDS.includes(media.t as MediaKind) ? (media.t as MediaKind) : 'file';
+/**
+ * Image types shown in the chat: raster formats only. Anything else a
+ * sender calls a photo or GIF (an SVG, which can carry script and links, or
+ * no type at all) is shown as a file.
+ */
+const INLINE_IMAGES: readonly string[] = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+/**
+ * How an attachment is shown: its kind; or as a file if this version doesn't
+ * know the kind, or if it's a photo or GIF that isn't a raster image type.
+ */
+export function shownAs(media: { t: string; m?: string | undefined }): MediaKind {
+  if (!MEDIA_KINDS.includes(media.t as MediaKind)) return 'file';
+  if ((media.t === 'photo' || media.t === 'gif') && !INLINE_IMAGES.includes(media.m ?? '')) return 'file';
+  return media.t as MediaKind;
+}
+
+/**
+ * A type the browser may be given for an attachment's decrypted bytes:
+ * raster images, audio and video, which play or show and never run
+ * anything. Any other (HTML, SVG, XML) is plain bytes, whatever the sender
+ * says, so the file can't act as a page of this site if it's ever opened.
+ */
+export function passiveType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  return INLINE_IMAGES.includes(type) || /^(audio|video)\/[\w.+-]+$/.test(type) ? type : 'application/octet-stream';
 }
 
 const EXTENSIONS: Record<string, string> = {

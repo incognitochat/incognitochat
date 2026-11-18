@@ -171,6 +171,7 @@ export const en = {
   seek: 'Position',
   download: 'Download',
   mediaGone: 'No longer available',
+  mediaBroken: "Couldn't be opened",
   errorTooBig: 'Files can be up to 50 MB.',
   errorUnreadable: "Couldn't read that file.",
   reply: 'Reply',
