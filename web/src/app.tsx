@@ -21,7 +21,7 @@ import {
   type RoundRecorder,
   type RoundRecording,
 } from './media/record';
-import { EDIT_WINDOW_MS, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
+import { editable, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
 import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, type StickerInfo } from './stickers/catalog';
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
@@ -2907,10 +2907,11 @@ function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageV
 /**
  * Whether one of ours can be edited: sent, in an open conversation, with
  * text or a caption to edit (not a sticker, voice or video message), and
- * not more than a day ago by the clock messages are dated by (now).
+ * not more than a day ago, as the engine counts it (now: the clock messages
+ * are dated by).
  */
 function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView, now: number): boolean {
-  if (!canReact(screen, m) || !m.out || m.sticker || now - m.at > EDIT_WINDOW_MS) return false;
+  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.at, now)) return false;
   return m.text !== '' || (!!m.media && !['voice', 'round'].includes(shownAs(m.media)));
 }
 

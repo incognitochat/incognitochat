@@ -23,7 +23,11 @@ import { ApiError } from './api';
 
 /** The furthest the server's clock is believed to be from this device's: two days. */
 export const MAX_OFFSET_MS = 48 * 3600_000;
-/** How long a session token lasts (the server's session.TTL): it expires this long after the server issued it. */
+/**
+ * How long a session token lasts (the server's session.TTL, which
+ * TestExpiryTellsTheWebAppTheServerClock pins): it expires this long after
+ * the server issued it.
+ */
 export const TOKEN_TTL_MS = 15 * 60_000;
 /**
  * How far a login's time may be from the server's clock (the server's
@@ -100,21 +104,15 @@ export function createClock(local: () => number = () => Date.now()): Clock {
 }
 
 /**
- * The times what this device sends carries (`at`, Unix milliseconds): the
- * time now (from clock, messageNow) rounded down to the whole second, so
- * they say nothing finer about this device's clock. Never earlier than the
- * last one, when a new session token puts the clock a little back; a clock
- * set back by more than MAX_SKEW_MS goes back with it. Recipients order
- * what came in the same second by when it came (docs/protocol.md).
+ * The time what this device sends carries (`at`, Unix milliseconds): the
+ * time now (from clock, messageNow) rounded down to the whole second, so it
+ * says nothing finer about this device's clock. Within a conversation the
+ * engine dates each a second after the last at least (store.ts,
+ * takeSentAt), and recipients order what came in the same second by when
+ * it came (docs/protocol.md, Times).
  */
 export function stamper(clock: () => number): () => number {
-  let last = -Infinity;
-  return () => {
-    let at = Math.floor(clock() / 1000) * 1000;
-    if (at < last && last - at <= MAX_SKEW_MS) at = last;
-    last = at;
-    return at;
-  };
+  return () => Math.floor(clock() / 1000) * 1000;
 }
 
 /**

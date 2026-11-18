@@ -146,13 +146,40 @@ export async function saveConversation(db: Database, conversation: ConversationR
  */
 export async function newestTheirs(db: Database, conv: string): Promise<{ at: number; id: string } | undefined> {
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
-  // Sent later, or in the same second taken in later (from before that was kept: the larger ID).
-  const after = (a: MessageRecord, b: MessageRecord) => (sentAt(a) - sentAt(b) || (a.order ?? 0) - (b.order ?? 0) || (a.id > b.id ? 1 : -1)) > 0;
+  // Sent later; or shown later (`at`, never after it arrived); or, shown at
+  // the same time, taken in later (from before that was kept: the larger ID).
+  const after = (a: MessageRecord, b: MessageRecord) =>
+    (sentAt(a) - sentAt(b) || a.at - b.at || (a.order ?? 0) - (b.order ?? 0) || (a.id > b.id ? 1 : -1)) > 0;
   let newest: MessageRecord | undefined;
   for (const m of await db.getAllFromIndex('messages', 'byConversation', range)) {
     if (!m.out && (!newest || after(m, newest))) newest = m;
   }
   return newest && { at: sentAt(newest), id: newest.id };
+}
+
+function sentKey(conv: string): string {
+  return `sent-at:${conv}`;
+}
+
+/**
+ * Takes the time for something this device sends in a conversation (`at`):
+ * choose gets the time of the last one sent there, from this device (also
+ * before a reload, and from any copy of the app), and returns the next.
+ * Kept apart from the conversation, under a lock of its own: two sends at
+ * once never get the same time, and a send going out (which holds the
+ * conversation's lock) doesn't hold up the next one being shown.
+ */
+export function takeSentAt(db: Database, conv: string, choose: (last: number | undefined) => number): Promise<number> {
+  return withLock(sentKey(conv), async () => {
+    const next = choose(await getMeta<number>(db, sentKey(conv)));
+    await putMeta(db, sentKey(conv), next);
+    return next;
+  });
+}
+
+/** The time of the last thing this device sent in a conversation (takeSentAt), if any. */
+export function lastSentAt(db: Database, conv: string): Promise<number | undefined> {
+  return getMeta<number>(db, sentKey(conv));
 }
 
 /** Conversations, newest activity first. */

@@ -45,13 +45,13 @@ device.
 |---|---|---|
 | A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when. |
 | The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
-| The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
+| The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can set, at each login, the clock someone's app dates messages by, anywhere within a minute of the device's: a recipient working with it can read that in what the person sends, as a tag. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | The bot-token holder | Everything Telegram's bot APIs allow | Who uses the bot, when notices go out. No content. Can send look-alike notices that open a look-alike page, which has none of the user's keys. |
 | The BotFather owner | Change the Mini App's address | Can point the app at a malicious page, for everyone or for chosen people. The largest remaining risk; see below. |
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock; what timing them can still tell is under What still leaks. |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times), and except voice messages: the recording's own header still carries the device's clock, to the second (not fixed yet). |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
 
@@ -167,9 +167,18 @@ it. This is how close it gets.
     bits from 10 to 30 each, and about 0.2 bits from different logins.
     How long messages take to arrive, which differs between networks, adds
     to that, clocks or not;
-  - a device whose clock is more than a minute off, and what's sent before
-    the app's first login after it opens, are dated by the device's own
-    clock, to the second;
+  - a device whose clock is more than a minute off gets nothing from this:
+    its messages are dated by its own clock, rounded down to the second,
+    which still tells how far it's off;
+  - everyone's messages are, too, until a login succeeds in that run of
+    the app: while it's offline, and also while the server refuses or
+    fails logins (429, 5xx), which the app treats the same way. That can be
+    a whole run. Then, in a conversation where it sent something by its own
+    clock, what it sends next carries on from that time, a second apart, so
+    as not to go back: for as long as its clock was ahead, a minute at
+    most;
+  - voice messages: the recording's own header still carries the device's
+    clock, to the second (not fixed yet);
   - anyone still on a version before this one sends the device's clock, to
     the millisecond.
 - **Not to other users: whether someone's app is open, or whether a mailbox

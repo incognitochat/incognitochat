@@ -159,11 +159,12 @@ export interface ConversationRecord {
   clearedBefore?: number;
   /**
    * Their latest delete of the whole conversation: its `at` (their clock),
-   * when we took it in (our clock), and, if its `last` named one of our
-   * messages, that message's time (our clock). Something of theirs from by
-   * then that shows they had more of ours takes those too, but never one we
-   * wrote after taking the delete in, nor one newer than the message `last`
-   * named: their app names the newest of ours it had. Forgotten with it.
+   * when we took it in (our clock, or the time of the last thing we sent
+   * there, if later), and, if its `last` named one of our messages, that
+   * message's time (our clock). Something of theirs from by then that shows
+   * they had more of ours takes those too, but never one we wrote after
+   * taking the delete in, nor one newer than the message `last` named:
+   * their app names the newest of ours it had. Forgotten with it.
    */
   theirClear?: { upTo: number; here: number; ours?: number };
   /**

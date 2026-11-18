@@ -98,9 +98,11 @@ token, in Unix seconds rounded down. So the server's clock was `expires` − 15
 minutes (plus up to a second) at some moment while the request was out, and
 the app takes the middle of both: to within half a second plus half the
 round trip. Each login does this anew. The app believes it only within 60
-seconds of its own clock, as far as a login's timestamp may be off; further
-off, and before the first login of a run of the app, messages are dated by
-the device's own clock.
+seconds of its own clock, as far as a login's timestamp may be off. Further
+off, messages are dated by the device's own clock (rounded down to the
+second), and so they are until a login succeeds in a run of the app: while
+it's offline, and also while the server refuses or fails logins (`429`,
+`5xx`), which the app treats the same way.
 
 **Overload.** When AWS throttles the server (a table at its cap, a function
 out of instances) or a request runs out of time, the server answers
@@ -480,14 +482,19 @@ above), rounded down to the whole second: the device's own clock, to the
 millisecond, would tell recipients how far that clock is off, which lasts
 for days and is the same in all of a person's conversations, so recipients
 comparing notes could link them ([security.md](security.md), What still
-leaks). It's never earlier than the sender's last `at` (unless its clock
-moved back by more than a minute), and within a conversation the sender
-dates each envelope at least a second after its previous one there, so the
-other side never gets two of its envelopes there with the same `at`: a
-quick run of them is dated a few seconds ahead. The inbox gives envelopes
-in no set order, so it's this, not when they arrive, that keeps one side's
-messages, edits and reactions in order. Versions before this one sent the
-device's own clock, to the millisecond; recipients take both.
+leaks). Within a conversation, the sender dates each envelope at least a
+second after the last one it sent there, so the other side never gets two
+of its envelopes there with the same `at`; a quick run of them is dated a
+few seconds ahead. The app keeps that last time with the conversation, so
+this holds across reloads and between copies of the app. The one exception
+is a clock that went back by more than a minute (the device's, or the
+server's as the app knows it): then `at` goes back with it. So, for up to
+a minute after the app starts dating messages by the server's clock rather
+than its own (above), what it sends in a conversation where it already sent
+something by its own clock carries on from that time. The inbox gives
+envelopes in no set order, so it's this, not when they arrive, that keeps
+one side's messages, edits and reactions in order. Versions before this
+one sent the device's own clock, to the millisecond; recipients take both.
 
 The recipient shows a message at its `at`, but never later than the second
 it arrived in, and messages with the same time (from both sides, or from

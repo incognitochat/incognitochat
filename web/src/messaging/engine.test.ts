@@ -14,7 +14,7 @@ import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, ownerParts, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
-import { MAX_TEXT_BYTES, newId } from '../protocol/message';
+import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
@@ -4669,9 +4669,17 @@ describe('message times', () => {
     const mine = await across(sender.db, conv, owner.db);
     const texts = async (who: 'owner' | 'sender') =>
       (await listMessages(who === 'owner' ? owner.db : sender.db, who === 'owner' ? mine : conv)).map((m) => m.text);
-    /** Another copy of someone's app, dating in the same second as theirs: it hasn't sent anything yet. */
-    const tab = (who: Person, at: number) => copyOf(backend, who, { now: () => at, messageNow: () => at });
-    return { backend, owner, sender, conv, mine, texts, tab };
+    /**
+     * Someone's app as one that doesn't date what it sends in a conversation
+     * apart (a version before this one, or another app): the next thing it
+     * sends there, with its clocks at `at`, carries the second it's in.
+     */
+    const unspaced = async (who: Person, conversation: string, at: number) => {
+      // Forgets when it last sent something there (store.ts, takeSentAt).
+      await deleteMeta(who.db, `sent-at:${conversation}`);
+      return copyOf(backend, who, { now: () => at, messageNow: () => at });
+    };
+    return { backend, owner, sender, conv, mine, texts, unspaced };
   }
 
   it("dates everything it sends by the server's clock, in whole seconds, not by the device's", async () => {
@@ -4732,20 +4740,20 @@ describe('message times', () => {
   });
 
   it('shows messages from the same second in the order they came or were written, and a reply after what it answers', async () => {
-    // Both sides, and two copies of the sender's app, all in one second;
-    // the devices' clocks too, to the millisecond.
-    const { owner, sender, conv, mine, texts, tab } = await chat({ owner: () => S + 500, sender: () => S + 100 });
+    // Both sides, all in one second, the devices' clocks too, to the
+    // millisecond; the sender's app doesn't date its messages apart.
+    const { owner, sender, conv, mine, texts, unspaced } = await chat({ owner: () => S + 500, sender: () => S + 100 });
     const [low, mid, high] = [rand(), rand(), rand()].sort();
     nextIds(high!);
-    await tab(sender, S + 100).send(conv, 'first');
+    await (await unspaced(sender, conv, S + 100)).send(conv, 'first');
     await owner.messaging.sync();
     nextIds(mid!);
-    await tab(sender, S + 100).send(conv, 'second');
+    await (await unspaced(sender, conv, S + 100)).send(conv, 'second');
     await owner.messaging.sync();
     expect(await texts('owner')).toEqual(['hello', 'first', 'second']);
     // The owner answers in that second too.
     nextIds(low!);
-    await tab(owner, S + 500).send(mine, 'answer');
+    await (await unspaced(owner, mine, S + 500)).send(mine, 'answer');
     expect(await texts('owner')).toEqual(['hello', 'first', 'second', 'answer']);
     await sender.messaging.sync();
     expect(await texts('sender')).toEqual(['hello', 'first', 'second', 'answer']);
@@ -4754,26 +4762,26 @@ describe('message times', () => {
   });
 
   it('takes the later of two edits from the same second, here or not yet, and the same one again changes nothing', async () => {
-    const { backend, owner, sender, conv, mine, tab } = await chat({ owner: () => S + 500, sender: () => S + 100 });
+    const { backend, owner, sender, conv, mine, unspaced } = await chat({ owner: () => S + 500, sender: () => S + 100 });
     const [hello] = await listMessages(sender.db, conv);
     // The owner's inbox as it is now (confirming replaces it).
     const inbox = () => backend.inboxes.get('owner')!;
 
-    // Two copies of the sender's app edit 'hello' in the same second.
-    await tab(sender, S + 100).edit(conv, hello!.id, 'hello.');
+    // The sender's app edits 'hello' twice in the same second.
+    await (await unspaced(sender, conv, S + 100)).edit(conv, hello!.id, 'hello.');
     await owner.messaging.sync();
-    await tab(sender, S + 100).edit(conv, hello!.id, 'hello!');
+    await (await unspaced(sender, conv, S + 100)).edit(conv, hello!.id, 'hello!');
     const lastEdit = inbox()[0]!;
     await owner.messaging.sync();
     expect(await getMessage(owner.db, mine, hello!.id)).toMatchObject({ text: 'hello!', edited: S });
 
     // A message edited twice in its second, both edits arriving before it.
-    await tab(sender, S + 100).send(conv, 'later');
+    await (await unspaced(sender, conv, S + 100)).send(conv, 'later');
     const later = (await listMessages(sender.db, conv)).at(-1)!;
     const message = inbox().splice(0);
-    await tab(sender, S + 100).edit(conv, later.id, 'later.');
+    await (await unspaced(sender, conv, S + 100)).edit(conv, later.id, 'later.');
     await owner.messaging.sync();
-    await tab(sender, S + 100).edit(conv, later.id, 'later!');
+    await (await unspaced(sender, conv, S + 100)).edit(conv, later.id, 'later!');
     await owner.messaging.sync();
     inbox().push(...message);
     await owner.messaging.sync();
@@ -4789,13 +4797,13 @@ describe('message times', () => {
   });
 
   it('takes the later of two reactions from the same second, here or not yet', async () => {
-    const { backend, owner, sender, conv, mine, tab } = await chat({ owner: () => S + 500, sender: () => S + 100 });
+    const { backend, owner, sender, conv, mine, unspaced } = await chat({ owner: () => S + 500, sender: () => S + 100 });
     const [hello] = await listMessages(sender.db, conv);
 
-    // Two copies of the owner's app react to 'hello' in the same second.
-    await tab(owner, S + 500).react(mine, hello!.id, '👍');
+    // The owner's app reacts to 'hello' twice in the same second.
+    await (await unspaced(owner, mine, S + 500)).react(mine, hello!.id, '👍');
     await sender.messaging.sync();
-    await tab(owner, S + 500).react(mine, hello!.id, '❤️');
+    await (await unspaced(owner, mine, S + 500)).react(mine, hello!.id, '❤️');
     await sender.messaging.sync();
     expect((await getMessage(sender.db, conv, hello!.id))!.reactions?.theirs).toEqual({ e: '❤️', at: S });
 
@@ -4803,17 +4811,69 @@ describe('message times', () => {
     // owner hasn't got yet.
     // The owner's inbox as it is now (confirming replaces it).
     const inbox = () => backend.inboxes.get('owner')!;
-    await tab(sender, S + 100).send(conv, 'later');
+    await (await unspaced(sender, conv, S + 100)).send(conv, 'later');
     const later = (await listMessages(sender.db, conv)).at(-1)!;
     const message = inbox().splice(0);
-    await tab(sender, S + 100).react(conv, later.id, '👍');
+    await (await unspaced(sender, conv, S + 100)).react(conv, later.id, '👍');
     await owner.messaging.sync();
-    await tab(sender, S + 100).react(conv, later.id, '😮');
+    await (await unspaced(sender, conv, S + 100)).react(conv, later.id, '😮');
     await owner.messaging.sync();
     inbox().push(...message);
     await owner.messaging.sync();
     expect((await getMessage(owner.db, mine, later.id))!.reactions?.theirs).toEqual({ e: '😮', at: S });
     expect((await getConversation(owner.db, mine))!.reactions ?? []).toEqual([]);
+  });
+
+  it('dates what it sends in a conversation apart across reloads and copies of the app, unless its clock went back more than a minute', async () => {
+    let clock = S + 100;
+    const { backend, sender, conv } = await chat({ owner: () => S + 60_000, sender: () => clock });
+    // The app opened again, and another copy of it, in the same second.
+    await sender.open({ messageNow: () => clock }).send(conv, 'reopened');
+    await copyOf(backend, sender, { now: () => clock, messageNow: () => clock }).send(conv, 'another copy');
+    // A new session token puts the clock a second and a half back.
+    clock = S - 1400;
+    await sender.messaging.send(conv, 'a little back');
+    // The device's clock set back by hours, beyond what a token could do: so are these.
+    clock = S - 3 * 3600_000 + 100;
+    await sender.messaging.send(conv, 'hours back');
+    const at = async (text: string) => (await listMessages(sender.db, conv)).find((m) => m.text === text)!.at;
+    expect(await Promise.all(['hello', 'reopened', 'another copy', 'a little back', 'hours back'].map(at))).toEqual([
+      S,
+      S + 1000,
+      S + 2000,
+      S + 3000,
+      S - 3 * 3600_000,
+    ]);
+  });
+
+  it('a delete of the whole chat for both sides takes all of ours they had, also ones dated a few seconds ahead', async () => {
+    // The owner writes three in one second: dated a second apart, so ahead.
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 30_000 });
+    for (const text of ['a', 'b', 'c']) await owner.messaging.send(mine, text);
+    expect((await listMessages(owner.db, mine)).filter((m) => m.out).map((m) => m.at)).toEqual([S, S + 1000, S + 2000]);
+    await sender.messaging.sync();
+    await sender.messaging.markSeen(conv);
+    await sender.messaging.remove(conv, true);
+    // The owner takes it in still in that first second.
+    await owner.messaging.sync();
+    expect(await texts('owner')).toEqual([]);
+    expect(await texts('sender')).toEqual([]);
+  });
+
+  it("offers an edit in the menu exactly while the engine takes it, a quick run of sends or not", async () => {
+    let clock = S + 100;
+    const { sender, conv } = await chat({ owner: () => S + 60_000, sender: () => clock });
+    const [hello] = await listMessages(sender.db, conv);
+    // Nearly a day on, two quick sends date what follows a second ahead.
+    clock = S + DAY - 500;
+    await sender.messaging.send(conv, 'one');
+    await sender.messaging.send(conv, 'two');
+    expect(editable(hello!.at, clock)).toBe(true);
+    await sender.messaging.edit(conv, hello!.id, 'hello!');
+    clock = S + DAY + 1000;
+    expect(editable(hello!.at, clock)).toBe(false);
+    await expect(sender.messaging.edit(conv, hello!.id, 'hello!!')).rejects.toThrow('too late to edit');
+    expect((await getMessage(sender.db, conv, hello!.id))!.text).toBe('hello!');
   });
 
   it('keeps messages dated to the millisecond by older versions, and goes on from them', async () => {

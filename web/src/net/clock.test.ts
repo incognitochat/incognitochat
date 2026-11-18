@@ -89,19 +89,14 @@ describe('the clock messages are dated by', () => {
     expect(Math.abs(clock.messageNow() - (local + 20_000))).toBeLessThanOrEqual(1000);
   });
 
-  it('stamps whole seconds, never going back by less than a minute', () => {
+  it('stamps whole seconds, rounded down', () => {
     let t = LOCAL + 999;
     const stamp = stamper(() => t);
     expect(stamp()).toBe(LOCAL);
     t = LOCAL + 1_000;
     expect(stamp()).toBe(LOCAL + 1_000);
-    // A new token puts the clock 1.5 s back: what's sent stays where it was.
-    t = LOCAL - 500;
-    expect(stamp()).toBe(LOCAL + 1_000);
-    t = LOCAL + 2_345;
-    expect(stamp()).toBe(LOCAL + 2_000);
-    // Set back by hours: it goes back with it.
-    t = LOCAL - 3 * 3600_000 + 1;
-    expect(stamp()).toBe(LOCAL - 3 * 3600_000);
+    // Back with the clock: within a conversation, the engine keeps them apart (store.ts, takeSentAt).
+    t = LOCAL - 1;
+    expect(stamp()).toBe(LOCAL - 1_000);
   });
 });

@@ -33,11 +33,11 @@ import {
   type TokenIssuer,
 } from '../account/wallet';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
-import { stamper } from '../net/clock';
+import { MAX_SKEW_MS, stamper } from '../net/clock';
 import type { Session } from '../net/session';
 import { MAX_ENVELOPE, sendTokensFor } from '../protocol/envelope';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
-import { EDIT_GRACE_MS, EDIT_WINDOW_MS, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
+import { EDIT_GRACE_MS, EDIT_WINDOW_MS, editable, isReactionEmoji, MAX_TEXT_BYTES, newId, openMessage, sealMessage, type Draft, type Media, type Message, type Sticker } from '../protocol/message';
 import { getMeta, putMeta, type ConversationRecord, type Database, type MessageRecord } from '../storage/db';
 import { withLock, withLockIfFree } from '../sync/locks';
 import {
@@ -67,6 +67,7 @@ import {
   getMedia,
   getMessage,
   hasMessage,
+  lastSentAt,
   listConversations,
   getIds,
   ID_KINDS,
@@ -91,6 +92,7 @@ import {
   setReaction,
   setText,
   stillSending,
+  takeSentAt,
   triedUploadDeletes,
   type ConversationIds,
   type LocalMedia,
@@ -349,20 +351,21 @@ export function createMessaging(deps: MessagingDeps) {
   const messageNow = deps.messageNow ?? now;
   const stamp = stamper(messageNow);
   /**
-   * When we last sent something in each conversation (its `at`), in this run
-   * of the app. Times are whole seconds, and the inbox gives envelopes in no
-   * set order, so what we send in a conversation is dated a second after the
-   * last at least: the other side never gets two of ours there with the same
-   * time, and shows ours in the order written, and takes a later edit,
-   * reaction, key or delete of the whole conversation as later. A quick run
-   * of sends can be dated a few seconds ahead.
+   * The time for what we send in a conversation (`at`): messageNow in whole
+   * seconds, and a second after the last thing we sent there at least
+   * (store.ts, takeSentAt), also from before a reload or from another copy
+   * of the app. Times are whole seconds and the inbox gives envelopes in no
+   * set order, so this way the other side never gets two of ours there with
+   * the same time: it shows ours in the order written, and takes a later
+   * edit, reaction, key or delete of the whole conversation as later. A
+   * quick run of sends is dated a few seconds ahead. Unless the last is more
+   * than a minute ahead: then the clock went back, and so does this.
    */
-  const lastSent = new Map<string, number>();
-  /** The time for what we send in a conversation (`at`): messageNow in whole seconds, after anything we sent there before. */
-  function stampIn(conv: string): number {
-    const at = Math.max(stamp(), (lastSent.get(conv) ?? -Infinity) + 1000);
-    lastSent.set(conv, at);
-    return at;
+  function stampIn(conv: string): Promise<number> {
+    return takeSentAt(db, conv, (last) => {
+      const at = stamp();
+      return last !== undefined && at <= last && last - at < MAX_SKEW_MS ? last + 1000 : at;
+    });
   }
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? httpTransfer;
@@ -434,7 +437,7 @@ export function createMessaging(deps: MessagingDeps) {
   ): Promise<void> {
     // Stored and shown first; everything slow happens after.
     const id = newId();
-    const at = stampIn(conversation.id);
+    const at = await stampIn(conversation.id);
     const answer = replyTo ? { replyTo } : {};
     await addMessage(db, { id, conv: conversation.id, at, out: true, status: 'sending' }, { text: '', ...content, ...answer });
     // Shown now; its chat's place in the list may wait for a send of ours
@@ -471,7 +474,7 @@ export function createMessaging(deps: MessagingDeps) {
     const conversation = await getConversation(db, conv);
     if (!conversation) throw new Error('unknown conversation');
     const id = newId();
-    const at = stampIn(conv);
+    const at = await stampIn(conv);
     await putMedia(db, conv, id, out.file);
     await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media));
     await onStored?.(id);
@@ -500,7 +503,7 @@ export function createMessaging(deps: MessagingDeps) {
       if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
       const file = await getMedia(db, conv, id);
       if (!file) throw new Error('attachment missing');
-      const at = stampIn(conv);
+      const at = await stampIn(conv);
       const { text, replyTo, media } = message;
       // Unless it was deleted meanwhile.
       if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at }))) return;
@@ -761,8 +764,9 @@ export function createMessaging(deps: MessagingDeps) {
     }
     if ((text.trim() === '' && !m.media) || utf8(text).length > MAX_TEXT_BYTES) throw new Error('not a valid text');
     if (text === m.text) return;
-    const at = stampIn(conv);
-    if (at - m.at > EDIT_WINDOW_MS) throw new Error('too late to edit');
+    // As the app's menu counts it.
+    if (!editable(m.at, messageNow())) throw new Error('too late to edit');
+    const at = await stampIn(conv);
     await transmit(conv, { kind: 'edit', id: newId(), at, edit: { to: id, text } });
     await setText(db, conv, id, text, at);
   }
@@ -780,7 +784,7 @@ export function createMessaging(deps: MessagingDeps) {
     if (!c || c.status !== 'active' || !m || !m.out || (m.status !== 'sent' && m.status !== 'seen')) {
       throw new Error('nothing to delete for both sides');
     }
-    await transmit(conv, { kind: 'delete', id: newId(), at: stampIn(conv), delete: [id] });
+    await transmit(conv, { kind: 'delete', id: newId(), at: await stampIn(conv), delete: [id] });
     await deleteUploadsLater([m.media]);
     await forget(conv, id);
   }
@@ -915,12 +919,12 @@ export function createMessaging(deps: MessagingDeps) {
     if (!c || c.status !== 'active' || !target) throw new Error('nothing to react to');
     if (emoji !== '' && !isReactionEmoji(emoji)) throw new Error('not an emoji');
     const before = target.reactions?.mine?.e ?? '';
-    const at = stampIn(conv);
+    const at = await stampIn(conv);
     await setReaction(db, conv, id, 'mine', emoji, at);
     try {
       await transmit(conv, { kind: 'reaction', id: newId(), at, reaction: { to: id, e: emoji } });
     } catch (err) {
-      await setReaction(db, conv, id, 'mine', before, stampIn(conv));
+      await setReaction(db, conv, id, 'mine', before, await stampIn(conv));
       throw err;
     }
   }
@@ -938,7 +942,7 @@ export function createMessaging(deps: MessagingDeps) {
     for (let i = 0; i < unseen.length; i += MAX_SEEN) {
       const batch = unseen.slice(i, i + MAX_SEEN);
       // Left as received if this fails, so the next opening tries again.
-      await transmit(conv, { kind: 'seen', id: newId(), at: stampIn(conv), seen: batch });
+      await transmit(conv, { kind: 'seen', id: newId(), at: await stampIn(conv), seen: batch });
       for (const id of batch) await setMessageStatus(db, conv, id, 'read');
     }
   }
@@ -989,7 +993,7 @@ export function createMessaging(deps: MessagingDeps) {
       return { ...current, myMailbox: null, myKey: keyKept ? current.myKey : null, unblocking: true, ...retire(current, current.myMailbox) };
     });
     // If this fails, it stays blocked, and unblocking again sends it.
-    if (tell) await transmit(c.id, { kind: 'key_update', id: newId(), at: stampIn(c.id) });
+    if (tell) await transmit(c.id, { kind: 'key_update', id: newId(), at: await stampIn(c.id) });
     if (c.role === 'owner' && c.tag) await removeBlockedTag(c.link.fingerprint, c.tag);
     await update(conv, ({ unblocking: _, ...current }) => ({ ...current, status: 'active' }));
   }
@@ -1020,7 +1024,7 @@ export function createMessaging(deps: MessagingDeps) {
       const c = await getConversation(db, conv);
       if (!c || c.status !== 'active') throw new Error("can't delete for both sides");
       const newest = c.lastMessage ?? (await newestTheirs(db, conv));
-      const at = stampIn(conv);
+      const at = await stampIn(conv);
       await transmit(conv, { kind: 'delete', id: newId(), at, all: true }, newest ? { last: newest.id } : {});
       await deleteUploadsLater((await listMessages(db, conv)).filter((m) => m.out && m.at <= at).map((m) => m.media));
       // It covers theirs up to that one, ours up to now: whatever arrives
@@ -1722,7 +1726,11 @@ export function createMessaging(deps: MessagingDeps) {
         // receipt of theirs dated before it says (their clock may have been
         // set back since).
         const named = message.last ? await db.get('messages', [conv.id, message.last]) : undefined;
-        conv.theirClear = { upTo: message.at, here: t, ...(named?.out ? { ours: named.at } : {}) };
+        // When we took it in, by our times: what we wrote by then may be
+        // dated a few seconds ahead (stampIn), so no earlier than the last
+        // thing we sent there.
+        const here = Math.max(t, (await lastSentAt(db, conv.id)) ?? -Infinity);
+        conv.theirClear = { upTo: message.at, here, ...(named?.out ? { ours: named.at } : {}) };
         clear = true;
       }
     } else if (message.kind === 'message' && (message.text || message.media || message.sticker)) {

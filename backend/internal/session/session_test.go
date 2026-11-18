@@ -33,6 +33,26 @@ func issuer(t *testing.T, keys map[byte][]byte, current byte) *Issuer {
 	return i
 }
 
+// The web app learns the server's clock from a token's expiry less 15
+// minutes, in whole seconds (web/src/net/clock.ts, TOKEN_TTL_MS): with
+// another TTL, or an expiry not rounded down to the second, it would believe
+// a clock that's off, or (more than a minute off) fall back to dating
+// messages by the device's clock, which links a sender's conversations.
+// Change both together.
+func TestExpiryTellsTheWebAppTheServerClock(t *testing.T) {
+	if TTL != 15*time.Minute {
+		t.Fatalf("TTL = %v: web/src/net/clock.ts TOKEN_TTL_MS must match", TTL)
+	}
+	i := issuer(t, map[byte][]byte{1: keyA}, 1)
+	_, expires, err := i.Issue(account, device, now.Add(999*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expires.Equal(now.Add(15 * time.Minute)) {
+		t.Fatalf("expires = %v, want the issue time plus 15 minutes, rounded down to the second", expires)
+	}
+}
+
 func TestIssueVerify(t *testing.T) {
 	i := issuer(t, map[byte][]byte{1: keyA}, 1)
 	token, expires, err := i.Issue(account, device, now)
