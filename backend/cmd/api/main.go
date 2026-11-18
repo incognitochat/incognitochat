@@ -28,6 +28,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/notices"
 	"github.com/incognitochat/incognitochat/backend/internal/push"
 	"github.com/incognitochat/incognitochat/backend/internal/session"
+	"github.com/incognitochat/incognitochat/backend/internal/tally"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/initdata"
 	"github.com/incognitochat/incognitochat/backend/internal/tokens"
 )
@@ -55,9 +56,13 @@ func main() {
 	server.Log = log
 	router := httpapi.NewRouter()
 	server.Routes(router)
-	// Slow requests are logged, with only their route and duration, to size
-	// the function from data.
-	router.Observe = func(route string, status int, elapsed time.Duration) {
+	// Answers are counted by route, status and error code, and the counts
+	// logged once a minute (internal/tally), for the alarms on limits,
+	// refusals, registrations and tokens. Slow requests are logged, with
+	// only their route and duration, to size the function from data.
+	counts := tally.New(log)
+	router.Observe = func(route string, status int, code string, elapsed time.Duration) {
+		counts.Add(time.Now(), route, status, code)
 		if elapsed >= slowRequest {
 			log.Warn("slow request",
 				slog.String(logx.KeyRoute, route),
@@ -65,7 +70,9 @@ func main() {
 				slog.Int64(logx.KeyDuration, elapsed.Milliseconds()))
 		}
 	}
-	lambda.Start(awsconf.WithDeadline(requestDeadline, router.Serve))
+	// SIGTERM, when the instance shuts down, logs the last minute's counts.
+	lambda.StartWithOptions(awsconf.WithDeadline(requestDeadline, router.Serve),
+		lambda.WithEnableSIGTERM(counts.Flush))
 }
 
 func setup(ctx context.Context) (*api.Server, error) {
