@@ -61,9 +61,10 @@ func partitionKeys(t *testing.T, client *dynamodb.Client, table, accountID strin
 	return sks
 }
 
-// owned returns the shared items (mailboxes, codes, links) the table says
-// an account owns, and the account's own records of them, each by the sort
-// key of its record ("M#<mailbox>", "I#<code>", "K#<link>").
+// owned returns the shared items (mailboxes, codes, links, link signing
+// keys' items) the table says an account owns, and the account's own
+// records of them, each by the sort key of its record ("M#<mailbox>",
+// "I#<code>", "K#<link>", "F#<fingerprint>").
 func owned(t *testing.T, client *dynamodb.Client, table, accountID string) (shared, records map[string]bool) {
 	t.Helper()
 	shared, records = map[string]bool{}, map[string]bool{}
@@ -84,6 +85,9 @@ func owned(t *testing.T, client *dynamodb.Client, table, accountID string) (shar
 			}
 			if a, _ := str(it, "a"); a == accountID && strings.HasPrefix(pk, "L#") {
 				shared[linkPrefix+strings.TrimPrefix(pk, "L#")] = true
+			}
+			if a, _ := str(it, "a"); a == accountID && strings.HasPrefix(pk, keyPK("")) {
+				shared[pk] = true // the record's sort key is its key too
 			}
 		}
 	}

@@ -28,10 +28,17 @@ type createLinkRequest struct {
 	// Replaces, if set, is the account's link this one takes the place of,
 	// in one step: the old link stops working.
 	Replaces string `json:"replaces,omitempty"`
+	// Proof shows the caller holds the signing key's private half: its
+	// signature over the link ID and the caller's account ID
+	// (links.CheckOwner).
+	Proof bytes64 `json:"proof"`
 }
 
 type linkKeysRequest struct {
 	Keys []linkKey `json:"keys"`
+	// Proof is as for createLinkRequest, for this link: the keys' own
+	// signatures don't show it, since anyone can copy them from a bundle.
+	Proof bytes64 `json:"proof"`
 }
 
 // bundleResponse is what anyone with a link ID can read. It says nothing
@@ -87,19 +94,23 @@ const LinkChangesPerDay = 5
 // createLink stores a link's bundle. The client chooses the link ID, so it
 // can sign and keep the link's keys before asking. An account has one link;
 // replacing it gives a new address, and the client keeps the signing key, so
-// senders' tags (and so blocks and labels) carry over.
+// senders' tags (and so blocks and labels) carry over. A signing key is one
+// account's for good, or senders' tags would match across accounts: only
+// whoever holds its private half can use it (the owner proof, checked
+// first), and another account than the first to use it gets
+// signing_key_taken.
 func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "POST /links"
 	var in createLinkRequest
 	if err := httpapi.DecodeJSON(req, &in); err != nil {
 		return httpapi.DecodeError(err)
 	}
+	signingKey, err := devicesig.ParsePublicKey(in.SigningKey)
+	if !links.ValidID(in.ID) || err != nil || links.CheckOwner(signingKey, in.Proof, in.ID, c.AccountID) != nil {
+		return httpapi.Error(http.StatusBadRequest, "invalid_link")
+	}
 	if !s.mayOwnLinks(c.device) {
 		return httpapi.Error(http.StatusForbidden, "invitation_required")
-	}
-	signingKey, err := devicesig.ParsePublicKey(in.SigningKey)
-	if !links.ValidID(in.ID) || err != nil {
-		return httpapi.Error(http.StatusBadRequest, "invalid_link")
 	}
 	keys := toKeys(in.Keys)
 	if links.Check(signingKey, keys, s.Now()) != nil {
@@ -129,6 +140,9 @@ func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) 
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	case errors.Is(err, directory.ErrLimit):
 		return httpapi.Error(http.StatusConflict, "link_limit")
+	case errors.Is(err, directory.ErrKeyTaken):
+		// Another account has (or had) this signing key.
+		return httpapi.Error(http.StatusConflict, "signing_key_taken")
 	case errors.Is(err, directory.ErrConflict):
 		// The ID is taken (or a concurrent change won): pick another and retry.
 		return httpapi.Error(http.StatusConflict, "conflict")
@@ -138,7 +152,9 @@ func (s *Server) createLink(ctx context.Context, req httpapi.Request, c caller) 
 	return httpapi.JSON(http.StatusCreated, map[string]string{"id": in.ID, "mailbox": link.Mailbox})
 }
 
-// setLinkKeys replaces a link's encryption keys (weekly rotation).
+// setLinkKeys replaces a link's encryption keys (weekly rotation), with an
+// owner proof for the link, which also claims the key of a link from before
+// keys were claimed (signing_key_taken if another account did first).
 func (s *Server) setLinkKeys(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "PUT /links/{id}/keys"
 	id := httpapi.Param(ctx, "id")
@@ -160,16 +176,25 @@ func (s *Server) setLinkKeys(ctx context.Context, req httpapi.Request, c caller)
 	if err != nil {
 		return s.internal(route, err)
 	}
+	if links.CheckOwner(signingKey, in.Proof, id, c.AccountID) != nil {
+		return httpapi.Error(http.StatusBadRequest, "invalid_link")
+	}
 	keys := toKeys(in.Keys)
 	if links.Check(signingKey, keys, s.Now()) != nil {
 		return httpapi.Error(http.StatusBadRequest, "invalid_link")
 	}
 	err = s.Directory.SetLinkKeys(ctx, c.AccountID, id, keys)
-	if errors.Is(err, directory.ErrNotFound) {
+	switch {
+	case errors.Is(err, directory.ErrNotFound):
 		// Someone else's link answers exactly like a missing one.
 		return httpapi.Error(http.StatusNotFound, "not_found")
-	}
-	if err != nil {
+	case errors.Is(err, directory.ErrKeyTaken):
+		// A link from before keys were claimed, whose key another account
+		// claimed first.
+		return httpapi.Error(http.StatusConflict, "signing_key_taken")
+	case errors.Is(err, directory.ErrConflict):
+		return httpapi.Error(http.StatusConflict, "conflict")
+	case err != nil:
 		return s.internal(route, err)
 	}
 	return httpapi.JSON(http.StatusOK, map[string]string{})
@@ -185,6 +210,10 @@ func (s *Server) revokeLink(ctx context.Context, _ httpapi.Request, c caller) ht
 	err := s.Directory.DeleteLink(ctx, c.AccountID, id)
 	if errors.Is(err, directory.ErrNotFound) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	if errors.Is(err, directory.ErrConflict) {
+		// A concurrent change to the account's links won: try again.
+		return httpapi.Error(http.StatusConflict, "conflict")
 	}
 	if err != nil {
 		return s.internal(route, err)

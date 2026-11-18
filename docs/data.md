@@ -75,6 +75,7 @@ chat and kind), so the chat list doesn't read them.
 | The account's and its device's public keys | To check logins and requests | While the account exists |
 | The user's Telegram chat ID, encrypted so only the notice service can open it, and their language | To send "New message" notices, if the user allows them | While notices are on |
 | The account's link: its ID, its public keys, its first-contact mailbox | So people can write to the user | Until it's replaced, or the account ends |
+| Each link signing key the account has used: the key's fingerprint and the account ID, kept apart (by fingerprint) and in the account's own records. While its link has the key, the link already says both (its owner, and its signing key, whose fingerprint anyone can work out); after a revocation, or a move to another key, the account keeps the key for a later link | So no two accounts' links ever share a signing key, which would let their owners match a sender who writes to each of them by the tag the sender's app adds | While the account exists. When it ends, the account ID goes from it (at once for its current link's key, the rest with the steps below), and the fingerprint stays for good, as a tombstone naming nobody: one small item for each signing key ever used, so that no account can take the key up later and match its senders' tags with the ones the ended account saw |
 | Mailboxes: random IDs, and which account they belong to | To deliver messages | Until they're ended, or their account is deleted or replaced: they take nothing from that moment, and go in steps while the app is open (below) |
 | Only while a deletion, or the cleanup after a replacement, is under way: that the account is being deleted; or, on the new account, the old account's ID | So the deletion or cleanup carries on where it stopped, and the account is never left half deleted and in use | Until it's done, a few minutes at most while the app is open; it carries on each time the app is opened. If the app is never opened again, it stays, with what isn't deleted yet (below) |
 | On the account: a random value replaced at each change to its link (not a count, so it says nothing about how often it changed), and, while a step of a deletion or cleanup runs, until when that step holds the account (to the millisecond) | So two requests can't undo each other's change to the link, or run the same step twice | The random value while the account exists; the step's time until the work is done (each step replaces it, the last removes it, or it goes with the account) |
@@ -115,7 +116,8 @@ unused. If the app is never opened again, that stays too: the account,
 marked and unused, with what is left of it. The same if the server can't
 finish and the user deletes everything from the device only; setting up
 again later replaces that account (without asking: it isn't in use) and
-deletes what is left of it, keeping no marker of it. Only short-lived rate
+deletes what is left of it, keeping no marker of it. Besides the tombstones
+of its link signing keys (above), which name nobody, only short-lived rate
 counters (and a quiet period, for a few minutes) are left. They expire on
 their own within about a day, though DynamoDB can take some days more to
 delete them, and an expired one is never used again. Until then, that day's
@@ -201,7 +203,8 @@ explained in [security.md](security.md#what-still-leaks).
 - **Delete their account** in the app (on the Link tab). It ends at once, and
   everything the server holds for it is deleted within minutes (the link,
   mailboxes, waiting messages and attachments, invitation codes, keys, and
-  the hash of the Telegram ID), then the app clears everything on the
+  the hash of the Telegram ID; only its link signing keys' fingerprints
+  stay, naming nobody), then the app clears everything on the
   device (see On the device for what that leaves). They can set up a new
   account later.
 - **Set up again on another device** if they can't use theirs any more. This

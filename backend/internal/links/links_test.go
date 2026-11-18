@@ -23,6 +23,59 @@ const (
 	vectorMessage = "0019696e636f676e69746f636861742f76322f6c696e6b2d6b6579000000010100000041043e4cd596e64fe0d4dac5cce1479f58b981e24664c49c89e823be92673cd970d130b3038618a2156d3db3edccde5a6f271cb346dd868dc771d0ba2812a1197cb100000008000000006b49d20000000008000000006b6ebc00"
 )
 
+// The owner proof's message for fixed IDs, computed independently (Python)
+// and checked by the client too (web/src/protocol/link.test.ts).
+const (
+	vectorLinkID       = "AAAAAAAAAAA"
+	vectorAccountID    = "AAAAAAAAAAAAAAAAAAAAAA"
+	vectorOwnerMessage = "001b696e636f676e69746f636861742f76322f6c696e6b2d6f776e657200000001010000000b41414141414141414141410000001641414141414141414141414141414141414141414141"
+)
+
+func signOwner(t *testing.T, key *ecdsa.PrivateKey, linkID, accountID string) []byte {
+	t.Helper()
+	digest := sha256.Sum256(devicesig.Message(devicesig.LabelLinkOwner, OwnerParts(linkID, accountID)...))
+	r, s, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return sig
+}
+
+func TestOwnerMessageMatchesClient(t *testing.T) {
+	got := devicesig.Message(devicesig.LabelLinkOwner, OwnerParts(vectorLinkID, vectorAccountID)...)
+	if want, _ := hex.DecodeString(vectorOwnerMessage); !bytes.Equal(got, want) {
+		t.Fatalf("message = %x\nwant      %x", got, want)
+	}
+}
+
+// An owner proof holds only for the key that made it, the link ID and the
+// account ID it names: a copied bundle (keys signed for anyone) proves
+// nothing, and one account's proof doesn't serve another, or another link.
+func TestCheckOwner(t *testing.T) {
+	lsk, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	const link, account = "AAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAA"
+	if err := CheckOwner(&lsk.PublicKey, signOwner(t, lsk, link, account), link, account); err != nil {
+		t.Fatalf("a valid proof: %v", err)
+	}
+	k := sign(t, lsk, Key{Key: encryptionKey(t), From: now.Truncate(time.Hour), Until: now.Truncate(time.Hour).Add(time.Hour)})
+	for name, proof := range map[string][]byte{
+		"none":                  nil,
+		"another key":           signOwner(t, other, link, account),
+		"another link":          signOwner(t, lsk, "BBBBBBBBBBB", account),
+		"another account":       signOwner(t, lsk, link, "BBBBBBBBBBBBBBBBBBBBBB"),
+		"an encryption key's":   k.Signature,
+		"garbage of the length": bytes.Repeat([]byte{1}, 64),
+	} {
+		if err := CheckOwner(&lsk.PublicKey, proof, link, account); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func sign(t *testing.T, key *ecdsa.PrivateKey, k Key) Key {
 	t.Helper()
 	digest := sha256.Sum256(devicesig.Message(devicesig.LabelLinkKey, KeyParts(k)...))

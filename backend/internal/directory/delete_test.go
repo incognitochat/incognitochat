@@ -37,14 +37,15 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("delete: %v %v", done, err)
 	}
 
-	// Nothing of it is left: the table holds only the other account's items.
+	// Nothing of it is left: the table holds only the other account's items,
+	// and its link signing key's tombstone, which names nobody.
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range out.Items {
 		pk, _ := str(it, "pk")
-		if pk != accountPK(other.ID) && pk != "T#"+other.TelegramHash {
+		if pk != accountPK(other.ID) && pk != "T#"+other.TelegramHash && !tombstone(it) {
 			sk, _ := str(it, "sk")
 			t.Errorf("left behind: %s %s", pk, sk)
 		}
@@ -124,7 +125,9 @@ func TestDeleteInSteps(t *testing.T) {
 	for _, it := range out.Items {
 		pk, _ := str(it, "pk")
 		sk, _ := str(it, "sk")
-		t.Errorf("left behind: %s %s", pk, sk)
+		if !tombstone(it) {
+			t.Errorf("left behind: %s %s", pk, sk)
+		}
 	}
 	for _, id := range append(pool, l.Mailbox) {
 		if _, err := s.Mailbox(ctx, id); !errors.Is(err, ErrNotFound) {

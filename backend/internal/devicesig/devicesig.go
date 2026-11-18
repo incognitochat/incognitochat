@@ -28,6 +28,7 @@ const (
 	LabelFingerprint = "incognitochat/v2/fingerprint"
 	LabelRequest     = "incognitochat/v2/request"
 	LabelLinkKey     = "incognitochat/v2/link-key"
+	LabelLinkOwner   = "incognitochat/v2/link-owner"
 )
 
 // Suite is the algorithm suite (P-256, HKDF-SHA256, AES-256-GCM). It's part

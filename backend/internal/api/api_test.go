@@ -79,10 +79,14 @@ type memDirectory struct {
 	telegram map[string]string
 	accounts map[string]*memAccount
 	links    map[string]*memLink
-	codes    map[string]*memCode
-	levels   map[int]int
-	boxes    map[string]directory.Mailbox
-	fail     error
+	// keys gives each link signing key (by fingerprint) to the account
+	// that first used it, for good: "" once that account ended (a
+	// tombstone), as the store does.
+	keys   map[string]string
+	codes  map[string]*memCode
+	levels map[int]int
+	boxes  map[string]directory.Mailbox
+	fail   error
 	// deviceReads counts reads of a device and its account.
 	deviceReads int
 	// goneOnDelete makes the next Delete find the account gone, as when
@@ -97,6 +101,7 @@ func newMemDirectory() *memDirectory {
 		telegram: map[string]string{},
 		accounts: map[string]*memAccount{},
 		links:    map[string]*memLink{},
+		keys:     map[string]string{},
 		codes:    map[string]*memCode{},
 		levels:   map[int]int{},
 		boxes:    map[string]directory.Mailbox{},
@@ -201,6 +206,7 @@ func (m *memDirectory) MarkDeleting(_ context.Context, account string) error {
 		return directory.ErrNotFound
 	}
 	a.deleting = true
+	m.burnKeys(account)
 	// Its link goes with the mark, as in the store.
 	for id, l := range m.links {
 		if l.owner == account {
@@ -411,9 +417,28 @@ func (m *memDirectory) Grant(_ context.Context, linkID string, n int) error {
 	return nil
 }
 
+// keyTaken reports whether another account has (or had) a signing key
+// (directory.ErrKeyTaken), which the store checks first.
+func (m *memDirectory) keyTaken(account string, signingKey []byte) bool {
+	owner, ok := m.keys[devicesig.Fingerprint(signingKey)]
+	return ok && owner != account
+}
+
+// burnKeys leaves the keys of an account that ended to nobody.
+func (m *memDirectory) burnKeys(account string) {
+	for fingerprint, owner := range m.keys {
+		if owner == account {
+			m.keys[fingerprint] = ""
+		}
+	}
+}
+
 func (m *memDirectory) CreateLink(_ context.Context, account string, l directory.Link, max int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
+	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
 	}
@@ -421,6 +446,7 @@ func (m *memDirectory) CreateLink(_ context.Context, account string, l directory
 	if !ok || a.links >= max {
 		return directory.ErrLimit
 	}
+	m.keys[devicesig.Fingerprint(l.SigningKey)] = account
 	a.links++
 	m.links[l.ID] = &memLink{owner: account, link: l}
 	m.boxes[l.Mailbox] = directory.Mailbox{ID: l.Mailbox, Owner: account, Link: l.ID}
@@ -434,9 +460,13 @@ func (m *memDirectory) ReplaceLink(_ context.Context, account, oldID string, l d
 	if !ok || old.owner != account {
 		return directory.ErrNotFound
 	}
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
+	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
 	}
+	m.keys[devicesig.Fingerprint(l.SigningKey)] = account
 	delete(m.links, oldID)
 	delete(m.boxes, old.link.Mailbox)
 	m.links[l.ID] = &memLink{owner: account, link: l}
@@ -465,6 +495,10 @@ func (m *memDirectory) SetLinkKeys(_ context.Context, account, id string, keys [
 	if !ok || l.owner != account {
 		return directory.ErrNotFound
 	}
+	if m.keyTaken(account, l.link.SigningKey) {
+		return directory.ErrKeyTaken
+	}
+	m.keys[devicesig.Fingerprint(l.link.SigningKey)] = account
 	l.link.Keys = keys
 	return nil
 }
@@ -583,6 +617,7 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	// codes stay, dead, until the cleanup.
 	prev := m.accounts[old.ID]
 	prev.replaced, prev.deleting, prev.th = true, false, ""
+	m.burnKeys(old.ID)
 	for id, l := range m.links {
 		if l.owner == old.ID {
 			delete(m.links, id)

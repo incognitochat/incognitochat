@@ -72,6 +72,7 @@ const NOTICE_TEXT: Record<HomeNotice, Key> = {
   'already-member': 'noticeAlreadyMember',
   'own-invitation': 'noticeOwnInvitation',
   'rate-limited': 'noticeRateLimited',
+  'new-signing-key': 'noticeNewSigningKey',
   network: 'errorNetwork',
   generic: 'errorGeneric',
 };

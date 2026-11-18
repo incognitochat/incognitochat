@@ -32,7 +32,7 @@ import {
   type LevelAllowance,
 } from '../account/invitations';
 import { checkSwitches, type Switch, type Switches } from '../account/switches';
-import { checkAccountInfo, createLink, listLinks, replaceLink, revokeLink, type AccountInfo, type LinkRecord } from '../account/links';
+import { checkAccountInfo, createLink, listLinks, newKeyToTell, replaceLink, revokeLink, toldNewKey, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
 import { budgetLeft, countTokens, rememberLeft, type TokenIssuer } from '../account/wallet';
 import { checkUsage, usageView, type UsageView } from '../account/usage';
@@ -132,8 +132,17 @@ export type HomeNotice =
   | 'already-member'
   | 'own-invitation'
   | 'rate-limited'
+  | 'new-signing-key'
   | 'network'
   | 'generic';
+
+/** Notices that say an action went as asked, which telling of a new link signing key takes the place of. */
+const ROUTINE_NOTICES: ReadonlySet<HomeNotice> = new Set<HomeNotice>(['blocked', 'unblocked', 'deleted', 'replaced', 'created', 'revoked', 'joined']);
+
+/** The home notice to show when the user is still to be told their link has a new signing key: that, unless an error is to be shown. */
+function withNewKey(notice: HomeNotice | null, newKey: boolean): HomeNotice | null {
+  return newKey && (notice === null || ROUTINE_NOTICES.has(notice)) ? 'new-signing-key' : notice;
+}
 
 export type InvitationsNotice = 'created' | 'none-left' | 'network' | 'generic';
 
@@ -613,6 +622,13 @@ export function createApp(deps: Deps) {
           deps.broadcast({ type: 'data-changed' });
           void refresh();
         },
+        // A link with a new signing key: the user is told on the home
+        // screen, here or in another copy, now or the next time it shows
+        // (refresh and showHome read the note).
+        onNewLink: () => {
+          deps.broadcast({ type: 'data-changed' });
+          void refresh();
+        },
       });
       return true;
     } catch {
@@ -776,11 +792,19 @@ export function createApp(deps: Deps) {
     }
   }
 
-  /** Redraws the current screen from storage (after new messages, or another copy's change). */
+  /**
+   * Redraws the current screen from storage (after new messages, or another
+   * copy's change), as it is once read: a notice shown meanwhile stays.
+   */
   async function refresh(): Promise<void> {
     const current = screen.value;
     if (current.kind === 'home' && !current.busy) {
-      screen.value = { ...current, conversations: await conversations(), links: await linkViews() };
+      const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
+      const latest = screen.value;
+      if (latest.kind !== 'home' || latest.busy) return;
+      const notice = withNewKey(latest.notice, newKey);
+      screen.value = { ...latest, conversations: list, links, notice };
+      if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
       screen.value = { ...current, messages: await listMessages(deps.db, current.id) };
@@ -1682,12 +1706,13 @@ export function createApp(deps: Deps) {
       invitations,
       links,
       busy: false,
-      notice: options.notice ?? null,
+      notice: withNewKey(options.notice ?? null, await newKeyToTell(db)),
       askNotices: noticeLaunch && !!account && !account.notices && !writeAllowed,
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
       deletionPaused,
     };
+    if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
     if (account && !account.notices && writeAllowed && !noticesTried) void setUpNotices();
   }
 
@@ -1823,7 +1848,11 @@ export function createApp(deps: Deps) {
     return adminAction(() => session!.call('POST', '/admin/grant', { link: ref.id, invitations }, checkObject, { sign: true }), 'granted');
   }
 
-  /** Runs a link action from the home screen, then shows home again with its outcome. */
+  /**
+   * Runs a link action from the home screen, then shows home again with its
+   * outcome (a new signing key the link got wins over a routine one:
+   * showHome).
+   */
   async function linkAction(action: () => Promise<unknown>, done: HomeNotice): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'home' || current.busy) return;

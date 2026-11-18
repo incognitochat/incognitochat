@@ -235,6 +235,13 @@ export interface MessagingDeps {
   onResume?: () => void;
   /** Called when upkeep found the account's link changed: a create or replace whose answer was lost, which the server had made. */
   onLinks?: () => void;
+  /**
+   * Called, instead of onLinks, when upkeep found the account's link changed
+   * and it has a new signing key the user is still to be told of
+   * (newKeyToTell): replaced because it couldn't get new keys any more, or a
+   * change made with a new key whose answer was lost.
+   */
+  onNewLink?: () => void;
 }
 
 /** An attachment to send: the file, and what it is. */
@@ -1938,11 +1945,15 @@ export function createMessaging(deps: MessagingDeps) {
         if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
       },
       async () => {
-        if (await settleLinkChange(db, session, api, Math.floor(now() / 1000))) deps.onLinks?.();
+        const changed = await settleLinkChange(db, session, api, Math.floor(now() / 1000));
+        if (changed === 'new-key') deps.onNewLink?.();
+        else if (changed) deps.onLinks?.();
       },
       backfillLinks,
       backfillIntros,
-      () => rotateLinkKey(db, session, Math.floor(now() / 1000)),
+      async () => {
+        if ((await rotateLinkKey(db, session, Math.floor(now() / 1000))) === 'new-link') deps.onNewLink?.();
+      },
     ];
     // Each on its own: one that fails (out of reach, or a daily limit
     // reached) doesn't keep the others from running. The first failure is

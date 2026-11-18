@@ -13,8 +13,9 @@
 //	account_replaced                      the account was replaced by a new registration
 //	session_expired                       the session token is missing or expired; log in again
 //	invitation_required                   only members and admins can own links while invite-only
-//	invalid_link                          the link ID or bundle is malformed or badly signed
+//	invalid_link                          the link ID or bundle is malformed or badly signed, or the owner proof doesn't check
 //	link_limit                            the account has a link already (replace it instead)
+//	signing_key_taken                     another account has (or had) this link signing key: each account's links need their own
 //	no_invitations_left                   the member has fewer invitations left than asked for
 //	invalid_invitation                    no such invitation code, or it is used up
 //	already_member                        the account already joined through an invitation, or is an admin

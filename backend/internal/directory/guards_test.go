@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
 )
@@ -175,8 +176,8 @@ func TestDeleteWhenTheTelegramItemIsNotItsOwn(t *testing.T) {
 }
 
 // A record in an account's partition that names someone else's mailbox,
-// link or code (nothing makes one, but nothing may trust it either) goes
-// when the account is deleted or replaced; their item stays.
+// link, code or signing key (nothing makes one, but nothing may trust it
+// either) goes when the account is deleted or replaced; their item stays.
 func TestStepsSpareOthersItems(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
@@ -194,7 +195,8 @@ func TestStepsSpareOthersItems(t *testing.T) {
 	}
 	plant := func(accountID string) {
 		t.Helper()
-		for _, sk := range []string{mailboxPrefix + box, mailboxPrefix + l.Mailbox, linkPrefix + l.ID, codePrefix + "abcdefgh"} {
+		victimKey := keyRecordPrefix + devicesig.Fingerprint(l.SigningKey)
+		for _, sk := range []string{mailboxPrefix + box, mailboxPrefix + l.Mailbox, linkPrefix + l.ID, codePrefix + "abcdefgh", victimKey} {
 			if _, err := client.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.Table, Item: item(accountPK(accountID), sk, attrs{})}); err != nil {
 				t.Fatal(err)
 			}
@@ -212,6 +214,9 @@ func TestStepsSpareOthersItems(t *testing.T) {
 		}
 		if _, err := s.get(ctx, codePK("abcdefgh"), skCode, time.Time{}); err != nil {
 			t.Fatalf("%s: the victim's code: %v", how, err)
+		}
+		if got, _ := keyOwner(t, client, s.Table, l.SigningKey); got != victim.ID {
+			t.Fatalf("%s: the victim's signing key's item names %q", how, got)
 		}
 	}
 

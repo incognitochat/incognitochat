@@ -34,7 +34,7 @@ record exactly when anything happened.
 |---|---|---|
 | Account key | ECDSA P-256 | Copyable (sealed in the vault), never shown to other users |
 | Device signing key | ECDSA P-256 | Non-extractable, one device |
-| Link signing key | ECDSA P-256 | One per link, copyable |
+| Link signing key | ECDSA P-256 | One per account, kept when its link is replaced; the server gives it to that account for good; copyable |
 | Link encryption key | ECDH P-256 | Signed by the link signing key, rotated |
 | Conversation key | ECDH P-256 | One per conversation per side, rotated |
 
@@ -279,6 +279,66 @@ fingerprint, so the same people keep the same tags across replacements, which
 keeps blocks and labels. Conversations carry on, since after the first message
 they don't go through the link; a sender the owner hasn't answered yet keeps
 writing to the old intro mailbox until the owner replies.
+
+**Owner proof.** Creating or replacing a link (`POST /links`) and rotating
+its keys (`PUT /links/{id}/keys`) carry `proof`, the link signing key's
+signature over
+
+```
+Message("incognitochat/v2/link-owner", [0x01], UTF-8 link ID, UTF-8 account ID)
+```
+
+with the new link's ID when creating or replacing, and the caller's account
+ID. The server checks it first; a missing or wrong proof is
+`400 {"error": "invalid_link"}`. The encryption keys' signatures don't name
+the link, and anyone can copy them from a bundle, so they don't show that
+the caller holds the key. The proof does, and only for that account and
+link.
+
+**One account per signing key.** Since a sender's tag is the same on every
+link with one signing key, accounts whose links shared a key could compare
+the tags they get and match a sender who writes to each of them. So the
+server gives each signing key to the first account that proves it holds it,
+for good. Any other account's create, replace or rotation with that key
+gets `409 {"error": "signing_key_taken"}`. The account keeps the key after
+it revokes its link or moves to another key, so its next link can use it
+again. When the account ends (deleted, or replaced by setting up again), the
+key isn't freed: the server keeps a tombstone of it, holding only the
+fingerprint, which refuses every account. So a key never passes from one
+account to another, at the same time or later.
+
+Links made before the server checked this get their key claimed at their
+next rotation or replacement, each with an owner proof: whoever proves they
+hold the key first claims it. Until those links' current keys expire, two
+things made before stay open:
+
+- **Copies.** Another account's copy of someone's link (their signing key
+  and signed keys, taken from a bundle, under another link ID) keeps taking
+  first messages meant for them until the copied keys expire: at most 5
+  weeks after they were signed, since the app signs each key for 5 weeks.
+  Whoever made the copy can't make a proof, so they can't claim the key,
+  rotate the copy or make another one.
+- **Shared keys.** Accounts that shared a private key itself keep getting
+  the same tag from a sender who writes to each of their links until the
+  keys those links already hold expire. The server accepted keys that start
+  in the future, so a link could hold up to 4 keys of up to 8 weeks each,
+  back to back: about 32 weeks from when they were put up. Only the first of
+  those accounts to create, replace or rotate since can do so again; the
+  others get `signing_key_taken`, and their apps make a new key (below).
+
+A key that was never claimed stays unclaimed when its link is revoked or its
+account ends, since those writes carry no proof, and whoever holds it can
+still claim it.
+
+**A key someone else has.** Told `signing_key_taken` when it creates or
+replaces a link, the app makes a new signing key and tries once more with
+it. Told so when it rotates, it replaces the link with one that has a new
+signing key. It does the same for a link whose signing key is gone from the
+device. Either way the user is told that the link has a new key: they
+share the new link, senders get new tags on it, and so new labels, and
+blocks don't carry over. The app notes this on the device before it makes
+the new key, and keeps the note until the home screen has said it (in any
+copy of the app), so a lost answer or the app closing doesn't lose it.
 
 **A lost answer.** The client picks the new link's ID, and makes and signs
 its keys, before it asks. Without an answer (a timeout, a dropped
@@ -1210,7 +1270,7 @@ logged-in admin, and every change also a device signature
 | Fingerprint | `backend/internal/devicesig`, `web/src/crypto/crypto.test.ts` |
 | Device list | `backend/internal/devicelist`, `web/src/protocol/device-list.test.ts` |
 | Register, session and request messages | `backend/internal/api/vectors_test.go`, `web/src/account/account.test.ts` |
-| Link keys | `backend/internal/links`, `web/src/protocol/link.test.ts` |
+| Link keys, owner proofs | `backend/internal/links`, `web/src/protocol/link.test.ts` |
 | HPKE (RFC 9180 Appendix A, AES-128-GCM and AES-256-GCM) | `web/src/crypto/hpke-vectors.json` |
 | Envelope layout (sealed by the client) | `backend/internal/envelope/testdata` |
 | Blind RSA (RFC 9474 Appendix A, PSS-Deterministic) | `web/src/crypto/blindrsa-vectors.json`, `backend/internal/tokens/testdata` |
