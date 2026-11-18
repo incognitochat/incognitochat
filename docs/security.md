@@ -99,9 +99,12 @@ it. This is how close it gets.
   organization is served from the app's origin, `https://<org>.github.io`,
   and a page there could use the keys the app keeps in the browser. So the
   organization hosts nothing but the app, and the verification script fails
-  if any other of its repositories has a Pages site. One gap remains: a
-  hosting workflow changed to add pages the manifest doesn't list shows only
-  in the hosting repository's public history
+  if any other of its repositories has a Pages site. One gap remains: whoever
+  controls the hosting repository can add pages the manifest doesn't list to
+  the app's own site (through a changed or added workflow, or by deploying
+  Pages from a branch), and nothing the script checks would catch it. The
+  change may show in the hosting repository's public history, but an admin
+  can rewrite that history and delete the runs
   ([verifying.md](verifying.md#what-this-proves-and-what-it-doesnt)).
 
 **What still requires trusting the operator**

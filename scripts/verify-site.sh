@@ -11,10 +11,15 @@
 # from is this checkout's origin on GitHub, or --code-repo. What it checks is
 # listed in docs/verifying.md.
 #
-# Needs curl, jq, sha256sum, git and the GitHub CLI, logged in (gh auth login,
-# any account: it only reads public data). --rebuild also needs Node (the
-# version in web/.nvmrc).
+# Needs curl, jq, sha256sum, git and the GitHub CLI 2.93.0 or later (2.102.0
+# or later recommended), logged in (gh auth login, any account: it only reads
+# public data). --rebuild also needs Node (the version in web/.nvmrc).
+#
+# Exit codes: 0 verified, 1 verification failed, 2 usage or setup error.
 set -euo pipefail
+# Character classes below mean ASCII only; the rebuild gets the caller's locale.
+caller_lc_all=${LC_ALL-} caller_lc_all_set=${LC_ALL+1}
+export LC_ALL=C
 
 die() { echo "Error: $*" >&2; exit 2; }
 refuse() { echo "$*"; echo "VERIFICATION FAILED"; exit 1; }
@@ -46,6 +51,16 @@ done
 # --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308).
 gh attestation verify --help 2>/dev/null | grep -q -- --signer-digest \
   || die "this GitHub CLI can't pin the signing workflow (no --signer-digest); update it"
+# Before 2.93.0, gh attestation sent the login token to the TUF mirror's host
+# (GHSA-8xvp-7hj6-mcj9). Before 2.102.0, --signer-workflow matched a prefix
+# and --source-ref ignored case; the exact --cert-identity below covers both.
+older() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]; }
+ghv=$(gh --version | sed -n '1s/^gh version \([0-9][0-9.]*\).*/\1/p')
+if [ -n "$ghv" ] && older "$ghv" 2.93.0; then
+  die "gh ${ghv} would send your GitHub token to the TUF mirror (GHSA-8xvp-7hj6-mcj9); update to 2.102.0 or later"
+elif [ -n "$ghv" ] && older "$ghv" 2.102.0; then
+  echo "Note: gh ${ghv} is older than 2.102.0, the version these checks are written for; consider updating" >&2
+fi
 gh auth status >/dev/null 2>&1 \
   || die "the GitHub CLI needs a login (gh auth login, any account) to read public attestations"
 
@@ -118,7 +133,7 @@ fi
 
 echo "Fetching ${site}/manifest.json"
 manifest=$work/manifest.json
-curl -fsS --max-time 30 --proto '=https' "${site}/manifest.json?nocache=$RANDOM" -o "$manifest" \
+curl -fsS --max-time 30 --max-filesize 1048576 --proto '=https' "${site}/manifest.json?nocache=$RANDOM" -o "$manifest" \
   || refuse "Can't fetch manifest.json"
 jq -e 'type == "object"' "$manifest" >/dev/null 2>&1 || refuse "manifest.json isn't a JSON object"
 
@@ -132,12 +147,13 @@ if [ -z "$repository" ] || [ -z "$ref" ] || [ -z "$commit" ]; then
   refuse "The manifest's repository, ref or commit is missing or malformed"
 fi
 # Paths and hashes too, before anything is fetched or written: the paths become
-# file names under the temporary folder.
-bad=$(jq -r --arg re '\A[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\z' '
+# file names under the temporary folder. Bad keys are printed as ASCII JSON, so
+# control or bidirectional characters can't hide text on the terminal.
+bad=$(jq -a --arg re '\A[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\z' '
   def plain: test($re) and (split("/") | all(. != "." and . != ".."));
   def sha256: type == "string" and test("\\A[0-9a-f]{64}\\z");
   if (.files | type) != "object" or (.files | length) == 0 then "(no files)"
-  else .files | to_entries[] | select((.key | plain) and (.value | sha256) | not) | .key | @json
+  else .files | to_entries[] | select((.key | plain) and (.value | sha256) | not) | .key
   end' "$manifest")
 if [ -n "$bad" ]; then
   refuse "The manifest lists paths that aren't plain relative paths, or hashes that aren't SHA-256:
@@ -183,7 +199,8 @@ esac
 # The signing workflow: the hosting repository's deploy.yml, run from its main
 # branch on GitHub's own runners, at a commit (the certificate's signer digest)
 # where it is byte for byte a copy of hosting/deploy.yml that was on this
-# repository's main. A changed workflow, even one changed back later, fails.
+# repository's main. A changed workflow, even one changed back later, fails,
+# also next to a reviewed one.
 identity="https://github.com/${hosting}/.github/workflows/deploy.yml@refs/heads/${branch}"
 attest() { # file [flags]: gh attestation verify with the pins every check uses
   gh attestation verify "$1" --repo "$hosting" --cert-identity "$identity" \
@@ -202,15 +219,17 @@ while IFS= read -r digest; do
   if ! gh api -H 'Accept: application/vnd.github.raw' \
     "repos/${hosting}/contents/.github/workflows/deploy.yml?ref=${digest}" >"$work/deploy-${digest}.yml" 2>/dev/null; then
     echo "UNREVIEWED WORKFLOW can't read ${hosting}'s deploy.yml at ${digest}"
+    failed=1
     continue
   fi
-  blob=$(git hash-object --no-filters "$work/deploy-${digest}.yml")
+  blob=$(code hash-object --no-filters "$work/deploy-${digest}.yml")
   copy=$(awk -v b="$blob" '$1 == b { print $2; exit }' <<<"$reviewed")
   if [ -n "$copy" ]; then
     echo "ok        signed by ${hosting}'s deploy.yml at ${digest}, the copy from ${code_repo}@${copy:0:12}"
     approved+=("$digest")
   else
     echo "UNREVIEWED WORKFLOW ${hosting}'s deploy.yml at ${digest} isn't a copy of hosting/deploy.yml from ${code_repo}'s ${branch}"
+    failed=1
   fi
 done <<<"$signers"
 attested() { # file: attested by an approved signer
@@ -220,8 +239,10 @@ attested() { # file: attested by an approved signer
   done
   return 1
 }
+manifest_ok=0
 if [ "${#approved[@]}" -gt 0 ] && attested "$manifest"; then
   echo "ok        manifest.json"
+  manifest_ok=1
 else
   echo "UNATTESTED manifest.json"
   failed=1
@@ -242,7 +263,8 @@ check() { # path expected-sha256
     "$work/site/"*) ;;
     *) echo "BAD PATH  ${path}"; failed=1; return ;;
   esac
-  if ! curl -fsS --max-time 30 --proto '=https' --path-as-is "${site}/${path}?nocache=$RANDOM" -o "$file"; then
+  if ! curl -fsS --max-time 60 --max-filesize 20971520 --proto '=https' --path-as-is \
+    "${site}/${path}?nocache=$RANDOM" -o "$file"; then
     echo "MISSING   ${path}"
     failed=1
     return
@@ -259,46 +281,61 @@ check() { # path expected-sha256
   fi
 }
 
-while IFS=$'\t' read -r path sha; do
-  check "$path" "$sha"
-done < <(jq -r '.files | to_entries[] | "\(.key)\t\(.value)"' "$manifest")
+# Only the files of a manifest that a reviewed workflow made.
+if [ "$manifest_ok" = 1 ]; then
+  while IFS=$'\t' read -r path sha; do
+    check "$path" "$sha"
+  done < <(jq -r '.files | to_entries[] | "\(.key)\t\(.value)"' "$manifest")
+else
+  echo "Not fetching the files the manifest lists: it isn't attested by a reviewed workflow"
+fi
 
 if [ "$rebuild" = 1 ] && [ "$failed" != 0 ]; then
   echo "Not rebuilding: the checks above failed"
 elif [ "$rebuild" = 1 ]; then
   # Only the expected repository, at the commit checked above.
   echo "Rebuilding ${commit} from ${code_repo}"
-  code -c advice.detachedHead=false checkout --quiet --detach "$commit"
   node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
   if [ "$node" != "$(node --version)" ]; then
     echo "Note: the site was built with Node ${node:-?}, this is $(node --version); files may differ"
   fi
-  (
-    cd "$work/code/web"
-    npm ci --ignore-scripts --silent
-    VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
-    VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
-    VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") \
-    VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
-    VITE_WS_URL=$(jq -r '.build.VITE_WS_URL // empty' "$manifest") \
-    VITE_MEDIA_ORIGIN=$(jq -r '.build.VITE_MEDIA_ORIGIN // empty' "$manifest") \
-      npm run build --silent >/dev/null
-  )
+  built=0
+  if ! code -c advice.detachedHead=false checkout --quiet --detach "$commit"; then
+    echo "REBUILD FAILED can't check out ${commit}"
+  elif ! (
+    if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
+    # set -e is off inside a condition, so each step is chained.
+    cd "$work/code/web" \
+      && npm ci --ignore-scripts --silent \
+      && VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
+        VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
+        VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") \
+        VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
+        VITE_WS_URL=$(jq -r '.build.VITE_WS_URL // empty' "$manifest") \
+        VITE_MEDIA_ORIGIN=$(jq -r '.build.VITE_MEDIA_ORIGIN // empty' "$manifest") \
+        npm run build --silent >/dev/null
+  ); then
+    echo "REBUILD FAILED npm ci or npm run build failed (output above)"
+  else
+    built=1
+  fi
   differs=0
-  while IFS=$'\t' read -r path sha; do
-    got=$(sha256sum "$work/code/web/dist/$path" 2>/dev/null | cut -d' ' -f1 || true)
-    if [ "$got" != "$sha" ]; then
-      echo "REBUILD DIFFERS ${path}"
+  if [ "$built" = 1 ]; then
+    while IFS=$'\t' read -r path sha; do
+      got=$(sha256sum "$work/code/web/dist/$path" 2>/dev/null | cut -d' ' -f1 || true)
+      if [ "$got" != "$sha" ]; then
+        echo "REBUILD DIFFERS ${path}"
+        differs=1
+      fi
+    done < <(jq -r '.files | to_entries[] | "\(.key)\t\(.value)"' "$manifest")
+    # And the manifest lists every file the build makes.
+    while IFS= read -r path; do
+      echo "NOT IN MANIFEST ${path}"
       differs=1
-    fi
-  done < <(jq -r '.files | to_entries[] | "\(.key)\t\(.value)"' "$manifest")
-  # And the manifest lists every file the build makes.
-  while IFS= read -r path; do
-    echo "NOT IN MANIFEST ${path}"
-    differs=1
-  done < <(LC_ALL=C comm -23 <(cd "$work/code/web/dist" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) \
-    <(jq -r '.files | keys[]' "$manifest" | LC_ALL=C sort))
-  if [ "$differs" = 0 ]; then
+    done < <(comm -23 <(cd "$work/code/web/dist" && find . -type f | sed 's|^\./||' | sort) \
+      <(jq -r '.files | keys[]' "$manifest" | sort))
+  fi
+  if [ "$built" = 1 ] && [ "$differs" = 0 ]; then
     echo "Rebuild matches byte for byte"
   else
     failed=1

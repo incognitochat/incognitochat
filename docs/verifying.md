@@ -61,7 +61,9 @@ until checked. The script checks, in this order:
    GitHub's own runners, at a commit where that file is byte for byte a copy
    of [`hosting/deploy.yml`](../hosting/deploy.yml) that was on this
    repository's `main`. A changed workflow fails, even one changed back
-   afterwards.
+   afterwards, and even when a reviewed copy signed the same manifest too.
+   Without such an attestation, the script doesn't fetch the files the
+   manifest lists.
 5. Every file the manifest lists is served with that SHA-256, and attested by
    the same workflow.
 6. With `--rebuild`, and only if everything above passed: it clones the
@@ -89,16 +91,21 @@ copies. `--signer-digest` and `--source-ref` need gh 2.68.0 or later.
 
 It needs `curl`, `jq`, `sha256sum`, `git` and the GitHub CLI, logged in
 (`gh auth login`, any account: the CLI doesn't read even public attestations
-without a login). `--rebuild` also needs the Node version in
-[`web/.nvmrc`](../web/.nvmrc).
+without a login). Use gh 2.102.0 or later: before 2.93.0, `gh attestation`
+sent the login token to the host of Sigstore's TUF mirror
+([GHSA-8xvp-7hj6-mcj9](https://github.com/advisories/GHSA-8xvp-7hj6-mcj9)),
+so the script refuses those versions, and warns below 2.102.0.
+`--rebuild` also needs the Node version in [`web/.nvmrc`](../web/.nvmrc).
 
 ## What this proves, and what it doesn't
 
 - **Proves:** the files the manifest lists are, right now, exactly what an
   unchanged copy of the hosting workflow built from a commit on this
-  repository's `main` (in production, a release tag), for everyone who
+  repository's `main` (or a release tag at such a commit), for everyone who
   fetches them, and with `--rebuild`, what that commit's code builds into.
-  And that no other Pages site shares the app's origin.
+  And that no other repository of the organization has a Pages site. It
+  doesn't check whether the site builds commits or tags: the manifest's ref
+  says which.
 - **Doesn't prove** what one particular person was served inside Telegram. A
   bot owner could point the app at another address, for everyone or for
   chosen people. A page on any other address has none of the keys on your
@@ -106,10 +113,13 @@ without a login). `--rebuild` also needs the Node version in
   loudly on your old device and changes your link. A page on the app's own
   address would have them, which is why nothing else may be served there.
 - **Doesn't see files the manifest doesn't list.** Whoever controls the
-  hosting repository could change its workflow to publish an attested build
-  together with extra pages, on the app's origin. The script would pass that
-  site; the change shows only in the hosting repository's public history and
-  Actions runs.
+  hosting repository could publish an attested build together with extra
+  pages on the app's origin: through a changed `deploy.yml`, another workflow
+  allowed to deploy Pages, or by switching Pages to deploy from a branch,
+  without touching `deploy.yml`. Nothing the script checks would catch it.
+  The change may show in the hosting repository's public history and
+  Actions runs, but an admin of the hosting organization can rewrite that
+  history (force-push `main`) and delete runs and deployments.
 - **Doesn't say the build is the newest.** It prints the commit and ref it
   checked; compare them with the release or commit you expect.
 - **Covers the backend only through the operator's records** (below). The

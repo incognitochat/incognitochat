@@ -58,9 +58,10 @@ from this repository: builds are reproducible, hashed and attested, and
 **Users still have to trust the operator** on two points:
 
 1. **A swapped page inside Telegram.** Whoever controls the bot decides which
-   page Telegram opens. A swapped page can't reach the keys on your device, so
-   past messages stay safe, but what you type into it isn't. Setting up again
-   on such a page would end your account loudly, on your old device.
+   page Telegram opens. A page on another address can't reach the keys on
+   your device, so past messages stay safe, but what you type into it isn't.
+   Setting up again on such a page would end your account loudly, on your old
+   device.
 2. **Live traffic watching.** The operator or AWS could link people by the
    timing and IP addresses of requests as they happen. Nothing stored shows
    this.
