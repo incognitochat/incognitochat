@@ -179,6 +179,11 @@ jobs:
             terraform -chdir="$dir" validate
           done
 
+      # Renders function role policies and checks what they reach
+      # (infra/tests). Fake credentials, overridden resources: no AWS calls.
+      - name: Test
+        run: terraform -chdir=infra test
+
   deploy-dev:
     name: Deploy to dev
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

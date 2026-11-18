@@ -2,7 +2,9 @@
 // function invokes it to seal a chat ID (only notify holds the key), and
 // the ws function, without waiting, after a delivery that no open app took
 // and that isn't quiet. It can read the bot token and the chat key, and the
-// notice fields of accounts; nothing about messages, and no socket records.
+// notice fields of accounts (infra/functions.tf: no other attribute, and
+// nothing outside account partitions); nothing about messages, and no
+// socket records.
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"time"
 
@@ -35,15 +38,41 @@ func main() {
 		os.Exit(1)
 	}
 	lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
-		out, err := handle(ctx, raw, sealer, notifier.Notify)
-		if err != nil {
-			log.Warn("notify failed", logx.ErrorKind(err))
-		}
-		return out, err
+		out, err := handle(ctx, raw, sealer, notifier)
+		return out, report(log, err)
 	})
 }
 
-func handle(ctx context.Context, raw json.RawMessage, sealer *notices.Sealer, notify func(context.Context, string) error) (any, error) {
+// report logs an invocation's failure and returns the error for Lambda. A
+// notice refused by Telegram's flood control is dropped as Telegram asked,
+// and isn't the function's failure; anything that failed with it is.
+func report(log *slog.Logger, err error) error {
+	if !errors.Is(err, notices.ErrRateLimited) {
+		if err != nil {
+			log.Warn("notify failed", logx.ErrorKind(err))
+		}
+		return err
+	}
+	log.Warn("notice refused by flood control")
+	var rest []error
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if !errors.Is(e, notices.ErrRateLimited) {
+				log.Warn("notify failed", logx.ErrorKind(e))
+				rest = append(rest, e)
+			}
+		}
+	}
+	return errors.Join(rest...)
+}
+
+// notifier is what handle needs of notices.Notifier.
+type notifier interface {
+	Notify(ctx context.Context, accountID string) error
+	Check(ctx context.Context) error
+}
+
+func handle(ctx context.Context, raw json.RawMessage, sealer *notices.Sealer, n notifier) (any, error) {
 	var e notices.Event
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return nil, errors.New("notify: unreadable event")
@@ -60,15 +89,18 @@ func handle(ctx context.Context, raw json.RawMessage, sealer *notices.Sealer, no
 		return notices.SealResult{Sealed: base64.RawURLEncoding.EncodeToString(sealed)}, nil
 	case e.Notify != nil:
 		if e.Notify.Account == "" {
-			// Nothing to do: the deploy sends this to check the function
-			// starts (api functions from before ws asked for notices also
-			// sent it, for sends to mailboxes that don't exist).
+			// Nothing to do (api functions from before ws asked for
+			// notices sent this, for sends to mailboxes that don't exist).
 			return nil, nil
 		}
 		if !ids.Valid(e.Notify.Account) {
 			return nil, errors.New("notify: bad account")
 		}
-		return nil, notify(ctx, e.Notify.Account)
+		return nil, n.Notify(ctx, e.Notify.Account)
+	case e.Check != nil:
+		// The deploy's check that the function starts and its role
+		// allows its directory calls.
+		return nil, n.Check(ctx)
 	}
 	return nil, errors.New("notify: unknown event")
 }

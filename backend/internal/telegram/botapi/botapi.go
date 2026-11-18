@@ -21,11 +21,18 @@ type Client struct {
 	HTTP  *http.Client // nil for a client with a timeout
 }
 
+// maxRetryAfter bounds the wait taken from Telegram's answer (a day), so a
+// strange value can't overflow.
+const maxRetryAfter = 24 * time.Hour
+
 // Error is a failed call: the method, the HTTP status and Telegram's error code.
 type Error struct {
 	Method string
 	Status int
 	Code   int
+	// RetryAfter is how long Telegram's flood control asks to wait before
+	// the call is made again (error 429); 0 if it didn't say.
+	RetryAfter time.Duration
 }
 
 func (e *Error) Error() string {
@@ -35,6 +42,11 @@ func (e *Error) Error() string {
 // Forbidden reports whether the bot may not write to the chat (blocked by
 // the user, or never allowed to write).
 func (e *Error) Forbidden() bool { return e.Code == http.StatusForbidden }
+
+// TooManyRequests reports whether Telegram's flood control refused the call
+// (about 30 messages a second per bot, and one a second per chat).
+// RetryAfter says how long to wait.
+func (e *Error) TooManyRequests() bool { return e.Code == http.StatusTooManyRequests }
 
 // Call runs a method and decodes its result into result (which may be nil).
 func (c Client) Call(ctx context.Context, method string, params any, result any) error {
@@ -61,12 +73,19 @@ func (c Client) Call(ctx context.Context, method string, params any, result any)
 	}
 	defer resp.Body.Close()
 	var out struct {
-		OK        bool            `json:"ok"`
-		ErrorCode int             `json:"error_code"`
-		Result    json.RawMessage `json:"result"`
+		OK         bool            `json:"ok"`
+		ErrorCode  int             `json:"error_code"`
+		Result     json.RawMessage `json:"result"`
+		Parameters struct {
+			RetryAfter int64 `json:"retry_after"` // seconds
+		} `json:"parameters"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil || !out.OK {
-		return &Error{Method: method, Status: resp.StatusCode, Code: out.ErrorCode}
+		e := &Error{Method: method, Status: resp.StatusCode, Code: out.ErrorCode}
+		if ra := out.Parameters.RetryAfter; ra > 0 {
+			e.RetryAfter = time.Duration(min(ra, int64(maxRetryAfter/time.Second))) * time.Second
+		}
+		return e
 	}
 	if result != nil {
 		if err := json.Unmarshal(out.Result, result); err != nil {

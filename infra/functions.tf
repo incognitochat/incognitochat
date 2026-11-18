@@ -78,12 +78,16 @@ locals {
     # Generic "New message" notices through the bot. api invokes it to seal
     # chat IDs (POST /notices waits for that, sharing this concurrency with
     # notices), and ws without waiting after a delivery no open app took.
-    # Its quiet periods in the ephemeral table get their own, narrower
-    # statement below.
+    # In the directory it reaches only account partitions, and in the
+    # ephemeral table only its quiet periods: both get their own, narrower
+    # statements below, and no table-wide one. The timeout must stay below
+    # notices.Lease (30 s), the quiet period held while a notice is sent
+    # (infra/tests checks it); it leaves room for one wait of up to 3 s when
+    # Telegram's flood control asks for it.
     notify = {
       timeout     = 10
       concurrency = 10
-      tables      = ["directory"]
+      tables      = []
       parameters  = ["bot-token", "chat-key"]
       environment = {
         TABLE_DIRECTORY = aws_dynamodb_table.table["directory"].name
@@ -180,6 +184,82 @@ data "aws_iam_policy_document" "fn" {
         test     = "ForAllValues:StringLike"
         variable = "dynamodb:LeadingKeys"
         values   = ["C#*"]
+      }
+    }
+  }
+
+  # notify reads an account's notice settings (backend/internal/directory,
+  # Notices): only in account partitions ("A#"; Null keeps out a request
+  # without a partition key, such as a Scan), and only the key and the
+  # sealed chat ID (cid), language (lg), last notice (nm) and "notices off"
+  # (no). A read that names no attributes would return the whole item, so
+  # it must name them (Select). IAM can't limit sort keys, nor an update's
+  # ReturnValuesOnConditionCheckFailure, so this doesn't confine it to
+  # account items or their notice fields: docs/security.md says what's left.
+  # See
+  # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/specifying-conditions.html
+  # and https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html
+  # (which condition keys each action has).
+  dynamic "statement" {
+    for_each = each.key == "notify" ? [1] : []
+    content {
+      sid       = "ReadNoticeSettings"
+      actions   = ["dynamodb:GetItem"]
+      resources = [aws_dynamodb_table.table["directory"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["A#*"]
+      }
+      condition {
+        test     = "Null"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["false"]
+      }
+      condition {
+        test     = "ForAllValues:StringEquals"
+        variable = "dynamodb:Attributes"
+        values   = ["pk", "sk", "cid", "lg", "nm", "no"]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "dynamodb:Select"
+        values   = ["SPECIFIC_ATTRIBUTES"]
+      }
+    }
+  }
+
+  # It writes the last notice (nm) and "notices off" (no) on account items,
+  # with conditions on the key alone, and gets nothing back (NoticeSent,
+  # NoticesOff). No PutItem or DeleteItem: they replace or remove whole
+  # items. An update creates the item it names if it isn't there, so this
+  # still lets it create items, holding only these fields, under any sort
+  # key in an account partition.
+  dynamic "statement" {
+    for_each = each.key == "notify" ? [1] : []
+    content {
+      sid       = "RecordNotices"
+      actions   = ["dynamodb:UpdateItem"]
+      resources = [aws_dynamodb_table.table["directory"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["A#*"]
+      }
+      condition {
+        test     = "Null"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["false"]
+      }
+      condition {
+        test     = "ForAllValues:StringEquals"
+        variable = "dynamodb:Attributes"
+        values   = ["pk", "sk", "nm", "no"]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "dynamodb:ReturnValues"
+        values   = ["NONE"]
       }
     }
   }
@@ -330,8 +410,12 @@ resource "aws_lambda_function" "fn" {
   depends_on = [aws_iam_role_policy.fn, aws_ssm_parameter.parameter]
 }
 
-# Notices are sent at once or not at all: a retry would come after the quiet
-# period started and send nothing, and a late notice is no use.
+# Notices are sent at once or not at all: a late notice is little use, and
+# a retry after Telegram's flood control refused one would only add to the
+# flood. Instead (backend/internal/notices), a notice refused outright
+# ends its quiet period, so the next message can notify; one refused by
+# flood control keeps the account quiet for as long as Telegram asked (at
+# least a minute), and the instance sends none until then.
 resource "aws_lambda_function_event_invoke_config" "notify" {
   function_name                = aws_lambda_function.fn["notify"].function_name
   maximum_retry_attempts       = 0

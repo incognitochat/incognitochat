@@ -23,7 +23,8 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   ([verifying.md](verifying.md#the-backend)).
 - It then sets up the bot (the function registers its own webhook, menu
   button and commands, so the bot token never passes through CI), and runs
-  smoke tests: the API, the webhook and the socket refuse what they should.
+  smoke tests: the API, the webhook and the socket refuse what they should,
+  and `notify` may make its directory calls (below).
 - Last, it asks the hosting repository to build and deploy the app from the
   same commit (production: the release tag), and waits until the site serves
   it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)). The
@@ -105,6 +106,16 @@ stopped.
 Either fails the deploy if a call is refused, or if the deploy role may not
 ask (an older `infra/init`), and asks again a few times when IAM is slow or
 throttles.
+
+The simulator can't check the conditions on `notify`'s directory access
+(which items and attributes; [infra/functions.tf](../infra/functions.tf)),
+so a smoke test does: it invokes `notify` with `{"check":{}}`, and the
+function makes its directory read and both writes for a random account
+that doesn't exist, under its role. A refusal fails the invocation and the
+deploy; otherwise nothing changes. After a change to notices or that role,
+check the rest by hand on dev: with the app closed, have a message sent to
+you and get a notice; more than 4 minutes later, another message brings a
+new notice, and the first is gone from the chat.
 
 Code signing is a versioned bucket for the bundles, an AWS Signer profile,
 and a code signing config set to enforce. Every function must use the config,
