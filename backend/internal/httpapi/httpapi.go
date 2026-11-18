@@ -102,8 +102,9 @@ type HandlerFunc func(ctx context.Context, req Request) Response
 type Router struct {
 	routes []*route
 	// Observe, if set, is told each handled request's route pattern (never
-	// the path, which can hold IDs), status and how long it took.
-	Observe func(route string, status int, elapsed time.Duration)
+	// the path, which can hold IDs), status, error code (ErrorCode) and how
+	// long it took.
+	Observe func(route string, status int, code string, elapsed time.Duration)
 }
 
 type route struct {
@@ -168,7 +169,7 @@ func (r *Router) Serve(ctx context.Context, req Request) (Response, error) {
 		started := time.Now()
 		resp := h(ctx, req)
 		if r.Observe != nil {
-			r.Observe(method+" "+rt.pattern, resp.StatusCode, time.Since(started))
+			r.Observe(method+" "+rt.pattern, resp.StatusCode, ErrorCode(resp), time.Since(started))
 		}
 		return resp, nil
 	}
@@ -247,4 +248,36 @@ func JSON(status int, v any) Response {
 // Error writes a JSON error with a stable, machine-readable code.
 func Error(status int, code string) Response {
 	return JSON(status, map[string]string{"error": code})
+}
+
+// maxCode is the longest error code ErrorCode returns.
+const maxCode = 40
+
+// ErrorCode is the code of an error response ("rate_limited"), or "" for
+// any other. Codes are the handlers' own constants, never anything from the
+// request; one that isn't lower case letters, digits and "_", starting with
+// a letter, counts as none.
+func ErrorCode(resp Response) string {
+	if resp.StatusCode < http.StatusBadRequest || resp.IsBase64Encoded || len(resp.Body) > 1<<10 {
+		return ""
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(resp.Body), &body) != nil || !isCode(body.Error) {
+		return ""
+	}
+	return body.Error
+}
+
+func isCode(s string) bool {
+	if s == "" || len(s) > maxCode || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
 }

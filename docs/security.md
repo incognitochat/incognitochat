@@ -199,6 +199,15 @@ it. This is how close it gets.
   attachment uploads and downloads. GitHub sees the IP address of every app
   load, together with the link being opened (Telegram puts it in the page
   address).
+- **How busy the service is, minute by minute.** Each `api` instance logs,
+  once a minute, how many requests it answered by route, status and error
+  code ([deployment.md](deployment.md#request-counts)), kept 7 days, for the
+  alarms on abuse. Counts only: no IDs, IP addresses, paths or content, per
+  minute, so they say what AWS's own per-minute metrics of the functions
+  and tables already say, by route. The line is written when the instance's
+  next request comes, so the log's own time for it is that request's,
+  though nothing else about it. On a quiet deployment, a minute with one
+  `POST /send` says that one message was sent then, not by or to whom.
 - **The user's own network.** The app's traffic doesn't travel through
   Telegram: it goes straight to the app's host and the backend. Whoever
   carries it (an internet provider, a Wi-Fi owner, a VPN) sees that the

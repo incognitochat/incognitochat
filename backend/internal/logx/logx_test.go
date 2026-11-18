@@ -65,6 +65,41 @@ func TestDropsEverythingNotAllowed(t *testing.T) {
 	}
 }
 
+func TestCountGroupsHoldOnlyCounts(t *testing.T) {
+	var buf bytes.Buffer
+	log := New(&buf, "api")
+	log.Warn("request counts",
+		slog.Group(KeyRoutes,
+			slog.Int("post_send_429", 3),
+			slog.String("post_send_200", "AAAAAAAAAAAAAAAAAAAAAA"),
+			slog.Int("POST /links/abc", 1),
+			slog.Int("9lives", 1),
+			slog.Int(strings.Repeat("a", 65), 1),
+		),
+		slog.Group(KeyErrors, slog.Int("rate_limited", 3), slog.Float64("ratio", 0.5)),
+		slog.Group("other", slog.Int("count", 1)),
+		slog.Int(KeyRoutes, 7),
+	)
+	// A group within a count group is dropped.
+	log.Warn("nested", slog.Group(KeyRoutes, slog.Group(KeyErrors, slog.Int("deep", 1))))
+	got := lines(t, &buf)[0]
+	routes, _ := got[KeyRoutes].(map[string]any)
+	if len(routes) != 1 || routes["post_send_429"] != float64(3) {
+		t.Errorf("routes = %v", got[KeyRoutes])
+	}
+	errs, _ := got[KeyErrors].(map[string]any)
+	if len(errs) != 1 || errs["rate_limited"] != float64(3) {
+		t.Errorf("errors = %v", got[KeyErrors])
+	}
+	if _, ok := got["other"]; ok {
+		t.Errorf("another group was logged: %v", got)
+	}
+	if strings.Contains(buf.String(), "AAAA") || strings.Contains(buf.String(), "abc") ||
+		strings.Contains(buf.String(), "deep") {
+		t.Errorf("more than counts was logged: %s", buf.String())
+	}
+}
+
 func TestLevelIsWarning(t *testing.T) {
 	var buf bytes.Buffer
 	log := New(&buf, "api")

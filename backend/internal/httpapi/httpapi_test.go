@@ -87,15 +87,41 @@ func TestServeParams(t *testing.T) {
 func TestObserve(t *testing.T) {
 	r := NewRouter()
 	r.Handle(http.MethodGet, "/links/{id}", func(context.Context, Request) Response { return JSON(http.StatusOK, struct{}{}) })
+	r.Handle(http.MethodPost, "/send", func(context.Context, Request) Response {
+		return Error(http.StatusTooManyRequests, "rate_limited")
+	})
 	var seen []string
-	r.Observe = func(route string, status int, elapsed time.Duration) {
-		seen = append(seen, fmt.Sprintf("%s %d %v", route, status, elapsed >= 0))
+	r.Observe = func(route string, status int, code string, elapsed time.Duration) {
+		seen = append(seen, fmt.Sprintf("%s %d %q %v", route, status, code, elapsed >= 0))
 	}
 	_, _ = r.Serve(context.Background(), request(http.MethodGet, "/links/secret-id"))
+	_, _ = r.Serve(context.Background(), request(http.MethodPost, "/send"))
 	_, _ = r.Serve(context.Background(), request(http.MethodGet, "/nope"))
 	// The pattern, not the path: no IDs. Unrouted requests aren't observed.
-	if len(seen) != 1 || seen[0] != "GET /links/{id} 200 true" {
-		t.Fatalf("observed %v", seen)
+	want := []string{`GET /links/{id} 200 "" true`, `POST /send 429 "rate_limited" true`}
+	if fmt.Sprint(seen) != fmt.Sprint(want) {
+		t.Fatalf("observed %v, want %v", seen, want)
+	}
+}
+
+func TestErrorCode(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		resp Response
+		want string
+	}{
+		{"error", Error(http.StatusUnauthorized, "invalid_token"), "invalid_token"},
+		{"error with more fields", JSON(http.StatusPaymentRequired, map[string]any{"error": "tokens_needed", "needed": 3}), "tokens_needed"},
+		{"success", JSON(http.StatusOK, map[string]string{"error": "not_an_error"}), ""},
+		{"no code", JSON(http.StatusBadRequest, struct{}{}), ""},
+		{"not JSON", Response{StatusCode: http.StatusBadGateway, Body: "oops"}, ""},
+		{"not a code", Error(http.StatusBadRequest, "Account 123"), ""},
+		{"too long", Error(http.StatusBadRequest, strings.Repeat("a", 41)), ""},
+		{"base64", Response{StatusCode: http.StatusBadRequest, Body: `{"error":"x"}`, IsBase64Encoded: true}, ""},
+	} {
+		if got := ErrorCode(tt.resp); got != tt.want {
+			t.Errorf("%s: ErrorCode = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 }
 

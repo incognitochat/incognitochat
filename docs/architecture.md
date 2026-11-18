@@ -427,7 +427,10 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - Secrets live in SSM, written through Terraform's write-only arguments, so they
   never land in Terraform state. Each function's role reads only its own.
 - Logs: warnings and errors only, kept 7 days. IDs, IP addresses, user agents
-  and bodies are never logged, and there are no API access logs.
+  and bodies are never logged, and there are no API access logs. Each `api`
+  instance logs one line a minute of request counts by route, status and
+  error code, counts only, for the alarms
+  ([deployment.md](deployment.md#request-counts)).
 - Code signing: the functions run only code signed by CI's AWS Signer
   profile, and each deploy checks that the running code is the attested build
   ([verifying.md](verifying.md#the-backend)).

@@ -206,3 +206,90 @@ resource "aws_cloudwatch_metric_alarm" "media_download_bytes" {
     return_data = true
   }
 }
+
+# The api function's request counts, as the app stack's metric filters
+# make them (infra/metrics.tf; the namespace must stay the same as there).
+# They show what a campaign does: many accounts, each within its own
+# limits, never make the invocations alarm, but each of them registers and
+# takes tokens. Each alarm sums an hour.
+locals {
+  counts_namespace = "${local.prefix}/api"
+  counts_period    = 3600
+
+  count_alarms = {
+    registrations = {
+      metric      = "Registrations"
+      threshold   = var.registrations_alarm
+      description = "More than ${var.registrations_alarm} accounts were registered or set up again in an hour."
+    }
+    limit-hits = {
+      metric      = "Limited"
+      threshold   = var.limit_hits_alarm
+      description = "The api function answered 429 (rate_limited or daily_limit) more than ${var.limit_hits_alarm} times in an hour."
+    }
+    invalid-tokens = {
+      metric      = "InvalidToken"
+      threshold   = var.refusals_alarm
+      description = "More than ${var.refusals_alarm} sends or uploads were refused for an invalid send or media token in an hour."
+    }
+    init-data-rejected = {
+      metric      = "InitDataRejected"
+      threshold   = var.refusals_alarm
+      description = "More than ${var.refusals_alarm} requests were refused in an hour for Telegram data that didn't check out."
+    }
+    signature-rejected = {
+      metric      = "SignatureRejected"
+      threshold   = var.refusals_alarm
+      description = "More than ${var.refusals_alarm} requests were refused in an hour for a device signature that didn't check out."
+    }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "counts" {
+  for_each = local.count_alarms
+
+  alarm_name          = "${local.prefix}-${each.key}"
+  alarm_description   = each.value.description
+  namespace           = local.counts_namespace
+  metric_name         = each.value.metric
+  statistic           = "Sum"
+  period              = local.counts_period
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = each.value.threshold
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
+# Batches of send and media tokens signed, the two together.
+resource "aws_cloudwatch_metric_alarm" "token_requests" {
+  alarm_name          = "${local.prefix}-token-requests"
+  alarm_description   = "More than ${var.token_requests_alarm} batches of send and media tokens were signed in an hour."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.token_requests_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "batches"
+    expression  = "FILL(send, 0) + FILL(media, 0)"
+    label       = "Token batches"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = { send = "SendTokenRequests", media = "MediaTokenRequests" }
+    content {
+      id = metric_query.key
+      metric {
+        namespace   = local.counts_namespace
+        metric_name = metric_query.value
+        stat        = "Sum"
+        period      = local.counts_period
+      }
+    }
+  }
+}

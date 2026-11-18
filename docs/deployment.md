@@ -139,8 +139,18 @@ alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 | `<table>-table-throttles` | A table refused requests because its per-second cap was reached. |
 | `media-uploads`, `media-downloads` | The media bucket had more than 3,000 PUT or GET requests in 5 minutes (10 a second; `media_requests_alarm`). These go straight to S3, past the API and its alarms, and each is billed. They read the bucket's request metrics, which the app stack turns on. Those are billed like custom metrics, $0.30 a month each for up to 16, counted only in hours with requests: at most about $5 a month per environment. |
 | `media-download-bytes` | More than 2 GiB was downloaded from the media bucket in 5 minutes (about 7 MB a second; `media_download_gib_alarm`). Downloads cost by the data sent: one 51 MiB download costs as much as about 11,000 GET requests. Same request metrics. |
+| `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
+| `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
+| `limit-hits` | The `api` function answered `429` (`rate_limited` or `daily_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
+| `invalid-tokens`, `init-data-rejected`, `signature-rejected` | More than 50 requests in an hour were refused for that reason (`refusals_alarm`, each alarm on its own): a send or media token that isn't valid (`POST /send`, `POST /media`), Telegram data that doesn't check out (`POST /register`, `POST /accounts/lookup`, `POST /notices`), or a device signature that doesn't (registrations and every signed request). |
+
+The last six read the `api` function's [request counts](#request-counts).
+Their thresholds are guesses far above an early deployment's use: check
+them against the metrics once real use has run a week or two, and set them
+with `TF_VAR_<name>` when rerunning the bootstrap.
 
 What to do when a media alarm fires: [emergency switches](#emergency-switches).
+When a count alarm fires: [request counts](#request-counts).
 
 The topic starts without subscribers, so no address is stored in the
 repository or in Terraform state. Subscribe one, and confirm the email AWS
@@ -444,6 +454,89 @@ the deploy role is denied writing table items, so deploys never reset it.
    try; an unsent attachment goes with Try again.
 
 The switches aren't flipped automatically by the alarms.
+
+## Request counts
+
+The `api` function keeps no access log, but each instance counts the
+answers it gives and logs the counts once a minute, in one line. It is
+logged as a warning, since production keeps only warnings and errors; it
+isn't one.
+
+```json
+{"time":"2026-11-18T10:02:00Z","level":"WARN","msg":"request counts","fn":"api","count":44,
+ "errors":{"rate_limited":2,"signature_rejected":1},
+ "routes":{"get_inbox_200":12,"post_register_200":1,"post_send_200":28,"post_send_429":2,"put_links_id_keys_401":1}}
+```
+
+- `count` is every answer in that minute, `routes` the answers by route
+  pattern and status (`PUT /links/{id}/keys` with 401 is
+  `put_links_id_keys_401`), and `errors` the error answers by code, all
+  routes together. Requests to no route, and requests Lambda refuses
+  (`lambda-throttles`), aren't counted.
+- Counts only: route patterns, never paths (which carry IDs), statuses and
+  error codes. Nothing names a person, device, account, link, mailbox,
+  address or request.
+- `time` is the start of the minute counted. Lambda freezes an instance
+  between requests, so the line is written with the instance's first
+  request after that minute, or when the instance shuts down: sometimes
+  minutes late. An idle instance writes nothing.
+
+Metric filters on the `api` log group (`infra/metrics.tf`, in the app
+stack) make these metrics of the lines, in namespace `<prefix>/api`. The
+alarms on them (above) are in the bootstrap stack, which CI can't change.
+
+| Metric | Counts |
+|---|---|
+| `Registrations` | Successful `POST /register`: new accounts, accounts set up again, and registrations retried after a lost answer. |
+| `SendTokenRequests`, `MediaTokenRequests` | Successful `POST /tokens` and `POST /tokens/media`: batches of tokens signed. |
+| `Limited` | Every `429` (`rate_limited`, `daily_limit`). |
+| `Limited.<route>` | One route's `429`s, e.g. `Limited.post_send`, for each route with a limit (`local.limited_routes`). |
+| `InvalidToken`, `InitDataRejected`, `SignatureRejected` | Answers with that error code. |
+
+Metric filters are free. Each of the 19 metrics is billed as a custom
+metric, $0.30 a month, but only for the hours it gets data: about $1 a month
+for the three counted whenever the app is used, next to nothing for the
+others until something goes wrong, and at most $5.70 if all of them got data
+every hour. The six alarms cost $0.70 a month (the token alarm reads two
+metrics), and the lines, under 1 KB a minute per busy instance, cents. So
+about $2 a month per environment, at most about $6.50.
+
+**When a count alarm fires:**
+
+1. Look at the metric over the last day or two (CloudWatch, namespace
+   `<prefix>/api`), and at the lines themselves, in Logs Insights on
+   `/aws/lambda/<prefix>-api`, an hour at a time:
+
+   ```
+   filter msg = "request counts"
+   | stats sum(`routes.post_register_200`) as registrations,
+           sum(`routes.post_tokens_200`) as send_batches,
+           sum(`routes.post_send_200`) as sends,
+           sum(`errors.rate_limited`) as limited
+     by bin(1h)
+   ```
+
+   or read the lines of the minutes that matter (`filter msg = "request
+   counts" and errors.rate_limited > 0`): `routes` shows where.
+2. `registrations`, `token-requests`: real growth (a post that shares the
+   bot, say) comes with more of everything, sends and inbox fetches
+   included. A campaign of many accounts, each within its own limits, shows
+   as registrations at a steady rate, then token batches growing with them
+   while sends don't keep up. If it isn't real use, see what it costs (the
+   budget, the tables' consumed capacity) and how fast it grows. Each
+   account stays within its limits, and keeping `INVITE_ONLY` on keeps new
+   accounts from owning links; nothing stops registrations without a
+   release.
+3. `limit-hits`: `Limited.<route>` says which limit. A rise on one route
+   without more traffic is someone pushing at that limit, which is holding;
+   a rise with more traffic everywhere is real use outgrowing the limits.
+4. `invalid-tokens`: forged, replayed or out-of-date tokens on `POST /send`
+   or `POST /media` (`routes` says which).
+5. `init-data-rejected`, `signature-rejected`: Telegram data or device
+   signatures that don't check out: forged, out of date, or (signatures) a
+   signed request sent again, since each is good once. A device whose clock
+   is off is answered `clock_skew` instead. With an `api-invocations` alarm
+   too, it's a flood: see [the firewall](#the-firewall).
 
 ## CloudFront in front of the API
 
