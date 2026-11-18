@@ -1,6 +1,8 @@
 # Cost and health alerts for the account: a monthly budget and a few
 # CloudWatch alarms, all publishing to one SNS topic. They live in this stack
-# so that CI, which can't change it, can't silence them either.
+# so that CI, which can't change it, can't silence them either. The six on
+# the api function's request counts are the exception: CI deploys what they
+# read (the log line, the metric filters, the log level), so it could.
 #
 # The topic starts without subscribers: whoever runs the deployment
 # subscribes an address themselves (docs/deployment.md), so no address is

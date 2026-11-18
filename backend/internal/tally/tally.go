@@ -30,10 +30,11 @@ import (
 // Message is the counts line's message.
 const Message = "request counts"
 
-// maxNames bounds each count group. The routes and codes are the server's
-// own, so they never reach it; past it, answers count under "other" (one
-// more).
-const maxNames = 200
+// maxNames bounds each count group. Names come only from the server's own
+// route patterns, statuses and codes, a few hundred at most, so it is never
+// reached, however requests are sprayed across routes; past it, an answer
+// with a new name counts only in the total.
+const maxNames = 1024
 
 // Counter counts one instance's answers. It is safe for concurrent use.
 type Counter struct {
@@ -94,10 +95,9 @@ func (c *Counter) flush() {
 }
 
 func bump(counts map[string]int, name string) {
-	if _, ok := counts[name]; !ok && len(counts) >= maxNames {
-		name = "other"
+	if _, ok := counts[name]; ok || len(counts) < maxNames {
+		counts[name]++
 	}
-	counts[name]++
 }
 
 func group(key string, counts map[string]int) slog.Attr {

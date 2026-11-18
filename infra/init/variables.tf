@@ -77,22 +77,42 @@ variable "registrations_alarm" {
   description = "Successful POST /register in an hour above which an alarm is raised: new accounts, and accounts set up again (a retried registration counts again)"
   type        = number
   default     = 20
+
+  validation {
+    condition     = var.registrations_alarm > 0
+    error_message = "registrations_alarm must be positive."
+  }
 }
 
 variable "token_requests_alarm" {
   description = "Successful POST /tokens and POST /tokens/media together in an hour above which an alarm is raised. The app asks for 20 send tokens or 30 media tokens at a time, so 200 is about 4,000 send tokens; a person may take 1,000 a day"
   type        = number
   default     = 200
+
+  validation {
+    condition     = var.token_requests_alarm > 0
+    error_message = "token_requests_alarm must be positive."
+  }
 }
 
 variable "limit_hits_alarm" {
   description = "429 answers from the api function (rate_limited and daily_limit, every route) in an hour above which an alarm is raised. The limits sit above real use, so real users seldom meet them"
   type        = number
   default     = 100
+
+  validation {
+    condition     = var.limit_hits_alarm > 0
+    error_message = "limit_hits_alarm must be positive."
+  }
 }
 
 variable "refusals_alarm" {
   description = "Requests refused in an hour above which an alarm is raised, separately for each of invalid_token (send or media token), init_data_rejected (Telegram data) and signature_rejected (device signature)"
   type        = number
   default     = 50
+
+  validation {
+    condition     = var.refusals_alarm > 0
+    error_message = "refusals_alarm must be positive."
+  }
 }

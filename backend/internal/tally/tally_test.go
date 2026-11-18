@@ -2,7 +2,7 @@ package tally
 
 import (
 	"bytes"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
@@ -74,9 +74,11 @@ func TestBounded(t *testing.T) {
 	c := New(logx.New(&buf, "api"))
 	now := time.Date(2026, 11, 18, 10, 2, 0, 0, time.UTC)
 	for i := range maxNames + 10 {
-		c.Add(now, "GET /r"+strings.Repeat("x", i), 200, "")
+		c.Add(now, "GET /r"+strconv.Itoa(i), 200, "")
 	}
-	if len(c.routes) != maxNames+1 || c.routes["other"] != 10 {
-		t.Fatalf("%d names, %d other", len(c.routes), c.routes["other"])
+	// A name counted before the bound still counts after it.
+	c.Add(now, "GET /r0", 200, "")
+	if len(c.routes) != maxNames || c.total != maxNames+11 || c.routes["get_r0_200"] != 2 {
+		t.Fatalf("%d names, total %d, get_r0_200 %d", len(c.routes), c.total, c.routes["get_r0_200"])
 	}
 }

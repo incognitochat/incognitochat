@@ -29,16 +29,17 @@ var allowed = map[string]bool{
 	KeyErrorKind: true, KeyDuration: true, KeyCount: true,
 }
 
-// Allowed groups, of counts only. Each member is an integer, named in lower
-// case letters, digits and "_" (at most 64), starting with a letter: by a
-// route pattern and status, or by an error code, never by anything from a
-// request.
+// Allowed groups, of counts only (internal/tally writes them). Each member
+// is an integer, named in lower case letters, digits and "_", starting with
+// a letter, by the server's own route patterns, statuses and error codes,
+// never by anything from a request.
 const (
-	KeyRoutes = "routes" // answers by route and status, e.g. "post_send_429"
-	KeyErrors = "errors" // answers by error code, e.g. "rate_limited"
+	// Answers by route and status: at most 64 characters, ending in "_"
+	// and an HTTP status, e.g. "post_send_429".
+	KeyRoutes = "routes"
+	// Answers by error code: at most 40 characters, e.g. "rate_limited".
+	KeyErrors = "errors"
 )
-
-var countGroups = map[string]bool{KeyRoutes: true, KeyErrors: true}
 
 // New returns a logger for one function writing to w.
 func New(w io.Writer, function string) *slog.Logger {
@@ -46,7 +47,7 @@ func New(w io.Writer, function string) *slog.Logger {
 		Level: slog.LevelWarn,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if len(groups) > 0 {
-				if len(groups) == 1 && countGroups[groups[0]] && isCount(a) {
+				if len(groups) == 1 && isCount(groups[0], a) {
 					return a
 				}
 				return slog.Attr{}
@@ -67,22 +68,39 @@ func New(w io.Writer, function string) *slog.Logger {
 	return slog.New(h).With(slog.String(KeyFunction, function))
 }
 
-// isCount is whether a is a count group's member: an integer with a name
-// of lower case letters, digits and "_", starting with a letter.
-func isCount(a slog.Attr) bool {
+// isCount is whether a may be a member of the count group named group.
+func isCount(group string, a slog.Attr) bool {
 	if k := a.Value.Kind(); k != slog.KindInt64 && k != slog.KindUint64 {
 		return false
 	}
-	if a.Key == "" || len(a.Key) > 64 || a.Key[0] < 'a' || a.Key[0] > 'z' {
+	name := a.Key
+	switch group {
+	case KeyRoutes:
+		// "_" and a status from 100 to 599 at the end.
+		n := len(name)
+		if n > 64 || n < 5 || name[n-4] != '_' || name[n-3] < '1' || name[n-3] > '5' ||
+			!isDigit(name[n-2]) || !isDigit(name[n-1]) {
+			return false
+		}
+	case KeyErrors:
+		if len(name) > 40 {
+			return false
+		}
+	default:
 		return false
 	}
-	for _, c := range []byte(a.Key) {
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+	if name == "" || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for _, c := range []byte(name) {
+		if (c < 'a' || c > 'z') && !isDigit(c) && c != '_' {
 			return false
 		}
 	}
 	return true
 }
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 // ErrorKind describes an error by its Go type only. Error messages can carry
 // keys or values from the request, so they are never logged.

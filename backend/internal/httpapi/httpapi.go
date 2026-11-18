@@ -148,6 +148,19 @@ func (r *Router) Handle(method, pattern string, h HandlerFunc) {
 	})
 }
 
+// Patterns returns the registered routes as Observe names them
+// ("PUT /links/{id}/keys"), sorted.
+func (r *Router) Patterns() []string {
+	var out []string
+	for _, rt := range r.routes {
+		for method := range rt.byMethod {
+			out = append(out, method+" "+rt.pattern)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Serve is the Lambda entry point for a function URL.
 func (r *Router) Serve(ctx context.Context, req Request) (Response, error) {
 	segments := split(req.RawPath)

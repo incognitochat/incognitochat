@@ -104,6 +104,18 @@ func TestObserve(t *testing.T) {
 	}
 }
 
+func TestPatterns(t *testing.T) {
+	r := NewRouter()
+	noop := func(context.Context, Request) Response { return Response{} }
+	r.Handle(http.MethodGet, "/links/{id}", noop)
+	r.Handle(http.MethodPost, "/send", noop)
+	r.Handle(http.MethodDelete, "/links/{id}", noop)
+	want := []string{"DELETE /links/{id}", "GET /links/{id}", "POST /send"}
+	if got := r.Patterns(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Patterns = %v, want %v", got, want)
+	}
+}
+
 func TestErrorCode(t *testing.T) {
 	for _, tt := range []struct {
 		name string

@@ -104,7 +104,7 @@ The keyed hashes and the edits are kept apart from the conversation itself
 | Notice quiet periods: a keyed hash of the account, the minute the period ends, and a random token naming who started it | At most one notice every 3 minutes | 3 minutes, rounded up to the minute (as long as Telegram asks, if it refused a notice for sending too many) |
 | Login nonces, spent send and media tokens (and whether one was given back). Nothing about whose they were | Replay protection | Minutes, up to two weeks |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
-| Request counts: once a minute, how many requests each server instance answered, by route (`POST /send`, never the path with its IDs) and status, and by error code (`rate_limited`, say). Counts only, nothing about who | Alarms on limits being hit, refused requests, and how many accounts and tokens are given out ([deployment.md](deployment.md#request-counts)) | 7 days |
+| Request counts: once a minute, how many requests each server instance answered, by route (`POST /send`, never the path with its IDs) and status, and by error code (`rate_limited`, say). Counts only, nothing about who | Alarms on limits being hit, refused requests, and how many accounts and tokens are given out ([deployment.md](deployment.md#request-counts)) | The log lines 7 days. The metrics made from them (registrations, token batches, 429s overall and by route, three kinds of refusal): kept by CloudWatch for 15 days a minute at a time, 63 days 5 minutes at a time and 15 months an hour at a time, and they can't be deleted |
 
 DynamoDB can take some days to delete an item after it expires; an expired
 one is never used again, but a copy of the table made meanwhile still holds

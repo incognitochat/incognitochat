@@ -147,7 +147,9 @@ alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 The last six read the `api` function's [request counts](#request-counts).
 Their thresholds are guesses far above an early deployment's use: check
 them against the metrics once real use has run a week or two, and set them
-with `TF_VAR_<name>` when rerunning the bootstrap.
+with `TF_VAR_<name>` when rerunning the bootstrap. The bootstrap doesn't
+remember them: set each again at every rerun, or it goes back to its
+default.
 
 What to do when a media alarm fires: [emergency switches](#emergency-switches).
 When a count alarm fires: [request counts](#request-counts).
@@ -162,7 +164,9 @@ AWS_PROFILE=<profile> aws sns subscribe --region <aws-region> --protocol email \
   --notification-endpoint <address>
 ```
 
-CI can't change these alerts: they belong to the bootstrap stack. Once the
+CI can't change these alerts: they belong to the bootstrap stack. It can
+still silence the six count alarms, though, since it deploys what they
+read: the log line, the metric filters and the log level. Once the
 bootstrap stack is applied with the deny on table items (added with the
 [emergency switches](#emergency-switches); apply it in each environment), CI
 can't write table items either, so a deploy can't overwrite runtime data
@@ -478,12 +482,25 @@ isn't one.
   address or request.
 - `time` is the start of the minute counted. Lambda freezes an instance
   between requests, so the line is written with the instance's first
-  request after that minute, or when the instance shuts down: sometimes
-  minutes late. An idle instance writes nothing.
+  request after that minute, or when the instance shuts down, which Lambda
+  may do long after the instance's last request. An idle instance writes
+  nothing.
 
 Metric filters on the `api` log group (`infra/metrics.tf`, in the app
-stack) make these metrics of the lines, in namespace `<prefix>/api`. The
-alarms on them (above) are in the bootstrap stack, which CI can't change.
+stack) make these metrics of the lines, in namespace `<prefix>/api`. Each
+data point is dated by when its line was written, not by its `time`. The
+alarms on them (above) are in the bootstrap stack, which CI can't change,
+but CI deploys the line, the filters and the log level, so it could still
+silence them. A test (`backend/internal/tally`) checks that every name the
+filters read is one the `api` function can log.
+
+After the first deploy with these filters, once the app has been used
+(a metric appears only when it first counts something), check that the
+metrics are there:
+
+```shell
+AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namespace <prefix>/api
+```
 
 | Metric | Counts |
 |---|---|
@@ -516,8 +533,10 @@ about $2 a month per environment, at most about $6.50.
      by bin(1h)
    ```
 
-   or read the lines of the minutes that matter (`filter msg = "request
-   counts" and errors.rate_limited > 0`): `routes` shows where.
+   `bin(1h)` goes by `@timestamp`, when each line was written, not by the
+   minute in its `time`, so a few counts can land in the next hour. Or read
+   the lines of the minutes that matter (`filter msg = "request counts" and
+   errors.rate_limited > 0`): `routes` shows where.
 2. `registrations`, `token-requests`: real growth (a post that shares the
    bot, say) comes with more of everything, sends and inbox fetches
    included. A campaign of many accounts, each within its own limits, shows
