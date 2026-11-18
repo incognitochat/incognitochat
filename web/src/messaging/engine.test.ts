@@ -18,7 +18,27 @@ import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
-import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, setFile, type IdKind } from './store';
+import {
+  clearMedia,
+  earlyFor,
+  getConversation,
+  getIds,
+  getMedia,
+  getMessage,
+  getPendingEdits,
+  lastShown,
+  listConversations,
+  listMessages,
+  MAX_EARLY,
+  MAX_EARLY_BYTES,
+  mediaUsage,
+  pendingUploadDeletes,
+  putConversation,
+  saveConversation,
+  setFile,
+  type IdKind,
+} from './store';
+import { MAX_PENDING_EDIT_BYTES, MAX_PENDING_EDITS } from '../storage/db';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
 
@@ -674,13 +694,26 @@ describe('paying for sends by size', () => {
     expect(await lost()).toBe(0);
   });
 
-  it('sends receipts for at most 50 messages, at one token each', async () => {
+  it('sends one receipt however many were read, at one token: the newest 50, and that the earlier ones were read too', async () => {
     const { backend, owner, sender, conv, mine } = await chat();
     for (let i = 0; i < 59; i++) await sender.messaging.send(conv, `m${i}`);
+    // One of them is still on its way.
+    const [late] = backend.inboxes.get('owner')!.splice(55, 1);
     await owner.messaging.sync();
     const before = backend.sendPayments.length;
     await owner.messaging.markSeen(mine);
-    expect(backend.sendPayments.slice(before)).toEqual([1, 1]);
+    expect(backend.sendPayments.slice(before)).toEqual([1]);
+    expect((await listMessages(owner.db, mine)).filter((m) => m.status !== 'read')).toEqual([]);
+    // Their side: all seen, but the one still on its way, written after the oldest the receipt names.
+    expect(await sender.messaging.sync()).toBe(1);
+    const unseen = (await listMessages(sender.db, conv)).filter((m) => m.status !== 'seen').map((m) => m.text);
+    expect(unseen).toEqual(['m55']);
+    // It comes, and is read: one receipt for it alone.
+    backend.inboxes.get('owner')!.push(late!);
+    await owner.messaging.sync();
+    await owner.messaging.markSeen(mine);
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).filter((m) => m.status !== 'seen')).toEqual([]);
   });
 
   it('fetches more tokens when the wallet has fewer than a send costs', async () => {
@@ -2080,7 +2113,7 @@ describe('editing', () => {
     const local = await across(sender.db, conv, owner.db);
     const theirs = (await listMessages(owner.db, local)).at(-1)!;
     expect(theirs).toMatchObject({ id: pic.id, text: '', edited: expect.any(Number), media: { t: 'photo' } });
-    expect((await getConversation(owner.db, local))!.edits).toEqual([]);
+    expect(await getPendingEdits(owner.db, local)).toEqual([]);
   });
 
   it('only within a day of sending; their app drops a later edit, even from a modified app', async () => {
@@ -3259,8 +3292,14 @@ async function asVersion3(db: Database, name: string, deleted: Record<string, { 
   });
   for (const k of await db.getAllKeys('keys')) await v3.put('keys', await db.get('keys', k), k);
   for (const k of await db.getAllKeys('vault')) await v3.put('vault', await db.get('vault', k), k);
+  // Edits waiting for their messages were kept on the conversation record.
+  const edits = new Map<string, unknown>();
   for (const k of await db.getAllKeys('meta')) {
     if (String(k).startsWith('ids:')) continue;
+    if (String(k).startsWith('edits:')) {
+      edits.set(String(k).slice('edits:'.length), await db.get('meta', k));
+      continue;
+    }
     let value = await db.get('meta', k);
     // Nor did it keep links' intro mailboxes.
     if (k === 'recipient-keys') {
@@ -3275,8 +3314,8 @@ async function asVersion3(db: Database, name: string, deleted: Record<string, { 
     if (k === 'links') value = (value as Record<string, unknown>[]).map(({ mailbox: _, ...l }) => l);
     await v3.put('meta', value, k);
   }
-  for (const { wire: id, firstKey: _, introUntil: __, formerMailboxes: ___, newest: _n, lastMessage: _l, ...c } of conversations) {
-    await v3.put('conversations', { ...c, id, ...(deleted[id] ? { deleted: deleted[id] } : {}) });
+  for (const { wire: id, firstKey: _, introUntil: __, formerMailboxes: ___, newest: _n, lastMessage: _l, preview: _p, ...c } of conversations) {
+    await v3.put('conversations', { ...c, id, ...(deleted[id] ? { deleted: deleted[id] } : {}), ...(edits.has(c.id) ? { edits: edits.get(c.id) } : {}) });
   }
   for (const { legacyFile: _, sent: _s, had: _h, ...m } of await db.getAll('messages')) await v3.put('messages', { ...m, conv: wire.get(m.conv)! });
   for (const key of await db.getAllKeys('media')) await v3.put('media', await db.get('media', key), typeof key === 'string' ? key : key[1]);
@@ -4267,7 +4306,7 @@ describe('envelopes that come again, or late', () => {
       for (const e of [edit, reaction, regret, edit]) await again('owner', e);
       expect(await owner.messaging.sync()).toBe(0);
       expect(await texts('owner')).toEqual(['hello', 'hi']);
-      expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+      expect(await getPendingEdits(owner.db, mine)).toEqual([]);
 
       // A modified app editing or reacting to it afterwards: nothing comes back, nothing is kept for later.
       await sender.db.put('messages', record);
@@ -4275,7 +4314,7 @@ describe('envelopes that come again, or late', () => {
       await sender.messaging.react(conv, m.id, '😈');
       expect(await owner.messaging.sync()).toBe(0);
       expect(await texts('owner')).toEqual(['hello', 'hi']);
-      expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+      expect(await getPendingEdits(owner.db, mine)).toEqual([]);
     });
 
     it('on this device only stays deleted when it comes again', async () => {
@@ -4406,7 +4445,7 @@ describe('envelopes that come again, or late', () => {
         await owner.messaging.sync();
         // Dated in whole seconds.
         expect(await getMessage(owner.db, mine, m.id)).toMatchObject({ text: 'hello there', edited: Math.floor(clock / 1000) * 1000 });
-        expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+        expect(await getPendingEdits(owner.db, mine)).toEqual([]);
       }
     });
   });
@@ -4786,7 +4825,7 @@ describe('message times', () => {
     inbox().push(...message);
     await owner.messaging.sync();
     expect(await getMessage(owner.db, mine, later.id)).toMatchObject({ text: 'later!', edited: S });
-    expect((await getConversation(owner.db, mine))!.edits ?? []).toEqual([]);
+    expect(await getPendingEdits(owner.db, mine)).toEqual([]);
 
     // The later edit of 'hello' again, with no record of having taken it in.
     await forgetIds(owner.db, mine, 'applied');
@@ -4928,5 +4967,332 @@ describe('message times', () => {
     const there = (await getMessage(owner.db, mine, hello!.id))!;
     expect([there.at, there.edited, there.reactions?.theirs]).toEqual([S + 123, S + 30_000, { e: '❤️', at: S + 31_000 }]);
     expect((await listMessages(owner.db, mine)).map((m) => m.at)).toEqual([S + 123, S + 22_000, S + 32_000]);
+  });
+});
+
+describe('someone with the link flooding the owner', () => {
+  it('an edit, reaction or delete before any message starts no conversation: it waits aside for the message', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'helo');
+    const [hello] = await listMessages(sender.db, conv);
+    await sender.messaging.edit(conv, hello!.id, 'hello');
+    await sender.messaging.react(conv, hello!.id, '🔥');
+    // Their message is still on its way: only what came after it is here.
+    const first = backend.inboxes.get('owner')!.shift()!;
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(await listConversations(owner.db)).toEqual([]);
+    const { wire, myKey } = (await getConversation(sender.db, conv))!;
+    expect(await earlyFor(owner.db, ref.id, wire, myKey!, 0)).toHaveLength(2);
+    // It comes: the conversation starts, edited and reacted to, and nothing is kept aside any more.
+    backend.inboxes.get('owner')!.push(first);
+    expect(await owner.messaging.sync()).toBe(1);
+    const mine = await across(sender.db, conv, owner.db);
+    expect(await listMessages(owner.db, mine)).toMatchObject([{ text: 'hello', edited: expect.any(Number), reactions: { theirs: { e: '🔥' } } }]);
+    expect(await getConversation(owner.db, mine)).toMatchObject({ hidden: false, unread: 1 });
+    expect(await lastShown(owner.db, (await getConversation(owner.db, mine))!)).toEqual({ out: false, text: 'hello' });
+    expect(await earlyFor(owner.db, ref.id, wire, myKey!, 0)).toEqual([]);
+
+    // A delete that came alone first: the message is dropped when it comes, and shows nowhere.
+    const oops = await sender.messaging.startConversation(ref, bundle, 'oops');
+    await sender.messaging.deleteForEveryone(oops, (await listMessages(sender.db, oops))[0]!.id);
+    const message = backend.inboxes.get('owner')!.shift()!;
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(await listConversations(owner.db)).toHaveLength(1);
+    backend.inboxes.get('owner')!.push(message);
+    expect(await owner.messaging.sync()).toBe(0);
+    const dropped = await across(sender.db, oops, owner.db);
+    expect(await getConversation(owner.db, dropped)).toMatchObject({ hidden: true, lastAt: 0, unread: 0 });
+    expect(await listMessages(owner.db, dropped)).toEqual([]);
+  });
+
+  it('keeps few envelopes aside, small, and not for long, however many come', async () => {
+    let clock = Date.now();
+    const now = () => clock;
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner', now);
+    const sender = await person(backend, 'sender', now);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'x');
+    const [m] = await listMessages(sender.db, conv);
+    // The message never comes; edits of it do, many and long.
+    backend.inboxes.get('owner')!.length = 0;
+    for (let i = 0; i < MAX_EARLY + 10; i++) {
+      clock += 1;
+      await sender.messaging.edit(conv, m!.id, `edit ${i}`);
+    }
+    expect(await owner.messaging.sync()).toBe(0);
+    const { wire, myKey } = (await getConversation(sender.db, conv))!;
+    const kept = await earlyFor(owner.db, ref.id, wire, myKey!, 0);
+    expect(kept.map((e) => e.edit!.text)).toEqual(Array.from({ length: MAX_EARLY }, (_, i) => `edit ${i + 10}`));
+    for (let i = 0; i < 10; i++) {
+      clock += 1;
+      await sender.messaging.edit(conv, m!.id, 'y'.repeat(MAX_TEXT_BYTES - i));
+    }
+    await owner.messaging.sync();
+    const big = await earlyFor(owner.db, ref.id, wire, myKey!, 0);
+    expect(new TextEncoder().encode(JSON.stringify(big)).length).toBeLessThanOrEqual(MAX_EARLY_BYTES);
+    expect(big.at(-1)!.edit!.text).toBe('y'.repeat(MAX_TEXT_BYTES - 9));
+    // No conversation, hidden or not.
+    expect(await listConversations(owner.db)).toEqual([]);
+    // Forgotten once the message they wait for can no longer come.
+    clock += 32 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect(await earlyFor(owner.db, ref.id, wire, myKey!, 0)).toEqual([]);
+    expect(await owner.db.get('meta', 'early-envelopes')).toBeUndefined();
+  });
+
+  it("keeps a conversation's edits for messages still on their way apart from it: the newest 20, and 64 KB", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const count = MAX_PENDING_EDITS + 5;
+    for (let i = 0; i < count; i++) await sender.messaging.send(conv, `m${i}`);
+    const sent = (await listMessages(sender.db, conv)).slice(1);
+    for (const [i, m] of sent.entries()) await sender.messaging.edit(conv, m.id, `edited ${i}`);
+    // The messages are still on their way; their edits are here.
+    const messages = backend.inboxes.get('owner')!.splice(0, count);
+    await owner.messaging.sync();
+    expect(await getPendingEdits(owner.db, mine)).toHaveLength(MAX_PENDING_EDITS);
+    expect(await getConversation(owner.db, mine)).not.toHaveProperty('edits');
+    // They come: the newest 20 show edited.
+    backend.inboxes.get('owner')!.push(...messages);
+    await owner.messaging.sync();
+    expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual([
+      'hello',
+      ...Array.from({ length: 5 }, (_, i) => `m${i}`),
+      ...Array.from({ length: MAX_PENDING_EDITS }, (_, i) => `edited ${i + 5}`),
+    ]);
+    expect(await getPendingEdits(owner.db, mine)).toEqual([]);
+
+    // Long ones: as many as fit.
+    for (let i = 0; i < 8; i++) await sender.messaging.send(conv, `long ${i}`);
+    const longs = (await listMessages(sender.db, conv)).slice(-8);
+    for (const m of longs) await sender.messaging.edit(conv, m.id, 'z'.repeat(MAX_TEXT_BYTES));
+    backend.inboxes.get('owner')!.splice(0, 8);
+    await owner.messaging.sync();
+    const pending = await getPendingEdits(owner.db, mine);
+    expect(pending.map((e) => e.id)).toEqual(longs.slice(-5).map((m) => m.id));
+    expect(pending.reduce((n, e) => n + e.sealed.length, 0)).toBeLessThanOrEqual(MAX_PENDING_EDIT_BYTES);
+  });
+
+  it('a hidden chat never opened goes after 31 days; one opened and deleted here stays', async () => {
+    let clock = Date.now();
+    const now = () => clock;
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner', now);
+    const sender = await person(backend, 'sender', now);
+    const other = await person(backend, 'other', now);
+    const { ref, bundle } = await linkOf(backend, owner);
+    // Started by a message they deleted before it came.
+    const oops = await sender.messaging.startConversation(ref, bundle, 'oops');
+    await sender.messaging.deleteForEveryone(oops, (await listMessages(sender.db, oops))[0]!.id);
+    backend.inboxes.get('owner')!.reverse();
+    await owner.messaging.sync();
+    const empty = await across(sender.db, oops, owner.db);
+    // One the owner opened and deleted here: kept, keys and mailbox, so it
+    // can come back. Opened is all it takes (no "seen" went out: the app was
+    // in the background, say).
+    const chat = await other.messaging.startConversation(ref, bundle, 'hi');
+    await owner.messaging.sync();
+    const deleted = await across(other.db, chat, owner.db);
+    await owner.messaging.markRead(deleted);
+    expect(await getConversation(owner.db, deleted)).toMatchObject({ opened: true, myKey: null });
+    await owner.messaging.remove(deleted);
+    // One an older version started with an edit, without the time of what came.
+    const { newest: _, ...older } = (await getConversation(owner.db, empty))!;
+    await putConversation(owner.db, { ...older, id: 'from-before', wire: 'from-before' });
+    expect((await listConversations(owner.db)).filter((c) => c.hidden).length).toBe(3);
+    // A time for those that a clock running ahead set: from now instead.
+    await putMeta(owner.db, 'empty-chats-since', clock + 300 * DAY);
+
+    clock += 30 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id).sort()).toEqual([deleted, empty, 'from-before'].sort());
+    clock += 2 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id).sort()).toEqual([deleted, 'from-before'].sort());
+    // Nothing kept for it is left.
+    expect(await getIds(owner.db, empty)).toEqual({});
+    expect((await owner.db.getAllKeys('meta')).filter((k) => String(k).includes(empty))).toEqual([]);
+    // The older one: 31 days and a day from when upkeep first found it.
+    clock += 29 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id).sort()).toEqual([deleted, 'from-before'].sort());
+    clock += 2 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id)).toEqual([deleted]);
+    // The deleted chat still comes back when they write.
+    await other.messaging.send(chat, 'still there?');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await getConversation(owner.db, deleted)).toMatchObject({ hidden: false });
+  });
+
+  it('a chat a sender wrote in and then cleared for both sides, never opened, goes too', async () => {
+    let clock = Date.now();
+    const now = () => clock;
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner', now);
+    const sender = await person(backend, 'sender', now);
+    const { ref, bundle } = await linkOf(backend, owner);
+    const chats: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      clock += 1000;
+      const conv = await sender.messaging.startConversation(ref, bundle, `hello ${i}`);
+      clock += 1000;
+      await sender.messaging.remove(conv, true);
+      await owner.messaging.sync();
+      chats.push(await across(sender.db, conv, owner.db));
+    }
+    for (const id of chats) {
+      expect(await getConversation(owner.db, id)).toMatchObject({ hidden: true, myKey: null, myMailbox: null });
+      expect((await getConversation(owner.db, id))!.lastAt).toBeGreaterThan(0);
+    }
+    // One the owner blocked stays (its sender tag is what blocks the person).
+    await owner.messaging.block(chats[2]!);
+    clock += 30 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id).sort()).toEqual([...chats].sort());
+    clock += 2 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id)).toEqual([chats[2]]);
+    clock += 400 * DAY;
+    await owner.messaging.maintain().catch(() => {});
+    expect((await listConversations(owner.db)).map((c) => c.id)).toEqual([chats[2]]);
+  });
+
+  it("drops the edits waiting in a chat we never answered when it's deleted or blocked", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const waiting = async () => {
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+      await owner.messaging.sync();
+      await sender.messaging.send(conv, 'helo');
+      await sender.messaging.edit(conv, (await listMessages(sender.db, conv)).at(-1)!.id, 'hello again');
+      // The message is still on its way; its edit is here.
+      backend.inboxes.get('owner')!.shift();
+      await owner.messaging.sync();
+      const mine = await across(sender.db, conv, owner.db);
+      expect(await getPendingEdits(owner.db, mine)).toHaveLength(1);
+      expect(await owner.db.get('meta', 'edits-unanswered')).toMatchObject([{ conv: mine }]);
+      return mine;
+    };
+    const deleted = await waiting();
+    await owner.messaging.remove(deleted);
+    expect(await getPendingEdits(owner.db, deleted)).toEqual([]);
+    expect(await owner.db.get('meta', 'edits-unanswered')).toBeUndefined();
+    const blocked = await waiting();
+    await owner.messaging.block(blocked);
+    expect(await getPendingEdits(owner.db, blocked)).toEqual([]);
+    expect(await owner.db.get('meta', 'edits-unanswered')).toBeUndefined();
+  });
+
+  it("a chat's edits for messages on their way stay once we answer it, whatever other chats' come", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    /** Someone writes through the link; then an edit of a message still on its way. */
+    const waiting = async (name: string, edits: number, text: (i: number) => string) => {
+      const who = await person(backend, name);
+      const conv = await who.messaging.startConversation(ref, bundle, 'hello');
+      await owner.messaging.sync();
+      const held = [];
+      for (let i = 0; i < edits; i++) {
+        await who.messaging.send(conv, `message ${i}`);
+        held.push(backend.inboxes.get('owner')!.pop()!);
+        await who.messaging.edit(conv, (await listMessages(who.db, conv)).at(-1)!.id, text(i));
+      }
+      await owner.messaging.sync();
+      return { mine: await across(who.db, conv, owner.db), held };
+    };
+    const a = await waiting('a', 1, () => 'edited');
+    expect(await getPendingEdits(owner.db, a.mine)).toHaveLength(1);
+    // The owner answers: from now on 'a' doesn't share the budget.
+    await owner.messaging.send(a.mine, 'hi');
+    // Others' fill it, past it: theirs go, the oldest first; never the answered one's.
+    const b = await waiting('b', 6, () => 'b'.repeat(MAX_TEXT_BYTES));
+    const c = await waiting('c', 1, () => 'c'.repeat(MAX_TEXT_BYTES));
+    expect(await getPendingEdits(owner.db, a.mine)).toHaveLength(1);
+    expect(await getPendingEdits(owner.db, b.mine)).toEqual([]);
+    expect(await getPendingEdits(owner.db, c.mine)).toHaveLength(1);
+    // And it applies when its message comes.
+    backend.inboxes.get('owner')!.push(...a.held);
+    await owner.messaging.sync();
+    expect((await listMessages(owner.db, a.mine)).map((m) => m.text)).toContain('edited');
+  });
+
+  it('takes in what was kept aside on the next sync if taking it in failed halfway', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'helo');
+    await sender.messaging.edit(conv, (await listMessages(sender.db, conv))[0]!.id, 'hello');
+    const first = backend.inboxes.get('owner')!.shift()!;
+    // Someone else's is kept aside too, for a message that never comes.
+    const other = await person(backend, 'other');
+    const theirs = await other.messaging.startConversation(ref, bundle, 'x');
+    await other.messaging.edit(theirs, (await listMessages(other.db, theirs))[0]!.id, 'y');
+    backend.inboxes.get('owner')!.splice(-2, 1);
+    await owner.messaging.sync();
+    // The message comes; the app closes after its conversation started, before it's taken in.
+    backend.inboxes.get('owner')!.push(first);
+    storage.closeAt = 'early-envelopes';
+    await expect(owner.messaging.sync()).rejects.toThrow();
+    const mine = await across(sender.db, conv, owner.db);
+    expect(await listMessages(owner.db, mine)).toEqual([]);
+    // Next time, through the conversation found: the edit first, then the message.
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await listMessages(owner.db, mine)).toMatchObject([{ text: 'hello', edited: expect.any(Number) }]);
+    const { wire, myKey } = (await getConversation(sender.db, conv))!;
+    expect(await earlyFor(owner.db, ref.id, wire, myKey!, 0)).toEqual([]);
+  });
+
+  it('keeps the preview of each chat in step: sent, received, edited, deleted', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const shown = async () => {
+      const c = (await getConversation(owner.db, mine))!;
+      // Kept on the record, so the list needn't make it.
+      expect(c.preview).toBeTruthy();
+      return lastShown(owner.db, c);
+    };
+    expect(await shown()).toEqual({ out: false, text: 'hello' });
+    await owner.messaging.send(mine, 'hi bak');
+    expect(await shown()).toEqual({ out: true, text: 'hi bak', status: 'sent' });
+    const reply = (await listMessages(owner.db, mine)).at(-1)!;
+    await owner.messaging.edit(mine, reply.id, 'hi back');
+    expect(await shown()).toEqual({ out: true, text: 'hi back', status: 'sent' });
+    await sender.messaging.sync();
+    await sender.messaging.markSeen(conv);
+    await owner.messaging.sync();
+    expect(await shown()).toEqual({ out: true, text: 'hi back', status: 'seen' });
+    // Theirs, edited and deleted.
+    await sender.messaging.send(conv, 'one mor');
+    await owner.messaging.sync();
+    const one = (await listMessages(sender.db, conv)).at(-1)!;
+    await sender.messaging.edit(conv, one.id, 'one more');
+    await owner.messaging.sync();
+    expect(await shown()).toEqual({ out: false, text: 'one more' });
+    await sender.messaging.deleteForEveryone(conv, one.id);
+    await owner.messaging.sync();
+    expect(await shown()).toEqual({ out: true, text: 'hi back', status: 'seen' });
+    await owner.messaging.deleteHere(mine, reply.id);
+    expect(await shown()).toEqual({ out: false, text: 'hello' });
+    await owner.messaging.remove(mine);
+    expect((await getConversation(owner.db, mine))!.preview).toBeNull();
   });
 });

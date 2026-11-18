@@ -15,13 +15,31 @@ import {
   getMessage,
   listConversations,
   listMessages,
+  getPendingEdits,
   openPendingEdit,
   pendingUploadDeletes,
   putMedia,
   setFile,
+  unreadIds,
   type MessageBody,
 } from '../messaging/store';
-import { DB_VERSION, getKey, getKeyPair, getMeta, getSealed, openDatabase, putKey, putMeta, putSealed, StorageError, type Database } from './db';
+import {
+  DB_VERSION,
+  getKey,
+  getKeyPair,
+  getMeta,
+  getSealed,
+  EDITS_LEDGER,
+  MAX_PENDING_EDIT_BYTES,
+  MAX_PENDING_EDITS,
+  MAX_UNANSWERED_EDIT_BYTES,
+  openDatabase,
+  putKey,
+  putMeta,
+  putSealed,
+  StorageError,
+  type Database,
+} from './db';
 
 let n = 0;
 const fresh = () => openDatabase(`test-${n++}`);
@@ -179,7 +197,8 @@ describe('upgrades', () => {
     ]);
     expect(await getMedia(db, 'written', 'm3')).toEqual(photo);
     const pending = byId.get('unanswered')!;
-    expect(await openPendingEdit(db, 'early', pending.edits![0]!.sealed)).toBe('fixed');
+    expect(await openPendingEdit(db, 'early', (await getPendingEdits(db, 'unanswered'))[0]!.sealed)).toBe('fixed');
+    expect(pending).not.toHaveProperty('edits');
     expect(pending.deleted).toEqual([{ id: 'gone', at: 6 }]);
     expect(await pendingUploadDeletes(db)).toEqual([{ id: 'u1', d: 's1' }]);
 
@@ -199,6 +218,64 @@ describe('upgrades', () => {
     await deleteMessage(db, 'answered', 'm3');
     expect(await getMedia(db, 'written', 'm3')).toEqual(photo);
     expect(await getMessage(db, 'written', 'm3')).toMatchObject({ file: 'local', out: true });
+  });
+
+  it('upgrades a version 4 database: edits waiting for their messages move off the conversation record, the newest that fit', async () => {
+    const name = `upgrade-test-${n++}`;
+    const v4 = await openDB(name, 4, {
+      upgrade(db) {
+        for (const store of ['keys', 'vault', 'meta', 'media']) db.createObjectStore(store);
+        db.createObjectStore('conversations', { keyPath: 'id' }).createIndex('byWire', ['link.id', 'wire']);
+        db.createObjectStore('messages', { keyPath: ['conv', 'id'] }).createIndex('byConversation', ['conv', 'at']);
+      },
+    });
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    await v4.put('keys', key, 'storage-key');
+    const conversation = { wire: 'w', role: 'owner', link: { id: 'L', fingerprint: 'F' }, label: 'x', peerKey: 'k', myKey: null, sendTo: 'm', myMailbox: null, lastAt: 0, unread: 0, status: 'active', lastReceived: null };
+    // A hidden one a flood of edits filled (as many as version 4 kept), one with a few, and one with none.
+    const flood = await Promise.all(
+      Array.from({ length: 500 }, async (_, i) => ({ id: `e${i}`, at: i, sealed: await sealed(key, `edit:e${i}`, utf8(JSON.stringify({ text: 'x'.repeat(i % 2 ? 12_000 : 10) }))) })),
+    );
+    await v4.put('conversations', { ...conversation, id: 'flooded', hidden: true, edits: flood });
+    const few = flood.slice(0, 3).filter((e) => e.sealed.length < 100);
+    await v4.put('conversations', { ...conversation, id: 'few', lastAt: 5, edits: few });
+    await v4.put('conversations', { ...conversation, id: 'none', lastAt: 6 });
+    await v4.put('meta', [{ day: 1, tags: ['t'] }], 'ids:applied:flooded');
+    // Two more never answered, whose edits are older than those: one fits in what's left of the budget all such chats share, one doesn't.
+    const old = (i: number, size: number) => ({ id: `o${i}`, at: 1, sealed: new Uint8Array(size) });
+    await v4.put('conversations', { ...conversation, id: 'old-small', lastAt: 7, edits: [old(1, 100)] });
+    await v4.put('conversations', { ...conversation, id: 'old-big', lastAt: 8, edits: [old(2, 12_000)] });
+    // One we answered keeps its own: it doesn't share the budget.
+    await v4.put('conversations', { ...conversation, id: 'answered', myMailbox: 'B', lastAt: 9, edits: [old(3, 30_000)] });
+    // Messages, found by status from now on.
+    await v4.put('messages', { id: 'm1', conv: 'few', at: 1, out: false, status: 'received', sealed: new Uint8Array(30) });
+    await v4.put('messages', { id: 'm2', conv: 'few', at: 2, out: false, status: 'read', sealed: new Uint8Array(30) });
+    v4.close();
+
+    const db = await openDatabase(name);
+    expect(db.version).toBe(DB_VERSION);
+    for (const c of await listConversations(db)) expect(c).not.toHaveProperty('edits');
+    // The newest, as many as fit: in number and in bytes.
+    const moved = await getPendingEdits(db, 'flooded');
+    expect(moved.length).toBeLessThanOrEqual(MAX_PENDING_EDITS);
+    expect(moved.reduce((n, e) => n + e.sealed.length, 0)).toBeLessThanOrEqual(MAX_PENDING_EDIT_BYTES);
+    expect(moved.at(-1)!.id).toBe('e499');
+    expect(moved).toEqual(flood.slice(-moved.length));
+    // Still sealed as they were, and open.
+    expect(await openPendingEdit(db, 'e498', moved.find((e) => e.id === 'e498')!.sealed)).toBe('x'.repeat(10));
+    expect(await getPendingEdits(db, 'few')).toEqual(few);
+    expect(await getPendingEdits(db, 'none')).toEqual([]);
+    expect(await getMeta(db, 'ids:applied:flooded')).toEqual([{ day: 1, tags: ['t'] }]);
+    expect((await listConversations(db)).find((c) => c.id === 'flooded')).toMatchObject({ hidden: true, lastAt: 0 });
+    // The budget never-answered chats share: newest first, as many as fit.
+    const bytes = moved.reduce((n, e) => n + e.sealed.length, 0) + few.reduce((n, e) => n + e.sealed.length, 0);
+    expect(bytes + 100).toBeLessThanOrEqual(MAX_UNANSWERED_EDIT_BYTES);
+    expect(bytes + 100 + 12_000).toBeGreaterThan(MAX_UNANSWERED_EDIT_BYTES);
+    expect(await getPendingEdits(db, 'old-small')).toHaveLength(1);
+    expect(await getPendingEdits(db, 'old-big')).toEqual([]);
+    expect(await getPendingEdits(db, 'answered')).toHaveLength(1);
+    expect(((await getMeta(db, EDITS_LEDGER)) as { conv: string }[]).map((e) => e.conv)).toEqual(['flooded', 'few', 'old-small']);
+    expect(await unreadIds(db, 'few')).toEqual(['m1']);
   });
 
   it('deletes and clears files kept from version 3 and files stored since, each where it is', async () => {

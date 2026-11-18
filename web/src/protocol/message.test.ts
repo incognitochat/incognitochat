@@ -55,6 +55,9 @@ describe('messages', () => {
     const receipt: Draft = { kind: 'seen', conv: newId(), id: newId(), at: 1, seen };
     const { message } = await openMessage(await sealMessage(receipt, a, b.publicKey), finder(b));
     expect(message.seen).toEqual(seen);
+    // One that says the earlier ones were read too.
+    const all = await openMessage(await sealMessage({ ...receipt, earlier: true }, a, b.publicKey), finder(b));
+    expect(all.message).toMatchObject({ seen, earlier: true });
     const update = await sealMessage({ kind: 'key_update', conv: newId(), id: newId(), at: 1 }, a, b.publicKey);
     expect((await openMessage(update, finder(b))).message.kind).toBe('key_update');
   });
@@ -118,6 +121,8 @@ describe('checkMessage', () => {
     ['media preview', { media: { ...media, p: 'x'.repeat(3001) } }],
     ['media on seen', { kind: 'seen', text: undefined, seen: ['AAAAAAAAAAAAAAAAAAAAAA'], media }],
     ['media on end', { kind: 'end', text: undefined, media }],
+    ['earlier on a message', { earlier: true }],
+    ['earlier as anything but true', { kind: 'seen', text: undefined, seen: ['AAAAAAAAAAAAAAAAAAAAAA'], earlier: 1 }],
   ])('rejects bad %s', (_, change) => {
     expect(() => checkMessage({ ...valid, ...change })).toThrow(MessageError);
   });
@@ -278,6 +283,7 @@ describe('what messages cost', () => {
       ['photo with a preview and a caption', sent({ text: 'c'.repeat(100), replyTo: newId(), media: photo })],
       ['voice message', sent({ media: { t: 'voice', id: newId(), k: rand(32), d: rand(16), s: 145_123, m: 'audio/mp4', l: 33, v: rand(100) } })],
       ['receipt for 50', sent({ kind: 'seen', seen: ids(50) })],
+      ['receipt for 50 and the earlier ones', sent({ kind: 'seen', seen: ids(50), earlier: true })],
       ['reaction', sent({ kind: 'reaction', reaction: { to: newId(), e: '👩🏽‍❤️‍💋‍👨🏻' } })],
       ['delete', sent({ kind: 'delete', delete: [newId()] })],
       ['delete all', sent({ kind: 'delete', all: true })],

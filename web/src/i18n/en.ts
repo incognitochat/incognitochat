@@ -207,6 +207,7 @@ export const en = {
   seen: 'Seen',
   newMessages: '{count} new messages',
   toLatest: 'Go to the latest message',
+  earlierMessages: 'Earlier messages',
   sent: 'Sent',
   delete: 'Delete',
   deleteConfirm: "Delete this conversation from this device? They keep their copy and aren't told. If they write again, it comes back.",

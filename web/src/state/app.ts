@@ -40,7 +40,21 @@ import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
 import { createMessaging, isPaused, NoMailboxes, NoTokens, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
-import { clearMedia, getMedia, listConversations, listMessages, mediaUsage, type MessageView } from '../messaging/store';
+import {
+  attachmentsOf,
+  clearMedia,
+  getConversation,
+  getMedia,
+  getMessage,
+  lastShown,
+  listConversations,
+  listRecords,
+  mediaUsage,
+  PAGE,
+  pageMessages,
+  unsentBefore,
+  type MessageView,
+} from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, fetchesByItself, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
 import type { Recording, RoundRecording } from '../media/record';
@@ -171,8 +185,8 @@ export interface ConversationView {
   unread: number;
   lastAt: number;
   status: 'active' | 'ended' | 'blocked';
-  /** The latest message, if any. */
-  last: { text: string; out: boolean; status: MessageView['status']; media?: { t: string; n?: string; m?: string }; sticker?: Sticker } | null;
+  /** The latest message, if any (status: of one of ours, for its ticks). */
+  last: { text: string; out: boolean; status?: MessageView['status']; media?: { t: string; n?: string; m?: string }; sticker?: Sticker } | null;
 }
 
 /** A message: its conversation (on this device) and its ID, which is unique only within that conversation. */
@@ -276,7 +290,16 @@ export type Screen =
       blocked: boolean;
       /** The server no longer takes this device: shown read-only. */
       readOnly: boolean;
+      /**
+       * The messages shown: the newest PAGE when it opens, and from the
+       * oldest shown on as more come; older ones load on scrolling up
+       * (loadOlder), so a flooded chat opens as fast as any.
+       */
       messages: MessageView[];
+      /** There are older messages than those shown. */
+      more: boolean;
+      /** Messages those shown answer that aren't among them (older), for their quotes. */
+      quoted: MessageView[];
       busy: boolean;
       error: SendError | null;
     }
@@ -341,6 +364,8 @@ const PAUSED_WAIT_MS = 2 * 60_000;
  * it waits for a tap. Paused downloads don't count.
  */
 const AUTO_TRIES = 3;
+/** The most messages an open chat keeps shown as more come in, unless more were loaded (chatPage). */
+export const MAX_SHOWN = 4 * PAGE;
 
 export function createApp(deps: Deps) {
   const screen = signal<Screen>({ kind: 'loading' });
@@ -809,37 +834,109 @@ export function createApp(deps: Deps) {
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
-      screen.value = { ...current, messages: await listMessages(deps.db, current.id) };
+      await showChat(current.id);
       autoFetch(current.id);
     }
   }
 
-  /** The chat list: blocked and deleted conversations are gone from it. With blocked, the Blocked list. */
+  /**
+   * The chat list: blocked and deleted conversations are gone from it. With
+   * blocked, the Blocked list. Each chat's newest message comes from its
+   * preview (one small item), not from its messages.
+   */
   async function conversations(blocked = false): Promise<ConversationView[]> {
     const list = (await listConversations(deps.db)).filter((c) => (blocked ? c.status === 'blocked' : c.status !== 'blocked' && !c.hidden));
     return Promise.all(
-      list.map(async (c) => {
-        const messages = await listMessages(deps.db, c.id);
-        const last = messages[messages.length - 1];
-        return {
-          id: c.id,
-          label: c.label,
-          role: c.role,
-          unread: c.unread,
-          lastAt: c.lastAt,
-          status: c.status,
-          last: last
-            ? {
-                text: last.text,
-                out: last.out,
-                status: last.status,
-                ...(last.media ? { media: { t: last.media.t, ...(last.media.n ? { n: last.media.n } : {}), ...(last.media.m ? { m: last.media.m } : {}) } } : {}),
-                ...(last.sticker ? { sticker: last.sticker } : {}),
-              }
-            : null,
-        };
-      }),
+      list.map(async (c) => ({
+        id: c.id,
+        label: c.label,
+        role: c.role,
+        unread: c.unread,
+        lastAt: c.lastAt,
+        status: c.status,
+        last: await lastShown(deps.db, c),
+      })),
     );
+  }
+
+  /**
+   * The messages an open chat shows (Screen, conversation): when it opens
+   * (shown null), the newest PAGE; as it's redrawn, all from the oldest
+   * shown on, but no more than MAX_SHOWN or as many as were shown (a flood
+   * coming in while it's open pushes the oldest out); with older, PAGE more
+   * than shown, or, given a message's ID, all from that one on. Ours still
+   * going out, or failed (to send again), from before those, show first
+   * however old: the rest is reckoned without them. With the older messages
+   * those answer, for their quotes.
+   */
+  async function chatPage(
+    conv: string,
+    shown: MessageView[] | null,
+    older?: true | string,
+  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] }> {
+    const base = shown?.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
+    let since = base?.[0]?.at;
+    if (typeof older === 'string') {
+      const target = await deps.db.get('messages', [conv, older]);
+      if (target) since = Math.min(target.at, since ?? Infinity);
+    }
+    let page: { messages: MessageView[]; more: boolean };
+    if (since === undefined || older === true) {
+      page = await pageMessages(deps.db, conv, { count: (base?.length ?? 0) + PAGE });
+    } else {
+      // A flood coming in while it's open: only the newest are read.
+      page = await pageMessages(deps.db, conv, { since, ...(older === undefined ? { most: Math.max(base!.length, MAX_SHOWN) } : {}) });
+    }
+    const first = page.messages[0];
+    if (first) page = { ...page, messages: [...(await unsentBefore(deps.db, conv, first.at, new Set(page.messages.map((m) => m.id)))), ...page.messages] };
+    const here = new Set(page.messages.map((m) => m.id));
+    const quoted: MessageView[] = [];
+    for (const id of new Set(page.messages.flatMap((m) => (m.replyTo && !here.has(m.replyTo) ? [m.replyTo] : [])))) {
+      const m = await getMessage(deps.db, conv, id);
+      if (m) quoted.push(m);
+    }
+    return { ...page, quoted };
+  }
+
+  /**
+   * Redraws the open chat from storage, if it's still `conv`, with these
+   * changes: on the screen as it is once its messages are read, and with
+   * the messages it shows then (older ones loaded meanwhile stay).
+   */
+  async function showChat(conv: string, changes: { error?: SendError | null } = {}): Promise<void> {
+    for (let tries = 0; ; tries++) {
+      const before = currentScreen();
+      if (before.kind !== 'conversation' || before.id !== conv) return;
+      const page = await chatPage(conv, before.messages);
+      const now = currentScreen();
+      if (now.kind !== 'conversation' || now.id !== conv) return;
+      // Shown otherwise meanwhile (older ones loaded, say): read again for that.
+      if (now.messages !== before.messages && tries < 2) continue;
+      screen.value = { ...now, ...changes, ...page };
+      return;
+    }
+  }
+
+  let loadingOlder = false;
+  /**
+   * Shows older messages in the open chat: PAGE more, or all from the one
+   * with this ID on (a quote's, to jump to it). Returns whether any came.
+   */
+  async function loadOlder(until?: string): Promise<boolean> {
+    const current = screen.value;
+    if (current.kind !== 'conversation' || !current.more || loadingOlder) return false;
+    loadingOlder = true;
+    try {
+      const page = await chatPage(current.id, current.messages, until ?? true);
+      const now = currentScreen();
+      if (now.kind !== 'conversation' || now.id !== current.id) return false;
+      screen.value = { ...now, ...page };
+      // Their attachments shown now download as they would have when the chat opened.
+      autoFetch(current.id);
+      return page.messages[0]?.id !== now.messages[0]?.id;
+    } finally {
+      loadingOlder = false;
+    }
   }
 
   /**
@@ -849,10 +946,7 @@ export function createApp(deps: Deps) {
   function seen(id: string): void {
     void messaging
       ?.markSeen(id)
-      .then(async () => {
-        const now = currentScreen();
-        if (now.kind === 'conversation' && now.id === id) screen.value = { ...now, messages: await listMessages(deps.db, id) };
-      })
+      .then(() => showChat(id))
       .catch(() => {});
   }
 
@@ -903,8 +997,7 @@ export function createApp(deps: Deps) {
   async function openConversation(id: string, tapped = hides): Promise<void> {
     if (tapped === hides) attending = true;
     void refreshBudget();
-    const list = await listConversations(deps.db);
-    const c = list.find((x) => x.id === id);
+    const c = await getConversation(deps.db, id);
     if (!c) return showHome();
     // In the background: it waits for a send of ours still going out in this chat.
     void messaging?.markRead(id).catch(() => {});
@@ -917,7 +1010,7 @@ export function createApp(deps: Deps) {
       ended: c.status === 'ended',
       blocked: c.status === 'blocked',
       readOnly: signedOut !== null || deletionPaused,
-      messages: await listMessages(deps.db, id),
+      ...(await chatPage(id, null)),
       busy: false,
       error: null,
     };
@@ -1011,12 +1104,7 @@ export function createApp(deps: Deps) {
     if (before.kind === 'conversation' && before.id === conv) screen.value = { ...before, error: null };
     let error: SendError | null = null;
     let sent: string | null = null;
-    const show = async () => {
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === conv) {
-        screen.value = { ...now, error, messages: await listMessages(deps.db, conv) };
-      }
-    };
+    const show = () => showChat(conv, { error });
     try {
       await messaging.sendMedia(
         conv,
@@ -1054,10 +1142,7 @@ export function createApp(deps: Deps) {
     if (transfers.value[key] !== undefined) return;
     screen.value = { ...current, error: null };
     let error: SendError | null = null;
-    const show = async () => {
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === conv) screen.value = { ...now, error, messages: await listMessages(deps.db, conv) };
-    };
+    const show = () => showChat(conv, { error });
     setProgress(key, 0);
     try {
       await messaging.resendMedia(conv, id, show, (f) => setProgress(key, f));
@@ -1114,7 +1199,7 @@ export function createApp(deps: Deps) {
       // A tap says it's paused, or that it no longer is.
       let error = now.error;
       if (!auto && now.id === m.conv) error = paused ? 'media-paused' : error === 'media-paused' ? null : error;
-      screen.value = { ...now, error, messages: await listMessages(deps.db, now.id) };
+      await showChat(now.id, { error });
     }
   }
 
@@ -1324,12 +1409,7 @@ export function createApp(deps: Deps) {
     screen.value = { ...current, error: null };
     let error: SendError | null = null;
     // Shown at once as "sending", updated when delivered.
-    const show = async () => {
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === current.id) {
-        screen.value = { ...now, error, messages: await listMessages(deps.db, current.id) };
-      }
-    };
+    const show = () => showChat(current.id, { error });
     try {
       await messaging.send(current.id, typeof content === 'string' ? content.trim() : content, replyTo, show);
     } catch (err) {
@@ -1361,8 +1441,7 @@ export function createApp(deps: Deps) {
       error = sendError(err);
     }
     deps.broadcast({ type: 'data-changed' });
-    const now = currentScreen();
-    if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, error, messages: await listMessages(deps.db, current.id) };
+    await showChat(current.id, { error });
   }
 
   /** Writes the first message to the link just checked, starting a conversation. */
@@ -1385,7 +1464,7 @@ export function createApp(deps: Deps) {
       const error = sendError(err);
       const now = currentScreen();
       if (opened && now.kind === 'conversation' && now.id === opened) {
-        screen.value = { ...now, error, messages: await listMessages(deps.db, opened) };
+        await showChat(opened, { error });
       } else {
         screen.value = { ...current, busy: false, error };
       }
@@ -1491,7 +1570,7 @@ export function createApp(deps: Deps) {
       if (messaging) {
         for (const c of await listConversations(deps.db)) {
           try {
-            await messaging.discardUploads(await listMessages(deps.db, c.id));
+            await messaging.discardUploads(await attachmentsOf(deps.db, await listRecords(deps.db, c.id)));
           } catch {
             // They expire on their own within 31 days.
           }
@@ -2028,6 +2107,8 @@ export function createApp(deps: Deps) {
     /** The time messages are dated by now (Unix ms): what a message's age, for editing, is counted from. */
     messageNow: () => clock.messageNow(),
     home: () => showHome(),
+    /** Scrolled to the top of the open chat: older messages (or all from the one with this ID, to jump to its quote). */
+    loadOlder,
     /** The open conversation's newest messages are in view: tell the other side, while the user is using the app. */
     markSeen: () => {
       const current = currentScreen();
@@ -2068,8 +2149,7 @@ export function createApp(deps: Deps) {
       if (current.kind !== 'conversation' || !messaging) return;
       await messaging.deleteHere(current.id, id);
       deps.broadcast({ type: 'data-changed' });
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, messages: await listMessages(deps.db, current.id) };
+      await showChat(current.id);
     },
     /**
      * Deletes one of our messages on both sides (their app deletes it too,
@@ -2087,8 +2167,7 @@ export function createApp(deps: Deps) {
         error = sendError(err);
       }
       deps.broadcast({ type: 'data-changed' });
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, error, messages: await listMessages(deps.db, current.id) };
+      await showChat(current.id, { error });
     },
     /** Edits one of our messages (its text, or a caption); if it can't be sent, it stays as it was and the conversation says why. */
     editMessage: async (id: string, text: string) => {
@@ -2102,8 +2181,7 @@ export function createApp(deps: Deps) {
         error = sendError(err);
       }
       deps.broadcast({ type: 'data-changed' });
-      const now = currentScreen();
-      if (now.kind === 'conversation' && now.id === current.id) screen.value = { ...now, error, messages: await listMessages(deps.db, current.id) };
+      await showChat(current.id, { error });
     },
     blocked: () => showBlocked(),
     unblock,

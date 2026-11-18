@@ -455,6 +455,8 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
 
 /** How close to the end of a chat still counts as being at the end, in px. */
 const AT_END = 80;
+/** How close to the top of a chat loads older messages, in px. */
+const NEAR_TOP = 400;
 const isAtEnd = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - AT_END;
 const scrollToEnd = (behavior: ScrollBehavior = 'auto') => window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
 const visible = () => document.visibilityState === 'visible';
@@ -465,10 +467,25 @@ const visible = () => document.visibilityState === 'visible';
  * already at the end; otherwise you stay where you are and a button shows
  * how many came in. Messages count as seen only once they're in view, and
  * after the app was hidden or minimised, only once it's touched again.
+ * Scrolling near the top loads older messages (more), which appear above
+ * without moving what's in view.
  */
-function useChatScroll(app: AppState, id: string, messages: { id: string; out: boolean }[]) {
+function useChatScroll(app: AppState, id: string, messages: { id: string; out: boolean }[], more: boolean) {
   const atEnd = useRef(true);
-  const shown = useRef<{ conv: string; last: string | null } | null>(null);
+  const shown = useRef<{ conv: string; first: string | null; last: string | null } | null>(null);
+  // How far from the bottom the view was when older messages were asked for: kept there once they show.
+  const anchor = useRef<number | null>(null);
+  const hasMore = useRef(more);
+  hasMore.current = more;
+  const older = () => {
+    if (anchor.current !== null) return;
+    anchor.current = document.documentElement.scrollHeight - window.scrollY;
+    // Once they show, the layout effect below keeps the view there; if none came, the next scroll asks again.
+    void app.loadOlder().then(
+      (loaded) => !loaded && (anchor.current = null),
+      () => (anchor.current = null),
+    );
+  };
   // Scrolled away from the end, and how many new messages came in since.
   const away = useSignal(false);
   const fresh = useSignal(0);
@@ -486,6 +503,7 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
       if (now && !atEnd.current) arrived();
       atEnd.current = now;
       away.value = !now;
+      if (hasMore.current && window.scrollY < NEAR_TOP) older();
     };
     // The keyboard opening shrinks the view: stay at the end if we were.
     const onResize = () => atEnd.current && scrollToEnd();
@@ -505,16 +523,23 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
   }, []);
 
   useLayoutEffect(() => {
+    const first = messages[0]?.id ?? null;
     const last = messages[messages.length - 1]?.id ?? null;
     const before = shown.current;
-    shown.current = { conv: id, last };
+    shown.current = { conv: id, first, last };
     if (before?.conv !== id) {
       // Just opened: start at the newest message.
+      anchor.current = null;
       scrollToEnd();
       atEnd.current = true;
       away.value = false;
       fresh.value = 0;
       return;
+    }
+    if (first !== before.first && anchor.current !== null) {
+      // Older ones came in above: what was in view stays put.
+      window.scrollTo({ top: document.documentElement.scrollHeight - anchor.current });
+      anchor.current = null;
     }
     if (last === before.last) return;
     const added = messages.slice(messages.findIndex((m) => m.id === before.last) + 1);
@@ -526,14 +551,14 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
     }
   }, [id, messages]);
 
-  return { away: away.value, fresh: fresh.value, toEnd: () => scrollToEnd('smooth') };
+  return { away: away.value, fresh: fresh.value, toEnd: () => scrollToEnd('smooth'), older };
 }
 
 function Conversation({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'conversation' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const confirmingBlock = useSignal(false);
   useBackCloses(confirmingBlock.value, () => (confirmingBlock.value = false));
-  const scroll = useChatScroll(app, screen.id, screen.messages);
+  const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
   const sending = app.preparing.value.filter((p) => p.conv === screen.id).length;
   useEffect(() => {
     if (sending > 0) window.scrollTo({ top: document.documentElement.scrollHeight });
@@ -546,18 +571,32 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const menu = useSignal<MessageView | null>(null);
   useBackCloses(!!menu.value, () => (menu.value = null));
   const highlight = useSignal<string | null>(null);
-  const byId = new Map(screen.messages.map((m) => [m.id, m]));
+  const byId = new Map([...screen.quoted, ...screen.messages].map((m) => [m.id, m]));
   useEffect(() => {
     replying.value = null;
     menu.value = null;
   }, [screen.id]);
+  // A quote's message older than those shown: loaded, then jumped to.
+  const jumping = useRef<string | null>(null);
   const jumpTo = (id: string) => {
     const el = document.getElementById(`m-${id}`);
-    if (!el) return;
+    if (!el) {
+      if (!screen.more) return;
+      jumping.current = id;
+      void app.loadOlder(id);
+      return;
+    }
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     highlight.value = id;
     setTimeout(() => highlight.value === id && (highlight.value = null), 1500);
   };
+  useLayoutEffect(() => {
+    const id = jumping.current;
+    if (id && document.getElementById(`m-${id}`)) {
+      jumping.current = null;
+      jumpTo(id);
+    }
+  }, [screen.messages]);
   const time = new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' });
   useEffect(() => {
     const timer = setTimeout(loadStickerArt, 300);
@@ -595,6 +634,13 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         )}
       </header>
       <ol class="messages">
+        {screen.more && (
+          <li class="earlier">
+            <button type="button" class="link-button muted-link" onClick={scroll.older}>
+              {tr('earlierMessages')}
+            </button>
+          </li>
+        )}
         {screen.messages.map((m) => (
           <Bubble
             key={m.id}
@@ -1255,7 +1301,7 @@ function ChatRow({
             </bdi>
           </span>
           <span class="muted chat-time">
-            {c.last?.out && <Ticks status={c.last.status} language={language} />}
+            {c.last?.out && c.last.status && <Ticks status={c.last.status} language={language} />}
             {relativeTime(language, new Date(c.lastAt))}
           </span>
         </span>
