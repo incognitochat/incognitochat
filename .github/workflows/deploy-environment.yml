@@ -80,10 +80,15 @@ jobs:
             missing=1
           fi
           # Retired: it replaced all four generated secrets at once, the
-          # Telegram-ID pepper too. Each has its own version now, starting
-          # at 1, so ignoring a value left set would replace them all.
+          # Telegram-ID pepper too. Each has its own version now, 1 while
+          # unset, so ignoring a value other than 1 would replace them all.
           if [ -n "$SECRETS_VERSION" ]; then
-            echo "::error::SECRETS_VERSION is retired. To keep the generated secrets, set SESSION_KEY_VERSION, WEBHOOK_SECRET_VERSION, CHAT_KEY_VERSION and TELEGRAM_ID_PEPPER_VERSION to its value (${SECRETS_VERSION}), then delete it (docs/deployment.md)"
+            where="SECRETS_VERSION is retired, but the ${ENVIRONMENT} environment still gets it (a variable of the environment, the repository or the organization)"
+            if [ "$SECRETS_VERSION" = 1 ]; then
+              echo "::error::${where}. It is 1, as each secret's own version is while unset: deleting it is enough"
+            else
+              echo "::error::${where}. First set SESSION_KEY_VERSION, WEBHOOK_SECRET_VERSION, CHAT_KEY_VERSION and TELEGRAM_ID_PEPPER_VERSION to ${SECRETS_VERSION} where it is set, so that no secret is replaced, then delete it (docs/deployment.md, Replacing a generated secret)"
+            fi
             missing=1
           fi
           exit "$missing"
@@ -282,6 +287,25 @@ jobs:
           done
           echo "API_LOCKED=$(terraform output -raw api_locked)" >> "$GITHUB_ENV"
 
+      # The bot registers its own webhook (with its secret) and menu button:
+      # neither the bot token nor the webhook secret passes through CI. Right
+      # after the checks of what was deployed, before the smoke tests: after
+      # a new webhook secret (WEBHOOK_SECRET_VERSION), the bot refuses every
+      # update until this step has run, so a failed smoke test mustn't
+      # leave it that way.
+      - name: Set up the bot
+        working-directory: infra
+        run: |
+          function=$(terraform output -raw bot_function_name)
+          payload=$(jq -nc --arg url "$WEBHOOK_URL" '{setup: {webhookUrl: $url}}')
+          failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
+            --payload "$payload" --query FunctionError --output text "$RUNNER_TEMP/bot-setup.json")
+          if [ "$failed" != "None" ] || ! jq -e '.ok == true' "$RUNNER_TEMP/bot-setup.json" >/dev/null; then
+            echo "::error::Bot setup failed"
+            exit 1
+          fi
+          echo "Webhook, menu button and /start command are set"
+
       - name: Smoke test – API answers with JSON errors
         run: |
           body=$(curl -sS --max-time 30 -w '\n%{http_code}' "${API_URL%/}/no-such-route")
@@ -343,25 +367,10 @@ jobs:
         run: |
           status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST -d '{}' "$WEBHOOK_URL")
           if [ "$status" != "404" ]; then
-            echo "::error::Expected HTTP 404 from the webhook stub, got ${status}"
+            echo "::error::Expected HTTP 404 from the webhook without its secret, got ${status}"
             exit 1
           fi
-          echo "Webhook reachable (HTTP 404 until the bot is built)"
-
-      # The bot registers its own webhook (with its secret) and menu button:
-      # neither the bot token nor the webhook secret passes through CI.
-      - name: Set up the bot
-        working-directory: infra
-        run: |
-          function=$(terraform output -raw bot_function_name)
-          payload=$(jq -nc --arg url "$WEBHOOK_URL" '{setup: {webhookUrl: $url}}')
-          failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
-            --payload "$payload" --query FunctionError --output text "$RUNNER_TEMP/bot-setup.json")
-          if [ "$failed" != "None" ] || ! jq -e '.ok == true' "$RUNNER_TEMP/bot-setup.json" >/dev/null; then
-            echo "::error::Bot setup failed"
-            exit 1
-          fi
-          echo "Webhook, menu button and /start command are set"
+          echo "Webhook reachable (HTTP 404 without its secret)"
 
       - name: Smoke test – the notify function starts and may read notices
         working-directory: infra

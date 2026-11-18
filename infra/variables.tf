@@ -72,12 +72,13 @@ variable "bot_token_version" {
 
 # The generated secrets (parameters.tf) each have a version of their own:
 # raising one writes a new random value for that secret alone, at the next
-# deploy. What each change does is in docs/deployment.md (Replacing a
-# generated secret). They replace SECRETS_VERSION, which changed all four
-# at once and was 1 while unset, as each of these is; the deploy now stops
-# while it is set.
+# deploy. Any change writes one, so a raised version must stay set: unset
+# is 1 again, which replaces the secret again. What each change does is in
+# docs/deployment.md (Replacing a generated secret). They replace
+# SECRETS_VERSION, which changed all four at once and was 1 while unset, as
+# each of these is; the deploy now stops while it is set.
 variable "session_key_version" {
-  description = "Increase to replace the session key: every session ends and apps log in again by themselves; pushes go out as Telegram notices for up to about half an hour"
+  description = "Increase to replace the session key: every session ends and apps log in again by themselves; for up to about half an hour open apps get no pushes (they poll, and accounts with notices on get a Telegram notice)"
   type        = number
   default     = 1
   nullable    = false
@@ -98,7 +99,7 @@ variable "chat_key_version" {
 }
 
 variable "telegram_id_pepper_version" {
-  description = "Only to start over; practically irreversible. Increase to replace the Telegram-ID pepper: no stored Telegram hash matches again, so existing accounts can never turn notices on again, admins lose admin, and a user setting up again gets a second account instead of replacing the first"
+  description = "Only to start over; undone only by hand, from SSM's history. Increase to replace the Telegram-ID pepper: no stored Telegram hash matches again, so existing accounts can never turn notices on again, admins lose admin, and a user setting up again gets a second account instead of replacing the first"
   type        = number
   default     = 1
   nullable    = false

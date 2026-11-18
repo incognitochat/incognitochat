@@ -9,9 +9,10 @@
 # ephemeral table (ws records and reads them, api forgets an account's), so
 # a copy of the table can't be matched with the directory. A new value
 # (session_key_version) logs everyone out, and apps log in again by
-# themselves; it leaves the old socket records unfound: open apps get a
-# notice instead of a push until they replace their sockets (within about
-# half an hour), and the old records expire within 40 minutes.
+# themselves; it leaves the old socket records unfound: open apps get no
+# push until they replace their sockets (within about half an hour), only
+# their polls and, with notices on, a notice; the old records expire within
+# 40 minutes.
 ephemeral "random_password" "session_key" {
   length  = 64
   special = false
@@ -30,7 +31,8 @@ ephemeral "random_password" "telegram_id_pepper" {
 
 # Telegram sends it with every webhook update; independent of the bot token.
 # A new value (webhook_secret_version) reaches Telegram when the deploy sets
-# up the bot, right after applying; updates refused meanwhile are sent again.
+# up the bot, after checking what it deployed and before the smoke tests;
+# updates refused meanwhile are sent again.
 ephemeral "random_password" "webhook_secret" {
   length  = 64
   special = false
