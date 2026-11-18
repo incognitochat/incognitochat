@@ -186,7 +186,8 @@ export function register(
         deviceSig,
         replace: options.replace,
       };
-      return api.post('/register', body, checkTokenResponse);
+      // The token also tells the server's clock (clock.timed).
+      return clock.timed(() => api.post('/register', body, checkTokenResponse));
     });
     await putMeta(db, META_ACCOUNT, {
       state: 'registered',
@@ -238,10 +239,9 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
       const timestamp = clock.seconds();
       const nonce = toBase64Url(randomBytes(16));
       const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
-      return api.post(
-        '/session',
-        { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) },
-        checkTokenResponse,
+      // The token also tells the server's clock (clock.timed).
+      return clock.timed(() =>
+        api.post('/session', { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) }, checkTokenResponse),
       );
     });
   try {

@@ -19,14 +19,15 @@ const base: ConversationRecord = {
 };
 
 describe('what a conversation remembers against repeats', () => {
-  it('orders envelopes by their time, and the same millisecond by tag, the same way whatever comes first', () => {
-    expect(isNewer(5, 'a', undefined)).toBe(true);
-    expect(isNewer(6, 'a', { at: 5, tag: 'z' })).toBe(true);
-    expect(isNewer(4, 'z', { at: 5, tag: 'a' })).toBe(false);
-    expect(isNewer(5, 'b', { at: 5, tag: 'a' })).toBe(true);
-    expect(isNewer(5, 'a', { at: 5, tag: 'b' })).toBe(false);
+  it('orders envelopes by their time, and the same second by which was taken in last', () => {
+    expect(isNewer(5000, 'a', undefined)).toBe(true);
+    expect(isNewer(6000, 'a', { at: 5000, tag: 'z' })).toBe(true);
+    expect(isNewer(4000, 'z', { at: 5000, tag: 'a' })).toBe(false);
+    // Times are whole seconds: of two from the same one, the later taken in.
+    expect(isNewer(5000, 'b', { at: 5000, tag: 'a' })).toBe(true);
+    expect(isNewer(5000, 'a', { at: 5000, tag: 'b' })).toBe(true);
     // The same envelope again is never newer than itself.
-    expect(isNewer(5, 'a', { at: 5, tag: 'a' })).toBe(false);
+    expect(isNewer(5000, 'a', { at: 5000, tag: 'a' })).toBe(false);
   });
 
   it('keeps each tag once, by day, and lets the oldest day go first past the cap, saying which', () => {

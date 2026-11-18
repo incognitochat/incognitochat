@@ -33,6 +33,7 @@ import {
   type TokenIssuer,
 } from '../account/wallet';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
+import { stamper } from '../net/clock';
 import type { Session } from '../net/session';
 import { MAX_ENVELOPE, sendTokensFor } from '../protocol/envelope';
 import { BundleMismatch, checkBundle, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
@@ -217,6 +218,14 @@ export interface MessagingDeps {
   mediaIssuer?: TokenIssuer;
   /** Unix milliseconds. */
   now?: () => number;
+  /**
+   * The time messages are dated by, Unix milliseconds: the server's clock as
+   * this device knows it (net/clock.ts, messageNow), so that what we send
+   * doesn't carry how far this device's own clock is off. What we send
+   * carries it rounded down to the second (stamper), and what comes in is
+   * set against it. now if not given.
+   */
+  messageNow?: () => number;
   /** Uploads and downloads attachments (tests use a fake). */
   transfer?: Transfer;
   /** Waits ms before an upload is tried again (tests don't wait). */
@@ -337,6 +346,24 @@ function checkInbox(value: unknown): { items: InboxItem[]; more: boolean; next: 
 export function createMessaging(deps: MessagingDeps) {
   const { db, api, session, issuer, mediaIssuer } = deps;
   const now = deps.now ?? Date.now;
+  const messageNow = deps.messageNow ?? now;
+  const stamp = stamper(messageNow);
+  /**
+   * When we last sent something in each conversation (its `at`), in this run
+   * of the app. Times are whole seconds, and the inbox gives envelopes in no
+   * set order, so what we send in a conversation is dated a second after the
+   * last at least: the other side never gets two of ours there with the same
+   * time, and shows ours in the order written, and takes a later edit,
+   * reaction, key or delete of the whole conversation as later. A quick run
+   * of sends can be dated a few seconds ahead.
+   */
+  const lastSent = new Map<string, number>();
+  /** The time for what we send in a conversation (`at`): messageNow in whole seconds, after anything we sent there before. */
+  function stampIn(conv: string): number {
+    const at = Math.max(stamp(), (lastSent.get(conv) ?? -Infinity) + 1000);
+    lastSent.set(conv, at);
+    return at;
+  }
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? httpTransfer;
   const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -407,7 +434,7 @@ export function createMessaging(deps: MessagingDeps) {
   ): Promise<void> {
     // Stored and shown first; everything slow happens after.
     const id = newId();
-    const at = now();
+    const at = stampIn(conversation.id);
     const answer = replyTo ? { replyTo } : {};
     await addMessage(db, { id, conv: conversation.id, at, out: true, status: 'sending' }, { text: '', ...content, ...answer });
     // Shown now; its chat's place in the list may wait for a send of ours
@@ -444,7 +471,7 @@ export function createMessaging(deps: MessagingDeps) {
     const conversation = await getConversation(db, conv);
     if (!conversation) throw new Error('unknown conversation');
     const id = newId();
-    const at = now();
+    const at = stampIn(conv);
     await putMedia(db, conv, id, out.file);
     await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media));
     await onStored?.(id);
@@ -473,7 +500,7 @@ export function createMessaging(deps: MessagingDeps) {
       if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
       const file = await getMedia(db, conv, id);
       if (!file) throw new Error('attachment missing');
-      const at = now();
+      const at = stampIn(conv);
       const { text, replyTo, media } = message;
       // Unless it was deleted meanwhile.
       if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at }))) return;
@@ -734,7 +761,7 @@ export function createMessaging(deps: MessagingDeps) {
     }
     if ((text.trim() === '' && !m.media) || utf8(text).length > MAX_TEXT_BYTES) throw new Error('not a valid text');
     if (text === m.text) return;
-    const at = now();
+    const at = stampIn(conv);
     if (at - m.at > EDIT_WINDOW_MS) throw new Error('too late to edit');
     await transmit(conv, { kind: 'edit', id: newId(), at, edit: { to: id, text } });
     await setText(db, conv, id, text, at);
@@ -753,7 +780,7 @@ export function createMessaging(deps: MessagingDeps) {
     if (!c || c.status !== 'active' || !m || !m.out || (m.status !== 'sent' && m.status !== 'seen')) {
       throw new Error('nothing to delete for both sides');
     }
-    await transmit(conv, { kind: 'delete', id: newId(), at: now(), delete: [id] });
+    await transmit(conv, { kind: 'delete', id: newId(), at: stampIn(conv), delete: [id] });
     await deleteUploadsLater([m.media]);
     await forget(conv, id);
   }
@@ -888,11 +915,12 @@ export function createMessaging(deps: MessagingDeps) {
     if (!c || c.status !== 'active' || !target) throw new Error('nothing to react to');
     if (emoji !== '' && !isReactionEmoji(emoji)) throw new Error('not an emoji');
     const before = target.reactions?.mine?.e ?? '';
-    await setReaction(db, conv, id, 'mine', emoji, now());
+    const at = stampIn(conv);
+    await setReaction(db, conv, id, 'mine', emoji, at);
     try {
-      await transmit(conv, { kind: 'reaction', id: newId(), at: now(), reaction: { to: id, e: emoji } });
+      await transmit(conv, { kind: 'reaction', id: newId(), at, reaction: { to: id, e: emoji } });
     } catch (err) {
-      await setReaction(db, conv, id, 'mine', before, now());
+      await setReaction(db, conv, id, 'mine', before, stampIn(conv));
       throw err;
     }
   }
@@ -910,7 +938,7 @@ export function createMessaging(deps: MessagingDeps) {
     for (let i = 0; i < unseen.length; i += MAX_SEEN) {
       const batch = unseen.slice(i, i + MAX_SEEN);
       // Left as received if this fails, so the next opening tries again.
-      await transmit(conv, { kind: 'seen', id: newId(), at: now(), seen: batch });
+      await transmit(conv, { kind: 'seen', id: newId(), at: stampIn(conv), seen: batch });
       for (const id of batch) await setMessageStatus(db, conv, id, 'read');
     }
   }
@@ -961,7 +989,7 @@ export function createMessaging(deps: MessagingDeps) {
       return { ...current, myMailbox: null, myKey: keyKept ? current.myKey : null, unblocking: true, ...retire(current, current.myMailbox) };
     });
     // If this fails, it stays blocked, and unblocking again sends it.
-    if (tell) await transmit(c.id, { kind: 'key_update', id: newId(), at: now() });
+    if (tell) await transmit(c.id, { kind: 'key_update', id: newId(), at: stampIn(c.id) });
     if (c.role === 'owner' && c.tag) await removeBlockedTag(c.link.fingerprint, c.tag);
     await update(conv, ({ unblocking: _, ...current }) => ({ ...current, status: 'active' }));
   }
@@ -992,7 +1020,7 @@ export function createMessaging(deps: MessagingDeps) {
       const c = await getConversation(db, conv);
       if (!c || c.status !== 'active') throw new Error("can't delete for both sides");
       const newest = c.lastMessage ?? (await newestTheirs(db, conv));
-      const at = now();
+      const at = stampIn(conv);
       await transmit(conv, { kind: 'delete', id: newId(), at, all: true }, newest ? { last: newest.id } : {});
       await deleteUploadsLater((await listMessages(db, conv)).filter((m) => m.out && m.at <= at).map((m) => m.media));
       // It covers theirs up to that one, ours up to now: whatever arrives
@@ -1526,7 +1554,9 @@ export function createMessaging(deps: MessagingDeps) {
       return false;
     }
     const entry = await lookupKey(db, keyId);
-    const t = now();
+    // By the clock messages are dated by, as ours are: what comes in is set
+    // against what we sent.
+    const t = messageNow();
     if (!entry || message.at < t - MAX_AGE || message.at > t + DAY) return false;
 
     // Which conversation it belongs to comes from how it reached us: the key
@@ -1651,9 +1681,18 @@ export function createMessaging(deps: MessagingDeps) {
       const start = await newestTheirs(db, conv.id);
       if (start) conv = { ...conv, newest: { at: start.at, tag: await tagOf(start.id) } };
     }
+    const cleared = conv.clearedBefore ?? -Infinity;
+    // Theirs sent by then are dropped: cleared for both sides, or (only past
+    // what's remembered one by one) deleted here.
+    const floor = Math.max(cleared, conv.droppedBefore ?? -Infinity);
+    // Deleted one by one: by them, or by the user here.
+    const deleted = (t: string) => remembers(ids.gone, t) || remembers(ids.dropped, t) || remembers(ids.mine, t);
+    const dropped = message.kind === 'message' && (deleted(tag) || message.at <= floor);
     // Only the newest envelope of theirs says which key they write from and
     // where we write to: one that comes late or again mustn't move us back.
-    if (isNewer(message.at, tag, conv.newest)) {
+    // A message dropped (below) came before what deleted or cleared it, so
+    // it isn't newer than that one even when both are from the same second.
+    if (isNewer(message.at, tag, conv.newest) && !(dropped && message.at === conv.newest?.at)) {
       conv = { ...conv, peerKey: message.from, sendTo: message.reply ?? conv.sendTo, lastReceived: message.id, newest: { at: message.at, tag } };
     }
     // Anything of ours it names, they had by its time (their clock): what a
@@ -1661,17 +1700,14 @@ export function createMessaging(deps: MessagingDeps) {
     const read = new Set(message.kind === 'seen' ? (message.seen ?? []) : []);
     const named = [...read, ...[message.last, message.replyTo, message.reaction?.to].filter((id): id is string => id !== undefined)];
     const had = await noteHad(db, conv.id, named, message.at, read);
-    const cleared = conv.clearedBefore ?? -Infinity;
-    // Theirs sent by then are dropped: cleared for both sides, or (only past
-    // what's remembered one by one) deleted here.
-    const floor = Math.max(cleared, conv.droppedBefore ?? -Infinity);
-    // Deleted one by one: by them, or by the user here.
-    const deleted = (t: string) => remembers(ids.gone, t) || remembers(ids.dropped, t) || remembers(ids.mine, t);
-    // Shown no later than it arrived, so a fast clock can't push a message above newer ones.
-    const at = Math.min(message.at, t);
+    // Shown no later than it arrived, so a fast clock can't push a message
+    // above newer ones: by the second, as ours are dated, so that a reply of
+    // ours written after it in the same second shows after it (ties go by
+    // the order taken in, store.ts listMessages).
+    const at = Math.min(message.at, Math.floor(t / 1000) * 1000);
     let changed = false;
     let clear = false;
-    if (message.kind === 'message' && (deleted(tag) || message.at <= floor)) {
+    if (dropped) {
       // Deleted before it got here: by them for both sides (their delete
       // came first), here, or with the whole conversation after it was sent.
     } else if (message.kind === 'delete' && message.all) {
@@ -1711,9 +1747,10 @@ export function createMessaging(deps: MessagingDeps) {
       );
       conv.unread += 1;
       conv.lastAt = Math.max(conv.lastAt, at);
-      // The newest of theirs taken in (from before it was kept: their newest here).
+      // The newest of theirs taken in (from before it was kept: their newest
+      // here); of those sent in the same second, the last taken in.
       const newest = conv.lastMessage ?? (await newestTheirs(db, conv.id));
-      if (!newest || message.at > newest.at || (message.at === newest.at && message.id > newest.id)) conv.lastMessage = { at: message.at, id: message.id };
+      if (!newest || message.at >= newest.at) conv.lastMessage = { at: message.at, id: message.id };
       else if (!conv.lastMessage) conv.lastMessage = newest;
       // Something new brings a deleted conversation back.
       conv.hidden = false;
@@ -1738,9 +1775,10 @@ export function createMessaging(deps: MessagingDeps) {
     } else if (message.kind === 'edit' && message.edit) {
       // Only their own messages in this conversation, within a day of sending
       // (with an hour of grace for clocks and late arrivals), and the latest
-      // edit wins. One for a message that hasn't arrived yet is kept, sealed,
-      // until it does; not for one deleted here, nor one sent before the
-      // conversation was cleared (it would be dropped).
+      // edit wins (of two sent in the same second, the one taken in last).
+      // One for a message that hasn't arrived yet is kept, sealed, until it
+      // does; not for one deleted here, nor one sent before the conversation
+      // was cleared (it would be dropped).
       const { to, text } = message.edit;
       const target = await getMessage(db, conv.id, to);
       if (target) {
@@ -1750,7 +1788,7 @@ export function createMessaging(deps: MessagingDeps) {
         }
       } else if (!deleted(await tagOf(to)) && message.at > floor) {
         const since = t - MAX_AGE;
-        const kept = (conv.edits ?? []).filter((e) => e.at >= since && !(e.id === to && e.at < message.at));
+        const kept = (conv.edits ?? []).filter((e) => e.at >= since && !(e.id === to && e.at <= message.at));
         if (!kept.some((e) => e.id === to)) kept.push({ id: to, at: message.at, sealed: await sealPendingEdit(db, to, text) });
         conv.edits = kept.slice(-MAX_PENDING_EDITS);
       }
@@ -1774,9 +1812,10 @@ export function createMessaging(deps: MessagingDeps) {
       }
     } else if (message.kind === 'reaction' && message.reaction) {
       // To a message of this conversation only, by their clock: the latest
-      // wins. One to a message not here yet (one of theirs still on its way)
-      // is kept, sealed, until it comes; not for one deleted here, nor one
-      // sent before the conversation was cleared (it would be dropped).
+      // wins (of two sent in the same second, the one taken in last). One to
+      // a message not here yet (one of theirs still on its way) is kept,
+      // sealed, until it comes; not for one deleted here, nor one sent before
+      // the conversation was cleared (it would be dropped).
       const { to, e } = message.reaction;
       const target = await getMessage(db, conv.id, to);
       if (target) {
@@ -1784,7 +1823,7 @@ export function createMessaging(deps: MessagingDeps) {
       } else {
         const toTag = await tagOf(to);
         if (!deleted(toTag) && message.at > floor) {
-          const kept = (conv.reactions ?? []).filter((r) => !(r.tag === toTag && r.at < message.at));
+          const kept = (conv.reactions ?? []).filter((r) => !(r.tag === toTag && r.at <= message.at));
           if (!kept.some((r) => r.tag === toTag)) kept.push({ tag: toTag, at: message.at, sealed: await sealPendingReaction(db, toTag, e) });
           conv.reactions = kept.slice(-MAX_PENDING_REACTIONS);
         }

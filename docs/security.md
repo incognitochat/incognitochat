@@ -51,7 +51,7 @@ device.
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock; what timing them can still tell is under What still leaks. |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
 
@@ -148,6 +148,30 @@ it. This is how close it gets.
   message arrived" with "a notice went out" or "someone replied", and link
   people after a few rounds. "Seen" receipts are sent the moment a message is
   read, which sharpens this. Not stored, but observable.
+- **Message times, a little, to other users.** Every message, receipt,
+  reaction, edit and delete says when it was sent (`at`). Taken from the
+  device's clock, to the millisecond, as versions before this one did, it
+  told recipients how far that clock is off: someone who notes when things
+  arrive can estimate that, it lasts for days, and it's the same in all of
+  a person's conversations, so a recipient comparing an anonymous chat with
+  a known one, or two recipients comparing notes, could link them (in a
+  simulation of typical clocks and networks, 4 to 5 bits from 10 to 30
+  messages and receipts each). So the app dates them by the server's clock
+  instead, rounded down to the second, as each login's session token tells
+  it ([protocol.md](protocol.md#inner-message), Times). What's left:
+  - the app knows the server's clock to about half a second, and the error
+    is the same in all its conversations until its next login, about 15
+    minutes later. Someone who times, within those minutes, many messages
+    and receipts in two chats (by answering while the other person has the
+    chat open, say) still learns a little: in that simulation 1.3 to 2.2
+    bits from 10 to 30 each, and about 0.2 bits from different logins.
+    How long messages take to arrive, which differs between networks, adds
+    to that, clocks or not;
+  - a device whose clock is more than a minute off, and what's sent before
+    the app's first login after it opens, are dated by the device's own
+    clock, to the second;
+  - anyone still on a version before this one sends the device's clock, to
+    the millisecond.
 - **Not to other users: whether someone's app is open, or whether a mailbox
   still exists.** A send is answered after the same steps whatever the
   mailbox. Pushing to the recipient's open apps (and the notice, if none is

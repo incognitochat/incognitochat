@@ -501,6 +501,23 @@ describe('a device clock that is off', () => {
     });
   });
 
+  it("dates messages by the server's clock as the login's token tells it, within a minute of the device's", async () => {
+    const server = fakeServer();
+    for (const [off, dated] of [
+      [20_000, 0],
+      [-45_000, 0],
+      // Further off: the device's own, as before.
+      [90_000, 90_000],
+    ] as const) {
+      await withDeviceClockOff(off, async () => {
+        const { app } = await registered(server.api);
+        // Something that logs in.
+        await app.createLink();
+        expect(Math.abs(app.messageNow() - (realNow() + dated))).toBeLessThan(1500);
+      });
+    }
+  });
+
   it('logs in when hours behind, too', async () => {
     const server = fakeServer();
     await withDeviceClockOff(-3.5 * 3600_000, async () => {

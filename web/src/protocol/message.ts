@@ -106,7 +106,11 @@ export interface Message {
   conv: string;
   /** Message ID, 16 random bytes. */
   id: string;
-  /** Sent time, Unix milliseconds, from the sender's clock. */
+  /**
+   * Sent time, Unix milliseconds: by the server's clock as the sender knows
+   * it, rounded down to the whole second (net/clock.ts). Older versions sent
+   * their own device's clock, to the millisecond.
+   */
   at: number;
   /** The sender's conversation public key (65 bytes); a new one means the sender rotated. */
   from: string;

@@ -86,10 +86,21 @@ a new account's first device list, and checking the session token's expiry.
 It signs again with a fresh nonce and retries once, so a device whose clock
 is off (a wrong time zone set by hand, say) works without the user seeing an
 error. Other times still come from the device's own clock: a link's key times
-(`from`, `until`, checked only to the hour and valid for weeks), the week of
-send and media tokens, and a message's `at`. The app believes `now` only
-within two days of its own clock; further off, it signs nothing and asks the
-user to set the device's date and time.
+(`from`, `until`, checked only to the hour and valid for weeks), and the week
+of send and media tokens. The app believes `now` only within two days of its
+own clock; further off, it signs nothing and asks the user to set the
+device's date and time.
+
+Messages are dated by the server's clock too (`at`, Inner message), learnt
+from the session token: `/register` and `/session` answer `{account, token,
+expires}`, and `expires` is exactly 15 minutes after the server issued the
+token, in Unix seconds rounded down. So the server's clock was `expires` − 15
+minutes (plus up to a second) at some moment while the request was out, and
+the app takes the middle of both: to within half a second plus half the
+round trip. Each login does this anew. The app believes it only within 60
+seconds of its own clock, as far as a login's timestamp may be off; further
+off, and before the first login of a run of the app, messages are dated by
+the device's own clock.
 
 **Overload.** When AWS throttles the server (a table at its cap, a function
 out of instances) or a request runs out of time, the server answers
@@ -442,7 +453,7 @@ JSON fields:
 | `kind` | `message`, `seen`, `reaction`, `delete`, `edit`, `key_update` or `end` |
 | `conv` | conversation ID (16 bytes) |
 | `id` | message ID (16 bytes) |
-| `at` | sent time, Unix milliseconds, sender's clock |
+| `at` | sent time, Unix milliseconds in whole seconds, by the server's clock as the sender knows it (see Times, below) |
 | `from` | sender's current conversation public key (65 bytes); a new one is a rotation |
 | `to` | key ID of the recipient key it was written for; must be the key that opened it |
 | `reply` | mailbox to write back to (16 bytes), first messages or when it changes |
@@ -463,6 +474,27 @@ text, an attachment or a sticker; `seen` needs `seen` and no text;
 `reaction` needs `reaction`, `edit` needs `edit`, and `delete` needs
 `delete` or `all` (one of them), and nothing else;
 `key_update` and `end` carry none of these.
+
+**Times.** `at` is the server's clock as the sender's app knows it (Clocks,
+above), rounded down to the whole second: the device's own clock, to the
+millisecond, would tell recipients how far that clock is off, which lasts
+for days and is the same in all of a person's conversations, so recipients
+comparing notes could link them ([security.md](security.md), What still
+leaks). It's never earlier than the sender's last `at` (unless its clock
+moved back by more than a minute), and within a conversation the sender
+dates each envelope at least a second after its previous one there, so the
+other side never gets two of its envelopes there with the same `at`: a
+quick run of them is dated a few seconds ahead. The inbox gives envelopes
+in no set order, so it's this, not when they arrive, that keeps one side's
+messages, edits and reactions in order. Versions before this one sent the
+device's own clock, to the millisecond; recipients take both.
+
+The recipient shows a message at its `at`, but never later than the second
+it arrived in, and messages with the same time (from both sides, or from
+versions before this one) in the order they were written or taken in on
+this device. Where envelopes from the same side have the same `at`, the one
+taken in last counts as the later one: edits and reactions keep it, and so
+does the choice of key and mailbox (Replays and order).
 
 **IDs count only within their conversation.** `conv` and `id` are the
 sender's choice, so the recipient never takes them as unique on its device,
@@ -545,17 +577,19 @@ attachment's caption, which may become empty; stickers, voice and video
 messages have none, for 24 hours after sending. The recipient applies an
 `edit` only to a message from that side in that conversation, only if its
 `at` is at most 25 hours after the message's (an hour of grace for clocks
-and late arrivals), and keeps the latest by `at`, so a replayed
-or late older one changes nothing; the message shows as edited. An `edit`
-that arrives before its message is kept, sealed under the storage key like
-any text, for at most 31 days, and applied when the message comes; not one
-for a message deleted on the recipient's device, nor one from before the
-conversation was cleared (its message would be dropped). Like deleting for
-both sides, it relies on the recipient's app.
+and late arrivals), and keeps the latest by `at` (of two from the same
+second, the one taken in last), so a replayed or late older one changes
+nothing; the message shows as edited. An `edit` that arrives before its
+message is kept, sealed under the storage key like any text, for at most 31
+days, and applied when the message comes; not one for a message deleted on
+the recipient's device, nor one from before the conversation was cleared
+(its message would be dropped). Like deleting for both sides, it relies on
+the recipient's app.
 
 **Reactions.** Each side has at most one reaction per message, as on Telegram
 without Premium; a new one replaces it. The recipient keeps the one with the
-latest `at` from that side, so a replayed or late older one changes nothing.
+latest `at` from that side (of two from the same second, the one taken in
+last), so a replayed or late older one changes nothing.
 One that arrives before its message (one of the sender's own, still on its
 way) is kept like an early edit, sealed, the latest per message, and shown
 when the message comes; one for a message deleted on the recipient's
@@ -616,11 +650,12 @@ no later than the time the conversation is cleared to is skipped.
 
 *Which key and mailbox.* The other side's key (`from`), the mailbox to write
 to (`reply`) and `last` are taken only from an envelope newer than the
-newest taken in: by `at`, and in the same millisecond by the larger keyed
-hash, so every copy of the app ends on the same one whatever the order. An
-older one coming late or again can't move the recipient back to an older
-key or mailbox. A conversation from before this was kept starts from the
-newest of the other side's messages it has.
+newest taken in: by `at`, and of two from the same second the one taken in
+last (but never a message dropped as deleted or cleared: it was sent
+before what deleted or cleared it). An older one coming late or again
+can't move the recipient back to an older key or mailbox. A conversation
+from before this was kept starts from the newest of the other side's
+messages it has.
 
 *Deleting the whole conversation for both sides.* The deleting app names in
 `last` the newest of the other side's messages it ever took in (also one it
@@ -683,7 +718,9 @@ theirs were deleted here within 31 days, above), so anything of theirs not
 taken in yet still arrives and brings the conversation back.
 
 *Clocks set back.* A sender whose clock ran ahead and is set right sends
-envelopes that look older than what came before. Its key or mailbox change
+envelopes that look older than what came before. Since `at` comes from the
+server's clock, this is left to devices whose own clock is more than a
+minute off, and to versions before this one. Its key or mailbox change
 is taken up only once its clock passes the newest time already taken in,
 at most about a day later (envelopes dated further ahead are dropped);
 meanwhile the recipient writes to its older key, which it still has, and to

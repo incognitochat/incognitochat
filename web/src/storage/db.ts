@@ -117,10 +117,12 @@ export interface ConversationRecord {
   lastReceived: string | null;
   /**
    * The newest envelope of theirs taken in: its `at` (their clock) and its
-   * keyed hash (idTag), which breaks ties. Only an envelope newer than this
-   * changes peerKey, sendTo and lastReceived, so one that comes late or
-   * again can't move us back to an older key or mailbox. Missing in
-   * conversations from before it was kept, until something comes.
+   * keyed hash (idTag). Only an envelope newer than this changes peerKey,
+   * sendTo and lastReceived, so one that comes late or again can't move us
+   * back to an older key or mailbox. Of envelopes from the same second
+   * (times are whole seconds), the one taken in last counts as newer.
+   * Missing in conversations from before it was kept, until something
+   * comes.
    */
   newest?: { at: number; tag: string };
   /**
@@ -194,8 +196,18 @@ export interface MessageRecord {
   id: string;
   /** The conversation's ID on this device. */
   conv: string;
-  /** Unix ms shown: the sender's time, but never later than when it arrived. */
+  /**
+   * Unix ms shown: the sender's time, but never later than when it arrived.
+   * Whole seconds from versions that date messages by the server's clock
+   * (net/clock.ts), milliseconds before.
+   */
   at: number;
+  /**
+   * Its place among the conversation's messages with the same `at` (0 for
+   * the first): they show in the order they were written or taken in here.
+   * Missing (0) in messages stored before it was kept.
+   */
+  order?: number;
   /**
    * Theirs: when they sent it, by their clock (its `at` on the wire), where
    * that's later than `at` (their clock runs ahead of ours). A delete of the
