@@ -148,7 +148,8 @@ func (w work) equal(o work) bool {
 
 // /send makes the same calls, with the same capacity, and answers without
 // waiting for the push, whether the mailbox's owner has the app open or
-// not, and whether the mailbox exists or ended; for small and the largest
+// not, and whether the mailbox exists or ended, or its account did
+// (replaced, or being deleted, before its mailboxes are); for small and the largest
 // envelopes, quiet or not, through conversation and intro mailboxes; and a
 // failing table fails it the same way. A sender can't tell them apart by
 // the answer, its time or a failure on the way (findings PRV-2, DLV-6,
@@ -191,6 +192,26 @@ func TestSendDoesTheSameWork(t *testing.T) {
 	onlineBox, offlineBox, discarded := mailbox(online), mailbox(offline), mailbox(offline)
 	h.as(t, offline, http.MethodPost, "/mailboxes/"+discarded+"/discard", nil, false)
 	onlineIntro, offlineIntro := intro(online), intro(offline)
+	// Mailboxes of an account replaced (the cleanup that deletes them not
+	// run yet), and of one being deleted.
+	replaced, deleting := h.account(t, userID+2), h.account(t, userID+3)
+	replacedBox, deletingBox := mailbox(replaced), mailbox(deleting)
+	ctx := context.Background()
+	th := directory.TelegramHash(h.server.Pepper, userID+2)
+	old, err := h.server.Directory.ByTelegram(ctx, th, replaced.d.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := newDevice(t)
+	if err := h.server.Directory.Replace(ctx, old, directory.NewAccount{
+		ID: ids.New(), TelegramHash: th, AccountKey: raw(t, fresh.ak), DeviceID: fresh.id, DeviceKey: raw(t, fresh.dsk),
+		DeviceList: []byte("list"), DeviceListSig: []byte("sig"), DeviceListSeq: 1,
+	}, h.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.Directory.MarkDeleting(ctx, deleting.d.account); err != nil {
+		t.Fatal(err)
+	}
 	send := func(mb, env string, tokens int, quiet bool) (int, map[string]any, work) {
 		t.Helper()
 		tb.meter.Reset()
@@ -199,9 +220,9 @@ func TestSendDoesTheSameWork(t *testing.T) {
 	}
 
 	// The first send to a mailbox that doesn't exist, ever, writes the
-	// placeholder the device lookup reads (directory.Store.NoDevices): one
-	// write more, once per table.
-	for i, want := range []int{1, 0} {
+	// placeholders the device lookup reads (directory.Store.NoRecipients):
+	// two writes more, once per table.
+	for i, want := range []int{2, 0} {
 		status, _, w := send(ids.New(), clientEnvelope(t), 1, false)
 		if status != http.StatusOK || w.directory.Write != float64(want) {
 			t.Fatalf("send %d to no mailbox: %d, %+v", i+1, status, w)
@@ -214,6 +235,8 @@ func TestSendDoesTheSameWork(t *testing.T) {
 		{"app closed", offlineBox, offline.d.account},
 		{"no such mailbox", ids.New(), ""},
 		{"mailbox ended", discarded, ""},
+		{"account replaced", replacedBox, ""},
+		{"account being deleted", deletingBox, ""},
 	}
 	// A sender knows it writes to an intro mailbox (it's in the link's
 	// bundle), and whether the link is gone (GET /links/{id}); the probe to

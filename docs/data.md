@@ -56,7 +56,9 @@ chat and kind), so the chat list doesn't read them.
 | The account's and its device's public keys | To check logins and requests | While the account exists |
 | The user's Telegram chat ID, encrypted so only the notice service can open it, and their language | To send "New message" notices, if the user allows them | While notices are on |
 | The account's link: its ID, its public keys, its first-contact mailbox | So people can write to the user | Until it's replaced, or the account ends |
-| Mailboxes: random IDs, and which account they belong to | To deliver messages | Until they're ended or expire |
+| Mailboxes: random IDs, and which account they belong to | To deliver messages | Until they're ended, or their account is deleted or replaced: they take nothing from that moment, and go in steps while the app is open (below) |
+| Only while a deletion, or the cleanup after a replacement, is under way: that the account is being deleted; or, on the new account, the old account's ID | So the deletion or cleanup carries on where it stopped, and the account is never left half deleted and in use | Until it's done, a few minutes at most while the app is open; it carries on each time the app is opened. If the app is never opened again, it stays, with what isn't deleted yet (below) |
+| On the account: a random value replaced at each change to its link (not a count, so it says nothing about how often it changed), and, while a step of a deletion or cleanup runs, until when that step holds the account (to the millisecond) | So two requests can't undo each other's change to the link, or run the same step twice | The random value while the account exists; the step's time until the work is done (each step replaces it, the last removes it, or it goes with the account) |
 | Messages waiting for the device, encrypted, each with the mailbox it came through | Delivery. The app takes a message in only through the mailbox it belongs to, so another user can't learn whose device opens it by sending it elsewhere | Until the device confirms them, at most 30 days |
 | Placeholders: a device of no account, and at most one waiting message for each size an envelope can have (64 sizes), all zeros, with no mailbox and no time, under an account ID no account has | A send to a mailbox that doesn't exist (or ended) reads and writes them instead, so it costs and takes what a delivery does; each write writes the same item again, so nothing about the send is kept. They only show which envelope sizes were ever sent to such a mailbox | They never change, and stay |
 | Attachments, encrypted, with their padded size and how many fresh upload links they were given (at most 3, when an upload is tried again) | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them. An upload is written once, with a link that only starts an upload within a minute and is given only in the 3 hours after payment, while nothing is stored: once deleted, it can't come back, except from a link given in that same minute (and that copy also expires within 30 days) |
@@ -81,16 +83,40 @@ accounts got messages, or opened the app, when. Whoever holds those keys
 (see [security.md](security.md#what-still-leaks)) could, for the records not
 yet deleted.
 
-When a user deletes their account, all of the above goes at once. Only
-short-lived rate counters (and a quiet period, for a few minutes) are left.
-They expire on their own within about a day, though DynamoDB can take some
-days more to delete them, and an expired one is never used again. Until
-then, that day's counters still say how much was used that day (for example
-how many send tokens were fetched), under names only the server's key ties
-to a Telegram user; not what was sent or to whom. Setting up again instead
-replaces the old account: a marker and the old device's public key are kept
-for 90 days, so the old device can say it was replaced; everything else of
-the old account goes at once.
+When a user deletes their account, it ends at once: the first step deletes
+its link and marks the account as being deleted, and from then on nothing is
+delivered to it, its invitation codes stop working, and nothing new is
+stored for it. Then the rest of the above goes, in steps that keep the
+database's capacity for everyone else: first what is left of an account it
+replaced, and the messages waiting for its device; everything within a few
+minutes for the biggest accounts, while the app stays open. If the app
+closes first, it carries on the next time it's opened; meanwhile the server
+keeps that the account is being deleted, and what isn't deleted yet stays,
+unused. If the app is never opened again, that stays too: the account,
+marked and unused, with what is left of it. The same if the server can't
+finish and the user deletes everything from the device only; setting up
+again later replaces that account (without asking: it isn't in use) and
+deletes what is left of it, keeping no marker of it. Only short-lived rate
+counters (and a quiet period, for a few minutes) are left. They expire on
+their own within about a day, though DynamoDB can take some days more to
+delete them, and an expired one is never used again. Until then, that day's
+counters still say how much was used that day (for example how many send
+tokens were fetched), under names only the server's key ties to a Telegram
+user; not what was sent or to whom.
+
+Setting up again instead replaces the old account, which ends at once the
+same way: a marker and the old device's public key are kept for 90 days, so
+the old device can say it was replaced, and its link goes at once. The rest
+of the old account (its mailboxes, invitation codes and messages still
+waiting for the old device) goes in the same steps: the first during setup,
+which is everything for a small account, the rest while the new device's app
+is open, carrying on at each launch until it's done. Meanwhile the new
+account records the old account's ID, which links the two on the server
+until the cleanup ends; setting up again carries it over, and deleting the
+new account finishes the cleanup first. Those leftovers have no expiry of
+their own, since giving each one an expiry costs as much as deleting it: if
+the new device's app is never opened again, they stay as long as the new
+account does, unused.
 
 **Never stored:** the content of any message or attachment in readable form,
 who sent a message, which conversations belong together, which mailboxes got
@@ -151,12 +177,14 @@ explained in [security.md](security.md#what-still-leaks).
   attachments forever, for a month or for a week; clear a chat's or all of
   them; and choose which kinds download by themselves. A cleared attachment
   can be fetched again only while the server still holds it.
-- **Delete their account** in the app (on the Link tab). Everything the server
-  holds for it is deleted at once (the link, mailboxes, waiting messages and
-  attachments, invitation codes, keys, and the hash of the Telegram ID), and
-  then everything on the device. They can set up a new account later.
+- **Delete their account** in the app (on the Link tab). It ends at once, and
+  everything the server holds for it is deleted within minutes (the link,
+  mailboxes, waiting messages and attachments, invitation codes, keys, and
+  the hash of the Telegram ID), then everything on the device. They can set
+  up a new account later.
 - **Set up again on another device** if they can't use theirs any more. This
-  replaces the old account; its links and mailboxes are deleted at once.
+  replaces the old account: its link goes and its mailboxes stop at once, and
+  they're deleted within minutes while the new device's app is open.
 
 Since the server keeps no content and no record of who talks to whom, there's
 nothing of that kind to hand over to anyone. What it does keep is listed

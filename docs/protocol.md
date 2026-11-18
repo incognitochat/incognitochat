@@ -112,33 +112,71 @@ Delivery).
 | `401 clock_skew` | The device's clock is off (above). |
 | `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
+| `409 account_deleting` | The account is being deleted (below): it takes no request but `GET /account` (which says `deleting: true`) and `DELETE /account`. |
 
-The app doesn't take the last two on trust, since a server could send them to
-anyone. It says so on a screen of its own, keeps the device's chats there and
-readable (nothing is sent or downloaded), asks again when the user taps Try
-again and at every launch, and goes on as before if the server lets the
-device in again. It remembers the answer, so a launch that can't reach the
-server opens read-only too. A replaced account stays shown as replaced if the
-server later only refuses it (the server keeps its marker of a replacement
-for 90 days). It deletes nothing on such an answer: only setting up again
-does, after the user types a confirmation.
+The app doesn't take `login_refused`, `account_replaced` or
+`account_deleting` (or `deleting` in `GET /account`) on trust, since a
+server could send them to anyone. It says so on a screen of its own, keeps
+the device's chats there and readable (nothing is sent or downloaded), asks
+again when the user taps Try again and at every launch, and goes on as
+before if the server lets the device in again. It remembers each of the
+three answers, so a launch that can't reach the server opens on the same
+screen, read-only. A replaced account
+stays shown as replaced if the server later only refuses it (the server
+keeps its marker of a replacement for 90 days). It deletes nothing on such
+an answer: only setting up again does, or finishing a deletion the server
+says is under way (Finish deleting), each after the user types a
+confirmation. The one exception is a deletion the user confirmed on this
+device (below).
 
 **One device per account.** Setting up on a second device replaces the
-account (after a typed confirmation); there is no device linking or sync.
-Replacing deletes the old account's links and mailboxes on the server, and a
+account (after a typed confirmation); there is no device linking or sync. A
 new setup on a device first deletes everything the previous account left
 there (keys, conversations, mailboxes, links). Per Telegram user and UTC day,
 `POST /register` makes at most 3 accounts or replacements, and takes at most
 20 attempts that get past the signature checks, retries and `account_exists`
 answers included: launch data stays valid for 10 minutes, so it can be
 replayed. An attempt reads only three items: the Telegram user's (`T#`),
-its account item and the registering device's. The old account's whole
-partition is listed only to replace it, once that has been counted; a
-replacement whose reading of the old account then fails still counts
-against the 3. A device without an account may ask `POST /accounts/lookup {initData}` whether
+its account item and the registering device's; a replacement, once counted,
+also the old account's devices and link. A replacement whose reading of the
+old account then fails still counts against the 3.
+
+**Replacing** ends the old account at once, in one transaction of a few
+writes however much it owns: its account item becomes a marker that, with
+its device keys, expires after 90 days (so its device can be told), and its
+link and device list are deleted. From then on nothing of it is used: a send
+to one of its mailboxes goes nowhere, doing exactly what a send to an ended
+mailbox does (the server finds the mailbox's account ended; it reads the
+account item with the devices, in the same query), its invitation codes
+don't work, and nothing new can be made under it. The rest (its mailboxes,
+invitation codes, and envelopes still waiting for its device) is deleted in
+steps of about 50 writes, as a deletion is (below): the first in the
+registration itself, the rest as the new device's app asks, `POST
+/account/cleanup` (signed), which answers `409 in_progress` while more is
+left, or while another step for the account runs, and `200 {}` once nothing
+is (also when nothing was); the app repeats it a second later, in the
+background (waiting out a busy server, as for a deletion, below; at most 400
+steps a run). `GET /account` says `cleanup: true` while anything is left, so
+the app carries on at its next launch if it closed first. Until then the new
+account's item lists the old account's ID; replacing the new account carries
+the list over, and deleting it finishes the cleanup first. Each step reads
+only what it deletes, deletes a mailbox, code or link only if the old
+account owns it, and can be repeated, or cut short anywhere, safely: the
+next step finds what one left.
+A device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
-launch, never one that names a link or an invitation, and stores nothing.
+launch, never one that names a link or an invitation, and stores nothing. An
+account being deleted (below) doesn't count: a lookup says there is none,
+and setting up again replaces it without `replace`, so without the warning
+about taking an account over; what is left of it goes with the new
+account's cleanup, as for any replacement. Unlike other replacements, and
+as its deletion would have, it keeps no marker: its item and devices lose
+their keys (they stay only as stubs, until the cleanup deletes them), so
+its device is refused like a deleted account's (`login_refused`), not told
+it was replaced; the app that confirmed the deletion takes either answer
+as done. Only the account's own signed `DELETE /account` marks it so, and
+nothing undoes that, so this can't take over an account in use.
 
 **Deleting an account:** `DELETE /account`, signed. The server deletes the
 account's waiting envelopes, links (their bundles then answer "not found"),
@@ -146,24 +184,67 @@ mailboxes (sends to them get the usual answer and are dropped), invitation
 codes, device list, devices and the account itself, and the item that keeps
 one account per Telegram user, so the same user can set up again, and, in
 the last step, its socket records. Unlike a replacement, it keeps no
-marker; only rate-limit counters remain until they expire (within about a
+marker, also when setting up again replaces it before it's done (above);
+only rate-limit counters remain until they expire (within about a
 day; DynamoDB can take longer to delete them). The daily limits (send and
 media tokens, new mailboxes, link changes, notice setups, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that
 keeps one account per user, so deleting an account and setting up again
-doesn't start a fresh day. It works in steps of about 150
-items, so a big account neither outlasts a request nor takes the table's whole
-write capacity: while more is left the server answers `409 in_progress`, and
-the app repeats the request a second later (links go in the first step, the
-account and its devices in the last). Another write to the account that
-cancels the last step (a new mailbox, a notice) is answered `in_progress`
-too, never as done. The last step answers `200 {}`. Once the devices are
-gone, a repeat (its answer was lost) is refused like any login of a device
-that no longer exists, `401 login_refused`, and the app takes that as done
-too; any other answer, `404` included, leaves everything on the device and
-says the deletion didn't finish. Before asking, the app deletes the uploads
-still waiting for it (`POST /media/{id}/delete`); afterwards it deletes
-everything on the device. The other side of each conversation isn't told.
+doesn't start a fresh day. It works in steps of about 50
+writes, each reading only what it deletes, so a big account neither outlasts
+a request nor takes the table's write capacity: while more is left the
+server answers `409 in_progress`, and the app repeats the request a second
+later. One step at a time runs for an account: it holds a lease on the
+account item, for 15 seconds at most (longer than the function may run), and
+lets the next step start a second after it ends, so the server keeps its own
+pace whatever the app does. A request while another step runs, or within that
+second, is answered `in_progress` too, having done nothing. The first step marks the
+account as being deleted and deletes its link (its bundle then answers "not
+found"), in one transaction: from then on nothing is delivered to it (a send
+to its mailboxes does what a send to an ended one does), its codes don't
+work, nothing new can be made under it, and it takes no request but `GET
+/account`, which says `deleting: true`, and `DELETE /account`; any other is
+answered `409 account_deleting`. It can't be undone. What is left of
+accounts it replaced goes next, then the rest of what it owns (a mailbox or
+code only if it owns it), the account, its devices and the Telegram item
+last, together; 4,000 mailboxes take about 160 steps, a few minutes. Another
+write to the account that cancels the last step (a notice) is answered
+`in_progress` too, never as done. The last step answers `200 {}`. Once the
+devices are gone, a repeat (its answer was lost) is refused like any login
+of a device that no longer exists, `401 login_refused`, and the app takes
+that as done too; any other answer, `404` included, leaves everything on the
+device and says the deletion didn't finish.
+
+Once the user has typed the confirmation, before its first request, the app
+records that it is deleting this account (by its ID) and carries on with it
+at every launch until it's done, before asking anything else; a launch whose
+login is then refused (`login_refused`) takes it as done and deletes
+everything on the device. Before each request, and before deleting
+anything on the device, it checks that the device still holds that account
+and the record, and each request, its retries included (a new login after
+an expired session, a new signature after `clock_skew`), is bound to that
+account: a record for another account (left by another copy of the app
+before a new setup, say) is dropped and acts on nothing, and a copy of the
+app whose deletion another copy finished, followed by a new setup, stops
+without logging in or signing as the new account. A server that is busy
+(`503 unavailable`, `429`) is waited out, as long as it asks (`Retry-After`,
+up to 30 seconds). One run takes at most 400 steps, or 10 minutes; then,
+or if the server keeps failing, the deleting screen offers Try again, the
+chats, read-only, and deleting everything on this device only (already
+confirmed, asked once more in a popup); what the server holds then stays,
+unused, until the user sets up again, which replaces it (above). A
+launch that can't reach the server shows that screen too. When the server says the account is
+being deleted (`deleting`, or `account_deleting`), the app carries on if it
+has the record (another copy of the app started it); if it hasn't, it doesn't
+take the server's word: it keeps the chats readable, as when signed out
+(above), and offers Finish deleting, which takes the same typed
+confirmation. Until the user confirms that, no answer from the server,
+`login_refused` included, deletes anything on the device. So an account is
+never left half deleted and in use, and nothing on the device is deleted on
+the server's word. Before its first request, the app deletes the uploads
+still waiting for it (`POST /media/{id}/delete`, which needs no login);
+afterwards it deletes everything on the device. The other side of each
+conversation isn't told.
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
 (1 byte), sequence number (8), SHA-256 of the previous list (32; zeros for the

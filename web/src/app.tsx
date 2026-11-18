@@ -152,6 +152,11 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               {tr('accountDeleted')}
             </p>
           )}
+          {screen.deletedHere && (
+            <p class="notice" role="status">
+              {tr('accountDeletedHere')}
+            </p>
+          )}
           {screen.mismatch && <p class="notice">{tr('setupMismatch')}</p>}
           <Button onClick={app.setUp}>{tr('setUp')}</Button>
         </Page>
@@ -180,6 +185,31 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
       return <ConfirmReplace app={app} language={language} busy={screen.busy} />;
     case 'confirm-delete':
       return <ConfirmDelete app={app} language={language} busy={screen.busy} error={screen.error} />;
+    case 'deleting':
+      // Confirmed already: nothing to cancel, only to carry on.
+      return (
+        <Page title={tr('deletingTitle')} busy={!screen.error}>
+          <p class="muted" role="status">
+            {tr('deletingAccount')}
+          </p>
+          {screen.error && (
+            <>
+              <p class="notice" role="alert">
+                {tr(ERROR_TEXT[screen.error])}
+              </p>
+              <Button onClick={app.continueDeletion}>{tr('tryAgain')}</Button>
+              <Button kind="secondary" onClick={app.readDuringDeletion}>
+                {tr('readChats')}
+              </Button>
+              {/* Already confirmed by the typed phrase: the server's part waits for the next setup. */}
+              <p class="muted">{tr('deleteHereOnlyNote')}</p>
+              <button type="button" class="link-button delete-account" onClick={() => void confirmDeleteHereOnly(app, language)}>
+                {tr('deleteHereOnly')}
+              </button>
+            </>
+          )}
+        </Page>
+      );
     case 'blocked':
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
@@ -244,10 +274,11 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
     case 'signed-out': {
       // The server's word, never checked: the chats stay, and nothing is deleted without a typed confirmation.
       const replaced = screen.reason === 'replaced';
+      const deleting = screen.reason === 'deleting';
       return (
-        <Page title={tr(replaced ? 'replacedTitle' : 'signedOutTitle')} busy={screen.busy}>
+        <Page title={tr(replaced ? 'replacedTitle' : deleting ? 'deletingElsewhereTitle' : 'signedOutTitle')} busy={screen.busy}>
           <p class={replaced ? 'warning' : 'notice'} role="alert">
-            {tr(replaced ? 'replacedBody' : 'signedOutBody')}
+            {tr(replaced ? 'replacedBody' : deleting ? 'deletingElsewhereBody' : 'signedOutBody')}
           </p>
           <p>{tr('signedOutKept')}</p>
           {screen.offline && <p class="notice">{tr('offline')}</p>}
@@ -257,8 +288,14 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
           <Button kind="secondary" disabled={screen.busy} onClick={app.readChats}>
             {tr('readChats')}
           </Button>
-          <button type="button" class="link-button delete-account" disabled={screen.busy} onClick={app.askReset}>
-            {tr('setUpAgain')}
+          {/* Finishing a deletion, like setting up again, takes a typed confirmation. */}
+          <button
+            type="button"
+            class="link-button delete-account"
+            disabled={screen.busy}
+            onClick={deleting ? app.askDeleteAccount : app.askReset}
+          >
+            {tr(deleting ? 'finishDeleting' : 'setUpAgain')}
           </button>
         </Page>
       );
@@ -288,7 +325,15 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
   // Signed out, the chats are read-only; Try again asks the server again.
-  const status = screen.signedOut ? (
+  // A deletion that couldn't finish: read-only too; Try again carries on with it.
+  const status = screen.deletionPaused ? (
+    <div class="card" role="status">
+      <p>{tr('deletionPausedNotice')}</p>
+      <button type="button" class="button secondary" onClick={() => void app.continueDeletion()}>
+        {tr('tryAgain')}
+      </button>
+    </div>
+  ) : screen.signedOut ? (
     <div class="card" role="status">
       <p>{tr('readOnlyNotice')}</p>
       <button type="button" class="button secondary" onClick={() => void app.recheck()}>
@@ -343,7 +388,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
                 language={language}
                 chat={c}
                 revealed={revealed.value === c.id}
-                onReveal={(id) => (revealed.value = screen.signedOut ? null : id)}
+                onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
               />
             ))}
           </ul>
@@ -1007,6 +1052,18 @@ async function confirmSwitch(app: AppState, language: Language, which: 'uploads'
     ],
   });
   if (choice === 'switch') await app.setSwitch(which, paused);
+}
+
+/** Deleting from this device only wipes everything here at once: asked once more, in a popup. */
+async function confirmDeleteHereOnly(app: AppState, language: Language): Promise<void> {
+  const choice = await app.popup({
+    message: t(language, 'deleteHereOnlyConfirm'),
+    buttons: [
+      { id: 'delete', type: 'destructive', text: t(language, 'deleteHereOnly') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'delete') await app.deleteHereOnly();
 }
 
 /** Asks, in Telegram's own popup, before swapping the link for a new one. */

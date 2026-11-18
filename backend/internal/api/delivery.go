@@ -281,24 +281,32 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	}
 	// A mailbox that doesn't exist takes the same steps for an account
 	// that doesn't exist either: the same query for its devices, which
-	// finds none (directory.Store.NoDevices), so the same write, to a
-	// placeholder (inbox.Store.Deliver), and a push to nobody.
+	// finds none (directory.Store.NoRecipients), so the same write, to a
+	// placeholder (inbox.Store.Deliver), and a push to nobody. So does a
+	// mailbox whose account was replaced or is being deleted: its devices
+	// are looked up the same way, and none take deliveries
+	// (directory.Store.Recipients), so the send goes nowhere, as to an
+	// ended mailbox, before the mailbox itself is deleted.
 	var devices []string
 	if exists {
-		devices, err = s.Directory.Devices(ctx, mailbox.Owner, now)
+		devices, err = s.Directory.Recipients(ctx, mailbox.Owner, now)
 	} else {
-		err = s.Directory.NoDevices(ctx, now)
+		err = s.Directory.NoRecipients(ctx, now)
 	}
 	if err != nil {
 		return s.internal(route, err)
 	}
-	if err := s.Inbox.Deliver(ctx, mailbox.Owner, devices, in.Mailbox, env, now); err != nil {
+	owner := mailbox.Owner
+	if len(devices) == 0 {
+		owner = ""
+	}
+	if err := s.Inbox.Deliver(ctx, owner, devices, in.Mailbox, env, now); err != nil {
 		return s.internal(route, err)
 	}
 	// Open apps fetch at once, and a notice goes out if none is open, both
 	// from the ws function, which this doesn't wait for. Receipts are
 	// pushed too (they update check marks), but never noticed.
-	s.push(ctx, mailbox.Owner, in.Quiet)
+	s.push(ctx, owner, in.Quiet)
 	return accepted()
 }
 

@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,8 @@ type memAccount struct {
 	links     int
 	chat      []byte // sealed chat ID for notices
 	language  string
+	deleting  bool
+	leftovers []string // accounts it replaced, still to clean up
 }
 
 type memCode struct {
@@ -85,6 +88,8 @@ type memDirectory struct {
 	// goneOnDelete makes the next Delete find the account gone, as when
 	// another request finished it meanwhile.
 	goneOnDelete bool
+	// leased are the accounts a step holds (Lease).
+	leased map[string]bool
 }
 
 func newMemDirectory() *memDirectory {
@@ -165,7 +170,7 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[account]
-	if !ok || a.replaced {
+	if !ok {
 		return nil, nil
 	}
 	var out []string
@@ -175,7 +180,83 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	return out, nil
 }
 
-func (m *memDirectory) NoDevices(context.Context, time.Time) error { return nil }
+func (m *memDirectory) Recipients(ctx context.Context, account string, now time.Time) ([]string, error) {
+	m.mu.Lock()
+	a, ok := m.accounts[account]
+	ended := !ok || a.replaced || a.deleting
+	m.mu.Unlock()
+	if ended {
+		return nil, nil
+	}
+	return m.Devices(ctx, account, now)
+}
+
+func (m *memDirectory) NoRecipients(context.Context, time.Time) error { return nil }
+
+func (m *memDirectory) MarkDeleting(_ context.Context, account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[account]
+	if !ok || a.replaced {
+		return directory.ErrNotFound
+	}
+	a.deleting = true
+	// Its link goes with the mark, as in the store.
+	for id, l := range m.links {
+		if l.owner == account {
+			delete(m.links, id)
+			delete(m.boxes, l.link.Mailbox)
+		}
+	}
+	return nil
+}
+
+// Lease holds an account for one step, as the store does (no expiry: the
+// tests release every lease, or set held).
+func (m *memDirectory) Lease(_ context.Context, account string, _ time.Time) (func(context.Context, time.Time, bool) error, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.leased == nil {
+		m.leased = map[string]bool{}
+	}
+	if m.leased[account] {
+		return nil, false, nil
+	}
+	m.leased[account] = true
+	return func(context.Context, time.Time, bool) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.leased, account)
+		return nil
+	}, true, nil
+}
+
+// CleanUp deletes up to max/2 of what old owns (two items each, as the
+// store does), then forgets it.
+func (m *memDirectory) CleanUp(_ context.Context, account, old string, max int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	left := max / 2
+	for id, b := range m.boxes {
+		if b.Owner == old && left > 0 {
+			delete(m.boxes, id)
+			left--
+		}
+	}
+	for code, c := range m.codes {
+		if c.owner == old && left > 0 {
+			delete(m.codes, code)
+			left--
+		}
+	}
+	if left == 0 {
+		return false, nil
+	}
+	if a, ok := m.accounts[account]; ok {
+		a.leftovers = slices.DeleteFunc(a.leftovers, func(id string) bool { return id == old })
+	}
+	return true, nil
+}
 
 type memInbox struct {
 	mu    sync.Mutex
@@ -422,7 +503,21 @@ func (m *memDirectory) ByTelegram(ctx context.Context, th, device string) (direc
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.accounts[id]
-	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device]}, nil
+	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device], Leftovers: slices.Clone(a.leftovers), Deleting: a.deleting}, nil
+}
+
+func (m *memDirectory) AccountExists(ctx context.Context, th string) (bool, error) {
+	id, err := m.AccountOf(ctx, th)
+	if errors.Is(err, directory.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[id]
+	return ok && !a.deleting, nil
 }
 
 func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (bool, error) {
@@ -484,19 +579,22 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	if m.telegram[n.TelegramHash] != old.ID {
 		return directory.ErrConflict
 	}
-	m.accounts[old.ID].replaced = true
-	m.accounts[old.ID].th = ""
+	// As the store does: the links go with the swap; the mailboxes and
+	// codes stay, dead, until the cleanup.
+	prev := m.accounts[old.ID]
+	prev.replaced, prev.deleting, prev.th = true, false, ""
 	for id, l := range m.links {
 		if l.owner == old.ID {
 			delete(m.links, id)
 		}
 	}
-	for id, b := range m.boxes {
-		if b.Owner == old.ID {
-			delete(m.boxes, id)
-		}
-	}
 	m.put(n)
+	m.accounts[n.ID].leftovers = append([]string{old.ID}, prev.leftovers...)
+	prev.leftovers = nil
+	// One being deleted keeps no marker: its item and devices go.
+	if old.Deleting {
+		delete(m.accounts, old.ID)
+	}
 	return nil
 }
 
@@ -515,7 +613,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 	return directory.Device{
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
-		Notices: a.chat != nil,
+		Notices: a.chat != nil, Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
 	}, nil
 }
 

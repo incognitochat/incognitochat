@@ -108,9 +108,22 @@ func TestReplaceEndsMailboxes(t *testing.T) {
 		t.Fatal(err)
 	}
 	old, _ := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
-	if err := s.Replace(ctx, old, newAccount(t, first.TelegramHash), now); err != nil {
+	second := newAccount(t, first.TelegramHash)
+	if err := s.Replace(ctx, old, second, now); err != nil {
 		t.Fatal(err)
 	}
+	// At once, they deliver to nobody.
+	for _, id := range []string{pool[0], l.Mailbox} {
+		mb, err := s.Mailbox(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if devices, err := s.Recipients(ctx, mb.Owner, now); err != nil || len(devices) != 0 {
+			t.Fatalf("mailbox %s of a replaced account delivers to %v, %v", id, devices, err)
+		}
+	}
+	// Then they go.
+	cleanUp(t, s, second.ID, first.ID)
 	for _, id := range []string{pool[0], l.Mailbox} {
 		if _, err := s.Mailbox(ctx, id); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("mailbox %s of a replaced account: %v", id, err)

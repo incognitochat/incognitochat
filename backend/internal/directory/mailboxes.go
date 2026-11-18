@@ -53,7 +53,7 @@ func (s *Store) CreateMailboxes(ctx context.Context, accountID string, ids []str
 		TableName:           &s.Table,
 		Key:                 key(accountPK(accountID), skAccount),
 		UpdateExpression:    aws.String("SET mc = if_not_exists(mc, :zero) + :n"),
-		ConditionExpression: aws.String("attribute_exists(ak) AND (attribute_not_exists(mc) OR mc <= :most)"),
+		ConditionExpression: aws.String(live + " AND (attribute_not_exists(mc) OR mc <= :most)"),
 		ExpressionAttributeValues: attrs{
 			":zero": nv(0),
 			":n":    nv(int64(len(ids))),
@@ -148,23 +148,52 @@ func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error 
 	return err
 }
 
-// Devices returns the IDs of an account's current devices, for delivery.
+// Devices returns the IDs of an account's devices that haven't expired,
+// whatever became of the account: to clear what waits for them. Deliveries
+// go by Recipients.
 func (s *Store) Devices(ctx context.Context, accountID string, now time.Time) ([]string, error) {
-	devices, _, err := s.devices(ctx, accountID, now)
+	items, err := s.prefixed(ctx, accountID, devicePrefix, "sk, e")
+	if err != nil {
+		return nil, err
+	}
+	var devices []string
+	for _, it := range items {
+		if !expired(it, now) {
+			sk, _ := str(it, "sk")
+			devices = append(devices, strings.TrimPrefix(sk, devicePrefix))
+		}
+	}
+	return devices, nil
+}
+
+// Recipients returns the devices a delivery to one of an account's
+// mailboxes goes to: none unless the account is live, neither replaced nor
+// being deleted nor gone. So an account's mailboxes all stop taking
+// messages the moment it ends, with no write to any of them: a send to one
+// then goes as to a mailbox that doesn't exist. It reads the account item
+// and its devices in one query (they sort together: accountSortKeys),
+// eventually consistent: an account that ended in about the last second
+// may still get a delivery, which its devices can no longer fetch.
+func (s *Store) Recipients(ctx context.Context, accountID string, now time.Time) ([]string, error) {
+	devices, _, err := s.recipients(ctx, accountID, now)
 	return devices, err
 }
 
-// devices is Devices, also reporting how many items it read, expired ones
-// too.
-func (s *Store) devices(ctx context.Context, accountID string, now time.Time) ([]string, int, error) {
+// recipients is Recipients, also reporting how many items it read, expired
+// ones too.
+func (s *Store) recipients(ctx context.Context, accountID string, now time.Time) ([]string, int, error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:              &s.Table,
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :d)"),
+		KeyConditionExpression: aws.String("pk = :pk AND sk BETWEEN :a AND :d"),
 		ExpressionAttributeValues: attrs{
 			":pk": sv(accountPK(accountID)),
-			":d":  sv(devicePrefix),
+			":a":  sv(skAccount),
+			":d":  sv(afterDevices),
 		},
+		// What tells whether the account is live, and when its items expire.
+		ProjectionExpression: aws.String("sk, e, g, dl"),
 	})
+	live := false
 	var devices []string
 	read := 0
 	for pages.HasMorePages() {
@@ -178,8 +207,17 @@ func (s *Store) devices(ctx context.Context, accountID string, now time.Time) ([
 				continue
 			}
 			sk, _ := str(it, "sk")
+			if sk == skAccount {
+				_, replaced := it["g"]
+				_, deleting := it["dl"]
+				live = !replaced && !deleting
+				continue
+			}
 			devices = append(devices, strings.TrimPrefix(sk, devicePrefix))
 		}
+	}
+	if !live {
+		return nil, read, nil
 	}
 	return devices, read, nil
 }
@@ -192,26 +230,26 @@ var NoAccount = ids.Encode([16]byte{})
 // (a raw P-256 point).
 const placeholderKeyLen = 65
 
-// NoDevices looks up the devices of an account that doesn't exist, for a
-// send to a mailbox that doesn't exist, the way Devices looks up an
-// account's: the same query, reading one item as large as a device's (a
-// placeholder of NoAccount's, all zeros, that expired long ago, so none is
-// found). So the lookup costs as many read units, and answers about as
-// much, as one for an account with its one device. It writes the
-// placeholder when it's missing: the first time, and if TTL ever took it
-// (TTL skips expiries more than five years past, as its is). One partition
-// reads at most 3,000 units a second, so the table's cap stays at most
-// that (infra/variables.tf, table_max_read_units).
-func (s *Store) NoDevices(ctx context.Context, now time.Time) error {
-	_, read, err := s.devices(ctx, NoAccount, now)
-	if err != nil || read > 0 {
+// NoRecipients looks up the devices of an account that doesn't exist, for
+// a send to a mailbox that doesn't exist, the way Recipients looks up an
+// account's: the same query, reading two items, an account's and one as
+// large as a device's (placeholders of NoAccount's, the device's key all
+// zeros, both expired long ago, so none is found). So the lookup costs as
+// many read units, and answers about as much, as one for an account with
+// its one device. It writes the placeholders when they're missing: the
+// first time, and if TTL ever took them (TTL skips expiries more than five
+// years past, as theirs are). One partition reads at most 3,000 units a
+// second, so the table's cap stays at most that (infra/variables.tf,
+// table_max_read_units).
+func (s *Store) NoRecipients(ctx context.Context, now time.Time) error {
+	_, read, err := s.recipients(ctx, NoAccount, now)
+	if err != nil || read >= 2 {
 		return err
 	}
-	_, err = s.DB.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: &s.Table,
-		Item:      item(accountPK(NoAccount), devicePrefix+NoAccount, attrs{"k": bv(make([]byte, placeholderKeyLen)), "e": nv(1)}),
+	return s.batchWrite(ctx, []types.WriteRequest{
+		{PutRequest: &types.PutRequest{Item: item(accountPK(NoAccount), skAccount, attrs{"e": nv(1)})}},
+		{PutRequest: &types.PutRequest{Item: item(accountPK(NoAccount), devicePrefix+NoAccount, attrs{"k": bv(make([]byte, placeholderKeyLen)), "e": nv(1)})}},
 	})
-	return err
 }
 
 // introMailboxWrites creates a link's intro mailbox (with CreateLink).

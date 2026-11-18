@@ -7,6 +7,8 @@ import {
   isRegistrationLaunch,
   isSetUp,
   logIn,
+  AccountChanged,
+  markDeletingElsewhere,
   prepareSetup,
   readAccount,
   register,
@@ -58,18 +60,62 @@ import type { SyncEvent } from '../sync/locks';
 /** Whether the device says it's offline (its saying online proves nothing). */
 const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
 
-/** Between the steps of deleting an account (DELETE /account answers in_progress until done). */
+/**
+ * Between the steps of deleting an account (DELETE /account answers
+ * in_progress until done), or what is left of one it replaced (POST
+ * /account/cleanup, the same).
+ */
 const DELETE_STEP_PAUSE_MS = 1000;
+/**
+ * Set once the user typed the confirmation to delete the account, until
+ * it's done: { accountId } of the account it's for. Every launch carries on
+ * with it, since the server deletes in steps and the app may close before
+ * the last; only for that account (deletionConfirmed), so a record left by
+ * another copy of the app, after a new setup, deletes nothing. Only the
+ * typed confirmation writes it: the server's word alone never deletes
+ * anything on the device.
+ */
+const META_DELETING = 'deleting';
+/**
+ * The most steps one run of a deletion, or of a cleanup, asks for (an
+ * account with 4,000 mailboxes takes about 160), and the longest it goes
+ * on: past either, a deletion shows its error screen (Try again, the chats,
+ * or deleting from this device only), and a cleanup stops, until a new run
+ * (the next time the home screen finds something left). A server that keeps
+ * answering "more" can't keep the user waiting.
+ */
+const STEPS_PER_RUN = 400;
+const RUN_FOR_MS = 10 * 60_000;
+/** The longest wait a step's Retry-After (503 unavailable, 429) is honoured for. */
+const STEP_WAIT_MAX_MS = 30_000;
+
+/** Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without finishing. */
+class DeletionStalled extends Error {}
+
+/**
+ * How long to wait before the next step after err, or null if err ends the
+ * run: in_progress the usual pause, and a server that is busy (503
+ * unavailable) or turning requests away (429) at least that, or as long as
+ * it asked (Retry-After), up to STEP_WAIT_MAX_MS.
+ */
+function stepWait(err: unknown, pause: number): number | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.code === 'in_progress') return pause;
+  if (err.status === 503 || err.status === 429) return Math.max(pause, Math.min((err.retryAfter ?? 0) * 1000, STEP_WAIT_MAX_MS));
+  return null;
+}
 
 /** clock: the device's clock is too far off (more than two days) for the server's to be believed. */
 export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'generic';
 
 /**
  * Why the server no longer takes this device: it refused the login (the
- * device or its account is gone), or says the account was replaced. Never
- * checked, so asked again at every launch; nothing is deleted for it.
+ * device or its account is gone), or says the account was replaced, or is
+ * being deleted when this app didn't start that here. Never checked, so
+ * asked again at every launch; nothing is deleted for it (a deletion is
+ * finished only after the typed confirmation).
  */
-export type SignedOutReason = 'refused' | 'replaced';
+export type SignedOutReason = 'refused' | 'replaced' | 'deleting';
 
 /** A short message on the home screen after an action. */
 export type HomeNotice =
@@ -157,12 +203,19 @@ export type Screen =
   | { kind: 'loading' }
   | { kind: 'unconfigured' }
   | { kind: 'outside-telegram' }
-  | { kind: 'welcome'; mismatch: boolean; deleted?: boolean }
+  /** deleted: the account was deleted; deletedHere: only from this device (the server couldn't be reached). */
+  | { kind: 'welcome'; mismatch: boolean; deleted?: boolean; deletedHere?: boolean }
   | { kind: 'reopening' }
   | { kind: 'registering' }
   | { kind: 'confirm-replace'; busy: boolean }
   /** Deleting the account, after a typed confirmation. */
   | { kind: 'confirm-delete'; busy: boolean; error: ErrorKind | null }
+  /**
+   * The account is being deleted, as the user confirmed: in steps, carried
+   * on at every launch until done. error: the last try failed; Try again
+   * carries on.
+   */
+  | { kind: 'deleting'; error: ErrorKind | null }
   /** This Telegram account is set up on another device (one device per account). */
   | { kind: 'elsewhere' }
   | {
@@ -181,6 +234,8 @@ export type Screen =
       blockedCount: number;
       /** The server no longer takes this device: chats are read-only. */
       signedOut: SignedOutReason | null;
+      /** The user's deletion couldn't finish, and they read their chats meanwhile: read-only; Try again carries on with it. */
+      deletionPaused: boolean;
     }
   | { kind: 'blocked'; conversations: ConversationView[]; busy: boolean; notice: HomeNotice | null }
   /** Data and storage: what stays on this device and what's fetched by itself. */
@@ -241,6 +296,8 @@ export interface Deps {
   mediaIssuer?: TokenIssuer;
   /** Run the inbox poll and upkeep in the background (off in tests). */
   background?: boolean;
+  /** The pause between steps of a deletion or cleanup, instead of a second (tests). */
+  stepPauseMs?: number;
 }
 
 /** How often an open app checks its inbox (until sockets arrive in phase 3). */
@@ -433,25 +490,66 @@ export function createApp(deps: Deps) {
    */
   async function enter(): Promise<void> {
     const recorded = await readAccount(deps.db);
+    // A deletion the user confirmed here, for this account, not finished
+    // when the app closed.
+    const deleting = await deletionConfirmed();
     let offline = false;
     try {
       session!.use(await logIn(deps.db, deps.api!, clock));
       signedOut = null;
+      // Reading the chats while a deletion couldn't finish ends here too:
+      // the deletion, if still confirmed, carries on below.
+      deletionPaused = false;
       readOnly.value = false;
     } catch (err) {
+      // It finished, and its answer was lost: the device no longer exists.
+      // Only for a deletion the user confirmed: a refusal alone deletes
+      // nothing.
+      // Replaced, likewise: set up again elsewhere, which replaces an
+      // account being deleted without asking.
+      if (deleting && isSetUp(recorded) && err instanceof ApiError && (err.code === 'login_refused' || err.code === 'account_replaced')) {
+        return finishDeletion(recorded.accountId);
+      }
       // Replaced once, still replaced: the server forgets a replacement
       // (its marker expires) and then only refuses the device, but the
       // warning stays.
       if (recorded?.state === 'replaced' && err instanceof ApiError && err.code === 'login_refused') return showSignedOut('replaced');
       if (handleGone(err)) return;
+      // Couldn't ask, with a deletion the user confirmed here: its own
+      // screen (Try again, the chats, deleting here only), whatever the
+      // server said before.
+      if (deleting) return showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
       // Couldn't ask: as the server last said, until it can be asked again.
-      const last = signedOut ?? (recorded?.state === 'replaced' || recorded?.state === 'refused' ? recorded.state : null);
+      const last =
+        signedOut ??
+        (recorded?.state === 'replaced' ? 'replaced' : recorded?.state === 'refused' ? (recorded.deleting ? 'deleting' : 'refused') : null);
       if (last) return showSignedOut(last, true);
       // Offline or the server is down: the device still works on what it has.
       offline = true;
     }
+    // Carried on before anything else is asked: the server takes no other
+    // request from an account being deleted.
+    if (deleting) return runDeletion();
     await startMessaging(!offline);
+    // The first sync found the server no longer takes this device (its
+    // account being deleted, say): that screen stays.
+    if (signedOut) return;
     return continueLaunch(offline);
+  }
+
+  /**
+   * Whether the user confirmed deleting this device's account (the typed
+   * confirmation), and it isn't done yet. A record for another account (left
+   * by another copy of the app, say, before a new setup here) is dropped.
+   */
+  async function deletionConfirmed(): Promise<boolean> {
+    const record = await getMeta<unknown>(deps.db, META_DELETING);
+    if (record === undefined) return false;
+    const account = await readAccount(deps.db);
+    const id = record && typeof record === 'object' ? (record as { accountId?: unknown }).accountId : undefined;
+    if (isSetUp(account) && id === account.accountId) return true;
+    await deleteMeta(deps.db, META_DELETING);
+    return false;
   }
 
   /** The server no longer takes this device: say so, and keep its chats readable. */
@@ -482,41 +580,53 @@ export function createApp(deps: Deps) {
     return enter();
   }
 
+  /**
+   * Creates the messaging engine, if there isn't one, without starting
+   * anything: no sync, no poll. Reports false if it couldn't (no usable
+   * issuer key).
+   */
+  async function createEngine(): Promise<boolean> {
+    if (messaging || !deps.config || !deps.api) return true;
+    try {
+      const issuer = deps.issuer ?? { key: await importIssuerKey(deps.config.issuer.spki), keyId: deps.config.issuer.keyId };
+      const media = deps.config.issuer.media;
+      const mediaIssuer = deps.mediaIssuer ?? (media ? { key: await importIssuerKey(media.spki), keyId: media.keyId } : undefined);
+      messaging = createMessaging({
+        db: deps.db,
+        api: deps.api,
+        session: session!,
+        issuer,
+        ...(mediaIssuer ? { mediaIssuer } : {}),
+        onTokens: () => void refreshBudget(),
+        onWaiting: () => backgroundSync(),
+        // Only while the app syncs in the background (not signed out).
+        onResume: () => {
+          if (backgroundStarted) backgroundSync();
+        },
+        // A link the server made though its answer was lost: shown here and in other copies.
+        onLinks: () => {
+          deps.broadcast({ type: 'data-changed' });
+          void refresh();
+        },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Creates the messaging engine and, outside tests, the inbox poll and upkeep. */
   async function startMessaging(online: boolean): Promise<void> {
     // "Keep media" applies at every start, whether or not this build can send.
     mediaSettings = await getMediaSettings(deps.db);
     await tidyMedia();
-    if (!messaging && deps.config && deps.api) {
-      try {
-        const issuer = deps.issuer ?? { key: await importIssuerKey(deps.config.issuer.spki), keyId: deps.config.issuer.keyId };
-        const media = deps.config.issuer.media;
-        const mediaIssuer = deps.mediaIssuer ?? (media ? { key: await importIssuerKey(media.spki), keyId: media.keyId } : undefined);
-        messaging = createMessaging({
-          db: deps.db,
-          api: deps.api,
-          session: session!,
-          issuer,
-          ...(mediaIssuer ? { mediaIssuer } : {}),
-          onTokens: () => void refreshBudget(),
-          onWaiting: () => backgroundSync(),
-          // Only while the app syncs in the background (not signed out).
-          onResume: () => {
-            if (backgroundStarted) backgroundSync();
-          },
-          // A link the server made though its answer was lost: shown here and in other copies.
-          onLinks: () => {
-            deps.broadcast({ type: 'data-changed' });
-            void refresh();
-          },
-        });
-      } catch {
-        // Without a usable issuer key the app still works, but can't send.
-        return;
-      }
-    }
+    // Without a usable issuer key the app still works, but can't send.
+    if (!(await createEngine())) return;
     if (online) {
       await sync();
+      // The server no longer takes this device (its account being deleted,
+      // say): nothing more starts, no poll, socket or logins.
+      if (signedOut) return;
       // Uploads left to delete from before (the app closed halfway).
       void messaging?.flushUploadDeletes();
     }
@@ -775,7 +885,7 @@ export function createApp(deps: Deps) {
       role: c.role,
       ended: c.status === 'ended',
       blocked: c.status === 'blocked',
-      readOnly: signedOut !== null,
+      readOnly: signedOut !== null || deletionPaused,
       messages: await listMessages(deps.db, id),
       busy: false,
       error: null,
@@ -1262,17 +1372,81 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Deletes the account: first the attachments still waiting for this device
-   * on the server (best effort), then everything the server holds for the
-   * account (DELETE /account, signed), then everything on this device. The
-   * other side of each conversation isn't told: their messages go nowhere,
-   * like to any unknown mailbox.
+   * Deletes the account, once the user typed the confirmation: from then on
+   * the deletion goes ahead, and a launch carries on with it if the app
+   * closes first (META_DELETING), so the account is never left half
+   * deleted. See runDeletion. This is also how a deletion the server says is
+   * under way, with no record of it here, is finished (Finish deleting).
    */
   async function deleteAccount(): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'confirm-delete' || current.busy || !session) return;
-    screen.value = { ...current, busy: true, error: null };
+    const account = await readAccount(deps.db);
+    if (!isSetUp(account)) return;
+    await putMeta(deps.db, META_DELETING, { accountId: account.accountId });
+    signedOut = null;
+    readOnly.value = false;
+    return runDeletion();
+  }
+
+  /** Whether runDeletion is under way. */
+  let deletionRunning = false;
+  /** Counts runs of runDeletion; another copy changing the account ends the one under way. */
+  let deletionRun = 0;
+
+  /**
+   * Whether this device still holds accountId, and the user's confirmed
+   * record of deleting it. Another copy of the app may have finished the
+   * deletion and set up a new account meanwhile: nothing of that one is
+   * deleted, here or on the server.
+   */
+  async function stillDeleting(accountId: string): Promise<boolean> {
+    const account = await readAccount(deps.db);
+    return isSetUp(account) && account.accountId === accountId && (await deletionConfirmed());
+  }
+
+  /**
+   * Deletes the account, or carries on deleting it, as the user confirmed
+   * (deleteAccount, or a launch with the record of it): first the
+   * attachments still waiting for this device on the server (best effort),
+   * then everything the server holds for the account (DELETE /account,
+   * signed), then everything on this device. The other side of each
+   * conversation isn't told: their messages go nowhere, like to any unknown
+   * mailbox. Nothing else is asked of the server meanwhile: it takes no
+   * other request from an account being deleted (uploads are deleted by
+   * their own secrets, without logging in).
+   *
+   * Only for the account it started with: before each request and before
+   * wiping anything, it checks that this device still holds that account
+   * and the record of deleting it (stillDeleting), and each request, its
+   * retries included, is bound to it (session.call's account): if not
+   * (another copy finished and set up again), it stops and looks again
+   * (start).
+   *
+   * At most STEPS_PER_RUN steps, or RUN_FOR_MS: past that it shows its
+   * error screen (Try again, the chats, or deleting here only), so a server
+   * that keeps answering "more" can't keep the user waiting. A busy server
+   * (503, 429) is waited out within that.
+   */
+  async function runDeletion(): Promise<void> {
+    screen.value = { kind: 'deleting', error: null };
+    backButton(false);
+    if (deletionRunning || !session) return;
+    const account = await readAccount(deps.db);
+    if (!isSetUp(account) || !(await deletionConfirmed())) return start();
+    const target = account.accountId;
+    const run = ++deletionRun;
+    deletionRunning = true;
+    deletionPaused = false;
+    readOnly.value = false;
+    const still = async () => run === deletionRun && (await stillDeleting(target));
+    const pause = deps.stepPauseMs ?? DELETE_STEP_PAUSE_MS;
+    const until = Date.now() + RUN_FOR_MS;
+    let steps = 0;
+    let finished = false;
     try {
+      // Also when carrying on at a launch, which starts no messaging.
+      await createEngine();
       if (messaging) {
         for (const c of await listConversations(deps.db)) {
           try {
@@ -1284,33 +1458,162 @@ export function createApp(deps: Deps) {
         // Done before the device is wiped, which takes the list with it.
         await messaging.flushUploadDeletes();
       }
+      stopMessaging();
       // In steps: the server answers in_progress until everything is gone
-      // (a big account takes a few minutes), and also when another change
-      // interrupted the last step. A pause between steps leaves the
-      // database's capacity to everyone else.
-      for (;;) {
+      // (the biggest accounts take a few minutes), and also when another
+      // change interrupted the last step, or another step was running. A
+      // pause between steps leaves the database's capacity to everyone else.
+      while (await still()) {
+        if (steps++ >= STEPS_PER_RUN || Date.now() > until) throw new DeletionStalled();
+        // Shown again each step: nothing else is, until it's done.
+        screen.value = { kind: 'deleting', error: null };
         try {
-          await session.call('DELETE', '/account', undefined, checkObject, { sign: true });
+          await session.call('DELETE', '/account', undefined, checkObject, { sign: true, account: target });
+          finished = true;
           break;
         } catch (err) {
-          if (!(err instanceof ApiError && err.code === 'in_progress')) throw err;
-          await new Promise((resolve) => setTimeout(resolve, DELETE_STEP_PAUSE_MS));
+          const wait = stepWait(err, pause);
+          if (wait === null) throw err;
+          await new Promise((resolve) => setTimeout(resolve, wait));
         }
       }
     } catch (err) {
+      // A run another copy's change ended, or one whose account this device
+      // no longer holds: its error isn't for whatever is here now.
+      if (run !== deletionRun) return;
+      const ours = !(err instanceof AccountChanged) && (await stillDeleting(target));
       // Refused as a device that no longer exists: an earlier step finished
-      // it, and its answer was lost. Done; the user asked for the rest.
-      if (!(err instanceof ApiError && err.code === 'login_refused')) {
+      // it, and its answer was lost. Or replaced: set up again elsewhere,
+      // which replaced it without asking, since it was being deleted. Done
+      // either way; the user asked for the rest, for this account.
+      if (ours && err instanceof ApiError && (err.code === 'login_refused' || err.code === 'account_replaced')) finished = true;
+      // Otherwise the error screen, unless the device holds another account
+      // now (start() below looks again).
+      else if (ours) {
+        deletionRunning = false;
         if (handleGone(err)) return;
-        screen.value = { kind: 'confirm-delete', busy: false, error: err instanceof NetworkError ? 'network' : 'generic' };
+        showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
         return;
       }
     }
+    if (run !== deletionRun) return; // Ended by another copy's change, which looks again itself.
+    deletionRunning = false;
+    if (finished) return finishDeletion(target);
+    return start();
+  }
+
+  /**
+   * The account the user confirmed deleting is gone from the server (or,
+   * here only, the user chose to delete it from this device only):
+   * everything on this device goes too. Only after the typed confirmation
+   * (deleteAccount), never on the server's word alone, and only while this
+   * device still holds that account and the record of it (stillDeleting).
+   */
+  async function finishDeletion(accountId: string, hereOnly = false): Promise<void> {
+    if (!(await stillDeleting(accountId))) return start();
     stopMessaging();
     await wipe(deps.db);
+    signedOut = null;
+    deletionPaused = false;
+    readOnly.value = false;
     deps.broadcast({ type: 'account-changed' });
     backButton(false);
-    screen.value = { kind: 'welcome', mismatch: false, deleted: true };
+    screen.value = hereOnly ? { kind: 'welcome', mismatch: false, deletedHere: true } : { kind: 'welcome', mismatch: false, deleted: true };
+  }
+
+  /**
+   * On the deleting screen, when the server keeps failing: everything on
+   * this device goes now, as the user confirmed. What the server holds stays,
+   * marked and unused, until the user sets up again (which ends it).
+   */
+  async function deleteHereOnly(): Promise<void> {
+    const account = await readAccount(deps.db);
+    if (deletionRunning || !isSetUp(account) || currentScreen().kind !== 'deleting') return;
+    return finishDeletion(account.accountId, true);
+  }
+
+  /** The deleting screen's error (it kept failing), shown again by Cancel from the confirmation. */
+  let deletionError: ErrorKind = 'generic';
+  function showDeletionError(error: ErrorKind): void {
+    deletionError = error;
+    screen.value = { kind: 'deleting', error };
+  }
+
+  /**
+   * The user's deletion couldn't finish, and they chose to read their chats
+   * meanwhile (readDuringDeletion): read-only, like signed out, but no
+   * refusal of the server's, so not signedOut (whose screens say the
+   * deletion wasn't started here). Try again there, or the next launch,
+   * carries on with the deletion.
+   */
+  let deletionPaused = false;
+
+  /** On the deleting screen, when the server keeps failing: the chats, read only. */
+  function readDuringDeletion(): Promise<void> {
+    deletionPaused = true;
+    readOnly.value = true;
+    return showHome({ tab: 'chats' });
+  }
+
+  /**
+   * The server says the account is being deleted. If the user confirmed that
+   * here (on this device, maybe in another copy of the app), it carries on.
+   * Otherwise it isn't taken on trust (a server could say so to anyone): the
+   * chats stay, readable, as when signed out (remembered, so a launch that
+   * can't reach the server shows the same), and the user can finish the
+   * deletion, after the same typed confirmation, or ask again. Nothing on
+   * the device is deleted for it. Signed out at once, so nothing else starts
+   * meanwhile.
+   */
+  function deletingOnServer(): void {
+    if (deletionRunning) return;
+    showSignedOut('deleting');
+    void (async () => {
+      if (await deletionConfirmed()) {
+        signedOut = null;
+        readOnly.value = false;
+        return runDeletion();
+      }
+      const account = await readAccount(deps.db);
+      if (isSetUp(account)) await markDeletingElsewhere(deps.db, account.accountId);
+    })();
+  }
+
+  /** The cleanup under way (cleanUpReplaced). */
+  let cleaning: Promise<void> | null = null;
+
+  /**
+   * Asks the server, in the background, to delete what is left of the
+   * account this one replaced (setting up here ended one elsewhere), in
+   * steps, until it says nothing is (POST /account/cleanup answers
+   * in_progress until then). The old account ended at once; this only frees
+   * what it held. GET /account says whether anything is left, so the next
+   * launch carries on if this one stops (closed, offline).
+   */
+  function cleanUpReplaced(): Promise<void> {
+    cleaning ??= (async () => {
+      try {
+        const account = await readAccount(deps.db);
+        if (!isSetUp(account)) return;
+        const pause = deps.stepPauseMs ?? DELETE_STEP_PAUSE_MS;
+        const until = Date.now() + RUN_FOR_MS;
+        for (let step = 0; step < STEPS_PER_RUN && Date.now() <= until; step++) {
+          try {
+            await session!.call('POST', '/account/cleanup', undefined, checkObject, { sign: true, account: account.accountId });
+            return;
+          } catch (err) {
+            // A busy server is waited out too; anything else (offline, another
+            // account set up meanwhile) stops it until the next launch.
+            const wait = stepWait(err, pause);
+            if (wait === null) return;
+            await new Promise((resolve) => setTimeout(resolve, wait));
+          }
+        }
+      } finally {
+        cleaning = null;
+      }
+    })();
+    return cleaning;
   }
 
   /**
@@ -1321,6 +1624,8 @@ export function createApp(deps: Deps) {
     if (!(err instanceof ApiError)) return false;
     if (err.code === 'account_replaced') showSignedOut('replaced');
     else if (err.code === 'login_refused') showSignedOut(signedOut === 'replaced' ? 'replaced' : 'refused');
+    // Not taken on trust: the chats stay, and the user may finish it.
+    else if (err.code === 'account_deleting') deletingOnServer();
     else if (clock.tooFar(err)) showClockOff(() => start());
     else return false;
     return true;
@@ -1335,7 +1640,7 @@ export function createApp(deps: Deps) {
     if (options.tab) tab = options.tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
-    let offline = (options.offline ?? false) || signedOut !== null;
+    let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
@@ -1349,6 +1654,8 @@ export function createApp(deps: Deps) {
         offline = true;
       }
     }
+    if (account?.deleting) return deletingOnServer();
+    if (account?.cleanup) void cleanUpReplaced();
     const links = await linkViews();
     backButton(false);
     screen.value = {
@@ -1364,6 +1671,7 @@ export function createApp(deps: Deps) {
       askNotices: noticeLaunch && !!account && !account.notices && !writeAllowed,
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
+      deletionPaused,
     };
     if (account && !account.notices && writeAllowed && !noticesTried) void setUpNotices();
   }
@@ -1605,6 +1913,9 @@ export function createApp(deps: Deps) {
     deps.broadcast({ type: 'account-changed' });
     if (!deps.launch.allowsWriteToPm) deps.bridge?.post('web_app_request_write_access');
     await startMessaging(true);
+    // The first sync found the server no longer takes this device: that
+    // screen stays.
+    if (signedOut) return;
     // A link or invitation opened before setup: continue there.
     launchParam = null;
     return continueLaunch(false);
@@ -1615,6 +1926,11 @@ export function createApp(deps: Deps) {
     start,
     /** Another copy changed the account (finished setting up, say): catch up. A login refused in the next few seconds is tried once more. */
     accountChanged(): Promise<void> {
+      // A deletion under way here stops: the account it was for may be gone
+      // (another copy finished it) or another set up. start() looks again.
+      deletionRun++;
+      deletionRunning = false;
+      deletionPaused = false;
       session?.setUp();
       return start();
     },
@@ -1647,7 +1963,20 @@ export function createApp(deps: Deps) {
       screen.value = { kind: 'confirm-delete', busy: false, error: null };
     },
     deleteAccount,
-    cancelDeleteAccount: () => showHome({ tab: 'links' }),
+    /** Try again, on the deleting screen: carries on with the deletion. */
+    continueDeletion: () => runDeletion(),
+    /** On the deleting screen, when the server keeps failing: the chats, read only. */
+    readDuringDeletion,
+    /** On the deleting screen, when the server keeps failing: everything on this device goes, as confirmed. */
+    deleteHereOnly,
+    cancelDeleteAccount: async () => {
+      backButton(false);
+      // Back to the deletion the user confirmed, if one couldn't finish; or
+      // to where Finish deleting was asked, while signed out.
+      if (await deletionConfirmed()) screen.value = { kind: 'deleting', error: deletionError };
+      else if (signedOut) screen.value = { kind: 'signed-out', reason: signedOut, busy: false, offline: false };
+      else return showHome({ tab: 'links' });
+    },
     close: () => deps.bridge?.post('web_app_close'),
     retry: () => retry(),
     home: () => showHome(),

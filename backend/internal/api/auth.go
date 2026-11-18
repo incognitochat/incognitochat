@@ -44,6 +44,24 @@ func (c caller) person() string {
 
 type callerHandler func(ctx context.Context, req httpapi.Request, c caller) httpapi.Response
 
+// whileDeleting are the only routes an account being deleted is answered
+// on: the app learns it is being deleted (GET /account) and carries on
+// with that (DELETE /account). Everything else is refused, account_deleting,
+// before anything is read or written for it.
+var whileDeleting = map[string]bool{"GET /account": true, "DELETE /account": true}
+
+// refused is a device's account's state that refuses the request, if any:
+// replaced, or being deleted (other than on whileDeleting's routes).
+func refused(route string, c caller) (httpapi.Response, bool) {
+	switch {
+	case c.device.Replaced:
+		return httpapi.Error(http.StatusGone, "account_replaced"), true
+	case c.device.Deleting && !whileDeleting[route]:
+		return httpapi.Error(http.StatusConflict, "account_deleting"), true
+	}
+	return httpapi.Response{}, false
+}
+
 // withDevice requires a session token and reads the device and its account,
 // so a replaced account or a removed device is refused at once rather than
 // when its token expires.
@@ -53,8 +71,8 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 		if !ok {
 			return resp
 		}
-		if c.device.Replaced {
-			return httpapi.Error(http.StatusGone, "account_replaced")
+		if resp, no := refused(route, c); no {
+			return resp
 		}
 		return h(ctx, req, c)
 	}
@@ -100,8 +118,8 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 		if err != nil {
 			return s.internal(route, err)
 		}
-		if c.device.Replaced {
-			return httpapi.Error(http.StatusGone, "account_replaced")
+		if resp, no := refused(route, c); no {
+			return resp
 		}
 		return h(ctx, req, c)
 	}

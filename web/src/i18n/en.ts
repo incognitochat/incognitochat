@@ -281,7 +281,18 @@ export const en = {
   deleteBody:
     "This deletes your account from the server at once: your link, your mailboxes and anything waiting for you. Your chats on this device go too. People who write to your old link or in your old chats get no answer, and aren't told why.",
   deleteWarning: "This can't be undone. You can set up a new account later, with a new link.",
-  deletingAccount: 'Deleting… This can take a few minutes. Keep the app open.',
+  deletingAccount: 'Deleting… This can take a few minutes. If the app closes, it carries on the next time you open it.',
+  deletingTitle: 'Deleting your account',
+  deletingElsewhereTitle: 'Your account is being deleted',
+  deletingElsewhereBody:
+    "The server says this account's deletion has started, but it wasn't started on this device. Another copy of the app may have started it, or something may be wrong on the server.",
+  finishDeleting: 'Finish deleting my account',
+  deleteHereOnly: 'Delete from this device only',
+  deleteHereOnlyNote:
+    "If the server can't finish it, you can delete everything on this device now. What the server still holds stays unused until you set up again, which ends it.",
+  accountDeletedHere: 'Everything was deleted from this device. What the server still holds stays unused until you set up again.',
+  deleteHereOnlyConfirm: "Delete all your chats and keys from this device now? This can't be undone.",
+  deletionPausedNotice: "Your account's deletion couldn't finish yet. Your chats are read-only until it does.",
   deletePhrase: 'delete my account',
   deleteAccountConfirm: 'Delete my account',
   accountDeleted: 'Your account was deleted, from the server and from this device.',

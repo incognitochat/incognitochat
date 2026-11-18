@@ -111,14 +111,26 @@ export interface AccountInfo {
   maxLinks: number;
   /** Whether Telegram notices are set up and not turned off. */
   notices: boolean;
+  /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
+  deleting: boolean;
+  /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
+  cleanup: boolean;
 }
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, maxLinks, notices } = v;
+  const { canCreateLinks, admin, links, maxLinks, notices, deleting, cleanup } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
   if (!Number.isSafeInteger(links) || !Number.isSafeInteger(maxLinks)) throw new Error('bad account');
-  return { canCreateLinks, admin, links: links as number, maxLinks: maxLinks as number, notices: notices === true };
+  return {
+    canCreateLinks,
+    admin,
+    links: links as number,
+    maxLinks: maxLinks as number,
+    notices: notices === true,
+    deleting: deleting === true,
+    cleanup: cleanup === true,
+  };
 }
 
 /** Vault names for a link's keys (signingName: links made when each had its own signing key). */
