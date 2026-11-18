@@ -283,8 +283,8 @@ export interface MessageRecord {
   /** The conversation's ID on this device. */
   conv: string;
   /**
-   * Unix ms shown: the sender's time, but never later than when it arrived.
-   * Whole seconds from versions that date messages by the server's clock
+   * Unix ms shown: the sender's time, but never later than when it arrived,
+   * nor earlier than a message it answers (engine.ts, shownAt). Whole seconds from versions that date messages by the server's clock
    * (net/clock.ts), milliseconds before.
    */
   at: number;
@@ -296,8 +296,9 @@ export interface MessageRecord {
   order?: number;
   /**
    * Theirs: when they sent it, by their clock (its `at` on the wire), where
-   * that's later than `at` (their clock runs ahead of ours). A delete of the
-   * whole conversation, also timed by their clock, is compared with this.
+   * that isn't `at` (their clock runs ahead of ours, or behind a message it
+   * answers). A delete of the whole conversation, also timed by their
+   * clock, is compared with this.
    */
   sent?: number;
   /**

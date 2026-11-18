@@ -391,6 +391,28 @@ export function createMessaging(deps: MessagingDeps) {
       return at <= last && last - at < MAX_SKEW_MS ? last + 1000 : at;
     });
   }
+  /**
+   * The time one of their messages shows at here (its `at` on this device),
+   * taken in at `t` (messageNow): by the second, as ours are dated, and those
+   * of the same second in the order written or taken in (store.ts byTime).
+   * Its own time, but no later than it arrived, so a fast clock can't push it
+   * above newer ones; reckoned on this conversation's times, which a quick run
+   * of ours may have dated a few seconds ahead (stampIn), so it shows after
+   * those. And no earlier than what it names that's here (the message it
+   * answers, and `last`, the newest of ours they had): written after those,
+   * it shows after them, also when their clock is a little behind ours.
+   */
+  async function shownAt(conv: string, message: Message, t: number): Promise<number> {
+    const now = Math.floor(t / 1000) * 1000;
+    const last = Math.max((await lastSentAt(db, conv)) ?? -Infinity, clearedAt.get(conv) ?? -Infinity);
+    // Ahead as stampIn reckons it: by a minute or more, the clock went back.
+    let at = Math.min(message.at, now < last && last - now < MAX_SKEW_MS ? last : now);
+    for (const id of new Set([message.last, message.replyTo])) {
+      const named = id === undefined ? undefined : await db.get('messages', [conv, id]);
+      if (named) at = Math.max(at, named.at);
+    }
+    return at;
+  }
   const findKey = keyFinder(db);
   const transfer = deps.transfer ?? httpTransfer;
   const wait = deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -1802,11 +1824,6 @@ export function createMessaging(deps: MessagingDeps) {
     const read = new Set(message.kind === 'seen' ? (message.seen ?? []) : []);
     const named = [...read, ...[message.last, message.replyTo, message.reaction?.to].filter((id): id is string => id !== undefined)];
     const had = await noteHad(db, conv.id, named, message.at, read);
-    // Shown no later than it arrived, so a fast clock can't push a message
-    // above newer ones: by the second, as ours are dated, so that a reply of
-    // ours written after it in the same second shows after it (ties go by
-    // the order taken in, store.ts listMessages).
-    const at = Math.min(message.at, Math.floor(t / 1000) * 1000);
     let changed = false;
     let clear = false;
     /** One of their messages whose text changed: the preview is sealed again if it's the newest. */
@@ -1836,13 +1853,14 @@ export function createMessaging(deps: MessagingDeps) {
         clear = true;
       }
     } else if (message.kind === 'message' && (message.text || message.media || message.sticker)) {
+      const at = await shownAt(conv.id, message, t);
       await addMessage(
         db,
         {
           id: message.id,
           conv: conv.id,
           at,
-          // Their clock runs ahead: when they sent it, by their clock.
+          // Shown at another time than theirs: when they sent it, by their clock.
           ...(message.at !== at ? { sent: message.at } : {}),
           out: false,
           status: 'received',

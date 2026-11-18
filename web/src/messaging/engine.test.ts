@@ -4800,6 +4800,32 @@ describe('message times', () => {
     expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual([S, S, S, S]);
   });
 
+  it('shows a reply after what it answers, though the clock it was dated by is a little behind', async () => {
+    // The owner knows the server's clock as four tenths of a second behind
+    // the sender, across a second: 'hello' comes dated a second after the
+    // owner's reply.
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S - 300, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    expect(await texts('sender')).toEqual(['hello', 'hi']);
+    // At the time of what it answers, and taken in after it; sent by their clock.
+    expect((await listMessages(sender.db, conv)).map((m) => [m.at, m.sent])).toEqual([
+      [S, undefined],
+      [S, S - 1000],
+    ]);
+  });
+
+  it('shows what comes after a quick run of ours after it, though ours are dated ahead', async () => {
+    // All in one second: the owner writes two (the second dated a second
+    // ahead), and then the sender writes, dated a second after 'hello'.
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'one');
+    await owner.messaging.send(mine, 'two');
+    await sender.messaging.send(conv, 'three');
+    await owner.messaging.sync();
+    expect(await texts('owner')).toEqual(['hello', 'one', 'two', 'three']);
+  });
+
   it('takes the later of two edits from the same second, here or not yet, and the same one again changes nothing', async () => {
     const { backend, owner, sender, conv, mine, unspaced } = await chat({ owner: () => S + 500, sender: () => S + 100 });
     const [hello] = await listMessages(sender.db, conv);

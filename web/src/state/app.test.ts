@@ -5,7 +5,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
+import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import type { SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
@@ -908,6 +908,23 @@ describe('syncing', () => {
       vi.unstubAllGlobals();
       Reflect.deleteProperty(navigator, 'onLine');
     }
+  });
+});
+
+describe('an open chat', () => {
+  it('shows a message that comes dated before all it shows, as the inbox gives them in no set order', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    await chatOnDevice(db);
+    await deleteMessage(db, 'c1', 'm1');
+    const S = 1_800_000_000_000;
+    await addMessage(db, { id: 'second', conv: 'c1', at: S + 1000, out: false, status: 'read' }, { text: 'second' });
+    await app.openConversation('c1');
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'second' }], more: false });
+
+    // The one written before it comes in a later sync.
+    await addMessage(db, { id: 'first', conv: 'c1', at: S, out: false, status: 'received' }, { text: 'first' });
+    await app.refresh();
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'first' }, { id: 'second' }], more: false });
   });
 });
 

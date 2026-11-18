@@ -498,9 +498,13 @@ one side's messages, edits and reactions in order. Versions before this
 one sent the device's own clock, to the millisecond; recipients take both.
 
 The recipient shows a message at its `at`, but never later than the second
-it arrived in, and messages with the same time (from both sides, or from
-versions before this one) in the order they were written or taken in on
-this device. Where envelopes from the same side have the same `at`, the one
+it arrived in (or than the last thing the recipient sent there, if a quick
+run of those was dated ahead of that second), and never earlier than a
+message it names that the recipient has (`replyTo`, and `last`): it was
+written after those, so it shows after them, however far apart the two
+clocks are. Messages with the same time (from both sides, or from versions
+before this one) show in the order they were written or taken in on this
+device. Where envelopes from the same side have the same `at`, the one
 taken in last counts as the later one: edits and reactions keep it, and so
 does the choice of key and mailbox (Replays and order).
 
