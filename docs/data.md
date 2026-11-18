@@ -60,7 +60,7 @@ or mailbox), each conversation also keeps, without any content:
 | The time, by the other side's clock, up to which the conversation was cleared for both sides, and for their delete, when this device took it in | 31 days |
 | Only if the user deleted more than 5,000 of their messages in a month: the end of the day up to which their messages are dropped | 31 days |
 | The time, by the other side's clock, and keyed hash of the newest envelope it took in | While the conversation is kept |
-| The time of the last thing this device sent in it, to the second, so the next is dated after it | While the conversation is kept |
+| The time of the last thing this device sent in it, to the second, so the next is dated after it | Until the chat is deleted (here or for both sides), and with the conversation |
 | The time and ID of their newest message it took in | Until a delete for both sides names it, or they delete it for both sides; otherwise while the conversation is kept |
 | For a received message, when it was sent by the other side's clock, if that's later than when it arrived; for a sent one, the earliest time (their clock) something of theirs showed they had it | With the message |
 | A reaction that arrived before its message, sealed like message text | Until the message arrives, or 31 days |

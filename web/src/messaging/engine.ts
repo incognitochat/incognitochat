@@ -62,6 +62,7 @@ import {
   clearMessages,
   deleteMessage,
   findLinkConversation,
+  forgetSentAt,
   forgetUploadDeletes,
   getConversation,
   getMedia,
@@ -351,6 +352,13 @@ export function createMessaging(deps: MessagingDeps) {
   const messageNow = deps.messageNow ?? now;
   const stamp = stamper(messageNow);
   /**
+   * Our deletes of a whole conversation for both sides in this run of the
+   * app, with their time: what we send there after one must be dated after
+   * it, as it clears what's dated up to it on both sides, though deleting
+   * the chat forgets when we last sent something there (forgetSentAt).
+   */
+  const clearedAt = new Map<string, number>();
+  /**
    * The time for what we send in a conversation (`at`): messageNow in whole
    * seconds, and a second after the last thing we sent there at least
    * (store.ts, takeSentAt), also from before a reload or from another copy
@@ -362,9 +370,10 @@ export function createMessaging(deps: MessagingDeps) {
    * than a minute ahead: then the clock went back, and so does this.
    */
   function stampIn(conv: string): Promise<number> {
-    return takeSentAt(db, conv, (last) => {
+    return takeSentAt(db, conv, (stored) => {
       const at = stamp();
-      return last !== undefined && at <= last && last - at < MAX_SKEW_MS ? last + 1000 : at;
+      const last = Math.max(stored ?? -Infinity, clearedAt.get(conv) ?? -Infinity);
+      return at <= last && last - at < MAX_SKEW_MS ? last + 1000 : at;
     });
   }
   const findKey = keyFinder(db);
@@ -1066,6 +1075,11 @@ export function createMessaging(deps: MessagingDeps) {
       // Out of the list, unless something came meanwhile.
       await saveConversation(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) }, ids, before);
     });
+    // Nor is when we last sent something there kept, but what we send next
+    // there must be dated after a delete for both: for this run, that's
+    // kept in memory.
+    if (forBoth) clearedAt.set(conv, upTo.ours);
+    await forgetSentAt(db, conv);
   }
 
   /** Deletes one message from this device only; the other side keeps theirs. */

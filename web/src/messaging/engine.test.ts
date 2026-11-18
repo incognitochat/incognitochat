@@ -4846,6 +4846,25 @@ describe('message times', () => {
     ]);
   });
 
+  it('forgets when it last sent something in a chat once the chat is deleted, here or for both sides', async () => {
+    const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 500, sender: () => S + 100 });
+    const sentAt = (who: Person, c: string) => getMeta<number>(who.db, `sent-at:${c}`);
+    await owner.messaging.send(mine, 'hi');
+    expect([await sentAt(sender, conv), await sentAt(owner, mine)]).toEqual([S, S]);
+    await owner.messaging.remove(mine);
+    expect(await sentAt(owner, mine)).toBeUndefined();
+
+    await sender.messaging.send(conv, 'still there?');
+    expect(await sentAt(sender, conv)).toBe(S + 1000);
+    await sender.messaging.remove(conv, true);
+    expect(await sentAt(sender, conv)).toBeUndefined();
+    // What it sends there next, in the same second, is still dated after the delete (S + 2000), and stays.
+    await sender.messaging.send(conv, 'fresh start');
+    expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual([S + 3000]);
+    await owner.messaging.sync();
+    expect(await texts('owner')).toEqual(['fresh start']);
+  });
+
   it('a delete of the whole chat for both sides takes all of ours they had, also ones dated a few seconds ahead', async () => {
     // The owner writes three in one second: dated a second apart, so ahead.
     const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 30_000 });

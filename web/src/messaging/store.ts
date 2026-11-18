@@ -182,6 +182,25 @@ export function lastSentAt(db: Database, conv: string): Promise<number | undefin
   return getMeta<number>(db, sentKey(conv));
 }
 
+/**
+ * Deletes when this device last sent something in a conversation
+ * (takeSentAt), within a transaction that writes `meta`: with its chat, or
+ * with its record. Whatever deletes a conversation's record deletes this in
+ * the same transaction, with what it remembers by keyed hashes.
+ */
+export function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
+  return meta.delete(sentKey(conv));
+}
+
+/** Forgets when this device last sent something in a conversation: its chat was deleted. */
+export function forgetSentAt(db: Database, conv: string): Promise<void> {
+  return withLock(sentKey(conv), async () => {
+    const tx = db.transaction('meta', 'readwrite');
+    await deleteSentAt(tx.store, conv);
+    await tx.done;
+  });
+}
+
 /** Conversations, newest activity first. */
 export async function listConversations(db: Database): Promise<ConversationRecord[]> {
   return (await db.getAll('conversations')).sort((a, b) => b.lastAt - a.lastAt);
