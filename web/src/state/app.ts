@@ -34,7 +34,7 @@ import {
 import { checkSwitches, type Switch, type Switches } from '../account/switches';
 import { checkAccountInfo, createLink, listLinks, newKeyToTell, replaceLink, revokeLink, toldNewKey, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
-import { budgetLeft, countTokens, rememberLeft, type TokenIssuer } from '../account/wallet';
+import { budgetLeft, countTokens, rememberLeft, type TokenIssuer, type TokenKind } from '../account/wallet';
 import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
@@ -174,8 +174,10 @@ export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not
 /**
  * Why a message couldn't be sent. media-paused: the operator has paused
  * attachments for now (also said when a tapped download is refused for it).
+ * outdated: the server no longer holds the issuer key this build names (it
+ * was replaced), so the app must be opened again.
  */
-export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'media-paused' | 'network' | 'too-big' | 'unreadable' | 'generic';
+export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'media-paused' | 'outdated' | 'network' | 'too-big' | 'unreadable' | 'generic';
 
 /** A conversation in the list. */
 export interface ConversationView {
@@ -1292,9 +1294,21 @@ export function createApp(deps: Deps) {
     return freed;
   }
 
+  /** The ID of the issuer key of a kind this build names (the tests' own, if given): only its tokens count. */
+  function buildKeyId(kind: TokenKind): Uint8Array | undefined {
+    return kind === 'send' ? (deps.issuer ?? deps.config?.issuer)?.keyId : (deps.mediaIssuer ?? deps.config?.issuer.media)?.keyId;
+  }
+
+  /** How many tokens of a kind this device holds unused. */
+  async function tokensHeld(kind: TokenKind): Promise<number> {
+    const keyId = buildKeyId(kind);
+    return keyId ? countTokens(deps.db, keyId, undefined, kind) : 0;
+  }
+
   /** Updates how many messages can still be sent today. */
   async function refreshBudget(): Promise<void> {
-    messagesLeft.value = await budgetLeft(deps.db);
+    const keyId = buildKeyId('send');
+    messagesLeft.value = keyId ? await budgetLeft(deps.db, keyId) : null;
   }
 
   /** Usage: today's limits, from the server's counts and what this device holds unused. */
@@ -1314,8 +1328,8 @@ export function createApp(deps: Deps) {
     await rememberLeft(deps.db, 'media', info.media.limit - info.media.used);
     void refreshBudget();
     const held = {
-      sendTokens: await countTokens(deps.db, undefined, 'send'),
-      mediaTokens: await countTokens(deps.db, undefined, 'media'),
+      sendTokens: await tokensHeld('send'),
+      mediaTokens: await tokensHeld('media'),
       spareMailboxes: await poolSize(deps.db),
     };
     if (currentScreen().kind !== 'usage') return;
@@ -1397,6 +1411,9 @@ export function createApp(deps: Deps) {
     if (err instanceof NoMailboxes) return 'no-mailboxes';
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
     if (isPaused(err)) return 'media-paused';
+    // The server no longer holds the issuer key this build names (it was
+    // replaced): a fresh copy of the app names the new one.
+    if (err instanceof ApiError && err.code === 'unknown_issuer_key') return 'outdated';
     if (err instanceof NetworkError) return 'network';
     return 'generic';
   }

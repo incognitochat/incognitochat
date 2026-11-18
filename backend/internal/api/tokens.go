@@ -30,9 +30,16 @@ const (
 	MediaTokensPerDay = 500
 )
 
-// Issuer signs and checks anonymous send tokens (internal/tokens).
+// Issuer signs and checks anonymous tokens of one kind (tokens.Keyring):
+// with the current issuer key and, while a rotation lasts, the previous one.
 type Issuer interface {
-	Sign(blinded []byte) ([]byte, error)
+	// Current is the current key's ID.
+	Current() [32]byte
+	// Holds reports whether a key is held.
+	Holds(keyID [32]byte) bool
+	// Sign signs a blinded message with the held key keyID names.
+	Sign(keyID [32]byte, blinded []byte) ([]byte, error)
+	// Check verifies a token of any key held.
 	Check(token []byte, now time.Time) (nonce []byte, forgetAfter time.Time, err error)
 	BlindedLen() int
 }
@@ -132,15 +139,33 @@ func (s *Server) issueMediaTokens(ctx context.Context, req httpapi.Request, c ca
 	return s.signTokens(ctx, req, "POST /tokens/media", s.MediaIssuer, "mtok", c.person(), MediaTokensPerDay)
 }
 
+// signTokens signs a batch with the issuer key the app names, its build's
+// (keyId), so an app never gets tokens for a key it can't use. An app from
+// before keys were named sends none, and gets the current key. A key the
+// server doesn't hold (a build for a retired key, or for one not deployed
+// yet) is refused with 409 unknown_issuer_key, before the batch is counted
+// against the day's budget.
 func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route string, issuer Issuer, kind, person string, perDay int) httpapi.Response {
 	var in struct {
 		Blinded []string `json:"blinded"`
+		KeyID   string   `json:"keyId"`
 	}
 	if err := httpapi.DecodeJSON(req, &in); err != nil {
 		return httpapi.DecodeError(err)
 	}
 	if len(in.Blinded) == 0 || len(in.Blinded) > TokenBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
+	}
+	keyID := issuer.Current()
+	if in.KeyID != "" {
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(in.KeyID)
+		if err != nil || len(raw) != len(keyID) {
+			return httpapi.Error(http.StatusBadRequest, "bad_request")
+		}
+		keyID = [32]byte(raw)
+		if !issuer.Holds(keyID) {
+			return httpapi.Error(http.StatusConflict, "unknown_issuer_key")
+		}
 	}
 	blinded := make([][]byte, len(in.Blinded))
 	for i, b := range in.Blinded {
@@ -161,7 +186,7 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 	}
 	signatures := make([]string, len(blinded))
 	for i, b := range blinded {
-		sig, err := issuer.Sign(b)
+		sig, err := issuer.Sign(keyID, b)
 		if errors.Is(err, tokens.ErrInvalid) {
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
 		}

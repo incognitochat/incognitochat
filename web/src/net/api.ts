@@ -32,6 +32,7 @@ export type ErrorCode =
   | 'mailbox_limit'
   | 'invalid_token'
   | 'tokens_needed'
+  | 'unknown_issuer_key'
   | 'uploads_paused'
   | 'downloads_paused'
   | 'in_progress'
@@ -69,6 +70,7 @@ const CODES = new Set<string>([
   'mailbox_limit',
   'invalid_token',
   'tokens_needed',
+  'unknown_issuer_key',
   'uploads_paused',
   'downloads_paused',
   'in_progress',

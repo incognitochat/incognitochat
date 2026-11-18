@@ -43,6 +43,8 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           ISSUER_KEY: ${{ secrets.ISSUER_KEY }}
           MEDIA_ISSUER_KEY: ${{ secrets.MEDIA_ISSUER_KEY }}
+          PREVIOUS_ISSUER_KEY: ${{ secrets.PREVIOUS_ISSUER_KEY }}
+          PREVIOUS_MEDIA_ISSUER_KEY: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
@@ -69,16 +71,26 @@ jobs:
             echo "::error::BOT_TOKEN doesn't look like a Telegram bot token"
             missing=1
           fi
-          for name in ISSUER_KEY MEDIA_ISSUER_KEY; do
+          # The previous keys are set only while a rotation lasts
+          # (docs/deployment.md, Rotating an issuer key).
+          keys=(ISSUER_KEY MEDIA_ISSUER_KEY PREVIOUS_ISSUER_KEY PREVIOUS_MEDIA_ISSUER_KEY)
+          for name in "${keys[@]}"; do
             if [ -n "${!name}" ] && [[ "${!name}" != "-----BEGIN PRIVATE KEY-----"* ]]; then
               echo "::error::$name isn't a PKCS#8 PEM private key"
               missing=1
             fi
           done
-          if [ -n "$ISSUER_KEY" ] && [ "$ISSUER_KEY" = "$MEDIA_ISSUER_KEY" ]; then
-            echo "::error::ISSUER_KEY and MEDIA_ISSUER_KEY must be different keys"
-            missing=1
-          fi
+          # A key that signed both kinds would give them one budget, and a
+          # previous key the same as the current one is a mistake.
+          for ((i = 0; i < ${#keys[@]}; i++)); do
+            for ((j = i + 1; j < ${#keys[@]}; j++)); do
+              a=${keys[i]} b=${keys[j]}
+              if [ -n "${!a}" ] && [ "${!a}" = "${!b}" ]; then
+                echo "::error::$a and $b must be different keys"
+                missing=1
+              fi
+            done
+          done
           # Retired: it replaced all four generated secrets at once, the
           # Telegram-ID pepper too. Each has its own version now, 1 while
           # unset, so ignoring a value other than 1 would replace them all.
@@ -134,6 +146,37 @@ jobs:
             echo "::error::The hosting repository's deploy.yml doesn't take a commit input; copy hosting/deploy.yml there first"
             exit 1
           fi
+
+      # The site names its issuer keys by an entry of web/issuer-keys.json,
+      # so the current keys must be published there, as one entry, before
+      # it can switch to them (docs/deployment.md, Rotating an issuer key).
+      # The IDs of every key the API will hold, the previous ones too, are
+      # kept for the check once the site is live. Key IDs are public.
+      - name: Check the issuer keys are published
+        env:
+          ISSUER_KEY: ${{ secrets.ISSUER_KEY }}
+          MEDIA_ISSUER_KEY: ${{ secrets.MEDIA_ISSUER_KEY }}
+          PREVIOUS_ISSUER_KEY: ${{ secrets.PREVIOUS_ISSUER_KEY }}
+          PREVIOUS_MEDIA_ISSUER_KEY: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
+        run: |
+          # The SHA-256 of the public key's SubjectPublicKeyInfo (DER), as published.
+          key_id() { printf '%s\n' "$1" | openssl pkey -pubout -outform DER | sha256sum | cut -d' ' -f1; }
+          send=$(key_id "$ISSUER_KEY")
+          media=$(key_id "$MEDIA_ISSUER_KEY")
+          entry=$(jq -r --arg send "$send" --arg media "$media" \
+            'to_entries[] | select(.value | type == "object") | select(.value.keyId == $send and .value.media.keyId == $media) | .key' \
+            web/issuer-keys.json | head -n 1)
+          if [ -z "$entry" ]; then
+            echo "::error::No entry of web/issuer-keys.json has ISSUER_KEY's public key (key ID ${send}) with MEDIA_ISSUER_KEY's (${media}) under media: publish them first (docs/deployment.md, Rotating an issuer key)"
+            exit 1
+          fi
+          echo "The current issuer keys are published as ${entry}"
+          held_send=$send
+          held_media=$media
+          if [ -n "$PREVIOUS_ISSUER_KEY" ]; then held_send+=" $(key_id "$PREVIOUS_ISSUER_KEY")"; fi
+          if [ -n "$PREVIOUS_MEDIA_ISSUER_KEY" ]; then held_media+=" $(key_id "$PREVIOUS_MEDIA_ISSUER_KEY")"; fi
+          echo "The API will hold the send keys ${held_send} and the media keys ${held_media}"
+          { echo "HELD_SEND_KEY_IDS=${held_send}"; echo "HELD_MEDIA_KEY_IDS=${held_media}"; } >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -207,6 +250,11 @@ jobs:
           TF_VAR_issuer_key_version: ${{ vars.ISSUER_KEY_VERSION || '1' }}
           TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
           TF_VAR_media_issuer_key_version: ${{ vars.MEDIA_ISSUER_KEY_VERSION || '1' }}
+          # Held only while a rotation lasts; unset, empty, which is none.
+          TF_VAR_previous_issuer_key: ${{ secrets.PREVIOUS_ISSUER_KEY }}
+          TF_VAR_previous_issuer_key_version: ${{ vars.PREVIOUS_ISSUER_KEY_VERSION || '1' }}
+          TF_VAR_previous_media_issuer_key: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
+          TF_VAR_previous_media_issuer_key_version: ${{ vars.PREVIOUS_MEDIA_ISSUER_KEY_VERSION || '1' }}
           # One version per generated secret (docs/deployment.md, Replacing a
           # generated secret).
           TF_VAR_session_key_version: ${{ vars.SESSION_KEY_VERSION || '1' }}
@@ -255,6 +303,8 @@ jobs:
           TF_VAR_bot_token: ${{ secrets.BOT_TOKEN }}
           TF_VAR_issuer_key: ${{ secrets.ISSUER_KEY }}
           TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
+          TF_VAR_previous_issuer_key: ${{ secrets.PREVIOUS_ISSUER_KEY }}
+          TF_VAR_previous_media_issuer_key: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
         # Resource IDs (such as the WebSocket API's) are printed on creation.
         # pipefail: without it, a failed apply would pass through sed as a success.
         run: |
@@ -427,6 +477,16 @@ jobs:
             if [ "$(jq -r '.commit // empty' <<<"$manifest" 2>/dev/null)" = "$GITHUB_SHA" ]; then
               if [ "$(jq -r '.build.VITE_API_URL' <<<"$manifest")" != "$API_URL" ]; then
                 echo "::error::The site was built for another API; update its API_URL variable"
+                exit 1
+              fi
+              # Apps ask for tokens of the keys their build names: keys the
+              # API doesn't hold get them none (HELD_*_KEY_IDS, above).
+              name=$(jq -r '.build.VITE_ISSUER_KEY' <<<"$manifest")
+              send=$(jq -r --arg name "$name" '.[$name].keyId // empty' web/issuer-keys.json)
+              media=$(jq -r --arg name "$name" '.[$name].media.keyId // empty' web/issuer-keys.json)
+              if [[ " ${HELD_SEND_KEY_IDS} " != *" ${send} "* ]] \
+                || { [ -n "$media" ] && [[ " ${HELD_MEDIA_KEY_IDS} " != *" ${media} "* ]]; }; then
+                echo "::error::The site names issuer keys (${name}) the API doesn't hold, so its apps get no tokens: set the hosting repository's ISSUER_KEY to the entry of the current keys (docs/deployment.md, Rotating an issuer key)"
                 exit 1
               fi
               echo "The client built from this commit is live"

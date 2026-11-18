@@ -18,6 +18,13 @@
 // Epochs are weeks. A token is accepted in its own epoch and the next one,
 // so spent tokens are only remembered for two weeks and the key can stay the
 // same: clients spend this week's tokens or last week's.
+//
+// Replacing a key (after a leak, or to void tokens stockpiled ahead) is the
+// only way to make outstanding tokens worthless. So that open apps built for
+// the old key keep working while the site switches to the new one, a
+// Keyring holds the current key of a kind and, while a rotation lasts, the
+// previous one: tokens of either are accepted, and each batch is signed
+// with the key the app names (its build's).
 package tokens
 
 import (
@@ -54,6 +61,9 @@ var (
 	ErrInvalid = errors.New("tokens: invalid token")
 	// ErrKey is returned for an unusable issuer key.
 	ErrKey = errors.New("tokens: invalid issuer key")
+	// ErrUnknownKey is returned for a request to sign with a key that isn't
+	// held.
+	ErrUnknownKey = errors.New("tokens: issuer key not held")
 )
 
 // Issuer holds the issuer key of one kind of token.

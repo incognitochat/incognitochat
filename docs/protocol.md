@@ -1216,6 +1216,14 @@ sees the tokens it signs:
 | Send tokens | `POST /tokens` | at most 50 | 1,000: everything a person (Telegram user) sends (messages, receipts, reactions, edits, deletes), by size (below) |
 | Media tokens | `POST /tokens/media` | at most 50 | 500: 500 MiB of uploads |
 
+A request is `{"blinded": [<blinded token input>, …], "keyId": <issuer key
+ID>}`, each in base64url, and is answered `{"signatures": […], "left": n}`.
+`keyId` names the issuer key to sign with: the one the app's build names
+(below). A key the server doesn't hold gets `409 unknown_issuer_key` before
+anything is counted, so it costs nothing of the day's budget; a malformed
+one gets `400 bad_request`. A request without `keyId` (an app from before
+it) is signed with the current key.
+
 Each answer also says `left`: how many more of that kind the person may
 get today, so the app can say when messages run low. `GET /usage` (logged
 in) returns the day's counts for the Usage screen: `{resetsAt, send, media,
@@ -1320,6 +1328,22 @@ way (A token goes with one send, above). Clients only accept the issuer keys the
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.
+
+**Replacing an issuer key.** Replacing a key is the only way to make the
+tokens already handed out worthless (after a leak, or to void tokens
+stockpiled ahead). While a rotation lasts, the server holds each kind's
+current key and its previous one: it accepts tokens of both, each checked
+with the key its key ID names, and signs each batch with the key the
+request names. So an app still open on a build for the old key keeps
+getting tokens it can use, and one built for the new key never gets
+old-key tokens. Apps keep and spend only tokens of the key their build
+names: any others in the wallet (bytes 66 to 98 of a token are its key ID)
+are dropped, never sent. Once the old key is retired, its tokens are
+refused (`401 invalid_token`), and an app still on its build gets
+`unknown_issuer_key` when it asks for more, and says to close the app and
+open it again. While both keys are held, a token shows which of the two
+builds its sender's app is on; the order of a rotation is in
+[deployment.md](deployment.md#rotating-an-issuer-key).
 
 ## Admin
 

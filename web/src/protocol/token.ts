@@ -17,7 +17,9 @@ export const TOKEN_TYPE = 0x0002;
 export const EPOCH_SECONDS = 7 * 24 * 3600;
 export const LABEL_SEND_TOKEN = 'incognitochat/v2/send-token';
 export const LABEL_MEDIA_TOKEN = 'incognitochat/v2/media-token';
-export const TOKEN_INPUT_LENGTH = 2 + 32 + 32 + 32;
+/** Where a token carries the ID of the issuer key it is for (32 bytes). */
+export const KEY_ID_OFFSET = 2 + 32 + 32;
+export const TOKEN_INPUT_LENGTH = KEY_ID_OFFSET + 32;
 
 export function epochOf(unixSeconds: number): number {
   return Math.floor(unixSeconds / EPOCH_SECONDS);

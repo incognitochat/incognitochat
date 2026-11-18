@@ -1291,7 +1291,7 @@ export function createMessaging(deps: MessagingDeps) {
    * for two of the longest messages meanwhile.
    */
   async function topUpSoon(): Promise<void> {
-    const low = (await countTokens(db, Math.floor(now() / 1000))) < LOW_WATER;
+    const low = (await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) < LOW_WATER;
     if (!low || cancelTopUp) return;
     cancelTopUp = later(() => {
       cancelTopUp = undefined;
@@ -1301,7 +1301,7 @@ export function createMessaging(deps: MessagingDeps) {
 
   /** Fetches a batch of send tokens if fewer than LOW_WATER are left. */
   async function topUp(): Promise<void> {
-    if ((await countTokens(db, Math.floor(now() / 1000))) >= LOW_WATER) return;
+    if ((await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) >= LOW_WATER) return;
     await fetchSendTokens(TOKEN_BATCH);
     deps.onTokens?.();
   }
@@ -1331,7 +1331,7 @@ export function createMessaging(deps: MessagingDeps) {
     try {
       let refilled = false;
       while (taken.length < count) {
-        const token = await takeToken(db, seconds(), 'media');
+        const token = await takeToken(db, mediaIssuer.keyId, seconds(), 'media');
         if (token) {
           taken.push(token);
           refilled = false;
@@ -1360,13 +1360,13 @@ export function createMessaging(deps: MessagingDeps) {
   /** Takes the send tokens a send costs, fetching more if the wallet has fewer. */
   async function nextTokens(count: number): Promise<StoredToken[]> {
     const seconds = () => Math.floor(now() / 1000);
-    let tokens = await takeTokens(db, count, seconds());
+    let tokens = await takeTokens(db, issuer.keyId, count, seconds());
     if (!tokens) {
       // Too few: fetching right before a send is a timing hint, but the
       // wallet is normally refilled well ahead (maintain(), topUpSoon()),
       // with twice what the longest message costs.
       await fetchSendTokens(count);
-      tokens = await takeTokens(db, count, seconds());
+      tokens = await takeTokens(db, issuer.keyId, count, seconds());
     }
     if (!tokens) throw new NoTokens();
     return tokens;
@@ -2157,7 +2157,7 @@ export function createMessaging(deps: MessagingDeps) {
       },
       topUp,
       async () => {
-        if (mediaIssuer && (await countTokens(db, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
+        if (mediaIssuer && (await countTokens(db, mediaIssuer.keyId, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
           await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
         }
       },

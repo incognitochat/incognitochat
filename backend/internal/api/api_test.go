@@ -819,6 +819,16 @@ var (
 	testMediaIssuer = sync.OnceValue(func() *tokens.Issuer { return newTestIssuer(tokens.LabelMedia) })
 )
 
+// keyring holds current and, unless nil, previous, as the api function
+// does: the previous key only while a rotation lasts.
+func keyring(current, previous *tokens.Issuer) *tokens.Keyring {
+	ring, err := tokens.NewKeyring(current, previous)
+	if err != nil {
+		panic(err)
+	}
+	return ring
+}
+
 func newTestIssuer(label string) *tokens.Issuer {
 	key, err := rsa.GenerateKey(rand.Reader, tokens.ModulusBits)
 	if err != nil {
@@ -908,8 +918,8 @@ func newHarness(t *testing.T) *harness {
 		Log:         logx.New(h.logs, "api"),
 		Now:         func() time.Time { return h.now },
 		Inbox:       h.inbox,
-		Issuer:      testIssuer(),
-		MediaIssuer: testMediaIssuer(),
+		Issuer:      keyring(testIssuer(), nil),
+		MediaIssuer: keyring(testMediaIssuer(), nil),
 		Spent:       &memSpent{spent: map[string]bool{}},
 	}
 	h.router = httpapi.NewRouter()

@@ -25,21 +25,26 @@ locals {
       # About 30 ms a request: room for roughly 3,000 requests a second.
       concurrency = 100
       tables      = ["directory", "messages", "ephemeral"]
-      parameters  = ["bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key"]
+      parameters = [
+        "bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key",
+        "previous-issuer-key", "previous-media-issuer-key",
+      ]
       environment = {
-        TABLE_DIRECTORY          = aws_dynamodb_table.table["directory"].name
-        TABLE_MESSAGES           = aws_dynamodb_table.table["messages"].name
-        TABLE_EPHEMERAL          = aws_dynamodb_table.table["ephemeral"].name
-        PARAM_BOT_ID             = aws_ssm_parameter.parameter["bot-id"].name
-        PARAM_SESSION_KEY        = aws_ssm_parameter.parameter["session-key"].name
-        PARAM_TELEGRAM_ID_PEPPER = aws_ssm_parameter.parameter["telegram-id-pepper"].name
-        PARAM_ISSUER_KEY         = aws_ssm_parameter.parameter["issuer-key"].name
-        PARAM_MEDIA_ISSUER_KEY   = aws_ssm_parameter.parameter["media-issuer-key"].name
-        NOTIFY_FUNCTION          = "${local.prefix}-notify"
-        WS_FUNCTION              = "${local.prefix}-ws"
-        MEDIA_BUCKET             = aws_s3_bucket.media.id
-        INVITE_ONLY              = tostring(var.invite_only)
-        ADMIN_TELEGRAM_IDS       = var.admin_telegram_ids
+        TABLE_DIRECTORY                 = aws_dynamodb_table.table["directory"].name
+        TABLE_MESSAGES                  = aws_dynamodb_table.table["messages"].name
+        TABLE_EPHEMERAL                 = aws_dynamodb_table.table["ephemeral"].name
+        PARAM_BOT_ID                    = aws_ssm_parameter.parameter["bot-id"].name
+        PARAM_SESSION_KEY               = aws_ssm_parameter.parameter["session-key"].name
+        PARAM_TELEGRAM_ID_PEPPER        = aws_ssm_parameter.parameter["telegram-id-pepper"].name
+        PARAM_ISSUER_KEY                = aws_ssm_parameter.parameter["issuer-key"].name
+        PARAM_MEDIA_ISSUER_KEY          = aws_ssm_parameter.parameter["media-issuer-key"].name
+        PARAM_PREVIOUS_ISSUER_KEY       = aws_ssm_parameter.parameter["previous-issuer-key"].name
+        PARAM_PREVIOUS_MEDIA_ISSUER_KEY = aws_ssm_parameter.parameter["previous-media-issuer-key"].name
+        NOTIFY_FUNCTION                 = "${local.prefix}-notify"
+        WS_FUNCTION                     = "${local.prefix}-ws"
+        MEDIA_BUCKET                    = aws_s3_bucket.media.id
+        INVITE_ONLY                     = tostring(var.invite_only)
+        ADMIN_TELEGRAM_IDS              = var.admin_telegram_ids
       }
     }
     # Telegram webhook: opens the app, cleans up service messages. The deploy

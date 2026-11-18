@@ -39,8 +39,10 @@ async function backend() {
   const owners = new Map<string, string>(); // mailbox -> account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
   const bundles = new Map<string, Record<string, unknown>>();
-  // uploadsPaused: the operator has paused uploads; mediaSigned: media tokens signed.
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0 };
+  // uploadsPaused: the operator has paused uploads; mediaSigned: media
+  // tokens signed; keyRetired: the issuer keys the apps' build names are
+  // replaced, and no longer held.
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false };
   /** Requests to the media routes. */
   const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
@@ -93,6 +95,9 @@ async function backend() {
         return check({ mailboxes: ids });
       }
       if (path === '/tokens' || path === '/tokens/media') {
+        // Signed with the key the request names, the only one held here
+        // until it is retired.
+        if (state.keyRetired || body.keyId !== toBase64Url(issuer.keyId)) throw new ApiError(409, 'unknown_issuer_key');
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
@@ -756,14 +761,14 @@ describe('conversations in the app', () => {
     expect(sender.preparing.value).toEqual([]);
     // Asked once, and every media token fetched is still in the wallet.
     expect(b.mediaCalls).toEqual(['POST /media']);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(b.state.mediaSigned);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
 
     // Try again while still paused: the same notice, one more request, nothing lost.
     await sender.resendMedia(failed.id);
     expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: 'media-paused' });
     expect((await listMessages(sender.db, conv.id)).at(-1)).toMatchObject({ id: failed.id, status: 'failed' });
     expect(b.mediaCalls).toEqual(['POST /media', 'POST /media']);
-    expect(await countTokens(sender.db, undefined, 'media')).toBe(b.state.mediaSigned);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
     // Text messages go on.
     await sender.sendMessage('still here');
     expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: null });
@@ -781,6 +786,19 @@ describe('conversations in the app', () => {
     // The conversation opens at once; the message shows as not sent, and why.
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it("says to reopen the app once the server no longer holds its build's issuer key", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    b.state.keyRetired = true;
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('outdated');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
   });
 });
