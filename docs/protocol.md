@@ -227,17 +227,21 @@ not show yet, so "not there" is never taken as final on its own.
   same request goes again, with the same ID, so the server can't make two
   links of one. If that's refused (the ID taken, the account at its limit,
   the link it replaces gone), the first may have been made after all, and
-  the bundle is asked once more; if it still doesn't show, the app keeps
-  the change and says the request was refused, and the next try or upkeep
-  looks again. Upkeep doesn't send it again; it gives the change up 10
-  minutes after it was last sent, when no request can still be on its way
-  and the read has long caught up.
+  the bundle is asked once more. If it still doesn't show, the app says the
+  request was refused and keeps the change for the next try or upkeep,
+  unless the change was last sent (a refused send doesn't count, since it
+  isn't on its way) 10 minutes before or more: then it gives the change up
+  and makes a new link in its place. Upkeep doesn't send it again; it gives
+  the change up 10 minutes after it was last sent, when no request can
+  still be on its way and the read has long caught up.
 - A link of that ID that isn't ours: ours wasn't made.
 - A note whose key isn't sealed: the app closed (or storage failed) before
   the request went, so it was never sent, and is dropped.
 
-Revoking a link also revokes a replacement of it whose answer was lost, and
-deletes every key of the link on the device.
+Revoking a link also revokes a replacement of it whose answer was lost (the
+link first, so a replacement still on its way finds it gone, or was made
+before and goes too), and deletes every key of the link on the device
+before the link leaves the list.
 
 An older app deleted the key after any failure, and could close between
 publishing a key and indexing it. Upkeep indexes a sealed key that the index

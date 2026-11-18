@@ -41,6 +41,22 @@ vi.mock('./store', async (importOriginal) => {
   };
 });
 
+// Writing a setting can fail as if the app closed right then (storage.closeAt).
+const storage = vi.hoisted(() => ({ closeAt: null as null | string }));
+vi.mock('../storage/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../storage/db')>();
+  return {
+    ...actual,
+    putMeta: async (...args: Parameters<typeof actual.putMeta>) => {
+      if (storage.closeAt === args[1]) {
+        storage.closeAt = null;
+        throw new Error('closed');
+      }
+      return actual.putMeta(...args);
+    },
+  };
+});
+
 /** Resolves once a request for a lock whose name ends with this is waiting. */
 async function waitingFor(lock: string): Promise<void> {
   for (;;) {
@@ -58,6 +74,7 @@ function nextIds(...ids: string[]): void {
 afterEach(() => {
   vi.mocked(newId).mockReset();
   pause.before = null;
+  storage.closeAt = null;
 });
 
 let n = 0;
@@ -1397,8 +1414,17 @@ describe('link changes whose answer was lost', () => {
     const old = await linkOf(backend, owner);
     loseAnswer(owner, 'POST', /^\/links$/);
     await expect(replaceLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
-    expect([...backend.bundles.keys()]).not.toContain(old.ref.id);
+    const [replacement] = [...backend.bundles.keys()];
+    expect(replacement).not.toBe(old.ref.id);
+    const deletes: string[] = [];
+    const call = owner.session.call;
+    owner.session.call = async function (method, path, ...rest) {
+      if (method === 'DELETE') deletes.push(path);
+      return call(method, path, ...rest);
+    } as Session['call'];
     await revokeLink(owner.db, owner.session, old.ref.id);
+    // The link first, so a replacement still on its way can't outlive it.
+    expect(deletes).toEqual([`/links/${old.ref.id}`, `/links/${replacement}`]);
     expect(backend.bundles.size).toBe(0);
     expect(await listLinks(owner.db)).toEqual([]);
     expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
@@ -1428,6 +1454,46 @@ describe('link changes whose answer was lost', () => {
     expect(await linkKeys(owner.db, ref.id)).toEqual([]);
     expect(await listSealed(owner.db, 'link:')).toEqual([]);
     await owner.messaging.maintain();
+    expect(await listLinks(owner.db)).toEqual([]);
+  });
+
+  it('give a refused resend up once the first send is 10 minutes old, and make a new link instead', async () => {
+    const backend = await fakeBackend();
+    backend.linkRules.max = 1;
+    let clock = Date.now();
+    const seconds = () => Math.floor(clock / 1000);
+    const owner = await person(backend, 'owner', () => clock);
+    const old = await linkOf(backend, owner);
+    // A replacement that never got there; then the old link goes on the server.
+    failRequest(owner, 'POST', /^\/links$/, new NetworkError('offline'));
+    await expect(replaceLink(owner.db, owner.session, backend.api, seconds)).rejects.toThrow(NetworkError);
+    const noted = (await getMeta<{ id: string; at: number }>(owner.db, 'link-change'))!;
+    backend.bundles.delete(old.ref.id);
+    backend.linkOwners.delete(old.ref.id);
+    // A minute on: sent again, refused, and not shown; kept, its time unchanged.
+    clock += 60_000;
+    await expect(replaceLink(owner.db, owner.session, backend.api, seconds)).rejects.toMatchObject({ code: 'not_found' });
+    expect(await getMeta(owner.db, 'link-change')).toMatchObject({ id: noted.id, at: noted.at });
+    // Ten minutes after the first send: given up, and a new link made.
+    clock += 10 * 60_000;
+    const record = await replaceLink(owner.db, owner.session, backend.api, seconds);
+    expect(record.id).not.toBe(noted.id);
+    expect(await getMeta(owner.db, 'link-change')).toBeUndefined();
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([record.id]);
+    expect([...backend.bundles.keys()]).toEqual([record.id]);
+  });
+
+  it('leave no key behind when the app closes while revoking', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref } = await linkOf(backend, owner);
+    storage.closeAt = 'links';
+    await expect(revokeLink(owner.db, owner.session, ref.id)).rejects.toThrow('closed');
+    // Its keys went before it left the list; revoking it again finishes.
+    expect(await listSealed(owner.db, `link:${ref.id}:`)).toEqual([]);
+    expect(await linkKeys(owner.db, ref.id)).toEqual([]);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([ref.id]);
+    await revokeLink(owner.db, owner.session, ref.id);
     expect(await listLinks(owner.db)).toEqual([]);
   });
 

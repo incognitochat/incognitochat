@@ -383,7 +383,9 @@ async function adoptLink(db: Database, change: LinkChange & { kind: 'link' }, ma
     rotateAt: nextRotation(change.at),
     ...(mailbox ? { mailbox } : {}),
   };
-  await putMeta(db, META_LINKS, [...(await listLinks(db)).filter((l) => l.id !== replaces && l.id !== id), record]);
+  // The old link's keys are seen to before it leaves the list, and the note
+  // goes last: if the app closes in between, the next settle does it all
+  // again, and no key is left that nothing will ever delete.
   if (replaces) {
     // Its keys stay until first messages sent before the replacement can
     // no longer be waiting in the inbox; loose ones an older version left
@@ -393,6 +395,7 @@ async function adoptLink(db: Database, change: LinkChange & { kind: 'link' }, ma
   }
   // First messages to the link are wrapped to this key, and come through its intro mailbox.
   await indexKey(db, fromBase64Url(key.key), { name: changeName(change), link: { id, fingerprint, ...(mailbox ? { mailbox } : {}) } });
+  await putMeta(db, META_LINKS, [...(await listLinks(db)).filter((l) => l.id !== replaces && l.id !== id), record]);
   await deleteMeta(db, META_CHANGE);
   return record;
 }
@@ -431,9 +434,11 @@ async function adoptKey(db: Database, change: LinkChange & { kind: 'key' }, now:
  *   sent again as it was, with the same ID, so the server can't make it
  *   twice. Refused, it may have been made after all (its ID taken, the
  *   account at its limit, the link it replaces gone), so the bundle is asked
- *   once more; still not shown, the change is kept and the refusal thrown:
- *   bundle reads can lag a moment behind a change, so "not there" is
- *   believed only at upkeep, 10 minutes after it was last sent.
+ *   once more. Bundle reads can lag a moment behind a change, so "not
+ *   there" is believed only 10 minutes after the change was last sent
+ *   (a refused send isn't on its way, and doesn't count): until then the
+ *   change is kept and the refusal thrown; after, it's given up, and a new
+ *   link made in its place.
  * - A link of that ID that isn't ours: ours wasn't made.
  * - A change whose key isn't sealed was never sent (the app closed, or
  *   storage failed, before): dropped.
@@ -471,12 +476,16 @@ async function settle(db: Database, session: Session, api: Api, now: number, aga
   } catch (err) {
     if (!refused(err)) throw err;
     refusal = err;
+    // Refused, it isn't on its way: the time is the earlier send's again.
+    await putMeta(db, META_CHANGE, change);
   }
   if (created) return adoptLink(db, resent, mailboxOf(created), now);
-  const after = await lookUp(api, resent, resent.fingerprint);
-  if (typeof after === 'object') return adoptLink(db, resent, after.mailbox, now);
-  if (after === 'gone') throw refusal!;
-  await forget(db, resent, null);
+  const after = await lookUp(api, change, change.fingerprint);
+  if (typeof after === 'object') return adoptLink(db, change, after.mailbox, now);
+  // Still not shown: believed once the earlier send is 10 minutes old (and
+  // a new link is made in its place), else the refusal stands for now.
+  if (after === 'gone' && Math.abs(now - change.at) < CHANGE_SETTLES_AFTER) throw refusal!;
+  await forget(db, change, null);
   return null;
 }
 
@@ -576,26 +585,29 @@ export function revokeLink(db: Database, session: Session, id: string): Promise<
 
 async function revoke(db: Database, session: Session, id: string): Promise<void> {
   const change = await pendingChange(db);
+  // The link first, then its replacement: a replacement still on its way
+  // then either finds the link gone and makes nothing, or was made first
+  // and is deleted here.
+  await deleteLink(session, id);
   if (change?.kind === 'link' && change.replaces === id) {
     await deleteLink(session, change.id);
     await forget(db, change, null);
   }
-  await deleteLink(session, id);
-  const links = await listLinks(db);
-  const record = links.find((l) => l.id === id);
-  await putMeta(db, META_LINKS, links.filter((l) => l.id !== id));
-  // Every key of the link: on its record, indexed, or sealed (loose ones an
-  // older version left included).
+  // Every key of the link (on its record, indexed, or sealed, loose ones an
+  // older version left included) goes before the link leaves the list: if
+  // the app closes in between, revoking it again finds them.
+  const record = (await listLinks(db)).find((l) => l.id === id);
   const names = new Set([
     ...(record?.keys ?? []).map((k) => keyName(id, k.from)),
     ...(await unindexKeys(db, (e) => e.link?.id === id)).map((e) => e.name),
     ...(await listSealed(db, keyPrefix(id))),
   ]);
-  // A new key for it still unsettled goes with the rest.
-  if (change?.kind === 'key' && change.id === id) await deleteMeta(db, META_CHANGE);
   // Links made when each had its own signing key.
   await deleteSealed(db, signingName(id));
   for (const name of names) await deleteSealed(db, name);
+  // A new key for it still unsettled went with the rest.
+  if (change?.kind === 'key' && change.id === id) await deleteMeta(db, META_CHANGE);
+  await putMeta(db, META_LINKS, (await listLinks(db)).filter((l) => l.id !== id));
 }
 
 /** Deletes a link on the server; one it doesn't have (any more) counts as deleted. */
