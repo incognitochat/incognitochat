@@ -49,6 +49,12 @@ type accountResponse struct {
 	MaxLinks       int  `json:"maxLinks"`
 	// Notices says whether Telegram notices are set up and not turned off.
 	Notices bool `json:"notices"`
+	// Deleting says the account is being deleted (DELETE /account has
+	// started): the app carries on with it.
+	Deleting bool `json:"deleting"`
+	// Cleanup says what is left of an account this one replaced is still
+	// to be deleted: the app asks for that (POST /account/cleanup).
+	Cleanup bool `json:"cleanup"`
 }
 
 // mayOwnLinks says whether an account may create links: while invite-only,
@@ -69,6 +75,8 @@ func (s *Server) account(_ context.Context, _ httpapi.Request, c caller) httpapi
 		Links:          c.device.Links,
 		MaxLinks:       links.MaxActive,
 		Notices:        c.device.Notices,
+		Deleting:       c.device.Deleting,
+		Cleanup:        len(c.device.Leftovers) > 0,
 	})
 }
 

@@ -293,18 +293,25 @@ it. This is how close it gets.
     whether such an item exists, say whether an account owns a link or
     mailbox whose ID it knows;
   - create items under any sort key in any account partition, holding
-    only the notice fields. In the partition of an account of its own, it
-    could add records naming someone else's link or mailbox (`K#<link>`,
-    `M#<mailbox>`): deleting or replacing that account then deletes the
-    other person's link or mailbox with it, since the cleanup trusts the
-    records in the partition it ends. Items added to someone else's
-    partition could break that account's requests.
+    only the notice fields. Records it adds to the partition of an account
+    of its own naming someone else's link, mailbox or code (`K#<link>`,
+    `M#<mailbox>`, `I#<code>`) no longer reach them: deleting or replacing
+    an account deletes a link, mailbox or code only if it names that
+    account as its owner, and otherwise only the record. What stays open:
+    - items added to someone else's partition could still break that
+      account's requests;
+    - added `K#` records make the repair of a stale link count
+      (recountLinks) see more links than the account has, so it doesn't
+      repair it;
+    - items whose sort keys fall between the account's (`A`) and its
+      devices' (`D#…`) are never deleted, and every login and request of
+      that account reads them (enough of them make those fail);
+    - added `D#` records are read in full by the last step of a deletion
+      and by the cleanup after a replacement (no page limit).
 
-  Either change would close the second: the cleanup deleting a link or
-  mailbox only if it names the ended account as its owner, or the notice
-  fields moved to a partition of their own (`N#<account>`), so the role
-  can be limited to `N#` partitions. The second would close the first
-  too.
+  Moving the notice fields to a partition of their own (`N#<account>`), so
+  the role can be limited to `N#` partitions, would close all of these and
+  the first.
 - **The server says which mailbox an envelope came through.** The app
   takes an envelope in only through the mailbox it belongs to
   ([protocol.md](protocol.md#inner-message)), so a user who knows one of

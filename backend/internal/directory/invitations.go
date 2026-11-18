@@ -117,8 +117,8 @@ func (s *Store) SetLevel(ctx context.Context, level, allowance int) error {
 // maxAllocated is the most uses they may have put into codes after this one
 // (their allowance plus grants); admins pass -1 for no limit. It returns
 // ErrConflict if the code is taken, ErrLimit if the member has too few
-// invitations left (or isn't a member any more), and ErrNotFound if an
-// admin's account is gone or replaced.
+// invitations left (or isn't a member any more, or is being deleted), and
+// ErrNotFound if an admin's account is gone, replaced or being deleted.
 func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, uses, ownerLevel, maxAllocated int) error {
 	k := codeKey(code)
 	writes := []types.TransactWriteItem{
@@ -139,7 +139,7 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 			TableName:           &s.Table,
 			Key:                 key(accountPK(accountID), skAccount),
 			UpdateExpression:    aws.String("SET ia = if_not_exists(ia, :zero) + :uses"),
-			ConditionExpression: aws.String("attribute_exists(lv) AND (attribute_not_exists(ia) OR ia <= :most)"),
+			ConditionExpression: aws.String("attribute_exists(lv) AND attribute_not_exists(dl) AND (attribute_not_exists(ia) OR ia <= :most)"),
 			ExpressionAttributeValues: attrs{
 				":zero": nv(0),
 				":uses": nv(int64(uses)),
@@ -151,7 +151,7 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 		writes = append(writes, types.TransactWriteItem{ConditionCheck: &types.ConditionCheck{
 			TableName:           &s.Table,
 			Key:                 key(accountPK(accountID), skAccount),
-			ConditionExpression: aws.String("attribute_exists(ak)"),
+			ConditionExpression: aws.String(live),
 		}})
 	}
 	reasons, err := s.transactReasons(ctx, writes)
@@ -214,14 +214,17 @@ func (s *Store) Invitations(ctx context.Context, accountID string) ([]Invitation
 
 // Redeem uses one use of a code to make the account a member, one level below
 // the code's owner, and returns that level. It returns ErrNotFound for an
-// unknown or used-up code, and ErrAlreadyMember if the account is a member.
+// unknown or used-up code, or one whose owner's account has ended (replaced
+// or being deleted: its codes stop working at once, before they're
+// deleted), and ErrAlreadyMember if the account is a member.
 func (s *Store) Redeem(ctx context.Context, accountID, code string) (int, error) {
 	k := codeKey(code)
 	it, err := s.get(ctx, codePK(k), skCode, time.Time{})
 	if err != nil {
 		return 0, err
 	}
-	if owner, _ := str(it, "o"); owner == accountID {
+	owner, _ := str(it, "o")
+	if owner == accountID {
 		return 0, ErrOwnInvitation
 	}
 	level := int(num(it, "l")) + 1
@@ -237,14 +240,19 @@ func (s *Store) Redeem(ctx context.Context, accountID, code string) (int, error)
 			TableName:                 &s.Table,
 			Key:                       key(accountPK(accountID), skAccount),
 			UpdateExpression:          aws.String("SET lv = :level"),
-			ConditionExpression:       aws.String("attribute_exists(ak) AND attribute_not_exists(lv)"),
+			ConditionExpression:       aws.String(live + " AND attribute_not_exists(lv)"),
 			ExpressionAttributeValues: attrs{":level": nv(int64(level))},
+		}},
+		{ConditionCheck: &types.ConditionCheck{
+			TableName:           &s.Table,
+			Key:                 key(accountPK(owner), skAccount),
+			ConditionExpression: aws.String(live),
 		}},
 	}
 	reasons, err := s.transactReasons(ctx, writes)
-	if errors.Is(err, ErrConflict) && len(reasons) == 2 {
+	if errors.Is(err, ErrConflict) && len(reasons) == len(writes) {
 		switch {
-		case reasons[0] == "ConditionalCheckFailed":
+		case reasons[0] == "ConditionalCheckFailed", reasons[2] == "ConditionalCheckFailed":
 			return 0, ErrNotFound
 		case reasons[1] == "ConditionalCheckFailed":
 			return 0, ErrAlreadyMember

@@ -26,7 +26,8 @@
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
 //	uploads_paused                        the operator has paused uploads of attachments for now (switches.go); try later
 //	downloads_paused                      the operator has paused downloads of attachments for now (switches.go); try later
-//	in_progress                           the account is being deleted in steps; repeat the request
+//	in_progress                           the account, or what is left of one it replaced, is being deleted in steps (or another step runs now); repeat the request
+//	account_deleting                      the account is being deleted: it takes no request but GET and DELETE /account
 //	not_found                             no such route, or no such link (revoked links included)
 //	unavailable                           503: the server is overloaded for now (AWS throttled it, or it ran out of time); try again after Retry-After
 //	internal                              something failed on the server
@@ -76,15 +77,30 @@ type Directory interface {
 	CreateMailboxes(ctx context.Context, accountID string, ids []string, max int) error
 	Mailbox(ctx context.Context, id string) (directory.Mailbox, error)
 	DiscardMailbox(ctx context.Context, accountID, id string) error
+	// Devices lists an account's devices whatever became of it, to clear
+	// what waits for them; Recipients those a delivery goes to: none
+	// unless the account is live.
 	Devices(ctx context.Context, accountID string, now time.Time) ([]string, error)
-	// NoDevices looks up the devices of an account that doesn't exist, as
-	// Devices does, at the same cost, and finds none.
-	NoDevices(ctx context.Context, now time.Time) error
+	Recipients(ctx context.Context, accountID string, now time.Time) ([]string, error)
+	// NoRecipients looks up the devices of an account that doesn't exist,
+	// as Recipients does, at the same cost, and finds none.
+	NoRecipients(ctx context.Context, now time.Time) error
 	Mailboxes(ctx context.Context, accountID string) ([]string, error)
 	MailboxCount(ctx context.Context, accountID string, now time.Time) (int, error)
+	// MarkDeleting marks an account as being deleted: from then on it
+	// makes and takes nothing (directory.Store.MarkDeleting).
+	MarkDeleting(ctx context.Context, accountID string) error
 	// Delete deletes about max items of an account per call, and reports
 	// whether it has finished (directory.Store.Delete).
 	Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error)
+	// CleanUp deletes about max items of what is left of old, an account
+	// that accountID replaced, per call, and reports whether it has
+	// finished (directory.Store.CleanUp).
+	CleanUp(ctx context.Context, accountID, old string, max int) (bool, error)
+	// Lease lets one such step run for an account at a time: ok is false
+	// while another holds it; release, at the end, lets the next start a
+	// moment later (directory.Store.Lease).
+	Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time) error, ok bool, err error)
 }
 
 // Limiter counts uses of a key in fixed windows.
@@ -189,6 +205,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodGet, "/account", s.withDevice("GET /account", s.account))
 	r.Handle(http.MethodGet, "/usage", s.withDevice("GET /usage", s.usage))
 	r.Handle(http.MethodDelete, "/account", s.withSignature("DELETE /account", s.deleteAccount))
+	r.Handle(http.MethodPost, "/account/cleanup", s.withSignature("POST /account/cleanup", s.cleanUp))
 	r.Handle(http.MethodPost, "/links", s.withSignature("POST /links", s.createLink))
 	r.Handle(http.MethodPut, "/links/{id}/keys", s.withSignature("PUT /links/{id}/keys", s.setLinkKeys))
 	r.Handle(http.MethodDelete, "/links/{id}", s.withSignature("DELETE /links/{id}", s.revokeLink))

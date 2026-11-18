@@ -21,30 +21,47 @@
 // query, from "A" to "D#<device>" (Device), so nothing but devices may
 // sort between them: a new kind of item needs a sort key after "D#~".
 //
-// The account item also counts the account's active links (lc) and, once it
-// joined through an invitation, records its level (lv), the invitations
-// granted to it on top of its level's allowance (ig) and the uses it has put
-// into codes (ia).
+// The account item also counts the account's active links (lc), marks each
+// change to them with a random value (lq, linkChange), and, once it joined
+// through an invitation, records its level (lv), the invitations granted to
+// it on top of its level's allowance (ig) and the uses it has put into
+// codes (ia).
 //
 // The Telegram hash is a keyed hash of the Telegram user ID (TelegramHash),
 // so the table enforces one account per user without holding the ID.
 //
-// A replaced account keeps a marker (g = "r") and its device keys until the
-// marker expires, so its devices can be told what happened after checking
-// their signatures. Its other items are deleted. Times are stored rounded up
-// to the hour (attribute e, the table's TTL).
+// An account ends in a few writes, however much it owns, and what it owns
+// goes afterwards, in steps of bounded size that can be repeated or cut
+// short (endSome):
+//   - Replaced (Replace): its item becomes a marker (g = "r") that, with its
+//     device keys, expires after ReplacedTTL, so its devices can be told
+//     what happened after checking their signatures; its links and device
+//     list go at once. The account that replaced it lists it (ro) until the
+//     rest is deleted (CleanUp).
+//   - Deleted (DELETE /account): its item is marked (dl) and its link goes
+//     in the first step (MarkDeleting), then everything else (Delete), the
+//     item last.
+//
+// Either way, from that first write on, nothing it owns is used: deliveries
+// to its mailboxes find no live owner (Recipients), nor do its invitation
+// codes (Redeem), and nothing new joins its partition (every write that
+// makes something there checks the account item: live). One step at a
+// time runs for an account, while it holds the account item's lease (sl,
+// Lease). Times are stored rounded up to the hour (attribute e, the
+// table's TTL).
 package directory
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -67,6 +84,14 @@ const (
 	skTelegram   = "T"
 	devicePrefix = "D#"
 	goneReplaced = "r"
+	// afterDevices sorts after every device's sort key (device IDs are
+	// base64url, all below "~") and before every other kind of item but the
+	// account's own (accountSortKeys).
+	afterDevices = devicePrefix + "~"
+	// live is the condition on an account item that every write making
+	// something in its partition checks: an account, not the marker of a
+	// replaced one (which has no account key), and not being deleted.
+	live = "attribute_exists(ak) AND attribute_not_exists(dl)"
 
 	// labelTelegram keys the hash of Telegram user IDs.
 	labelTelegram = "incognitochat/v2/telegram-id"
@@ -93,6 +118,7 @@ type DB interface {
 	PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 	TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
@@ -115,6 +141,12 @@ type Account struct {
 	ID        string
 	Key       []byte // account key; nil if the account item is missing
 	DeviceKey []byte // the signing key of the device asked about; nil if the account has no such device
+	// Leftovers are the accounts it replaced whose items aren't all
+	// deleted yet (CleanUp).
+	Leftovers []string
+	// linkChange is the account item's lq as read (nil if none), so
+	// Replace can tell whether its links changed since.
+	linkChange types.AttributeValue
 }
 
 // NewAccount is a registration to store.
@@ -141,6 +173,12 @@ type Device struct {
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
 	Notices      bool   // Telegram notices are set up and not turned off
+	// Deleting: DELETE /account has started (MarkDeleting), and the
+	// account takes no other request.
+	Deleting bool
+	// Leftovers are the accounts this one replaced whose items aren't all
+	// deleted yet (CleanUp), sorted.
+	Leftovers []string
 }
 
 // AccountOf returns the ID of the account registered for a Telegram hash,
@@ -164,7 +202,8 @@ func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, err
 // ByTelegram returns the account registered for a Telegram hash, with the
 // signing key of one of its devices, if it has that device. It reads only
 // those items, never the rest of the partition, which can hold thousands
-// (only Replace lists it, after the caller's limit on replacements).
+// (nothing lists it all: Replace reads only devices and links, and the
+// steps after it, CleanUp and Delete, only what they delete).
 func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (Account, error) {
 	id, err := s.AccountOf(ctx, telegramHash)
 	if err != nil {
@@ -177,6 +216,8 @@ func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (
 	out := Account{ID: id}
 	if _, gone := str(acct, "g"); !gone {
 		out.Key, _ = bin(acct, "ak")
+		out.Leftovers = stringSet(acct, "ro")
+		out.linkChange = acct["lq"]
 	}
 	out.DeviceKey, _ = bin(dev, "k")
 	return out, nil
@@ -226,26 +267,53 @@ func (s *Store) Create(ctx context.Context, n NewAccount) error {
 			Item:                item("T#"+n.TelegramHash, skTelegram, attrs{"a": sv(n.ID)}),
 			ConditionExpression: aws.String("attribute_not_exists(pk)"),
 		},
-	}}, s.newAccountItems(n)...)
+	}}, s.newAccountItems(n, nil)...)
 	return s.transact(ctx, writes)
 }
 
-// Replace ends old and stores n in its place, atomically. It returns
-// ErrConflict if the Telegram user's account changed since old was read.
+// maxSwapLinks and maxSwapDevices bound how many of an account's links and
+// devices the one-transaction writes that end it take (Replace,
+// MarkDeleting, Delete's last step). An account has one of each (one link
+// at a time, one device per account); the steps take any more.
+const (
+	maxSwapLinks   = 4
+	maxSwapDevices = 8
+)
+
+// Replace ends old and stores n in its place, atomically, in a few writes
+// however much old owns. One transaction moves the Telegram user's item to
+// n; turns old's item into a marker (g = "r") that expires after
+// ReplacedTTL, and gives its device keys the same expiry, so its devices
+// can still be told; deletes its device list and its links (their bundles
+// then answer "not found"); and lists old among n's leftovers, with any old
+// had itself. From then on nothing else of old is used either: deliveries
+// to its mailboxes find no live owner (Recipients), nor do its invitation
+// codes (Redeem), and nothing new joins its partition (making anything
+// there checks its item, now a marker). What is left goes in steps
+// (CleanUp). It returns ErrConflict if the Telegram user's account changed
+// since old was read, or one of its links did.
 //
-// The old partition is listed (it can hold thousands of mailboxes) only
-// here, so after the caller's limit on replacements. Once before the swap,
-// eventually consistent (half the cost), so the cleanup can still run if
-// the table refuses reads after it; and once after, strongly consistent,
-// which is the listing that counts: it also finds what was made in
-// between. Nothing joins the partition after the swap: making anything in
-// it needs the account item, then only a marker.
+// It reads only old's devices and links, never its whole partition, which
+// can hold thousands of mailboxes. A link that replaced old's between that
+// read and the swap is left to CleanUp, which takes links first; its intro
+// mailbox is as dead as the others meanwhile.
 func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time.Time) error {
-	sks, devices, err := s.partition(ctx, old.ID, false)
+	pk := accountPK(old.ID)
+	devices, err := s.query(ctx, pk, "begins_with(sk, :v)", devicePrefix, "sk, k", maxSwapDevices)
 	if err != nil {
 		return err
 	}
-	expires := roundUp(now.Add(ReplacedTTL))
+	links, err := s.endLinks(ctx, old.ID)
+	if err != nil {
+		return err
+	}
+	leftovers := []string{old.ID}
+	for _, id := range old.Leftovers {
+		if id != old.ID && id != n.ID {
+			leftovers = append(leftovers, id)
+		}
+	}
+	expires := nv(roundUp(now.Add(ReplacedTTL)))
 	writes := []types.TransactWriteItem{{
 		Update: &types.Update{
 			TableName:           &s.Table,
@@ -258,153 +326,297 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 			},
 		},
 	}}
-	writes = append(writes, s.newAccountItems(n)...)
-	// The old account ends in the same transaction.
-	writes = append(writes, types.TransactWriteItem{Put: &types.Put{
-		TableName: &s.Table,
-		Item:      item(accountPK(old.ID), skAccount, attrs{"g": sv(goneReplaced), "e": nv(expires)}),
-	}})
-	if err := s.transact(ctx, writes); err != nil {
+	writes = append(writes, s.newAccountItems(n, leftovers)...)
+	// Only if old's links are as they were when it was read: a link made
+	// meanwhile isn't left behind.
+	unchanged, values := linksUnchanged(old.linkChange)
+	marker := &types.Put{
+		TableName:           &s.Table,
+		Item:                item(pk, skAccount, attrs{"g": sv(goneReplaced), "e": expires}),
+		ConditionExpression: aws.String(unchanged),
+	}
+	if len(values) > 0 {
+		marker.ExpressionAttributeValues = values
+	}
+	writes = append(writes,
+		types.TransactWriteItem{Put: marker},
+		types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, skDeviceList)}},
+	)
+	for _, d := range devices.items {
+		sk, _ := str(d, "sk")
+		if k, ok := bin(d, "k"); ok {
+			writes = append(writes, types.TransactWriteItem{Put: &types.Put{
+				TableName: &s.Table,
+				Item:      item(pk, sk, attrs{"k": bv(k), "e": expires}),
+			}})
+		}
+	}
+	return s.transact(ctx, append(writes, links...))
+}
+
+// endLinks returns the transaction items that delete an account's links
+// (at most maxSwapLinks; the steps take any more): each link the account
+// owns, only while it still does, and the account's record of it. A record
+// that names a link the account doesn't own (which nothing makes) goes
+// without it.
+func (s *Store) endLinks(ctx context.Context, accountID string) ([]types.TransactWriteItem, error) {
+	pk := accountPK(accountID)
+	records, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk", maxSwapLinks)
+	if err != nil {
+		return nil, err
+	}
+	var writes []types.TransactWriteItem
+	for _, r := range records.items {
+		sk, _ := str(r, "sk")
+		id := strings.TrimPrefix(sk, linkPrefix)
+		l, err := s.get(ctx, linkPK(id), skLink, time.Time{})
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if owner, _ := str(l, "a"); owner == accountID {
+			writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{
+				TableName:                 &s.Table,
+				Key:                       key(linkPK(id), skLink),
+				ConditionExpression:       aws.String("a = :a"),
+				ExpressionAttributeValues: attrs{":a": sv(accountID)},
+			}})
+		}
+		writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, sk)}})
+	}
+	return writes, nil
+}
+
+// CleanUp deletes, in steps of about max writes, what is left of old, an
+// account that accountID replaced: its mailboxes, invitation codes, any
+// links and its device list, with its records of them (endSome). Its marker
+// and device keys stay, to tell its devices, until they expire
+// (ReplacedTTL); a device the swap didn't take (past maxSwapDevices) gets
+// the marker's expiry here. Nothing of old is used any more meanwhile
+// (Replace), so this only frees what it held.
+//
+// Each call takes one step and reports whether it has finished: then old is
+// no longer one of accountID's leftovers. A step can be repeated, or cut
+// short anywhere: the next finds what it left. An old account that is
+// somehow live (it has an account key) is never touched, only forgotten.
+func (s *Store) CleanUp(ctx context.Context, accountID, old string, max int) (bool, error) {
+	marker, err := s.get(ctx, accountPK(old), skAccount, time.Time{})
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, err
+	}
+	if _, live := marker["ak"]; !live {
+		more, err := s.endSome(ctx, old, max)
+		if err != nil || more {
+			return false, err
+		}
+		if err := s.expireDevices(ctx, old, marker); err != nil {
+			return false, err
+		}
+	}
+	_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(accountPK(accountID), skAccount),
+		UpdateExpression:          aws.String("DELETE ro :old"),
+		ConditionExpression:       aws.String("attribute_exists(ro)"),
+		ExpressionAttributeValues: attrs{":old": &types.AttributeValueMemberSS{Value: []string{old}}},
+	})
+	var failed *types.ConditionalCheckFailedException
+	if errors.As(err, &failed) {
+		// Forgotten already, or the account itself was replaced since,
+		// and its successor lists old now.
+		return true, nil
+	}
+	return err == nil, err
+}
+
+// expireDevices gives a replaced account's devices that have no expiry the
+// marker's, or deletes them if the marker has expired. The swap takes up to
+// maxSwapDevices, and an account has one, so this normally finds nothing
+// to do.
+func (s *Store) expireDevices(ctx context.Context, accountID string, marker map[string]types.AttributeValue) error {
+	devices, err := s.prefixed(ctx, accountID, devicePrefix, "sk, k, e")
+	if err != nil {
 		return err
 	}
-
-	// Then the rest of its partition, with what was made since it was
-	// listed. That read is tried a few times; if it still fails, what was
-	// listed before goes anyway. Device keys stay until the marker expires,
-	// everything else goes now.
-	if after, afterDevices, err := s.listAgain(ctx, old.ID); err == nil {
-		listed := make(map[string]bool, len(sks))
-		for _, sk := range sks {
-			listed[sk] = true
-		}
-		for _, sk := range after {
-			if !listed[sk] {
-				sks = append(sks, sk)
-			}
-		}
-		maps.Copy(devices, afterDevices)
-	}
+	expires, ok := marker["e"]
 	var requests []types.WriteRequest
-	for _, sk := range sks {
-		switch {
-		case sk == skAccount:
-		case strings.HasPrefix(sk, mailboxPrefix):
-			// Sends to the account's mailboxes then go nowhere.
-			requests = append(requests,
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(accountPK(old.ID), sk)}},
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox)}},
-			)
-		case strings.HasPrefix(sk, codePrefix):
-			// Unused codes of an ended account stop working.
-			requests = append(requests,
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(accountPK(old.ID), sk)}},
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(codePK(strings.TrimPrefix(sk, codePrefix)), skCode)}},
-			)
-		case strings.HasPrefix(sk, linkPrefix):
-			// The link itself goes too: its bundle then answers "not found".
-			requests = append(requests,
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(accountPK(old.ID), sk)}},
-				types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink)}},
-			)
-		case strings.HasPrefix(sk, devicePrefix):
-			k, ok := devices[sk]
-			if !ok {
-				continue
-			}
+	for _, d := range devices {
+		if _, has := d["e"]; has {
+			continue
+		}
+		sk, _ := str(d, "sk")
+		if k, hasKey := bin(d, "k"); ok && hasKey {
 			requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{
-				Item: item(accountPK(old.ID), sk, attrs{"k": bv(k), "e": nv(expires)}),
+				Item: item(accountPK(accountID), sk, attrs{"k": bv(k), "e": expires}),
 			}})
-		default:
-			requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{
-				Key: key(accountPK(old.ID), sk),
-			}})
+		} else {
+			requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(accountPK(accountID), sk)}})
 		}
 	}
 	return s.batchWrite(ctx, requests)
 }
 
-// Delete removes an account and everything it owns, keeping nothing (unlike
-// Replace): its links (whose bundles then answer "not found"), mailboxes
-// (sends to them then go nowhere), invitation codes, device list, devices,
-// the account item, and the Telegram item, so the same Telegram user can set
-// up again later. It returns ErrNotFound if the account is already gone or
-// replaced.
+// MarkDeleting marks an account as being deleted (dl) and deletes its link
+// (its bundle then answers "not found"), in one transaction of a few
+// writes: the first thing DELETE /account does. From then on nothing is
+// delivered to it (Recipients), its invitation codes stop working
+// (Redeem), nothing new joins its partition (live), and it takes no request
+// but the rest of its deletion (api), which Delete carries out in steps. It
+// isn't undone. It returns ErrNotFound if the account is gone or replaced,
+// and ErrConflict if its links changed since it read them (lq): a link made
+// meanwhile isn't left behind; asking again marks it.
+func (s *Store) MarkDeleting(ctx context.Context, accountID string) error {
+	acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
+	if err != nil {
+		return err
+	}
+	if _, ok := acct["ak"]; !ok {
+		return ErrNotFound
+	}
+	links, err := s.endLinks(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	unchanged, values := linksUnchanged(acct["lq"])
+	values[":one"], values[":lq"] = nv(1), newLinkChange()
+	writes := append([]types.TransactWriteItem{{Update: &types.Update{
+		TableName:                 &s.Table,
+		Key:                       key(accountPK(accountID), skAccount),
+		UpdateExpression:          aws.String("SET dl = :one, " + linkChange),
+		ConditionExpression:       aws.String("attribute_exists(ak) AND " + unchanged),
+		ExpressionAttributeValues: values,
+	}}}, links...)
+	reasons, err := s.transactReasons(ctx, writes)
+	if errors.Is(err, ErrConflict) && len(reasons) > 0 && reasons[0] == "ConditionalCheckFailed" {
+		// Gone or replaced since, or its links changed.
+		acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
+		if _, ok := acct["ak"]; errors.Is(err, ErrNotFound) || (err == nil && !ok) {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	return err
+}
+
+// leaseFor is how long a step of deleting an account, or what is left of
+// one it replaced, may hold the account (Lease): longer than the api
+// function may run (its timeout, 10 s in infra/functions.tf, and 5 s
+// more), so no step outlives its lease, and one that dies halfway holds
+// the account no longer.
+const leaseFor = 15 * time.Second
+
+// stepGap is how long after a step ends the next may start (release): the
+// server's own pacing, whatever the app does.
+const stepGap = time.Second
+
+// Lease lets one step of deleting an account, or what is left of accounts
+// it replaced, run at a time: it records on the account item (sl) that a
+// step holds it, until leaseFor from now, unless another step does (or a
+// concurrent transaction on the item: taken as held), and reports whether
+// it did. So requests sent at once can't each write the same deletes.
+// Release, at the end of the step, lets the next one in stepGap later; a
+// step that dies halfway holds the account until its lease expires. An
+// account that is gone isn't leased. A release that fails (a concurrent
+// transaction) returns its error, and the lease expires on its own.
+func (s *Store) Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time) error, ok bool, err error) {
+	until := nv(now.Add(leaseFor).UnixMilli())
+	_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(accountPK(accountID), skAccount),
+		UpdateExpression:          aws.String("SET sl = :until"),
+		ConditionExpression:       aws.String("attribute_exists(pk) AND (attribute_not_exists(sl) OR sl <= :now)"),
+		ExpressionAttributeValues: attrs{":until": until, ":now": nv(now.UnixMilli())},
+	})
+	var failed *types.ConditionalCheckFailedException
+	var busy *types.TransactionConflictException
+	if errors.As(err, &failed) || errors.As(err, &busy) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return func(ctx context.Context, now time.Time) error {
+		// Only this step's lease: one that outlived it is another's now.
+		// Gone with the account after a deletion's last step.
+		_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                 &s.Table,
+			Key:                       key(accountPK(accountID), skAccount),
+			UpdateExpression:          aws.String("SET sl = :next"),
+			ConditionExpression:       aws.String("sl = :until"),
+			ExpressionAttributeValues: attrs{":until": until, ":next": nv(now.Add(stepGap).UnixMilli())},
+		})
+		if errors.As(err, &failed) {
+			return nil
+		}
+		return err
+	}, true, nil
+}
+
+// Delete removes an account and everything it owns, keeping nothing
+// (unlike Replace): its links (whose bundles then answer "not found"),
+// mailboxes (sends to them then go nowhere), invitation codes, device list,
+// devices, the account item, and the Telegram item, so the same Telegram
+// user can set up again later. It returns ErrNotFound if the account is
+// already gone or replaced.
 //
-// It works in steps of about max deletions, so an account with many
+// It works in steps of about max writes (endSome), so an account with many
 // mailboxes neither outlasts a request nor takes the table's whole write
 // capacity: it reports whether it finished, and the caller asks again until
-// it has. Links go first, so first messages stop at once. Each step deletes
-// shared items (a mailbox's, a link's, a code's) before the account's own
-// record of them, so a step that fails halfway leaves the record, and the
-// next step finds and finishes it. Last come the account and the Telegram
-// item together, then the devices (orphaned devices can't log in). If another
-// write to the account cancels that last step, it reports not finished, and
-// asking again finishes it: a conflict is never taken for "already gone".
+// it has. The account is marked as being deleted first (MarkDeleting, which
+// the caller normally did already), so nothing new joins it meanwhile and
+// nothing is delivered to it. Last come the account, the Telegram item (if
+// it still names the account) and the devices, in one transaction, and only
+// once nothing is left of the accounts it replaced (CleanUp), which
+// deleting its item would forget. If another write to the account cancels
+// that last step, or something of them is left, it reports not finished,
+// and asking again finishes it: that is never taken for "already gone".
 func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max int) (bool, error) {
-	sks, _, err := s.partition(ctx, accountID, true)
+	acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
 	if err != nil {
 		return false, err
 	}
-	if !slices.Contains(sks, skAccount) {
+	if _, replaced := acct["g"]; replaced {
 		return false, ErrNotFound
 	}
-	del := func(pk, sk string) types.WriteRequest {
-		return types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(pk, sk)}}
-	}
-	// What the account owns, in the order it goes: each with its shared
-	// item, if any, and the account's own record of it.
-	type owned struct {
-		shared *types.WriteRequest
-		own    types.WriteRequest
-	}
-	var first, rest []owned
-	var devices []types.WriteRequest
-	for _, sk := range sks {
-		own := del(accountPK(accountID), sk)
-		shared := func(pk, shared string) *types.WriteRequest {
-			r := del(pk, shared)
-			return &r
+	if _, deleting := acct["dl"]; !deleting {
+		err := s.MarkDeleting(ctx, accountID)
+		if errors.Is(err, ErrConflict) {
+			return false, nil
 		}
-		switch {
-		case sk == skAccount:
-		case strings.HasPrefix(sk, devicePrefix):
-			devices = append(devices, own)
-		case strings.HasPrefix(sk, linkPrefix):
-			first = append(first, owned{shared(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), own})
-		case strings.HasPrefix(sk, mailboxPrefix):
-			rest = append(rest, owned{shared(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), own})
-		case strings.HasPrefix(sk, codePrefix):
-			rest = append(rest, owned{shared(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), own})
-		default:
-			rest = append(rest, owned{nil, own})
+		if err != nil {
+			return false, err
 		}
 	}
-	items := append(first, rest...)
-	var shared, own []types.WriteRequest
-	n := 0
-	for len(items) > 0 && (n == 0 || n+2 <= max) {
-		it := items[0]
-		items = items[1:]
-		if it.shared != nil {
-			shared = append(shared, *it.shared)
-			n++
-		}
-		own = append(own, it.own)
-		n++
-	}
-	if err := s.batchWrite(ctx, shared); err != nil {
+	if more, err := s.endSome(ctx, accountID, max); err != nil || more {
 		return false, err
 	}
-	if err := s.batchWrite(ctx, own); err != nil {
+	pk := accountPK(accountID)
+	devices, err := s.prefixed(ctx, accountID, devicePrefix, "sk")
+	if err != nil {
 		return false, err
 	}
-	if len(items) > 0 {
-		return false, nil
+	// Past what a transaction takes (an account has one), the rest first.
+	var extra []types.WriteRequest
+	for len(devices) > maxSwapDevices {
+		sk, _ := str(devices[len(devices)-1], "sk")
+		extra = append(extra, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(pk, sk)}})
+		devices = devices[:len(devices)-1]
 	}
+	if err := s.batchWrite(ctx, extra); err != nil {
+		return false, err
+	}
+	return s.deleteLast(ctx, accountID, telegramHash, devices)
+}
+
+// deleteLast deletes an account's item, its Telegram item and its devices,
+// in one transaction (Delete's last step). A Telegram item that names
+// another account, or none, isn't this one's to delete: the account goes
+// without it.
+func (s *Store) deleteLast(ctx context.Context, accountID, telegramHash string, devices []map[string]types.AttributeValue) (bool, error) {
+	pk := accountPK(accountID)
 	writes := []types.TransactWriteItem{{Delete: &types.Delete{
 		TableName:           &s.Table,
-		Key:                 key(accountPK(accountID), skAccount),
-		ConditionExpression: aws.String("attribute_exists(pk) AND attribute_not_exists(g)"),
+		Key:                 key(pk, skAccount),
+		ConditionExpression: aws.String("attribute_exists(pk) AND attribute_not_exists(g) AND attribute_not_exists(ro)"),
 	}}}
 	if telegramHash != "" {
 		writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{
@@ -414,75 +626,192 @@ func (s *Store) Delete(ctx context.Context, accountID, telegramHash string, max 
 			ExpressionAttributeValues: attrs{":id": sv(accountID)},
 		}})
 	}
-	if reasons, err := s.transactReasons(ctx, writes); err != nil {
-		if !errors.Is(err, ErrConflict) {
-			return false, err
-		}
-		// A condition failed: the account is gone already, or was replaced.
-		if slices.Contains(reasons, "ConditionalCheckFailed") {
-			return false, ErrNotFound
-		}
-		// Another write to the account got there first (a mailbox, a
-		// notice): nothing went, and asking again finishes it.
-		return false, nil
+	for _, d := range devices {
+		sk, _ := str(d, "sk")
+		writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{TableName: &s.Table, Key: key(pk, sk)}})
 	}
-	return true, s.batchWrite(ctx, devices)
+	reasons, err := s.transactReasons(ctx, writes)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, ErrConflict) || !slices.Contains(reasons, "ConditionalCheckFailed") {
+		// Another write to the account got there first (a notice): nothing
+		// went, and asking again finishes it.
+		return false, ignoreConflict(err)
+	}
+	if telegramHash != "" && len(reasons) > 1 && reasons[1] == "ConditionalCheckFailed" &&
+		!slices.Contains(slices.Delete(slices.Clone(reasons), 1, 2), "ConditionalCheckFailed") {
+		return s.deleteLast(ctx, accountID, "", devices)
+	}
+	// A condition failed: the account is gone already or was replaced, or
+	// something of the accounts it replaced is left (asking again, the
+	// caller cleans that up first).
+	acct, err := s.get(ctx, pk, skAccount, time.Time{})
+	if errors.Is(err, ErrNotFound) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, replaced := acct["g"]; replaced {
+		return false, ErrNotFound
+	}
+	return false, nil
 }
 
-// listTries is how many times Replace lists the old partition after the
-// swap before falling back to its listing from before.
-const listTries = 3
+// ignoreConflict is err, unless it says a concurrent write won.
+func ignoreConflict(err error) error {
+	if errors.Is(err, ErrConflict) {
+		return nil
+	}
+	return err
+}
 
-// listAgain is partition, strongly consistent, tried up to listTries times
-// with a short pause between (a throttled table often takes the next one).
-func (s *Store) listAgain(ctx context.Context, accountID string) ([]string, map[string][]byte, error) {
-	var err error
-	for try := range listTries {
-		if try > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, nil, ctx.Err()
-			case <-time.After(time.Duration(50<<try) * time.Millisecond):
+// sharedParallel is how many shared items a step deletes at once: each is
+// a conditional delete of its own, so a step of 25 takes a few round trips.
+const sharedParallel = 8
+
+// endSome deletes up to about max items an account owns, never its item or
+// its devices: links first, so first messages stop at once, then the rest
+// in sort order (invitation codes, the device list, mailboxes). Each goes
+// with its shared item, if any (a link's bundle, a code, a mailbox), which
+// is deleted first, and only if the account owns it (a record that names
+// someone else's goes without it), so a step that fails halfway leaves the
+// record, and the next one finds and finishes it.
+//
+// It reads only what one step deletes, so a step costs about the same
+// however much is left: about max write units and a few read units. It
+// reports whether more may be left.
+func (s *Store) endSome(ctx context.Context, accountID string, max int) (bool, error) {
+	pk := accountPK(accountID)
+	links, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk", max)
+	if err != nil {
+		return false, err
+	}
+	rest, err := s.query(ctx, pk, "sk > :v", afterDevices, "sk", max)
+	if err != nil {
+		return false, err
+	}
+	var sks []string
+	listed := map[string]bool{}
+	for _, it := range append(links.items, rest.items...) {
+		if sk, ok := str(it, "sk"); ok && !listed[sk] {
+			listed[sk] = true
+			sks = append(sks, sk)
+		}
+	}
+	var shared []ownedItem
+	var own []types.WriteRequest
+	n, i := 0, 0
+	for ; i < len(sks) && (n == 0 || n+2 <= max); i++ {
+		sk := sks[i]
+		switch {
+		case strings.HasPrefix(sk, linkPrefix):
+			shared = append(shared, ownedItem{key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), "a"})
+			n++
+		case strings.HasPrefix(sk, mailboxPrefix):
+			shared = append(shared, ownedItem{key(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), "o"})
+			n++
+		case strings.HasPrefix(sk, codePrefix):
+			shared = append(shared, ownedItem{key(codePK(strings.TrimPrefix(sk, codePrefix)), skCode), "o"})
+			n++
+		}
+		own = append(own, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key(pk, sk)}})
+		n++
+	}
+	if err := s.deleteOwned(ctx, accountID, shared); err != nil {
+		return false, err
+	}
+	if err := s.batchWrite(ctx, own); err != nil {
+		return false, err
+	}
+	return i < len(sks) || links.more || rest.more, nil
+}
+
+// ownedItem is a shared item, and the attribute that names its owner.
+type ownedItem struct {
+	key   map[string]types.AttributeValue
+	owner string
+}
+
+// deleteOwned deletes the items that accountID owns, sharedParallel at a
+// time; an item it doesn't own, or that is gone, stays as it is. It
+// returns the first error, once all have been tried.
+func (s *Store) deleteOwned(ctx context.Context, accountID string, items []ownedItem) error {
+	var mu sync.Mutex
+	var first error
+	var wg sync.WaitGroup
+	next := make(chan ownedItem)
+	for range min(sharedParallel, len(items)) {
+		wg.Go(func() {
+			for it := range next {
+				_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+					TableName:                 &s.Table,
+					Key:                       it.key,
+					ConditionExpression:       aws.String("#o = :a"),
+					ExpressionAttributeNames:  map[string]string{"#o": it.owner},
+					ExpressionAttributeValues: attrs{":a": sv(accountID)},
+				})
+				var failed *types.ConditionalCheckFailedException
+				if err != nil && !errors.As(err, &failed) {
+					mu.Lock()
+					first = cmp.Or(first, err)
+					mu.Unlock()
+				}
 			}
-		}
-		var sks []string
-		var devices map[string][]byte
-		if sks, devices, err = s.partition(ctx, accountID, true); err == nil {
-			return sks, devices, nil
-		}
+		})
 	}
-	return nil, nil, err
+	for _, it := range items {
+		next <- it
+	}
+	close(next)
+	wg.Wait()
+	return first
 }
 
-// partition lists an account's whole partition: every sort key, and the
-// signing key of each device (by sort key).
-func (s *Store) partition(ctx context.Context, accountID string, consistent bool) ([]string, map[string][]byte, error) {
+// page is one page of a query: its items, and whether more may follow.
+type page struct {
+	items []map[string]types.AttributeValue
+	more  bool
+}
+
+// query reads one page, strongly consistent, of at most limit items of the
+// partition pk whose sort keys meet cond (against :v), with only the
+// attributes in projection.
+func (s *Store) query(ctx context.Context, pk, cond, value, projection string, limit int) (page, error) {
+	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
+		TableName:                 &s.Table,
+		KeyConditionExpression:    aws.String("pk = :pk AND " + cond),
+		ExpressionAttributeValues: attrs{":pk": sv(pk), ":v": sv(value)},
+		ProjectionExpression:      aws.String(projection),
+		ConsistentRead:            aws.Bool(true),
+		Limit:                     aws.Int32(int32(max(limit, 1))),
+	})
+	if err != nil {
+		return page{}, err
+	}
+	return page{out.Items, len(out.LastEvaluatedKey) > 0}, nil
+}
+
+// prefixed lists the items of an account's partition whose sort keys start
+// with prefix, strongly consistent, with only the attributes in projection.
+func (s *Store) prefixed(ctx context.Context, accountID, prefix, projection string) ([]map[string]types.AttributeValue, error) {
 	pages := dynamodb.NewQueryPaginator(s.DB, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
-		KeyConditionExpression:    aws.String("pk = :pk"),
-		ExpressionAttributeValues: attrs{":pk": sv(accountPK(accountID))},
-		ProjectionExpression:      aws.String("sk, k"),
-		ConsistentRead:            aws.Bool(consistent),
+		KeyConditionExpression:    aws.String("pk = :pk AND begins_with(sk, :v)"),
+		ExpressionAttributeValues: attrs{":pk": sv(accountPK(accountID)), ":v": sv(prefix)},
+		ProjectionExpression:      aws.String(projection),
+		ConsistentRead:            aws.Bool(true),
 	})
-	var sks []string
-	devices := map[string][]byte{}
+	var items []map[string]types.AttributeValue
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		for _, it := range page.Items {
-			sk, ok := str(it, "sk")
-			if !ok {
-				continue
-			}
-			sks = append(sks, sk)
-			if k, ok := bin(it, "k"); ok && strings.HasPrefix(sk, devicePrefix) {
-				devices[sk] = k
-			}
-		}
+		items = append(items, page.Items...)
 	}
-	return sks, devices, nil
+	return items, nil
 }
 
 // Device returns a device's signing key, and whether its account was
@@ -518,6 +847,7 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 	_, member := acct["lv"].(*types.AttributeValueMemberN)
 	_, chat := acct["cid"]
 	_, off := acct["no"]
+	_, deleting := acct["dl"]
 	return Device{
 		Key:          k,
 		Replaced:     g == goneReplaced,
@@ -528,15 +858,24 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 		Allocated:    int(num(acct, "ia")),
 		Links:        int(num(acct, "lc")),
 		Notices:      chat && !off,
+		Deleting:     deleting,
+		Leftovers:    stringSet(acct, "ro"),
 	}, nil
 }
 
-func (s *Store) newAccountItems(n NewAccount) []types.TransactWriteItem {
+// newAccountItems stores a new account: its item, listing leftovers (the
+// accounts it replaced whose items are still to be deleted), its device and
+// its device list.
+func (s *Store) newAccountItems(n NewAccount, leftovers []string) []types.TransactWriteItem {
 	pk := accountPK(n.ID)
+	account := attrs{"ak": bv(n.AccountKey), "th": sv(n.TelegramHash)}
+	if len(leftovers) > 0 {
+		account["ro"] = &types.AttributeValueMemberSS{Value: leftovers}
+	}
 	return []types.TransactWriteItem{
 		{Put: &types.Put{
 			TableName:           &s.Table,
-			Item:                item(pk, skAccount, attrs{"ak": bv(n.AccountKey), "th": sv(n.TelegramHash)}),
+			Item:                item(pk, skAccount, account),
 			ConditionExpression: aws.String("attribute_not_exists(pk)"),
 		}},
 		{Put: &types.Put{
@@ -645,6 +984,15 @@ func sv(v string) types.AttributeValue { return &types.AttributeValueMemberS{Val
 func bv(v []byte) types.AttributeValue { return &types.AttributeValueMemberB{Value: v} }
 func nv(v int64) types.AttributeValue {
 	return &types.AttributeValueMemberN{Value: strconv.FormatInt(v, 10)}
+}
+
+// stringSet returns a string set attribute, sorted; nil if missing.
+func stringSet(item map[string]types.AttributeValue, name string) []string {
+	v, ok := item[name].(*types.AttributeValueMemberSS)
+	if !ok || len(v.Value) == 0 {
+		return nil
+	}
+	return slices.Sorted(slices.Values(v.Value))
 }
 
 func str(item map[string]types.AttributeValue, name string) (string, bool) {

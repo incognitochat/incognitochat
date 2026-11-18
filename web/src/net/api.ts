@@ -35,6 +35,7 @@ export type ErrorCode =
   | 'downloads_paused'
   | 'in_progress'
   | 'unavailable'
+  | 'account_deleting'
   | 'internal'
   | 'not_found'
   | 'method_not_allowed';
@@ -70,6 +71,7 @@ const CODES = new Set<string>([
   'downloads_paused',
   'in_progress',
   'unavailable',
+  'account_deleting',
   'internal',
   'not_found',
   'method_not_allowed',

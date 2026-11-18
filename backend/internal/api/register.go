@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 const (
@@ -117,7 +119,8 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 	// Counted before anything is read, whatever comes of it. Then only the
 	// items it needs are read: the Telegram user's account, its account
 	// item and this device's, never the whole partition (thousands of
-	// mailboxes), which only a replacement lists, once counted.
+	// mailboxes). A replacement, once counted, reads only the old account's
+	// devices and links, and its first cleanup step only what it deletes.
 	if resp, ok := s.allowPerDay(ctx, route, "regtry", telegramHash, RegisterAttemptsPerDay); !ok {
 		return resp
 	}
@@ -147,6 +150,15 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		err = s.Directory.Replace(ctx, existing, account, now)
 		if errors.Is(err, directory.ErrConflict) {
 			return httpapi.Error(http.StatusConflict, "conflict")
+		}
+		if err == nil {
+			// The old account ended with the swap, in a few writes. What is
+			// left of it goes in steps: the first here, the rest as the app
+			// asks (POST /account/cleanup). One that fails only leaves more
+			// for those, so the registration stands.
+			if _, err := s.leasedCleanUp(ctx, route, account.ID, existing.ID); err != nil {
+				s.Log.Warn("cleanup step failed", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
+			}
 		}
 	}
 	if err != nil {

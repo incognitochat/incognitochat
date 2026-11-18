@@ -70,15 +70,29 @@ flowchart LR
   account's links and mailboxes end at once, and the old device says so, and
   that it may mean tampering. A second device that finds an account elsewhere
   says "your account is on another device" instead of offering setup.
+- **Accounts end in a few writes, and are taken apart in steps.** Replacing
+  or deleting an account changes only its account item and its link (and,
+  for a replacement, its device list), however much it owns: a delivery
+  reads the owner's account item with its devices, in the one query it made
+  anyway, so every mailbox of an ended account stops at once, and so do its
+  invitation codes; nothing new joins it. The rest goes in steps of about
+  50 writes that read only what they delete, delete a shared item only if
+  the account owns it, and can be repeated or cut short safely; one step
+  at a time runs per account (a short lease on its item). The app asks for
+  them (a deletion's, or the new device's after a replacement) and carries
+  on at its next launch, so a big account never outlasts a request or takes
+  the table's write capacity, and is never left half deleted and in use.
 - **Nothing is deleted on the server's word.** A device the server says was
-  replaced, or no longer accepts, keeps its chats, readable (nothing can be
-  sent), and asks again at every launch and on Try again; if the server lets
-  it in, it carries on. Setting up again there deletes everything on the
-  device, so it takes a typed confirmation too.
-- **Deleting an account** (in the app, after a typed confirmation) removes
-  everything the server holds for it at once, keeping no marker, and then
-  everything on the device. Nobody is told; messages to its old link and
-  mailboxes go nowhere.
+  replaced, no longer accepts, or is being deleted (when this device didn't
+  start that), keeps its chats, readable (nothing can be sent), and asks
+  again at every launch and on Try again; if the server lets it in, it
+  carries on. Setting up again there, or finishing a deletion, deletes
+  everything on the device, so it takes a typed confirmation too.
+- **Deleting an account** (in the app, after a typed confirmation) ends it at
+  once and then removes everything the server holds for it, keeping no
+  marker, and then everything on the device; an app closed halfway carries
+  on at its next launch, for that account only. Nobody is told; messages to
+  its old link and mailboxes go nowhere.
 - **Several Telegram accounts in one Telegram app** share one storage area, so
   each gets its own local profile on the device, named after a hash of its
   Telegram user ID.
@@ -351,7 +365,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 
 | Table | Holds | Expires |
 |---|---|---|
-| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | mailboxes expire |
+| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | a replaced account's marker and device keys, after 90 days |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
 | `ephemeral` | socket records, rate counters, notice quiet periods (each named by a keyed hash, not a mailbox, link or account ID), login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 

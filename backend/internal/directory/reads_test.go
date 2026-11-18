@@ -20,8 +20,9 @@ import (
 // Looking up the devices of an account that doesn't exist (a send to a
 // mailbox that doesn't exist) makes the same query as for an account with
 // its one device, at the same cost, and finds none; it writes its
-// placeholder only the first time.
-func TestNoDevicesCostsWhatDevicesDoes(t *testing.T) {
+// placeholders only the first time. So does the lookup for an account that
+// was replaced or is being deleted: its mailboxes stop at once.
+func TestNoRecipientsCostsWhatRecipientsDo(t *testing.T) {
 	s, meter, _ := metered(t)
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0)
@@ -29,33 +30,68 @@ func TestNoDevicesCostsWhatDevicesDoes(t *testing.T) {
 	if err := s.Create(ctx, n); err != nil {
 		t.Fatal(err)
 	}
+	// Notices set up: the account item at its usual size.
+	if err := s.SetNotices(ctx, n.ID, make([]byte, 60), "en"); err != nil {
+		t.Fatal(err)
+	}
 	meter.Reset()
-	if devices, err := s.Devices(ctx, n.ID, now); err != nil || len(devices) != 1 {
-		t.Fatalf("Devices = %v, %v", devices, err)
+	if devices, err := s.Recipients(ctx, n.ID, now); err != nil || len(devices) != 1 || devices[0] != n.DeviceID {
+		t.Fatalf("Recipients = %v, %v", devices, err)
 	}
 	calls, units := meter.Calls(), meter.Units(s.Table)
 
 	meter.Reset()
-	if err := s.NoDevices(ctx, now); err != nil {
+	if err := s.NoRecipients(ctx, now); err != nil {
 		t.Fatal(err)
 	}
-	if u := meter.Units(s.Table); u.Write != 1 {
+	if u := meter.Units(s.Table); u.Write != 2 {
 		t.Fatalf("the first lookup cost %+v", u)
 	}
 	for range 3 {
 		meter.Reset()
-		if err := s.NoDevices(ctx, now); err != nil {
+		if err := s.NoRecipients(ctx, now); err != nil {
 			t.Fatal(err)
 		}
 		if got := meter.Calls(); !slices.Equal(got, calls) {
-			t.Fatalf("NoDevices made %v, Devices %v", got, calls)
+			t.Fatalf("NoRecipients made %v, Recipients %v", got, calls)
 		}
 		if got := meter.Units(s.Table); got != units {
-			t.Fatalf("NoDevices cost %+v, Devices %+v", got, units)
+			t.Fatalf("NoRecipients cost %+v, Recipients %+v", got, units)
 		}
 	}
-	if devices, err := s.Devices(ctx, NoAccount, now); err != nil || len(devices) != 0 {
+	if devices, err := s.Recipients(ctx, NoAccount, now); err != nil || len(devices) != 0 {
 		t.Fatalf("the placeholder's devices: %v, %v", devices, err)
+	}
+
+	// Being deleted, then replaced: none, at the same cost.
+	for _, end := range []func(Account){
+		func(Account) {
+			if err := s.MarkDeleting(ctx, n.ID); err != nil {
+				t.Fatal(err)
+			}
+		},
+		func(old Account) {
+			if err := s.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		old, err := s.ByTelegram(ctx, "th-1", n.DeviceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end(old)
+		meter.Reset()
+		if devices, err := s.Recipients(ctx, n.ID, now); err != nil || len(devices) != 0 {
+			t.Fatalf("Recipients of an ended account = %v, %v", devices, err)
+		}
+		if got := meter.Units(s.Table); got != units {
+			t.Fatalf("an ended account's lookup cost %+v, a live one's %+v", got, units)
+		}
+	}
+	// Devices, for clearing what waits for them, still finds the device.
+	if devices, err := s.Devices(ctx, n.ID, now); err != nil || len(devices) != 1 {
+		t.Fatalf("Devices of the replaced account = %v, %v", devices, err)
 	}
 }
 
@@ -179,28 +215,29 @@ func TestDeviceIsOneRead(t *testing.T) {
 	}
 }
 
-// afterFirstQuery is a table that runs hook once, right after the first
-// query made through it: what happens between Replace's first listing of
-// the old partition and its swap.
-type afterFirstQuery struct {
+// afterQuery is a table that runs hook once, right after its nth query:
+// for Replace, after it read the old account's devices (1) and links (2),
+// before its swap.
+type afterQuery struct {
 	DB
-	hook    func()
-	queried bool
+	n    int
+	hook func()
+	seen int
 }
 
-func (a *afterFirstQuery) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+func (a *afterQuery) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	out, err := a.DB.Query(ctx, in, opts...)
-	if !a.queried {
-		a.queried = true
+	if a.seen++; a.seen == a.n {
 		a.hook()
 	}
 	return out, err
 }
 
-// Replace lists the old partition again once the swap has committed, so it
-// also ends what was made between its first listing and the swap: a new
-// mailbox, and a link replaced with a new one and its intro mailbox.
-func TestReplaceListsAfterSwap(t *testing.T) {
+// What was made between Replace's reads and its swap is ended too: a link
+// replaced with a new one makes the swap lose (the user's retry then takes
+// the new link at once); a new mailbox is as dead as the rest at once, and
+// goes with the rest in the cleanup.
+func TestReplaceEndsWhatWasMadeMeanwhile(t *testing.T) {
 	s, _, client := metered(t)
 	ctx := context.Background()
 	first := newAccount(t, "th-1")
@@ -216,28 +253,48 @@ func TestReplaceListsAfterSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	late, next := ids.New(), testLink(t)
-	hooked := &Store{DB: &afterFirstQuery{DB: client, hook: func() {
-		if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
-			t.Error(err)
-		}
+	hooked := &Store{DB: &afterQuery{DB: client, n: 2, hook: func() {
 		if err := s.ReplaceLink(ctx, first.ID, l.ID, next); err != nil {
 			t.Error(err)
 		}
 	}}, Table: s.Table}
-	if err := hooked.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
+	second := newAccount(t, "th-1")
+	if err := hooked.Replace(ctx, old, second, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a replacement over a link replaced meanwhile: %v", err)
+	}
+	if old, err = s.ByTelegram(ctx, "th-1", first.DeviceID); err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range []string{late, next.Mailbox} {
-		if _, err := s.Mailbox(ctx, m); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("mailbox %s, made after the first listing, outlived the replacement: %v", m, err)
+	hooked = &Store{DB: &afterQuery{DB: client, n: 2, hook: func() {
+		if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
+			t.Error(err)
 		}
+	}}, Table: s.Table}
+	if err := hooked.Replace(ctx, old, second, now); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.Bundle(ctx, next.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a link made after the first listing is still served: %v", err)
+		t.Fatalf("the link replaced meanwhile is still served: %v", err)
+	}
+	// Dead at once: their owner takes no deliveries.
+	for _, m := range []string{late} {
+		mb, err := s.Mailbox(ctx, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if devices, err := s.Recipients(ctx, mb.Owner, now); err != nil || len(devices) != 0 {
+			t.Fatalf("mailbox %s still delivers to %v, %v", m, devices, err)
+		}
 	}
 	// Nothing new joins the old partition after the swap.
 	if err := s.CreateMailboxes(ctx, first.ID, []string{ids.New()}, 10); err == nil {
 		t.Fatal("a replaced account made a mailbox")
+	}
+	cleanUp(t, s, second.ID, first.ID)
+	for _, m := range []string{late, next.Mailbox} {
+		if _, err := s.Mailbox(ctx, m); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("mailbox %s outlived the cleanup: %v", m, err)
+		}
 	}
 }
 
@@ -285,29 +342,6 @@ func TestLoginDevice(t *testing.T) {
 	}
 }
 
-// failAfterSwap is a table that refuses reads once a transaction has
-// committed, as a throttled one would: all of them, or the first fails.
-type failAfterSwap struct {
-	DB
-	fails   int // 0: all
-	swapped bool
-	failed  int
-}
-
-func (f *failAfterSwap) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
-	out, err := f.DB.TransactWriteItems(ctx, in, opts...)
-	f.swapped = f.swapped || err == nil
-	return out, err
-}
-
-func (f *failAfterSwap) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	if f.swapped && (f.fails == 0 || f.failed < f.fails) {
-		f.failed++
-		return nil, errors.New("throttled")
-	}
-	return f.DB.Query(ctx, in, opts...)
-}
-
 // cutShort is a table whose queries say there's more after what they
 // return, as DynamoDB does past 1 MB.
 type cutShort struct{ DB }
@@ -334,77 +368,6 @@ func TestDeviceReadCutShort(t *testing.T) {
 		if _, err := read(ctx, n.ID, n.DeviceID, now); err == nil || errors.Is(err, ErrNotFound) {
 			t.Fatalf("a cut-short read: %v", err)
 		}
-	}
-}
-
-// The listing after the swap is tried again when it fails, so what was
-// made since the first listing still goes.
-func TestReplaceRetriesTheLaterListing(t *testing.T) {
-	s, _, client := metered(t)
-	ctx := context.Background()
-	first := newAccount(t, "th-1")
-	if err := s.Create(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	late := ids.New()
-	flaky := &failAfterSwap{DB: client, fails: listTries - 1}
-	hooked := &Store{DB: &afterFirstQuery{DB: flaky, hook: func() {
-		if err := s.CreateMailboxes(ctx, first.ID, []string{late}, 10); err != nil {
-			t.Error(err)
-		}
-	}}, Table: s.Table}
-	if err := hooked.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
-		t.Fatal(err)
-	}
-	if flaky.failed != listTries-1 {
-		t.Fatalf("%d listings refused, want %d", flaky.failed, listTries-1)
-	}
-	if _, err := s.Mailbox(ctx, late); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a mailbox made after the first listing outlived the replacement: %v", err)
-	}
-}
-
-// A replacement still cleans up the old account when the table refuses
-// to list it after the swap: what it listed before goes.
-func TestReplaceCleansUpWhenTheLaterListingFails(t *testing.T) {
-	s, _, client := metered(t)
-	ctx := context.Background()
-	first := newAccount(t, "th-1")
-	if err := s.Create(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	l := testLink(t)
-	if err := s.CreateLink(ctx, first.ID, l, 1); err != nil {
-		t.Fatal(err)
-	}
-	pool := []string{ids.New(), ids.New()}
-	if err := s.CreateMailboxes(ctx, first.ID, pool, 10); err != nil {
-		t.Fatal(err)
-	}
-	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	throttled := &Store{DB: &failAfterSwap{DB: client}, Table: s.Table}
-	if err := throttled.Replace(ctx, old, newAccount(t, "th-1"), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Bundle(ctx, l.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("the old link is still served: %v", err)
-	}
-	for _, m := range append(pool, l.Mailbox) {
-		if _, err := s.Mailbox(ctx, m); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("mailbox %s still routes: %v", m, err)
-		}
-	}
-	// The old device stays, to be told, but expires.
-	dev, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(first.ID), devicePrefix+first.DeviceID)})
-	if err != nil || dev.Item["e"] == nil {
-		t.Fatalf("old device = %v, %v", dev, err)
 	}
 }
 

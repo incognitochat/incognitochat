@@ -48,13 +48,15 @@ export type AccountRecord =
 /**
  * A device with an account: registered; or, as the server last said (never
  * checked, so asked again at every launch), replaced by a registration
- * elsewhere, or refused (its login was refused: the device or account is
- * gone). A replaced account stays replaced when the server later only refuses
- * it, so its warning isn't lost when the server forgets the replacement.
+ * elsewhere, refused (its login was refused: the device or account is
+ * gone), or being deleted (a deletion this device didn't start; it deletes
+ * nothing here). A replaced account stays replaced when the server later only
+ * refuses it, so its warning isn't lost when the server forgets the
+ * replacement.
  */
-export type SetUpState = 'registered' | 'replaced' | 'refused';
+export type SetUpState = 'registered' | 'replaced' | 'refused' | 'deleting';
 
-const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused'] satisfies SetUpState[];
+const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused', 'deleting'] satisfies SetUpState[];
 
 /** This launch's start parameter isn't the registration this device prepared. */
 export class SetupMismatch extends Error {
@@ -232,7 +234,7 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
       await new Promise((resolve) => setTimeout(resolve, REFUSED_RETRY_MS));
       result = await attempt();
     }
-    await setState(db, current.accountId, ['replaced', 'refused'], 'registered');
+    await setState(db, current.accountId, ['replaced', 'refused', 'deleting'], 'registered');
     return result;
   } catch (err) {
     await recordRefusal(db, current.accountId, err);
@@ -246,14 +248,23 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
  */
 export async function recordRefusal(db: Database, accountId: string, err: unknown): Promise<void> {
   if (!(err instanceof ApiError)) return;
-  if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused'], 'replaced');
+  if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused', 'deleting'], 'replaced');
   // A replaced account stays replaced: its warning matters more.
-  if (err.code === 'login_refused') await setState(db, accountId, ['registered'], 'refused');
+  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'deleting'], 'refused');
 }
 
 /** Records that the server says this account was replaced (it's asked again at the next launch). */
 export function markReplaced(db: Database, accountId: string): Promise<void> {
-  return setState(db, accountId, ['registered', 'refused'], 'replaced');
+  return setState(db, accountId, ['registered', 'refused', 'deleting'], 'replaced');
+}
+
+/**
+ * Records that the server says this account is being deleted, when this
+ * device didn't start that (it's asked again at the next launch; nothing is
+ * deleted for it).
+ */
+export function markDeletingElsewhere(db: Database, accountId: string): Promise<void> {
+  return setState(db, accountId, ['registered', 'refused'], 'deleting');
 }
 
 function setState(db: Database, accountId: string, from: SetUpState[], to: SetUpState): Promise<void> {
