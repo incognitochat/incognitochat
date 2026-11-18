@@ -165,6 +165,49 @@ export async function addMessage(db: Database, record: Omit<MessageRecord, 'seal
   await db.put('messages', { ...record, sealed: await sealBody(db, record.id, body) });
 }
 
+/** Whether one of our messages is still here and going out (status sending): not deleted meanwhile. */
+export async function stillSending(db: Database, conv: string, id: string): Promise<boolean> {
+  return (await db.get('messages', [conv, id]))?.status === 'sending';
+}
+
+/**
+ * Changes one of our messages that's going out, only if it's still here
+ * with status `from`: its status, its time, or its attachment (with the
+ * upload's fields, once uploaded). Returns whether it did. A message deleted
+ * meanwhile isn't brought back, and one another copy of the app sent or
+ * marked meanwhile is left as it is.
+ */
+export async function patchMessage(
+  db: Database,
+  conv: string,
+  id: string,
+  from: MessageRecord['status'],
+  patch: { status?: MessageRecord['status']; at?: number; media?: LocalMedia },
+): Promise<boolean> {
+  // The lock reactions and edits take, so the body isn't written back stale.
+  return withLock(`message:${conv}:${id}`, async () => {
+    let sealed: Uint8Array<ArrayBuffer> | undefined;
+    if (patch.media) {
+      const message = await getMessage(db, conv, id);
+      if (!message || message.status !== from) return false;
+      const body: MessageBody = {
+        text: message.text,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+        media: patch.media,
+        ...(message.sticker ? { sticker: message.sticker } : {}),
+        ...(message.reactions ? { reactions: message.reactions } : {}),
+        ...(message.edited ? { edited: message.edited } : {}),
+      };
+      sealed = await sealBody(db, id, body);
+    }
+    return updateMessage(db, conv, id, (record) =>
+      record.status === from
+        ? { ...record, ...(patch.status ? { status: patch.status } : {}), ...(patch.at !== undefined ? { at: patch.at } : {}), ...(sealed ? { sealed } : {}) }
+        : null,
+    );
+  });
+}
+
 /** Sets a message's status; with from, only if it has that status now. */
 export async function setMessageStatus(db: Database, conv: string, id: string, status: MessageRecord['status'], from?: MessageRecord['status']): Promise<void> {
   await updateMessage(db, conv, id, (record) => (from === undefined || record.status === from ? { ...record, status } : null));
@@ -460,6 +503,12 @@ const UPLOAD_DELETES = 'upload-deletes';
 export interface UploadDelete {
   id: string;
   d: string;
+  /**
+   * One of ours, deleted just after it was made (its message was deleted
+   * while it went out): the server looks uploads up from a copy that can lag
+   * a moment behind, so the first not_found is asked again later.
+   */
+  recent?: true;
 }
 
 async function readUploadDeletes(db: Database): Promise<UploadDelete[]> {
@@ -494,6 +543,20 @@ export function queueUploadDeletes(db: Database, items: UploadDelete[]): Promise
 /** The uploads still to delete. */
 export function pendingUploadDeletes(db: Database): Promise<UploadDelete[]> {
   return readUploadDeletes(db);
+}
+
+/** Marks uploads asked for once (no longer `recent`): a not_found for them now means gone. */
+export function triedUploadDeletes(db: Database, ids: string[]): Promise<void> {
+  if (ids.length === 0) return Promise.resolve();
+  return withLock(UPLOAD_DELETES, async () => {
+    const tried = new Set(ids);
+    const list = (await readUploadDeletes(db)).map((u) => {
+      if (!tried.has(u.id)) return u;
+      const { recent: _, ...rest } = u;
+      return rest;
+    });
+    await writeUploadDeletes(db, list);
+  });
 }
 
 /** Takes uploads off the list once they're deleted (or already gone). */

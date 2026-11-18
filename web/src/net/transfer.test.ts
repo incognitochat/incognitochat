@@ -87,6 +87,36 @@ describe('downloads', () => {
     expect(read.bytes).toBeLessThanOrEqual(4096);
   });
 
+  it('gives up, as unreachable, when the answer or its bytes stop coming', async () => {
+    // No answer at all.
+    const silent: Fetch = () => new Promise(() => {});
+    await expect(createTransfer(silent, undefined, 50).get('https://bucket.example/m/x', SIZE)).rejects.toMatchObject({ name: 'TransferError', status: 0 });
+    // An answer that stops partway.
+    let sent = 0;
+    const stalled = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      pull(c) {
+        if (sent >= SIZE / 2) return new Promise(() => {});
+        sent += 4096;
+        c.enqueue(new Uint8Array(4096));
+      },
+    });
+    const { fetchImpl, seen } = answering(stalled, { 'Content-Length': String(SIZE) });
+    await expect(createTransfer(fetchImpl, undefined, 50).get('https://bucket.example/m/x', SIZE)).rejects.toMatchObject({ name: 'TransferError', status: 0 });
+    expect(seen.signal?.aborted).toBe(true);
+    // A slow one that keeps coming isn't stopped.
+    let slow = 0;
+    const trickle = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      async pull(c) {
+        if (slow >= SIZE) return c.close();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        slow += 4096;
+        c.enqueue(new Uint8Array(4096));
+      },
+    });
+    const ok = answering(trickle, { 'Content-Length': String(SIZE) });
+    expect(await createTransfer(ok.fetchImpl, undefined, 50).get('https://bucket.example/m/x', SIZE)).toHaveLength(SIZE);
+  });
+
   it('says how the bucket refused, or that it could not be reached', async () => {
     const refused = answering(null, {}, 403);
     await expect(createTransfer(refused.fetchImpl).get('https://bucket.example/m/x', SIZE)).rejects.toMatchObject({ name: 'TransferError', status: 403 });

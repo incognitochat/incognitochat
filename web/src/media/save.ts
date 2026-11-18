@@ -17,7 +17,7 @@ import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { decryptFile, uploadSize } from '../crypto/media';
 import { checkObject, type Api } from '../net/api';
 import type { Transfer } from '../net/transfer';
-import { fileName, MAX_FILE_BYTES, type Media } from '../protocol/message';
+import { fileName, MAX_FILE_BYTES, passiveType, type Media } from '../protocol/message';
 
 export const SAVE_PREFIX = '#save=';
 
@@ -61,7 +61,11 @@ export class Gone extends Error {
   }
 }
 
-/** Fetches and decrypts the attachment a ticket names. */
+/**
+ * Fetches and decrypts the attachment a ticket names. Its type is the
+ * sender's only if it's passive (passiveType): an SVG or HTML file is plain
+ * bytes here, so the page never shows it, and opening it can't run it.
+ */
 export async function fetchForSaving(api: Api, transfer: Transfer, ticket: SaveTicket, onProgress?: (f: number) => void): Promise<File> {
   let url: string;
   try {
@@ -75,5 +79,6 @@ export async function fetchForSaving(api: Api, transfer: Transfer, ticket: SaveT
     throw err;
   }
   const bytes = await decryptFile(await transfer.get(url, uploadSize(ticket.s), onProgress), fromBase64Url(ticket.k), ticket.s);
-  return new File([bytes], ticket.n ?? 'file', ticket.m ? { type: ticket.m } : {});
+  const type = passiveType(ticket.m);
+  return new File([bytes], ticket.n ?? 'file', type ? { type } : {});
 }

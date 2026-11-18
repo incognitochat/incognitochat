@@ -2123,7 +2123,7 @@ function AttachDialog({
 }
 
 /** A message in a line: its text, with "📷 Photo", "📹 Video", "📎 name" and so on before a caption, or "😉 Sticker". For chat previews, quotes and the reply bar. */
-function contentLine(language: Language, { text, media, sticker }: { text: string; media?: { t: string; n?: string } | undefined; sticker?: Sticker | undefined }): string {
+function contentLine(language: Language, { text, media, sticker }: { text: string; media?: { t: string; n?: string; m?: string } | undefined; sticker?: Sticker | undefined }): string {
   if (sticker) return `${findSticker(sticker.id)?.e ?? sticker.e ?? ''} ${t(language, 'sticker')}`.trim();
   if (!media) return text;
   const label = {
@@ -2198,16 +2198,25 @@ function useMediaUrl(app: AppState, m: MessageView) {
   return url;
 }
 
-/** Whether an attachment waits for a tap to download: one received, or one cleared from this device. */
-const fetchable = (app: AppState, m: MessageView) => !app.readOnly.value && ((m.file === 'remote' && !m.out) || m.file === 'cleared');
+/**
+ * Whether an attachment waits for a tap to download: one received, one
+ * cleared from this device, or one that was broken (a tap tries again).
+ */
+const fetchable = (app: AppState, m: MessageView) => !app.readOnly.value && ((m.file === 'remote' && !m.out) || m.file === 'cleared' || m.file === 'broken');
+
+/** "No longer available" or "Couldn't be opened", for an attachment that's gone or broken. */
+function fileNote(language: Language, m: MessageView): string | null {
+  return m.file === 'gone' ? t(language, 'mediaGone') : m.file === 'broken' ? t(language, 'mediaBroken') : null;
+}
 
 /** The tiny preview carried in the message, as an image URL. */
 function tinyPreview(p: string | undefined): string | null {
   return p ? `data:image/jpeg;base64,${p.replace(/-/g, '+').replace(/_/g, '/')}` : null;
 }
 
-/** Progress, a download button, or "no longer available", over a photo or video. */
+/** Progress, a download button, and "no longer available" or "couldn't be opened", over a photo or video. */
 function MediaState({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
+  const note = progress === undefined && fileNote(language, m);
   return (
     <>
       {progress !== undefined && (
@@ -2220,23 +2229,31 @@ function MediaState({ app, message: m, language, progress }: { app: AppState; me
           ↓
         </button>
       )}
-      {m.file === 'gone' && <span class="media-gone">{t(language, 'mediaGone')}</span>}
+      {note && <span class="media-gone">{note}</span>}
     </>
   );
 }
 
-/** A photo or GIF: the tiny preview until it's here, then the image (a GIF plays); tap for full screen. */
+/** A photo or GIF: the tiny preview and its size until it's here, then the image (a GIF plays); tap for full screen. */
 function PhotoView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const url = useMediaUrl(app, m);
   const open = useSignal(false);
-  const { w = 4, h = 3, p } = m.media!;
+  const { w = 4, h = 3, p, s } = m.media!;
   const gif = m.media!.t === 'gif';
   const tiny = tinyPreview(p);
   const alt = t(language, gif ? 'gif' : 'photo');
+  // Its size, until it's here: one over the automatic limit waits for a tap.
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   return (
     <div class="photo" style={{ aspectRatio: `${w} / ${h}` }}>
       {url.value ? <img src={url.value} alt={alt} onClick={() => (open.value = true)} /> : tiny && <img class="tiny" src={tiny} alt="" />}
-      {gif && <span class="media-badge">{t(language, 'gif')}</span>}
+      {(gif || size) && (
+        <span class="media-badge">
+          {gif && t(language, 'gif')}
+          {gif && size && ' · '}
+          {size}
+        </span>
+      )}
       <MediaState app={app} message={m} language={language} progress={progress} />
       {open.value && url.value && (
         <Viewer language={language} onClose={() => (open.value = false)} onSave={() => void save(app, m, language)}>
@@ -2419,7 +2436,7 @@ function VoiceView({ app, message: m, language, progress }: { app: AppState; mes
         </div>
         <span class="media-meta">
           <bdi dir="ltr">{formatLength(language, Math.round(shown))}</bdi>
-          {m.file === 'gone' && <span>{t(language, 'mediaGone')}</span>}
+          {fileNote(language, m) && <span>{fileNote(language, m)}</span>}
           {player.failed && <span>{t(language, 'audioUnplayable')}</span>}
           {url.value && !player.failed && (
             <button type="button" class="rate" aria-label={t(language, 'playbackSpeed')} onPointerDown={keepPress} onClick={player.nextRate}>
@@ -2467,7 +2484,7 @@ function AudioView({ app, message: m, language, progress }: { app: AppState; mes
           ) : (
             <>
               {total && <bdi dir="ltr">{total}</bdi>}
-              <span>{m.file === 'gone' ? t(language, 'mediaGone') : formatSize(language, s)}</span>
+              <span>{fileNote(language, m) ?? formatSize(language, s)}</span>
             </>
           )}
           {player.failed && <span>{t(language, 'audioUnplayable')}</span>}
@@ -2648,7 +2665,7 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
         <span class="file-name" dir="auto">
           {media.n ?? t(language, 'file')}
         </span>
-        <span class="file-size">{m.file === 'gone' ? t(language, 'mediaGone') : formatSize(language, media.s)}</span>
+        <span class="file-size">{fileNote(language, m) ?? formatSize(language, media.s)}</span>
       </span>
     </button>
   );

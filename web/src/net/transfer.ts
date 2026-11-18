@@ -1,7 +1,7 @@
 // Uploads and downloads of encrypted attachments, straight to and from the
 // media bucket with presigned URLs (docs/protocol.md, Media). Uploads use
 // XMLHttpRequest, for upload progress; downloads use fetch, to read the
-// answer as it arrives and stop it as soon as it's the wrong size.
+// answer as it arrives and stop it as soon as it's the wrong size, or stalls.
 
 import { NetworkError, type Fetch } from './api';
 
@@ -24,6 +24,13 @@ export class WrongSize extends Error {
   }
 }
 
+/**
+ * A download that gets no answer, or no more bytes, for this long is given
+ * up as unreachable: long enough for a slow connection, short enough that a
+ * dead one doesn't hold a download (and its place in the queue) for minutes.
+ */
+export const DOWNLOAD_IDLE_MS = 30_000;
+
 export interface Transfer {
   /**
    * PUTs the bytes to a presigned upload URL. Rejects with a TransferError;
@@ -32,12 +39,34 @@ export interface Transfer {
   put(url: string, body: Uint8Array<ArrayBuffer>, onProgress?: (fraction: number) => void): Promise<void>;
   /**
    * GETs exactly size bytes from a presigned download URL, and stops (with
-   * WrongSize) as soon as the answer says or turns out otherwise.
+   * WrongSize) as soon as the answer says or turns out otherwise. Gives up
+   * (TransferError, status 0) when nothing arrives for DOWNLOAD_IDLE_MS.
    */
   get(url: string, size: number, onProgress?: (fraction: number) => void): Promise<Uint8Array<ArrayBuffer>>;
 }
 
-export function createTransfer(fetchImpl: Fetch = (input, init) => fetch(input, init), newXhr: () => XMLHttpRequest = () => new XMLHttpRequest()): Transfer {
+/** p, or a TransferError (unreachable) if it doesn't settle within ms. */
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TransferError(0, 'media GET stalled')), ms);
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+export function createTransfer(
+  fetchImpl: Fetch = (input, init) => fetch(input, init),
+  newXhr: () => XMLHttpRequest = () => new XMLHttpRequest(),
+  idleMs = DOWNLOAD_IDLE_MS,
+): Transfer {
   return {
     put: (url, body, onProgress) =>
       new Promise((resolve, reject) => {
@@ -61,9 +90,13 @@ export function createTransfer(fetchImpl: Fetch = (input, init) => fetch(input, 
       try {
         // no-store: the browser keeps no copy of the ciphertext in its cache;
         // the bucket answers Cache-Control: no-store as well.
-        response = await fetchImpl(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', mode: 'cors', redirect: 'error', signal: stop.signal });
-      } catch {
-        throw new TransferError(0, 'media GET failed');
+        response = await within(
+          fetchImpl(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', mode: 'cors', redirect: 'error', signal: stop.signal }),
+          idleMs,
+        );
+      } catch (err) {
+        stop.abort();
+        throw err instanceof TransferError ? err : new TransferError(0, 'media GET failed');
       }
       if (!response.ok) {
         stop.abort();
@@ -82,7 +115,7 @@ export function createTransfer(fetchImpl: Fetch = (input, init) => fetch(input, 
       let got = 0;
       try {
         for (;;) {
-          const { done, value } = await reader.read();
+          const { done, value } = await within(reader.read(), idleMs);
           if (done) break;
           // Stopped at once if more arrives than the upload can hold.
           if (got + value.length > size) throw new WrongSize();
@@ -92,7 +125,8 @@ export function createTransfer(fetchImpl: Fetch = (input, init) => fetch(input, 
         }
       } catch (err) {
         stop.abort();
-        if (err instanceof WrongSize) throw err;
+        void reader.cancel().catch(() => {});
+        if (err instanceof WrongSize || err instanceof TransferError) throw err;
         throw new TransferError(0, 'media GET failed');
       }
       if (got !== size) throw new WrongSize();

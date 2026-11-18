@@ -57,9 +57,26 @@ describe('save tickets', () => {
     const ticket = readTicket(new URL(saveUrl('https://x/', media)).hash)!;
     const file = await fetchForSaving(api, transfer, ticket);
     expect(file.name).toBe('notes ✓.txt');
-    expect(file.type).toBe('text/plain');
+    // Only images, audio and video keep the sender's type.
+    expect(file.type).toBe('application/octet-stream');
     expect(new TextDecoder().decode(await file.arrayBuffer())).toBe('hello');
     expect(calls).toEqual([`GET /media/${media.id}`]);
     await expect(fetchForSaving(api, transfer, { ...ticket, id: 'CCCCCCCCCCCCCCCCCCCCCA' })).rejects.toBeInstanceOf(Gone);
+  });
+
+  it("never hands the browser an active type the sender claims: it's plain bytes", async () => {
+    const upload = await encryptFile(new TextEncoder().encode('hello'), key);
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      request: async (_method, _path, _init, check) => check({ url: 'https://bucket.example/m/x' }),
+    };
+    const transfer = { put: async () => {}, get: async () => upload };
+    const typeOf = async (m: string) => (await fetchForSaving(api, transfer, { id: media.id, k: media.k, s: 5, m })).type;
+    expect(await typeOf('image/svg+xml')).toBe('application/octet-stream');
+    expect(await typeOf('text/html')).toBe('application/octet-stream');
+    expect(await typeOf('application/xhtml+xml')).toBe('application/octet-stream');
+    expect(await typeOf('image/jpeg')).toBe('image/jpeg');
+    expect(await typeOf('video/mp4')).toBe('video/mp4');
+    expect(await typeOf('audio/ogg')).toBe('audio/ogg');
   });
 });

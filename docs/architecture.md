@@ -306,15 +306,22 @@ the server never sees a key, name or type.
   size the message says and stops at once otherwise, so an upload can't
   unpack into something huge on the recipient's device. S3 also answers it
   with `Cache-Control: no-store`, and the app asks not to cache it either, so
-  the web view keeps no copy of the ciphertext in its cache.
+  the web view keeps no copy of the ciphertext in its cache. The app gives
+  up after 30 seconds without a byte. A download that doesn't match its
+  message (size or key), or that the bucket refuses (403 or 404), marks the
+  attachment broken: fetched again, with a fresh URL, only on a tap.
 - Photos are redrawn on the device (up to 1280 px), which drops their
   metadata; videos keep their pictures but lose location and time metadata;
   voice and video messages are recorded in the app and carry none. Files are
   sent untouched.
 - The recipient fetches the upload by its unguessable ID, decrypts it and
-  keeps it on the device, encrypted under the device's storage key. Photos,
-  voice and video messages and GIFs up to 10 MB download as soon as their
-  conversation is open (each kind can be turned off); the rest on a tap.
+  keeps it on the device, encrypted under the device's storage key. Photos
+  up to 5 MB, and voice and video messages and GIFs up to 10 MB (by the size
+  the message gives), download as soon as their conversation is open (each
+  kind can be turned off); the rest on a tap. Only JPEG, PNG, WebP and GIF
+  images show in the chat; any other "photo" (an SVG, say) is a file.
+- Deleting one of our messages while it's still sending (or its chat)
+  cancels it: it isn't sent, and an upload already made is deleted.
 - **Data and storage** shows the space attachments take, and clears them from
   the device after a month or a week, or on request, keeping their messages.
   A cleared attachment downloads again on a tap while its upload exists.

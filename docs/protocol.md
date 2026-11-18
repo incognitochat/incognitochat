@@ -883,6 +883,18 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 - The app runs two uploads at a time and asks for an upload's URL only when
   its turn comes, so a URL doesn't age out while it waits behind other
   transfers to the bucket.
+- **Deleted while it goes out.** A message of ours deleted on this device
+  (alone, or with its conversation) before it's sent isn't sent. Before
+  sealing it, under the conversation's send lock (which deleting takes
+  too), the app checks that it's still there and still sending; if not, it
+  stops before taking a mailbox or showing any token to the server. An
+  attachment deleted before its upload starts isn't uploaded or paid for;
+  one deleted while it uploads is deleted from the server once the upload
+  is done, or has failed (`POST /media/{id}/delete`, as for a received
+  one), and no error is shown for it. The server looks uploads up from a
+  copy that can lag a moment behind, so for these the app takes a first
+  `not_found` as "not yet" and asks once more about 30 seconds later (or
+  on the next start).
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),
@@ -907,9 +919,20 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   with sound, as H.264 in MP4 where the browser can, else WebM; at most a
   minute, with a preview frame and no device or place metadata. Music is the
   audio file as it is, with its length. A file is the original bytes,
-  untouched (location included, if it has any). Photos, voice and video
-  messages, and GIFs up to 10 MiB are fetched when their conversation opens;
-  videos, music and files on a tap.
+  untouched (location included, if it has any).
+- **Fetched by itself.** Photos up to 5 MiB, and voice and video messages
+  and GIFs up to 10 MiB, by the size `s` their message gives, are fetched
+  when their conversation opens (each kind can be turned off); larger ones,
+  and videos, music and files, on a tap. The limits leave room above what
+  the app sends: a photo of at most 1280 px as JPEG stays under its raw
+  pixels (4.7 MiB); 15 minutes of voice at 48 kbit/s is 5.1 MiB, and a
+  minute of video message at about 650 kbit/s 4.6 MiB.
+- **Shown in the chat.** Only JPEG, PNG, WebP and GIF images are shown as
+  photos or GIFs: one of any other type (an SVG, which can carry script, or
+  none given) is shown as a file, whatever kind the sender says. To show or
+  play a decrypted file, and on the save page, the app gives the browser
+  the sender's type only for those images, audio and video; anything else
+  is plain bytes (`application/octet-stream`).
 - The upload is `nonce (12) ‖ AES-GCM(k, nonce, file ‖ zeros, aad =
   "incognitochat/v2/media")`, padded to the next power of two from 16 KiB up
   to 1 MiB, then to the next whole MiB.
@@ -922,10 +945,22 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   browser keeps a copy of the ciphertext in its cache (all three are in its
   signed query). The app fetches it with `cache: 'no-store'` too. The app reads
   at most the padded size of `s`: it stops at once if `Content-Length` says
-  otherwise or more bytes arrive, and refuses a shorter answer. The upload
-  stays, downloaded or saved, until the
+  otherwise or more bytes arrive, and refuses a shorter answer. It gives up
+  on a download that gets no answer, or no more bytes, for 30 seconds. The
+  upload stays, downloaded or saved, until the
   message or conversation is deleted on the recipient's device (then it's
   deleted with `POST /media/{id}/delete {secret}`) or it expires.
+- **A download that fails.** One of another size, one that doesn't decrypt
+  with `k`, and one the bucket refuses (S3 answers 403 or 404 for a file
+  never uploaded, but also for a download URL that expired before it was
+  used, as when the app was put to sleep in between) mark the attachment
+  broken: it's fetched again, with a fresh URL, only on a tap. One the
+  server doesn't know (`not_found` from `GET /media/{id}`: expired or
+  deleted) is gone. Any other failure (the server or the bucket out of
+  reach, failing, busy or refusing, or the device too full to keep the
+  file) leaves it to fetch: after each, fetching by itself waits one to two
+  minutes, and it tries one attachment at most three times in a run of the
+  app; then a tap. Paused downloads don't count toward the three.
 - **Saving outside Telegram.** A Mini App can't hand a file to the device
   (Telegram's download needs a public HTTPS URL, which would mean a decrypted
   copy on a server). Where the app has a share sheet, it uses that.

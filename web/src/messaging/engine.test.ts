@@ -17,7 +17,7 @@ import { MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
-import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, type IdKind } from './store';
+import { clearMedia, getConversation, getIds, getMedia, getMessage, listConversations, listMessages, mediaUsage, pendingUploadDeletes, putConversation, saveConversation, setFile, type IdKind } from './store';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
 
@@ -133,10 +133,13 @@ async function fakeBackend() {
    * paused. uploads and downloads: paused by the operator (the server
    * answers so before looking at anything else). bundles: link bundles are
    * out of reach, refused (rate limited), or another link's comes back.
-   * acks: confirmations can't reach the server.
+   * acks: confirmations can't reach the server. deleteLag: how many of the
+   * next upload deletes find nothing, as the server's lookup does for an
+   * upload made a moment before (it reads a copy that can lag behind).
    */
   const down = {
     deletes: false,
+    deleteLag: 0,
     bundles: null as null | 'unreachable' | 'busy' | 'wrong',
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
     renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing' | 'paused')[],
@@ -177,7 +180,8 @@ async function fakeBackend() {
     },
     async get(url, size) {
       const up = uploads.get(uploadId(url));
-      if (!up?.body) throw new Error('not in the bucket');
+      // As S3 answers a role that can't list the bucket.
+      if (!up?.body) throw new TransferError(403, 'not in the bucket');
       if (up.body.length !== size) throw new WrongSize();
       return up.body;
     },
@@ -239,12 +243,16 @@ async function fakeBackend() {
       }
       if (method === 'GET' && path.startsWith('/media/')) {
         if (down.downloads) throw new ApiError(503, 'downloads_paused');
-        const up = uploads.get(path.split('/')[2]!);
-        if (!up?.body) throw new ApiError(404, 'not_found');
+        // Its record, paid for, not the file: that may never have been uploaded.
+        if (!uploads.has(path.split('/')[2]!)) throw new ApiError(404, 'not_found');
         return check({ url: `https://bucket.example/m/${path.split('/')[2]!}` });
       }
       if (method === 'POST' && path.startsWith('/media/') && path.endsWith('/delete')) {
         if (down.deletes) throw new NetworkError('down');
+        if (down.deleteLag > 0) {
+          down.deleteLag--;
+          throw new ApiError(404, 'not_found');
+        }
         const id = path.split('/')[2]!;
         const { secret } = JSON.parse(init.body!) as { secret: string };
         const hash = toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(secret))));
@@ -3320,15 +3328,226 @@ describe('uploading and downloading attachments', () => {
     expect((await listMessages(sender.db, conv)).filter((m) => m.media).map((m) => m.status)).toEqual(['sent', 'sent', 'sent', 'sent']);
   });
 
-  it('downloads only the padded size the message says', async () => {
+  it('downloads only the padded size the message says, and marks another broken', async () => {
+    const { backend, owner, photo, send, received } = await photoChat();
+    await send();
+    const { local, theirs } = await received();
+    // Not the upload the message names: refused, and marked broken, so it
+    // isn't fetched again by itself.
+    const up = [...backend.uploads.values()][0]!;
+    const body = up.body!;
+    up.body = new Uint8Array(up.size * 2);
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('broken');
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('broken');
+    expect(await getMedia(owner.db, local, theirs.id)).toBeUndefined();
+    // A tap tries again.
+    up.body = body;
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
+  });
+
+  it("marks broken an upload that doesn't decrypt with the message's key", async () => {
     const { backend, owner, send, received } = await photoChat();
     await send();
     const { local, theirs } = await received();
-    // Not the upload the message names: refused, and still to fetch.
+    // The right size, but not what the sender's key sealed.
     const up = [...backend.uploads.values()][0]!;
-    up.body = new Uint8Array(up.size * 2);
-    await expect(owner.messaging.fetchMedia(local, theirs.id)).rejects.toBeInstanceOf(WrongSize);
-    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('remote');
+    up.body = crypto.getRandomValues(new Uint8Array(up.size));
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('broken');
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('broken');
+    expect(await getMedia(owner.db, local, theirs.id)).toBeUndefined();
+  });
+
+  it("marks broken an upload the bucket refuses, which a tap asks for again; and leaves one it can't reach to fetch later", async () => {
+    const { backend, owner, photo, send, received } = await photoChat();
+    await send();
+    const { local, theirs } = await received();
+    const up = [...backend.uploads.values()][0]!;
+    const body = up.body!;
+    // The bucket out of reach, or failing: tried again later.
+    const get = backend.transfer.get.bind(backend.transfer);
+    for (const status of [0, 500, 503]) {
+      backend.transfer.get = async () => {
+        throw new TransferError(status, 'down');
+      };
+      await expect(owner.messaging.fetchMedia(local, theirs.id)).rejects.toMatchObject({ status });
+      expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('remote');
+    }
+    // S3 answers 403 (or 404) for a file never uploaded, and as much for a
+    // URL that expired before it was used (an app put to sleep in between):
+    // broken, so it isn't fetched again by itself...
+    backend.transfer.get = async () => {
+      throw new TransferError(403, 'expired');
+    };
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('broken');
+    expect((await listMessages(owner.db, local)).at(-1)!.file).toBe('broken');
+    const asked = backend.mediaCalls.length;
+    expect(await owner.messaging.fetchMedia(local, theirs.id, undefined, true)).toBe('broken');
+    expect(backend.mediaCalls).toHaveLength(asked);
+    // ...but a tap asks for a fresh URL, and gets it.
+    backend.transfer.get = get;
+    up.body = body;
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    expect(backend.mediaCalls).toHaveLength(asked + 1);
+    expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
+  });
+
+  it('fetches by itself only one still to fetch: not one cleared or broken meanwhile', async () => {
+    const { backend, owner, send, received } = await photoChat();
+    await send();
+    const { local, theirs } = await received();
+    // Another fetch found it broken while this one waited.
+    await setFile(owner.db, local, theirs.id, 'broken');
+    expect(await owner.messaging.fetchMedia(local, theirs.id, undefined, true)).toBe('broken');
+    await setFile(owner.db, local, theirs.id, 'cleared');
+    expect(await owner.messaging.fetchMedia(local, theirs.id, undefined, true)).toBe('cleared');
+    expect(backend.mediaCalls.filter((c) => c.startsWith('GET'))).toEqual([]);
+    // A tap does.
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+  });
+});
+
+describe('deleting an attachment or message while it goes out', () => {
+  async function chat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    const out = { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } };
+    /** PUTs that wait until released. */
+    const held: (() => void)[] = [];
+    const holdPuts = () => {
+      const put = backend.transfer.put.bind(backend.transfer);
+      backend.transfer.put = (url, body, onProgress) =>
+        new Promise((resolve, reject) => {
+          held.push(() => void put(url, body, onProgress).then(resolve, reject));
+        });
+    };
+    /** What reached the owner, as texts, after 'hello'. */
+    const reached = async () => {
+      await owner.messaging.sync();
+      const local = await across(sender.db, conv, owner.db);
+      return (await listMessages(owner.db, local)).map((m) => (m.media ? `[${m.media.t}]` : m.text));
+    };
+    return { backend, owner, sender, conv, out, held, holdPuts, reached };
+  }
+
+  it("doesn't send an attachment deleted while it uploads, and deletes its upload", async () => {
+    const { backend, sender, conv, out, held, holdPuts, reached } = await chat();
+    holdPuts();
+    let id = '';
+    const sending = sender.messaging.sendMedia(conv, out, 'oops', undefined, (stored) => void (id = stored));
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    expect(await getMessage(sender.db, conv, id)).toMatchObject({ status: 'sending' });
+    const sends = backend.sendAttempts.length;
+    await sender.messaging.deleteHere(conv, id);
+    held.shift()!();
+    await sending;
+    // Not sent, no token shown for it, and not back on this device.
+    expect(backend.sendAttempts).toHaveLength(sends);
+    expect(await getMessage(sender.db, conv, id)).toBeUndefined();
+    expect(await getMedia(sender.db, conv, id)).toBeUndefined();
+    // Its upload goes from the server.
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+    expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+    expect(await reached()).toEqual(['hello']);
+  });
+
+  it("asks again later to delete an upload the server didn't find just after it was made", async () => {
+    const { backend, sender, conv, out, held, holdPuts } = await chat();
+    holdPuts();
+    let id = '';
+    const sending = sender.messaging.sendMedia(conv, out, '', undefined, (stored) => void (id = stored));
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    await sender.messaging.deleteHere(conv, id);
+    // The server's lookup lags: the first delete finds nothing.
+    backend.down.deleteLag = 1;
+    held.shift()!();
+    await sending;
+    await vi.waitFor(() => expect(backend.later.some((job) => job.ms === 30_000)).toBe(true));
+    for (const job of backend.later.filter((j) => j.ms === 30_000)) job.fn();
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.mediaCalls.filter((c) => c.endsWith('/delete'))).toHaveLength(2);
+    expect(backend.uploads.size).toBe(0);
+    expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+  });
+
+  it('says nothing when an attachment deleted while it uploads then fails to upload, and deletes the upload', async () => {
+    const { backend, sender, conv, out, reached } = await chat();
+    let id = '';
+    // Deleted during the first PUT, which fails, and so do the three after it.
+    const put = backend.transfer.put.bind(backend.transfer);
+    backend.transfer.put = async () => {
+      backend.transfer.put = put;
+      await sender.messaging.deleteHere(conv, id);
+      throw new TransferError(0, 'unreachable');
+    };
+    backend.down.puts.push('unreachable', 'unreachable', 'unreachable');
+    await sender.messaging.sendMedia(conv, out, '', undefined, (stored) => void (id = stored));
+    expect(backend.puts).toHaveLength(3);
+    expect(await getMessage(sender.db, conv, id)).toBeUndefined();
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+    expect(await reached()).toEqual(['hello']);
+  });
+
+  it("doesn't upload or pay for an attachment deleted before its upload starts", async () => {
+    const { backend, sender, conv, out, reached } = await chat();
+    const tokens = await countTokens(sender.db, undefined, 'media');
+    await sender.messaging.sendMedia(conv, out, '', undefined, (id) => sender.messaging.deleteHere(conv, id));
+    expect(backend.mediaCalls).toEqual([]);
+    expect(await countTokens(sender.db, undefined, 'media')).toBe(tokens);
+    expect(await listMessages(sender.db, conv)).toHaveLength(1);
+    expect(await reached()).toEqual(['hello']);
+  });
+
+  it("doesn't send attachments still uploading when their chat is deleted", async () => {
+    const { backend, sender, conv, out, held, holdPuts, reached } = await chat();
+    holdPuts();
+    const sending = sender.messaging.sendMedia(conv, out);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    await sender.messaging.remove(conv);
+    held.shift()!();
+    await sending;
+    expect(await listMessages(sender.db, conv)).toEqual([]);
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+    expect(await reached()).toEqual(['hello']);
+  });
+
+  it("doesn't send a message deleted before it goes out", async () => {
+    const { backend, sender, conv, reached } = await chat();
+    const sends = backend.sendAttempts.length;
+    let id = '';
+    await sender.messaging.send(conv, 'oops', undefined, async () => {
+      id = (await listMessages(sender.db, conv)).at(-1)!.id;
+      await sender.messaging.deleteHere(conv, id);
+    });
+    expect(backend.sendAttempts).toHaveLength(sends);
+    expect(await getMessage(sender.db, conv, id)).toBeUndefined();
+    expect(await reached()).toEqual(['hello']);
+    // The next one goes as usual.
+    await sender.messaging.send(conv, 'hi');
+    expect(await reached()).toEqual(['hello', 'hi']);
+  });
+
+  it('sends an attachment as usual when it stays, keeping what changed on it meanwhile', async () => {
+    const { sender, conv, out, held, holdPuts, reached } = await chat();
+    holdPuts();
+    let id = '';
+    const sending = sender.messaging.sendMedia(conv, out, 'a cat', undefined, (stored) => void (id = stored));
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    await sender.messaging.react(conv, id, '👍');
+    held.shift()!();
+    await sending;
+    const mine = (await getMessage(sender.db, conv, id))!;
+    expect(mine).toMatchObject({ status: 'sent', file: 'local', text: 'a cat', media: { t: 'photo' } });
+    expect(mine.media!.id).toBeDefined();
+    expect(mine.reactions?.mine?.e).toBe('👍');
+    expect(await reached()).toEqual(['hello', '[photo]']);
   });
 });
 

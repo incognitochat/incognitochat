@@ -40,12 +40,12 @@ import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
 import { createMessaging, isPaused, NoMailboxes, NoTokens, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
-import { clearMedia, getMedia, listConversations, listMessages, mediaUsage, type LocalMedia, type MessageView } from '../messaging/store';
-import { DEFAULT_MEDIA_SETTINGS, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
+import { clearMedia, getMedia, listConversations, listMessages, mediaUsage, type MessageView } from '../messaging/store';
+import { DEFAULT_MEDIA_SETTINGS, fetchesByItself, getMediaSettings, keepCutoff, putMediaSettings, type KeepMedia, type MediaSettings } from '../messaging/settings';
 import { prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo, TooBig } from '../media/prepare';
 import type { Recording, RoundRecording } from '../media/record';
 import { saveUrl } from '../media/save';
-import { fileName, type Media, type Sticker } from '../protocol/message';
+import { fileName, passiveType, type Media, type Sticker } from '../protocol/message';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
 import { createBackoff } from '../net/backoff';
 import { createClock } from '../net/clock';
@@ -163,7 +163,7 @@ export interface ConversationView {
   lastAt: number;
   status: 'active' | 'ended' | 'blocked';
   /** The latest message, if any. */
-  last: { text: string; out: boolean; status: MessageView['status']; media?: { t: string; n?: string }; sticker?: Sticker } | null;
+  last: { text: string; out: boolean; status: MessageView['status']; media?: { t: string; n?: string; m?: string }; sticker?: Sticker } | null;
 }
 
 /** A message: its conversation (on this device) and its ID, which is unique only within that conversation. */
@@ -318,15 +318,20 @@ export interface LinkView extends LinkRecord {
 
 /** How long the old copy waits before closing, so Telegram handles the link first (tested in phase 0). */
 const CLOSE_DELAY_MS = 400;
-/** GIFs up to this size are fetched without a tap, like photos. */
-const AUTO_GIF_BYTES = 10 * 1024 * 1024;
 /**
  * After the server says downloads are paused, attachments aren't fetched by
  * themselves for this long; then on the next opening or new message. A tap
- * still asks. After an automatic fetch that couldn't reach the server or was
- * turned away, half of this to all of it.
+ * still asks. After an automatic fetch that failed any other way (out of
+ * reach, turned away, failing, or the file couldn't be stored), half of
+ * this to all of it.
  */
 const PAUSED_WAIT_MS = 2 * 60_000;
+/**
+ * How many times one attachment is fetched by itself, in a run of the app,
+ * when that keeps failing (a poor connection, say, or a full device); then
+ * it waits for a tap. Paused downloads don't count.
+ */
+const AUTO_TRIES = 3;
 
 export function createApp(deps: Deps) {
   const screen = signal<Screen>({ kind: 'loading' });
@@ -802,7 +807,7 @@ export function createApp(deps: Deps) {
                 text: last.text,
                 out: last.out,
                 status: last.status,
-                ...(last.media ? { media: { t: last.media.t, ...(last.media.n ? { n: last.media.n } : {}) } } : {}),
+                ...(last.media ? { media: { t: last.media.t, ...(last.media.n ? { n: last.media.n } : {}), ...(last.media.m ? { m: last.media.m } : {}) } } : {}),
                 ...(last.sticker ? { sticker: last.sticker } : {}),
               }
             : null,
@@ -1041,15 +1046,19 @@ export function createApp(deps: Deps) {
   }
 
   // Until when attachments aren't fetched by themselves: the server said
-  // downloads are paused, or an automatic fetch couldn't reach it or was
-  // turned away (429, the firewall's too), so the rest aren't asked for one
-  // by one meanwhile.
+  // downloads are paused, or an automatic fetch failed (out of reach, turned
+  // away, failing, or the file couldn't be stored), so the rest aren't asked
+  // for one by one meanwhile.
   let downloadsPausedUntil = 0;
+  /** Attachments whose fetching by itself failed in this run, and how often (AUTO_TRIES). */
+  const autoFailures = new Map<string, number>();
 
   /**
    * Fetches a received attachment: on a tap, or by itself (auto) for
    * photos, GIFs, voice and video messages. If downloads are paused, a tap
    * says so; fetching by itself stops quietly for a while (PAUSED_WAIT_MS).
+   * One that's gone or broken is marked so (messaging.fetchMedia), and isn't
+   * fetched by itself again.
    */
   async function fetchMedia(m: MessageRef, auto = false): Promise<void> {
     const key = messageKey(m);
@@ -1057,7 +1066,7 @@ export function createApp(deps: Deps) {
     setProgress(key, 0);
     let paused = false;
     try {
-      await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f));
+      await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f), auto);
       // Answered: downloads aren't paused (any more).
       downloadsPausedUntil = 0;
     } catch (err) {
@@ -1065,8 +1074,11 @@ export function createApp(deps: Deps) {
       if (isPaused(err)) {
         paused = true;
         downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS;
-      } else if (auto && (err instanceof NetworkError || (err instanceof ApiError && err.status === 429))) {
+      } else if (auto) {
+        // However it failed: not again at once, for this one or the rest;
+        // and this one only a few times in all.
         downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS * (0.5 + Math.random() / 2);
+        autoFailures.set(key, (autoFailures.get(key) ?? 0) + 1);
       }
     } finally {
       setProgress(key, null);
@@ -1091,7 +1103,9 @@ export function createApp(deps: Deps) {
     if (!media) return 'unavailable';
     if (typeof navigator.canShare === 'function') {
       const file = await getMedia(deps.db, m.conv, m.id);
-      const shareable = file && new File([file], fileName(media), media.m ? { type: media.m } : {});
+      // Only a passive type, as for showing it.
+      const type = passiveType(media.m);
+      const shareable = file && new File([file], fileName(media), type ? { type } : {});
       if (shareable && navigator.canShare({ files: [shareable] })) {
         try {
           await navigator.share({ files: [shareable] });
@@ -1111,24 +1125,23 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Photos, voice and video messages and GIFs (up to 10 MB) are fetched as
-   * soon as their conversation is open, as in Telegram, unless turned off in
-   * Data and storage; videos, music and files wait for a tap. Attachments
-   * cleared from this device also wait for a tap.
+   * Photos, voice and video messages and GIFs are fetched as soon as their
+   * conversation is open, as in Telegram, up to a size for each kind
+   * (fetchesByItself), unless turned off in Data and storage; videos, music,
+   * files and anything larger wait for a tap. Attachments cleared from this
+   * device, gone or broken also wait for a tap.
    */
   function autoFetch(conv: string): void {
     const now = currentScreen();
     if (now.kind !== 'conversation' || now.id !== conv) return;
     const { auto } = mediaSettings;
-    const automatic = (media: LocalMedia) =>
-      (auto.photos && media.t === 'photo') ||
-      (auto.voice && (media.t === 'voice' || media.t === 'round')) ||
-      (auto.gifs && media.t === 'gif' && media.s <= AUTO_GIF_BYTES);
     void (async () => {
       for (const m of now.messages) {
         // Paused: one refusal, not one per attachment.
         if (Date.now() < downloadsPausedUntil) return;
-        if (m.file === 'remote' && m.media && automatic(m.media) && !m.out) await fetchMedia(m, true);
+        if (m.file !== 'remote' || m.out || !m.media || !fetchesByItself(m.media, auto)) continue;
+        if ((autoFailures.get(messageKey(m)) ?? 0) >= AUTO_TRIES) continue;
+        await fetchMedia(m, true);
       }
     })();
   }
@@ -1150,8 +1163,10 @@ export function createApp(deps: Deps) {
     if (cached) return cached;
     const file = await getMedia(deps.db, m.conv, m.id);
     if (!file) return null;
-    // QuickTime videos and .m4a songs play as MP4 (the same container) where a browser doesn't know their type.
-    const shown = type === 'video/quicktime' ? 'video/mp4' : type === 'audio/x-m4a' ? 'audio/mp4' : type;
+    // QuickTime videos and .m4a songs play as MP4 (the same container) where
+    // a browser doesn't know their type. Only a passive type is used: an SVG
+    // or HTML file is never handed over as one.
+    const shown = passiveType(type === 'video/quicktime' ? 'video/mp4' : type === 'audio/x-m4a' ? 'audio/mp4' : type);
     const url = URL.createObjectURL(new Blob([file], shown ? { type: shown } : {}));
     urls.set(key, url);
     return url;

@@ -172,6 +172,7 @@ export const fa = {
   seek: 'موقعیت',
   download: 'دریافت',
   mediaGone: 'دیگر در دسترس نیست',
+  mediaBroken: 'باز نشد',
   errorTooBig: 'حجم فایل حداکثر ۵۰ مگابایت است.',
   errorUnreadable: 'خواندن آن فایل ممکن نشد.',
   reply: 'پاسخ',
