@@ -58,7 +58,7 @@ chat and kind), so the chat list doesn't read them.
 | The account's link: its ID, its public keys, its first-contact mailbox | So people can write to the user | Until it's replaced, or the account ends |
 | Mailboxes: random IDs, and which account they belong to | To deliver messages | Until they're ended, or their account is deleted or replaced: they take nothing from that moment, and go in steps while the app is open (below) |
 | Only while a deletion, or the cleanup after a replacement, is under way: that the account is being deleted; or, on the new account, the old account's ID | So the deletion or cleanup carries on where it stopped, and the account is never left half deleted and in use | Until it's done, a few minutes at most while the app is open; it carries on each time the app is opened. If the app is never opened again, it stays, with what isn't deleted yet (below) |
-| On the account: a random value replaced at each change to its link (not a count, so it says nothing about how often it changed), and, while a step of a deletion or cleanup runs, until when that step holds the account (to the millisecond) | So two requests can't undo each other's change to the link, or run the same step twice | While the account exists; the step's time is replaced by the next step's, and goes with the account |
+| On the account: a random value replaced at each change to its link (not a count, so it says nothing about how often it changed), and, while a step of a deletion or cleanup runs, until when that step holds the account (to the millisecond) | So two requests can't undo each other's change to the link, or run the same step twice | The random value while the account exists; the step's time until the work is done (each step replaces it, the last removes it, or it goes with the account) |
 | Messages waiting for the device, encrypted, each with the mailbox it came through | Delivery. The app takes a message in only through the mailbox it belongs to, so another user can't learn whose device opens it by sending it elsewhere | Until the device confirms them, at most 30 days |
 | Placeholders: a device of no account, and at most one waiting message for each size an envelope can have (64 sizes), all zeros, with no mailbox and no time, under an account ID no account has | A send to a mailbox that doesn't exist (or ended) reads and writes them instead, so it costs and takes what a delivery does; each write writes the same item again, so nothing about the send is kept. They only show which envelope sizes were ever sent to such a mailbox | They never change, and stay |
 | Attachments, encrypted, with their padded size and how many fresh upload links they were given (at most 3, when an upload is tried again) | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them. An upload is written once, with a link that only starts an upload within a minute and is given only in the 3 hours after payment, while nothing is stored: once deleted, it can't come back, except from a link given in that same minute (and that copy also expires within 30 days) |
@@ -93,7 +93,10 @@ minutes for the biggest accounts, while the app stays open. If the app
 closes first, it carries on the next time it's opened; meanwhile the server
 keeps that the account is being deleted, and what isn't deleted yet stays,
 unused. If the app is never opened again, that stays too: the account,
-marked and unused, with what is left of it. Only short-lived rate
+marked and unused, with what is left of it. The same if the server can't
+finish and the user deletes everything from the device only; setting up
+again later replaces that account (without asking: it isn't in use) and
+deletes what is left of it, as for any replacement. Only short-lived rate
 counters (and a quiet period, for a few minutes) are left. They expire on
 their own within about a day, though DynamoDB can take some days more to
 delete them, and an expired one is never used again. Until then, that day's

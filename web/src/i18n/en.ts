@@ -291,6 +291,8 @@ export const en = {
   deleteHereOnlyNote:
     "If the server can't finish it, you can delete everything on this device now. What the server still holds stays unused until you set up again, which ends it.",
   accountDeletedHere: 'Everything was deleted from this device. What the server still holds stays unused until you set up again.',
+  deleteHereOnlyConfirm: "Delete all your chats and keys from this device now? This can't be undone.",
+  deletionPausedNotice: "Your account's deletion couldn't finish yet. Your chats are read-only until it does.",
   deletePhrase: 'delete my account',
   deleteAccountConfirm: 'Delete my account',
   accountDeleted: 'Your account was deleted, from the server and from this device.',

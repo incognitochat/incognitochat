@@ -43,20 +43,26 @@ const LINK_PARAM = /^[A-Za-z0-9_-]{1,64}$/;
 export type AccountRecord =
   /** Keys exist; waiting for the registration launch. */
   | { state: 'pending'; deviceId: string; fingerprint: string }
-  | { state: SetUpState; deviceId: string; fingerprint: string; accountId: string };
+  /**
+   * deleting (only with refused): the server said the account is being
+   * deleted, by a deletion this device didn't start (it deletes nothing
+   * here). Stored as refused plus this flag, so an older build of the app
+   * still open in another window reads a refused account, never "no
+   * account" (whose setup wouldn't ask for the typed confirmation).
+   */
+  | { state: SetUpState; deviceId: string; fingerprint: string; accountId: string; deleting?: true };
 
 /**
  * A device with an account: registered; or, as the server last said (never
  * checked, so asked again at every launch), replaced by a registration
- * elsewhere, refused (its login was refused: the device or account is
- * gone), or being deleted (a deletion this device didn't start; it deletes
- * nothing here). A replaced account stays replaced when the server later only
- * refuses it, so its warning isn't lost when the server forgets the
- * replacement.
+ * elsewhere, or refused (its login was refused: the device or account is
+ * gone; or, with deleting, the account is being deleted). A replaced account
+ * stays replaced when the server later only refuses it, so its warning isn't
+ * lost when the server forgets the replacement.
  */
-export type SetUpState = 'registered' | 'replaced' | 'refused' | 'deleting';
+export type SetUpState = 'registered' | 'replaced' | 'refused';
 
-const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused', 'deleting'] satisfies SetUpState[];
+const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused'] satisfies SetUpState[];
 
 /** This launch's start parameter isn't the registration this device prepared. */
 export class SetupMismatch extends Error {
@@ -70,16 +76,16 @@ export class SetupMismatch extends Error {
 export async function readAccount(db: Database): Promise<AccountRecord | undefined> {
   const value = await getMeta<Record<string, unknown>>(db, META_ACCOUNT);
   if (!value || typeof value !== 'object') return undefined;
-  const { state, deviceId, fingerprint: fp, accountId } = value;
+  const { state, deviceId, fingerprint: fp, accountId, deleting } = value;
   if (typeof deviceId !== 'string' || !ID.test(deviceId) || typeof fp !== 'string' || !FINGERPRINT.test(fp)) return undefined;
   if (state === 'pending') return { state, deviceId, fingerprint: fp };
   if (SET_UP.includes(state) && typeof accountId === 'string' && ID.test(accountId)) {
-    return { state: state as SetUpState, deviceId, fingerprint: fp, accountId };
+    return { state: state as SetUpState, deviceId, fingerprint: fp, accountId, ...(state === 'refused' && deleting === true ? { deleting } : {}) };
   }
   return undefined;
 }
 
-/** Whether the record is of a device with an account (registered, replaced or refused). */
+/** Whether the record is of a device with an account (registered, replaced or refused, which includes being deleted elsewhere). */
 export function isSetUp(record: AccountRecord | undefined): record is Extract<AccountRecord, { accountId: string }> {
   return record !== undefined && record.state !== 'pending';
 }
@@ -89,8 +95,9 @@ export function isSetUp(record: AccountRecord | undefined): record is Extract<Ac
  * must carry. A pending setup is reused, so asking again reopens with the same
  * code; otherwise new keys are created, and everything of an account before
  * is deleted from this device. Over a device with an account (registered,
- * replaced or refused) that takes restart, which only the typed confirmation
- * gives: no answer from the server alone ever deletes a device's chats.
+ * replaced or refused, which includes being deleted elsewhere) that takes
+ * restart, which only the typed confirmation gives: no answer from the
+ * server alone ever deletes a device's chats.
  */
 export function prepareSetup(db: Database, options: { restart?: boolean } = {}): Promise<string> {
   return withLock(LOCK, async () => {
@@ -209,10 +216,14 @@ export function loginParts(accountId: string, deviceId: string, timestamp: numbe
  * justSetUp: the account was set up a moment ago, here or in another copy of
  * the app. The server's login read can miss a device for about a second, so
  * a refusal then is tried once more, a second later, before it's recorded.
+ *
+ * expected, if set, is the only account it may log in: if the device holds
+ * another now, it throws AccountChanged.
  */
-export async function logIn(db: Database, api: Api, clock: Clock = createClock(), justSetUp = false): Promise<TokenResponse> {
+export async function logIn(db: Database, api: Api, clock: Clock = createClock(), justSetUp = false, expected?: string): Promise<TokenResponse> {
   const current = await readAccount(db);
   if (!isSetUp(current)) throw new Error('not registered');
+  if (expected !== undefined && current.accountId !== expected) throw new AccountChanged();
   const device = await requirePair(db, KEY_DEVICE);
   const attempt = () =>
     withServerTime(clock, async () => {
@@ -234,11 +245,19 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
       await new Promise((resolve) => setTimeout(resolve, REFUSED_RETRY_MS));
       result = await attempt();
     }
-    await setState(db, current.accountId, ['replaced', 'refused', 'deleting'], 'registered');
+    await setState(db, current.accountId, ['replaced', 'refused'], 'registered');
     return result;
   } catch (err) {
     await recordRefusal(db, current.accountId, err);
     throw err;
+  }
+}
+
+/** The device holds another account now than the one a request was for (another copy of the app set one up, say). */
+export class AccountChanged extends Error {
+  constructor() {
+    super("the device's account changed");
+    this.name = 'AccountChanged';
   }
 }
 
@@ -248,30 +267,32 @@ export async function logIn(db: Database, api: Api, clock: Clock = createClock()
  */
 export async function recordRefusal(db: Database, accountId: string, err: unknown): Promise<void> {
   if (!(err instanceof ApiError)) return;
-  if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused', 'deleting'], 'replaced');
-  // A replaced account stays replaced: its warning matters more.
-  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'deleting'], 'refused');
+  if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused'], 'replaced');
+  // A replaced account stays replaced: its warning matters more. A refused
+  // one said to be being deleted is now only refused.
+  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'refused'], 'refused');
 }
 
 /** Records that the server says this account was replaced (it's asked again at the next launch). */
 export function markReplaced(db: Database, accountId: string): Promise<void> {
-  return setState(db, accountId, ['registered', 'refused', 'deleting'], 'replaced');
+  return setState(db, accountId, ['registered', 'refused'], 'replaced');
 }
 
 /**
  * Records that the server says this account is being deleted, when this
  * device didn't start that (it's asked again at the next launch; nothing is
- * deleted for it).
+ * deleted for it): refused, with deleting.
  */
 export function markDeletingElsewhere(db: Database, accountId: string): Promise<void> {
-  return setState(db, accountId, ['registered', 'refused'], 'deleting');
+  return setState(db, accountId, ['registered', 'refused'], 'refused', true);
 }
 
-function setState(db: Database, accountId: string, from: SetUpState[], to: SetUpState): Promise<void> {
+function setState(db: Database, accountId: string, from: SetUpState[], to: SetUpState, deleting = false): Promise<void> {
   return withLock(LOCK, async () => {
     const latest = await readAccount(db);
     if (isSetUp(latest) && from.includes(latest.state) && latest.accountId === accountId) {
-      await putMeta(db, META_ACCOUNT, { ...latest, state: to } satisfies AccountRecord);
+      const { deleting: _, ...rest } = latest;
+      await putMeta(db, META_ACCOUNT, { ...rest, state: to, ...(deleting ? { deleting: true as const } : {}) } satisfies AccountRecord);
     }
   });
 }
@@ -294,7 +315,8 @@ export async function requestParts(
  * The X-Device-Signature header for a sensitive request: this device signs
  * the method, path, time, a fresh nonce and the exact body text. Like a
  * login, also for an account the server last called replaced or refused, so
- * the server's answer says which.
+ * the server's answer says which. expected, if set, is the only account it
+ * may sign for: if the device holds another now, it throws AccountChanged.
  */
 export async function signRequest(
   db: Database,
@@ -302,9 +324,11 @@ export async function signRequest(
   path: string,
   body: string,
   now: () => number = () => Math.floor(Date.now() / 1000),
+  expected?: string,
 ): Promise<string> {
   const current = await readAccount(db);
   if (!isSetUp(current)) throw new Error('not registered');
+  if (expected !== undefined && current.accountId !== expected) throw new AccountChanged();
   const device = await requirePair(db, KEY_DEVICE);
   const timestamp = now();
   const nonce = toBase64Url(randomBytes(16));

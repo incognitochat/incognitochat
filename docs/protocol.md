@@ -155,7 +155,8 @@ registration itself, the rest as the new device's app asks, `POST
 /account/cleanup` (signed), which answers `409 in_progress` while more is
 left, or while another step for the account runs, and `200 {}` once nothing
 is (also when nothing was); the app repeats it a second later, in the
-background. `GET /account` says `cleanup: true` while anything is left, so
+background (waiting out a busy server, as for a deletion, below; at most 400
+steps a launch). `GET /account` says `cleanup: true` while anything is left, so
 the app carries on at its next launch if it closed first. Until then the new
 account's item lists the old account's ID; replacing the new account carries
 the list over, and deleting it finishes the cleanup first. Each step reads
@@ -165,7 +166,13 @@ next step finds what one left.
 A device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
-launch, never one that names a link or an invitation, and stores nothing.
+launch, never one that names a link or an invitation, and stores nothing. An
+account being deleted (below) doesn't count: a lookup says there is none,
+and setting up again replaces it without `replace`, so without the warning
+about taking an account over; what is left of it goes with the new
+account's cleanup, as for any replacement. Only the account's own signed
+`DELETE /account` marks it so, and nothing undoes that, so this can't take
+over an account in use.
 
 **Deleting an account:** `DELETE /account`, signed. The server deletes the
 account's waiting envelopes, links (their bundles then answer "not found"),
@@ -209,13 +216,19 @@ at every launch until it's done, before asking anything else; a launch whose
 login is then refused (`login_refused`) takes it as done and deletes
 everything on the device. Before each request, and before deleting
 anything on the device, it checks that the device still holds that account
-and the record: a record for another account (left by another copy of the
-app before a new setup, say) is dropped and acts on nothing, and a copy of
-the app whose deletion another copy finished, followed by a new setup,
-stops without touching the new account. If the server keeps failing, the
-deleting screen also offers the chats, read-only, and deleting everything
-on this device only (already confirmed); what the server holds then stays,
-unused, until the user sets up again. When the server says the account is
+and the record, and each request, its retries included (a new login after
+an expired session, a new signature after `clock_skew`), is bound to that
+account: a record for another account (left by another copy of the app
+before a new setup, say) is dropped and acts on nothing, and a copy of the
+app whose deletion another copy finished, followed by a new setup, stops
+without logging in or signing as the new account. A server that is busy
+(`503 unavailable`, `429`) is waited out, as long as it asks (`Retry-After`,
+up to 30 seconds). One run takes at most 400 steps, or 10 minutes; then,
+or if the server keeps failing, the deleting screen offers Try again, the
+chats, read-only, and deleting everything on this device only (already
+confirmed, asked once more in a popup); what the server holds then stays,
+unused, until the user sets up again, which replaces it (above). A
+launch that can't reach the server shows that screen too. When the server says the account is
 being deleted (`deleting`, or `account_deleting`), the app carries on if it
 has the record (another copy of the app started it); if it hasn't, it doesn't
 take the server's word: it keeps the chats readable, as when signed out

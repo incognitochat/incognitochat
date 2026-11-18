@@ -17,15 +17,14 @@ import (
 
 // One step at a time holds an account: another is refused until the first
 // lets go and a second has passed, or its lease expires; a late release
-// doesn't free a newer lease; an account that doesn't exist isn't leased,
-// and nothing is made.
+// doesn't free a newer lease; once the work is done the lease goes from the
+// item; an account that doesn't exist isn't leased, and nothing is made.
+// (That the lease outlasts the api function is checked against its timeout
+// in infra/tests.)
 func TestLease(t *testing.T) {
 	s, client := store(t)
 	ctx := context.Background()
 	n := registered(t, s)
-	if leaseFor <= 10*time.Second {
-		t.Fatalf("a lease of %v doesn't outlast the api function (10 s)", leaseFor)
-	}
 
 	release, ok, err := s.Lease(ctx, n.ID, now)
 	if err != nil || !ok {
@@ -34,7 +33,7 @@ func TestLease(t *testing.T) {
 	if _, ok, err := s.Lease(ctx, n.ID, now.Add(time.Second)); err != nil || ok {
 		t.Fatalf("a second step at once: %v, %v", ok, err)
 	}
-	if err := release(ctx, now.Add(2*time.Second)); err != nil {
+	if err := release(ctx, now.Add(2*time.Second), false); err != nil {
 		t.Fatal(err)
 	}
 	// The next waits a second after the release.
@@ -50,14 +49,23 @@ func TestLease(t *testing.T) {
 	if _, ok, _ := s.Lease(ctx, n.ID, at.Add(10*time.Second)); ok {
 		t.Fatal("leased while held")
 	}
-	if _, ok, err := s.Lease(ctx, n.ID, at.Add(leaseFor)); err != nil || !ok {
+	newer, ok, err := s.Lease(ctx, n.ID, at.Add(leaseFor))
+	if err != nil || !ok {
 		t.Fatalf("after the lease expired: %v, %v", ok, err)
 	}
-	if err := late(ctx, at.Add(leaseFor)); err != nil {
+	if err := late(ctx, at.Add(leaseFor), true); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.Lease(ctx, n.ID, at.Add(leaseFor+stepGap)); ok {
 		t.Fatal("a late release freed a newer lease")
+	}
+	// Done: the lease goes from the item.
+	if err := newer(ctx, at.Add(leaseFor+stepGap), true); err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(n.ID), skAccount)})
+	if _, held := out.Item["sl"]; err != nil || held {
+		t.Fatalf("the lease stayed after the work was done: %v, %v", out.Item["sl"], err)
 	}
 	// The account reads as before.
 	if _, err := s.Device(ctx, n.ID, n.DeviceID, now); err != nil {

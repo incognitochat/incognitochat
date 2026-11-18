@@ -99,8 +99,11 @@ type Directory interface {
 	CleanUp(ctx context.Context, accountID, old string, max int) (bool, error)
 	// Lease lets one such step run for an account at a time: ok is false
 	// while another holds it; release, at the end, lets the next start a
-	// moment later (directory.Store.Lease).
-	Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time) error, ok bool, err error)
+	// moment later, or removes the lease once done (directory.Store.Lease).
+	Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time, done bool) error, ok bool, err error)
+	// AccountExists reports whether a Telegram user has an account in use
+	// (not one being deleted).
+	AccountExists(ctx context.Context, telegramHash string) (bool, error)
 }
 
 // Limiter counts uses of a key in fixed windows.

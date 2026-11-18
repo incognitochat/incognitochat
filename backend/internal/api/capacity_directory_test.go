@@ -111,7 +111,9 @@ func TestDirectoryCapacity(t *testing.T) {
 	if status, _ := h.post(t, "/accounts/lookup", map[string]any{"initData": launch(t, big.user, "", h.now)}); status != http.StatusOK {
 		t.Fatalf("lookup: %d", status)
 	}
-	if d, _ := tb.cost(t, "POST /accounts/lookup, 4,000-mailbox account"); d.Read != 1 {
+	// The Telegram item, and the account item eventually consistent (to tell
+	// one being deleted).
+	if d, _ := tb.cost(t, "POST /accounts/lookup, 4,000-mailbox account"); d.Read != 1.5 {
 		t.Fatalf("lookup read %.1f units", d.Read)
 	}
 

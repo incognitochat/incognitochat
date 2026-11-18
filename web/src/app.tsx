@@ -203,7 +203,7 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               </Button>
               {/* Already confirmed by the typed phrase: the server's part waits for the next setup. */}
               <p class="muted">{tr('deleteHereOnlyNote')}</p>
-              <button type="button" class="link-button delete-account" onClick={app.deleteHereOnly}>
+              <button type="button" class="link-button delete-account" onClick={() => void confirmDeleteHereOnly(app, language)}>
                 {tr('deleteHereOnly')}
               </button>
             </>
@@ -325,7 +325,15 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
   // Signed out, the chats are read-only; Try again asks the server again.
-  const status = screen.signedOut ? (
+  // A deletion that couldn't finish: read-only too; Try again carries on with it.
+  const status = screen.deletionPaused ? (
+    <div class="card" role="status">
+      <p>{tr('deletionPausedNotice')}</p>
+      <button type="button" class="button secondary" onClick={() => void app.continueDeletion()}>
+        {tr('tryAgain')}
+      </button>
+    </div>
+  ) : screen.signedOut ? (
     <div class="card" role="status">
       <p>{tr('readOnlyNotice')}</p>
       <button type="button" class="button secondary" onClick={() => void app.recheck()}>
@@ -380,7 +388,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
                 language={language}
                 chat={c}
                 revealed={revealed.value === c.id}
-                onReveal={(id) => (revealed.value = screen.signedOut ? null : id)}
+                onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
               />
             ))}
           </ul>
@@ -1047,6 +1055,18 @@ async function confirmSwitch(app: AppState, language: Language, which: 'uploads'
 }
 
 /** Asks, in Telegram's own popup, before swapping the link for a new one. */
+/** Deleting from this device only wipes everything here at once: asked once more, in a popup. */
+async function confirmDeleteHereOnly(app: AppState, language: Language): Promise<void> {
+  const choice = await app.popup({
+    message: t(language, 'deleteHereOnlyConfirm'),
+    buttons: [
+      { id: 'delete', type: 'destructive', text: t(language, 'deleteHereOnly') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'delete') await app.deleteHereOnly();
+}
+
 async function confirmReplace(app: AppState, language: Language): Promise<void> {
   const choice = await app.popup({
     message: t(language, 'newLinkConfirm'),

@@ -144,6 +144,9 @@ type Account struct {
 	// Leftovers are the accounts it replaced whose items aren't all
 	// deleted yet (CleanUp).
 	Leftovers []string
+	// Deleting: its own DELETE /account has started (MarkDeleting), which
+	// is never undone; setting up again replaces it without asking.
+	Deleting bool
 	// linkChange is the account item's lq as read (nil if none), so
 	// Replace can tell whether its links changed since.
 	linkChange types.AttributeValue
@@ -199,6 +202,30 @@ func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, err
 	return id, nil
 }
 
+// AccountExists reports whether a Telegram user has an account in use: one
+// being deleted (MarkDeleting) doesn't count, since setting up again
+// replaces it without asking (it can only be marked by its own signed
+// DELETE /account, and never unmarked). It reads the Telegram user's item,
+// then the account item eventually consistent (half a unit).
+func (s *Store) AccountExists(ctx context.Context, telegramHash string) (bool, error) {
+	id, err := s.AccountOf(ctx, telegramHash)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	acct, err := s.read(ctx, accountPK(id), skAccount, time.Time{}, false)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_, deleting := acct["dl"]
+	return !deleting, nil
+}
+
 // ByTelegram returns the account registered for a Telegram hash, with the
 // signing key of one of its devices, if it has that device. It reads only
 // those items, never the rest of the partition, which can hold thousands
@@ -218,6 +245,7 @@ func (s *Store) ByTelegram(ctx context.Context, telegramHash, deviceID string) (
 		out.Key, _ = bin(acct, "ak")
 		out.Leftovers = stringSet(acct, "ro")
 		out.linkChange = acct["lq"]
+		_, out.Deleting = acct["dl"]
 	}
 	out.DeviceKey, _ = bin(dev, "k")
 	return out, nil
@@ -513,11 +541,12 @@ const stepGap = time.Second
 // step holds it, until leaseFor from now, unless another step does (or a
 // concurrent transaction on the item: taken as held), and reports whether
 // it did. So requests sent at once can't each write the same deletes.
-// Release, at the end of the step, lets the next one in stepGap later; a
-// step that dies halfway holds the account until its lease expires. An
-// account that is gone isn't leased. A release that fails (a concurrent
-// transaction) returns its error, and the lease expires on its own.
-func (s *Store) Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time) error, ok bool, err error) {
+// Release, at the end of the step, lets the next one in stepGap later, or,
+// once the work is done, removes the lease from the item; a step that dies
+// halfway holds the account until its lease expires. An account that is
+// gone isn't leased. A release that fails (a concurrent transaction)
+// returns its error, and the lease expires on its own.
+func (s *Store) Lease(ctx context.Context, accountID string, now time.Time) (release func(ctx context.Context, now time.Time, done bool) error, ok bool, err error) {
 	until := nv(now.Add(leaseFor).UnixMilli())
 	_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
@@ -534,16 +563,21 @@ func (s *Store) Lease(ctx context.Context, accountID string, now time.Time) (rel
 	if err != nil {
 		return nil, false, err
 	}
-	return func(ctx context.Context, now time.Time) error {
+	return func(ctx context.Context, now time.Time, done bool) error {
 		// Only this step's lease: one that outlived it is another's now.
 		// Gone with the account after a deletion's last step.
-		_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		in := &dynamodb.UpdateItemInput{
 			TableName:                 &s.Table,
 			Key:                       key(accountPK(accountID), skAccount),
 			UpdateExpression:          aws.String("SET sl = :next"),
 			ConditionExpression:       aws.String("sl = :until"),
 			ExpressionAttributeValues: attrs{":until": until, ":next": nv(now.Add(stepGap).UnixMilli())},
-		})
+		}
+		if done {
+			in.UpdateExpression = aws.String("REMOVE sl")
+			in.ExpressionAttributeValues = attrs{":until": until}
+		}
+		_, err := s.DB.UpdateItem(ctx, in)
 		if errors.As(err, &failed) {
 			return nil
 		}

@@ -141,9 +141,14 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		// A retry of a registration that already succeeded, e.g. after its
 		// response was lost.
 		return s.issue(route, existing.ID, in.Device, now)
-	case !in.Replace:
+	case !in.Replace && !existing.Deleting:
 		return httpapi.Error(http.StatusConflict, "account_exists")
 	default:
+		// Replacing asks the user first (replace), unless the account is
+		// being deleted: only its own signed DELETE /account marks it, and
+		// nothing unmarks it, so it isn't in use, and the user may have
+		// deleted it from their device (the server couldn't finish).
+		// POST /accounts/lookup doesn't count it either.
 		if resp, ok := s.allowRegistration(ctx, route, telegramHash); !ok {
 			return resp
 		}
@@ -156,7 +161,7 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 			// left of it goes in steps: the first here, the rest as the app
 			// asks (POST /account/cleanup). One that fails only leaves more
 			// for those, so the registration stands.
-			if _, err := s.leasedCleanUp(ctx, route, account.ID, existing.ID); err != nil {
+			if _, err := s.leasedCleanUp(ctx, route, account.ID, append([]string{existing.ID}, existing.Leftovers...)); err != nil {
 				s.Log.Warn("cleanup step failed", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
 			}
 		}

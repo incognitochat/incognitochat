@@ -3,7 +3,7 @@
 // key on top of the token. Times the server checks come from the server's
 // clock as this device knows it (clock.ts), not the device's own.
 
-import { isSetUp, logIn, readAccount, recordRefusal, signRequest } from '../account/account';
+import { AccountChanged, isSetUp, logIn, readAccount, recordRefusal, signRequest } from '../account/account';
 import type { Database } from '../storage/db';
 import { ApiError, NetworkError, type Api, type Method, type TokenResponse } from './api';
 import { createClock, type Clock } from './clock';
@@ -32,9 +32,12 @@ export interface Session {
   /**
    * Sends a logged-in request. sign adds a device signature (needed to
    * create, rotate or revoke links). Retries once after an expired token, and
-   * once after the server says this device's clock is off.
+   * once after the server says this device's clock is off. account binds the
+   * request, retries included, to that account: if the device holds another
+   * by then (another copy of the app set one up), it throws AccountChanged
+   * rather than log in or sign as that one.
    */
-  call<T>(method: Method, path: string, body: unknown, check: (value: unknown) => T, options?: { sign?: boolean }): Promise<T>;
+  call<T>(method: Method, path: string, body: unknown, check: (value: unknown) => T, options?: { sign?: boolean; account?: string }): Promise<T>;
   /** Uses a token just received (from registration). */
   use(token: TokenResponse): void;
   /**
@@ -68,9 +71,9 @@ export function createSession(
   let failed: unknown = null;
   let retryAt = -Infinity;
 
-  async function login(): Promise<TokenResponse> {
+  async function login(expected?: string): Promise<TokenResponse> {
     try {
-      const t = await logIn(db, api, clock, now() - setUpAt < JUST_SET_UP_MS);
+      const t = await logIn(db, api, clock, now() - setUpAt < JUST_SET_UP_MS, expected);
       failures = 0;
       retryAt = -Infinity;
       return t;
@@ -85,14 +88,16 @@ export function createSession(
     }
   }
 
-  async function token(): Promise<string> {
+  /** A token, of expected's account if set (otherwise AccountChanged). */
+  async function token(expected?: string): Promise<string> {
     // The expiry is the server's time, so it's compared with the server's clock.
     if (!current || current.expires - MARGIN_SECONDS <= clock.seconds()) {
       // Until the wait is over, the last failure again, without a request.
       if (!pending && now() < retryAt) throw failed;
-      pending ??= login().finally(() => (pending = null));
+      pending ??= login(expected).finally(() => (pending = null));
       current = await pending;
     }
+    if (expected !== undefined && current.account !== expected) throw new AccountChanged();
     return current.token;
   }
 
@@ -108,14 +113,16 @@ export function createSession(
       // A login may be refused just after a setup and is tried again (JUST_SET_UP_MS): not held back.
       retryAt = -Infinity;
     },
-    token,
+    token: () => token(),
     async call(method, path, body, check, options = {}) {
       const text = body === undefined ? '' : JSON.stringify(body);
       let renewed = false;
       let retimed = false;
       for (;;) {
-        const headers: Record<string, string> = { 'X-Session': await token() };
-        if (options.sign) headers['X-Device-Signature'] = await signRequest(db, method, path, text, () => clock.seconds());
+        // Each attempt checks the account again (account): a retry comes
+        // later, maybe after another copy of the app set up another.
+        const headers: Record<string, string> = { 'X-Session': await token(options.account) };
+        if (options.sign) headers['X-Device-Signature'] = await signRequest(db, method, path, text, () => clock.seconds(), options.account);
         try {
           return await api.request(method, path, text === '' ? { headers } : { body: text, headers }, check);
         } catch (err) {

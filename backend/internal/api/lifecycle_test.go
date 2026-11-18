@@ -162,6 +162,13 @@ func TestReplaceABigAccount(t *testing.T) {
 	if status, out := h.as(t, current, http.MethodPost, "/account/cleanup", nil, true); status != http.StatusOK {
 		t.Fatalf("cleanup again: %d %v", status, out)
 	}
+	// Nothing left of the steps' lease on the account item.
+	got, err := tb.meter.Client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &tb.directory, Key: map[string]types.AttributeValue{
+		"pk": &types.AttributeValueMemberS{Value: "A#" + fresh.account}, "sk": &types.AttributeValueMemberS{Value: "A"},
+	}})
+	if _, held := got.Item["sl"]; err != nil || held {
+		t.Fatalf("the steps' lease stayed: %v, %v", got.Item["sl"], err)
+	}
 	// The old device is still told, for the marker's 90 days.
 	status, out = h.post(t, "/session", old.d.login(t, h.now))
 	wantError(t, status, out, http.StatusGone, "account_replaced")
@@ -292,6 +299,67 @@ func TestDeleteAccountResumes(t *testing.T) {
 
 // Deleting an account first finishes deleting what is left of the account
 // it replaced, which deleting its item would forget.
+// An account being deleted (its own signed DELETE /account started) isn't
+// in use: a lookup says the Telegram user has none, and setting up again
+// replaces it without the replace flag; what is left of it goes with the
+// new account's cleanup. A live account still needs the flag.
+func TestSetUpAgainOverAnAccountBeingDeleted(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	old := h.account(t, userID)
+	for range MailboxesPerDay/MailboxBatch - 1 {
+		h.now = h.now.Add(time.Second)
+		if status, out := h.as(t, old, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
+			t.Fatalf("mailboxes: %d %v", status, out)
+		}
+	}
+	lookup := func() bool {
+		t.Helper()
+		status, out := h.post(t, "/accounts/lookup", map[string]any{"initData": launch(t, userID, "", h.now)})
+		if status != http.StatusOK {
+			t.Fatalf("lookup: %d %v", status, out)
+		}
+		return out["exists"] == true
+	}
+	if !lookup() {
+		t.Fatal("a live account isn't found")
+	}
+	// Live: setting up again needs the flag.
+	status, out := h.register(t, newDevice(t), false)
+	wantError(t, status, out, http.StatusConflict, "account_exists")
+
+	// The deletion starts, and stops (the app deleted only on the device).
+	status, out = h.as(t, old, http.MethodDelete, "/account", nil, true)
+	wantError(t, status, out, http.StatusConflict, "in_progress")
+	if lookup() {
+		t.Fatal("an account being deleted is found")
+	}
+	fresh := newDevice(t)
+	if status, out := h.register(t, fresh, false); status != http.StatusOK {
+		t.Fatalf("set up again: %d %v", status, out)
+	}
+	status, out = h.post(t, "/session", old.d.login(t, h.now))
+	wantError(t, status, out, http.StatusGone, "account_replaced")
+	m := member{d: fresh, token: h.token(t, fresh)}
+	if status, out := h.as(t, m, http.MethodGet, "/account", nil, false); status != http.StatusOK || out["cleanup"] != true || out["deleting"] != false {
+		t.Fatalf("new account: %d %v", status, out)
+	}
+	for steps := 0; ; steps++ {
+		if steps > 10 {
+			t.Fatal("never finishes")
+		}
+		h.now = h.now.Add(time.Second)
+		if status, _ := h.as(t, m, http.MethodPost, "/account/cleanup", nil, true); status == http.StatusOK {
+			break
+		}
+	}
+	for id, b := range h.dir.boxes {
+		if b.Owner == old.d.account {
+			t.Fatalf("mailbox %s of the old account left", id)
+		}
+	}
+}
+
 func TestDeleteAccountFinishesALeftover(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false

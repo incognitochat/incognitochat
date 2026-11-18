@@ -213,7 +213,7 @@ func (m *memDirectory) MarkDeleting(_ context.Context, account string) error {
 
 // Lease holds an account for one step, as the store does (no expiry: the
 // tests release every lease, or set held).
-func (m *memDirectory) Lease(_ context.Context, account string, _ time.Time) (func(context.Context, time.Time) error, bool, error) {
+func (m *memDirectory) Lease(_ context.Context, account string, _ time.Time) (func(context.Context, time.Time, bool) error, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.leased == nil {
@@ -223,7 +223,7 @@ func (m *memDirectory) Lease(_ context.Context, account string, _ time.Time) (fu
 		return nil, false, nil
 	}
 	m.leased[account] = true
-	return func(context.Context, time.Time) error {
+	return func(context.Context, time.Time, bool) error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		delete(m.leased, account)
@@ -503,7 +503,21 @@ func (m *memDirectory) ByTelegram(ctx context.Context, th, device string) (direc
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.accounts[id]
-	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device]}, nil
+	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device], Leftovers: slices.Clone(a.leftovers), Deleting: a.deleting}, nil
+}
+
+func (m *memDirectory) AccountExists(ctx context.Context, th string) (bool, error) {
+	id, err := m.AccountOf(ctx, th)
+	if errors.Is(err, directory.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[id]
+	return ok && !a.deleting, nil
 }
 
 func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (bool, error) {

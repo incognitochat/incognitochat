@@ -3,7 +3,8 @@
 # action, and in the directory only account partitions, with the notice
 # fields named (finding BOT-5; what IAM can't narrow further is in
 # docs/security.md). Also that notify's timeout stays below the quiet
-# period it holds while sending. Nothing touches AWS: the provider has
+# period it holds while sending, and api's below the lease a deletion step
+# holds on its account. Nothing touches AWS: the provider has
 # fake credentials and makes no calls (a policy document is rendered
 # locally), and every resource the policy refers to is overridden, so
 # "apply" creates nothing. Run by CI (terraform test).
@@ -135,6 +136,14 @@ run "notify_role" {
   assert {
     condition     = local.functions["notify"].timeout < 30
     error_message = "notify's timeout must stay below notices.Lease (30 s)."
+  }
+
+  # api must stop before a deletion or cleanup step's lease on the account
+  # runs out (leaseFor, 15 s in backend/internal/directory), or a second
+  # step could start while one is still writing.
+  assert {
+    condition     = local.functions["api"].timeout < 15
+    error_message = "api's timeout must stay below the deletion steps' lease (directory.leaseFor, 15 s)."
   }
 
   # No other table but its quiet periods' (the ephemeral table).

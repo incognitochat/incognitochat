@@ -397,11 +397,21 @@ func TestDeletingAccount(t *testing.T) {
 	}
 	boxes := grow(t, client, s.Table, n.ID, 30)
 
+	if exists, err := s.AccountExists(ctx, n.TelegramHash); err != nil || !exists {
+		t.Fatalf("AccountExists before = %v, %v", exists, err)
+	}
 	if err := s.MarkDeleting(ctx, n.ID); err != nil {
 		t.Fatal(err)
 	}
 	if dev, err := s.Device(ctx, n.ID, n.DeviceID, now); err != nil || !dev.Deleting || dev.TelegramHash != n.TelegramHash {
 		t.Fatalf("device = %+v, %v", dev, err)
+	}
+	// Not an account in use any more: setting up again replaces it without asking.
+	if exists, err := s.AccountExists(ctx, n.TelegramHash); err != nil || exists {
+		t.Fatalf("AccountExists while deleting = %v, %v", exists, err)
+	}
+	if acct, err := s.ByTelegram(ctx, n.TelegramHash, n.DeviceID); err != nil || !acct.Deleting {
+		t.Fatalf("ByTelegram while deleting = %+v, %v", acct, err)
 	}
 	// Its link went with the mark.
 	if _, err := s.Bundle(ctx, l.ID); !errors.Is(err, ErrNotFound) {

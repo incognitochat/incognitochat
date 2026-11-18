@@ -57,7 +57,8 @@ func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller)
 	if !ok {
 		return inProgress()
 	}
-	defer release()
+	// The account item goes with the last step, the lease with it.
+	defer release(false)
 	if !c.device.Deleting {
 		err := s.Directory.MarkDeleting(ctx, c.AccountID)
 		switch {
@@ -130,37 +131,43 @@ func (s *Server) cleanUp(ctx context.Context, _ httpapi.Request, c caller) httpa
 	if len(c.device.Leftovers) == 0 {
 		return httpapi.JSON(http.StatusOK, map[string]string{})
 	}
-	done, err := s.leasedCleanUp(ctx, route, c.AccountID, c.device.Leftovers[0])
+	done, err := s.leasedCleanUp(ctx, route, c.AccountID, c.device.Leftovers)
 	if err != nil {
 		return s.internal(route, err)
 	}
-	if !done || len(c.device.Leftovers) > 1 {
+	if !done {
 		return inProgress()
 	}
 	return httpapi.JSON(http.StatusOK, map[string]string{})
 }
 
-// leasedCleanUp is cleanUpStep, with a full step's budget, once it holds
-// the account's lease; it reports not done while another step holds it.
-func (s *Server) leasedCleanUp(ctx context.Context, route, accountID, old string) (bool, error) {
+// leasedCleanUp is cleanUpStep, with a full step's budget, on the first of
+// leftovers, once it holds the account's lease; it reports whether nothing
+// of any of them is left (not done while another step holds it). Once
+// nothing is, the lease goes from the account item.
+func (s *Server) leasedCleanUp(ctx context.Context, route, accountID string, leftovers []string) (bool, error) {
 	release, ok, err := s.lease(ctx, route, accountID)
 	if err != nil || !ok {
 		return false, err
 	}
-	defer release()
-	return s.cleanUpStep(ctx, accountID, old, DeleteStep)
+	done := false
+	defer func() { release(done) }()
+	first, err := s.cleanUpStep(ctx, accountID, leftovers[0], DeleteStep)
+	done = err == nil && first && len(leftovers) == 1
+	return done, err
 }
 
 // lease takes the account's lease for one step (directory.Store.Lease).
-// release ends it, so the next step may start a second later; one that
-// fails is logged, and the lease expires on its own.
-func (s *Server) lease(ctx context.Context, route, accountID string) (release func(), ok bool, err error) {
+// release ends it: the next step may start a second later, or, done, the
+// lease goes from the item. One that fails is logged, and the lease
+// expires on its own.
+func (s *Server) lease(ctx context.Context, route, accountID string) (release func(done bool), ok bool, err error) {
 	end, ok, err := s.Directory.Lease(ctx, accountID, s.Now())
 	if err != nil || !ok {
 		return nil, ok, err
 	}
-	return func() {
-		if err := end(ctx, s.Now()); err != nil {
+	return func(done bool) {
+		if err := end(ctx, s.Now(), done); err != nil {
 			s.Log.Warn("step lease not released", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
 		}
 	}, true, nil
