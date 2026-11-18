@@ -309,22 +309,36 @@ account to another, at the same time or later.
 
 Links made before the server checked this get their key claimed at their
 next rotation or replacement, each with an owner proof: whoever proves they
-hold the key first claims it. Someone who only copied a bundle can't make a
-proof, so they can't claim the key, rotate their copy or make another one.
-A copy made before stops working once its keys expire, within 8 weeks (the
-longest a key may be offered). Only accounts that shared the private key
-itself can claim a key before its owner does. The owner's next create,
-replace or rotation then gets `signing_key_taken`. A key that was never
-claimed stays unclaimed when its link is revoked or its account ends,
-since those writes carry no proof, and whoever holds it can still claim it.
+hold the key first claims it. Until those links' current keys expire, two
+things made before stay open:
+
+- **Copies.** Another account's copy of someone's link (their signing key
+  and signed keys, taken from a bundle, under another link ID) keeps taking
+  first messages meant for them until the copied keys expire: at most 5
+  weeks after they were signed, since the app signs each key for 5 weeks.
+  Whoever made the copy can't make a proof, so they can't claim the key,
+  rotate the copy or make another one.
+- **Shared keys.** Accounts that shared a private key itself keep getting
+  the same tag from a sender who writes to each of their links until the
+  keys those links already hold expire. The server accepted keys that start
+  in the future, so a link could hold up to 4 keys of up to 8 weeks each,
+  back to back: about 32 weeks from when they were put up. Only the first of
+  those accounts to create, replace or rotate since can do so again; the
+  others get `signing_key_taken`, and their apps make a new key (below).
+
+A key that was never claimed stays unclaimed when its link is revoked or its
+account ends, since those writes carry no proof, and whoever holds it can
+still claim it.
 
 **A key someone else has.** Told `signing_key_taken` when it creates or
 replaces a link, the app makes a new signing key and tries once more with
 it. Told so when it rotates, it replaces the link with one that has a new
 signing key. It does the same for a link whose signing key is gone from the
-device. Either way the user is told that the link changed: they share the
-new link, senders get new tags on it, and so new labels, and blocks don't
-carry over.
+device. Either way the user is told that the link has a new key: they
+share the new link, senders get new tags on it, and so new labels, and
+blocks don't carry over. The app notes this on the device before it makes
+the new key, and keeps the note until the home screen has said it (in any
+copy of the app), so a lost answer or the app closing doesn't lose it.
 
 **A lost answer.** The client picks the new link's ID, and makes and signs
 its keys, before it asks. Without an answer (a timeout, a dropped

@@ -236,9 +236,10 @@ export interface MessagingDeps {
   /** Called when upkeep found the account's link changed: a create or replace whose answer was lost, which the server had made. */
   onLinks?: () => void;
   /**
-   * Called when upkeep replaced the account's link because it couldn't get
-   * new keys any more (another account has its signing key): the link has a
-   * new address, and its labels and blocks start over, which the user is told.
+   * Called, instead of onLinks, when upkeep found the account's link changed
+   * and it has a new signing key the user is still to be told of
+   * (newKeyToTell): replaced because it couldn't get new keys any more, or a
+   * change made with a new key whose answer was lost.
    */
   onNewLink?: () => void;
 }
@@ -1944,15 +1945,14 @@ export function createMessaging(deps: MessagingDeps) {
         if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
       },
       async () => {
-        if (await settleLinkChange(db, session, api, Math.floor(now() / 1000))) deps.onLinks?.();
+        const changed = await settleLinkChange(db, session, api, Math.floor(now() / 1000));
+        if (changed === 'new-key') deps.onNewLink?.();
+        else if (changed) deps.onLinks?.();
       },
       backfillLinks,
       backfillIntros,
       async () => {
-        if ((await rotateLinkKey(db, session, Math.floor(now() / 1000))) === 'new-link') {
-          deps.onLinks?.();
-          deps.onNewLink?.();
-        }
+        if ((await rotateLinkKey(db, session, Math.floor(now() / 1000))) === 'new-link') deps.onNewLink?.();
       },
     ];
     // Each on its own: one that fails (out of reach, or a daily limit

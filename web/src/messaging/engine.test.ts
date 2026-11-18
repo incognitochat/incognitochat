@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { openDB } from 'idb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLink, keyName, listLinks, replaceLink, revokeLink, rotateLinkKey } from '../account/links';
+import { createLink, keyName, listLinks, newKeyToTell, replaceLink, revokeLink, rotateLinkKey, toldNewKey } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url, toHex } from '../crypto/encoding';
@@ -1160,17 +1160,17 @@ describe('a link signing key another account has', () => {
     const first = await createLink(owner.db, owner.session, backend.api);
     await takenBySomeoneElse(backend, first.id);
 
+    expect(await newKeyToTell(owner.db)).toBe(false);
     const next = await replaceLink(owner.db, owner.session, backend.api);
-    expect(next.newSigningKey).toBe(true);
+    expect(await newKeyToTell(owner.db)).toBe(true);
     expect(next.fingerprint).not.toBe(first.fingerprint);
     expect(backend.bundles.has(first.id)).toBe(false);
     expect(backend.keyOwners.get(toBase64Url((await bundleOf(backend, next.id)).signingKey))).toBe('owner');
-    const links = await listLinks(owner.db);
-    expect(links.map((l) => [l.id, l.fingerprint])).toEqual([[next.id, next.fingerprint]]);
-    expect(links[0]).not.toHaveProperty('newSigningKey');
-    // From then on the new key is the account's, kept as usual.
+    expect((await listLinks(owner.db)).map((l) => [l.id, l.fingerprint])).toEqual([[next.id, next.fingerprint]]);
+    // Told, it's forgotten; from then on the new key is the account's, kept as usual.
+    await toldNewKey(owner.db);
     const third = await replaceLink(owner.db, owner.session, backend.api);
-    expect(third.newSigningKey).toBeUndefined();
+    expect(await newKeyToTell(owner.db)).toBe(false);
     expect(third.fingerprint).toBe(next.fingerprint);
   });
 
@@ -1181,7 +1181,7 @@ describe('a link signing key another account has', () => {
     await takenBySomeoneElse(backend, first.id);
     await revokeLink(owner.db, owner.session, first.id);
     const made = await createLink(owner.db, owner.session, backend.api);
-    expect(made.newSigningKey).toBe(true);
+    expect(await newKeyToTell(owner.db)).toBe(true);
     expect(made.fingerprint).not.toBe(first.fingerprint);
     expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([made.id]);
   });
@@ -1198,8 +1198,10 @@ describe('a link signing key another account has', () => {
 
     clock += 10 * DAY;
     await messaging.maintain();
+    // Only onNewLink: the app redraws with the notice, which a second redraw could overwrite.
     expect(onNewLink).toHaveBeenCalledOnce();
-    expect(onLinks).toHaveBeenCalledOnce();
+    expect(onLinks).not.toHaveBeenCalled();
+    expect(await newKeyToTell(owner.db)).toBe(true);
     const [link] = await listLinks(owner.db);
     expect(link!.id).not.toBe(first.id);
     expect(link!.fingerprint).not.toBe(first.fingerprint);
@@ -1209,6 +1211,41 @@ describe('a link signing key another account has', () => {
     expect(await rotateLinkKey(owner.db, owner.session, Math.floor(clock / 1000))).toBe(true);
     expect((await listLinks(owner.db))[0]!.id).toBe(link!.id);
     expect(onNewLink).toHaveBeenCalledOnce();
+  });
+
+  it("still tells of the new key when the new link's answer was lost, once upkeep finds the link", async () => {
+    const backend = await fakeBackend();
+    let clock = Date.now();
+    const owner = await person(backend, 'owner', () => clock);
+    const onNewLink = vi.fn();
+    const onLinks = vi.fn();
+    const messaging = owner.open({ onNewLink, onLinks });
+    const first = await createLink(owner.db, owner.session, backend.api);
+    await takenBySomeoneElse(backend, first.id);
+    // The first try is refused (the key is taken); the second, with a new
+    // key, is made, but its answer is lost.
+    const call = owner.session.call;
+    let posts = 0;
+    owner.session.call = async function (m, p, ...rest) {
+      if (m !== 'POST' || p !== '/links' || ++posts < 2) return call(m, p, ...rest);
+      owner.session.call = call;
+      await call(m, p, ...rest);
+      throw new NetworkError('answer lost');
+    } as Session['call'];
+    await expect(replaceLink(owner.db, owner.session, backend.api)).rejects.toThrow(NetworkError);
+    expect((await listLinks(owner.db)).map((l) => l.id)).toEqual([first.id]);
+    expect(await newKeyToTell(owner.db)).toBe(true);
+
+    // The app closed, say; at the next upkeep the link is found and taken.
+    clock += 60 * 1000;
+    await messaging.maintain();
+    const [link] = await listLinks(owner.db);
+    expect(link!.id).not.toBe(first.id);
+    expect(link!.fingerprint).not.toBe(first.fingerprint);
+    expect(onNewLink).toHaveBeenCalledOnce();
+    expect(onLinks).not.toHaveBeenCalled();
+    // Still to tell until the app has shown it.
+    expect(await newKeyToTell(owner.db)).toBe(true);
   });
 
   it('a stuck link whose replacement failed is replaced at a later upkeep, with the key made then', async () => {

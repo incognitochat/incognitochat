@@ -294,11 +294,17 @@ it. This is how close it gets.
   link shows the same key under a new ID too: an operator that let several
   accounts share a key would let their owners match a sender who writes to
   each of them. Links made before the server checked this get their key
-  claimed at their next key rotation or replacement. Until then, accounts
-  that shared the private key itself (not only a bundle) can still use it;
-  if one of them claims it first, the owner's app makes a new key and a new
-  link. A key never claimed before its link was revoked, or its account
-  ended, stays unclaimed.
+  claimed at their next key rotation or replacement, and two things made
+  before stay open until those links' current keys expire. A copy of
+  someone's link put up under another account keeps taking first messages
+  meant for them for up to 5 weeks (the copied keys' lifetime). Accounts
+  that shared a private key itself keep matching a sender's tag across
+  their links for up to about 32 weeks: the server accepted keys starting
+  in the future, up to 4 of 8 weeks each per link. Neither can be renewed:
+  a copy can't be rotated without the private key, and of the accounts
+  sharing one, only the first to claim it can go on using it. A key never
+  claimed before its link was revoked, or its account ended, stays
+  unclaimed.
 - **A blocked sender may still trigger a notice**: the server can't tell a
   blocked first message from any other, so the owner may be notified of a
   message their app then drops.

@@ -11,7 +11,8 @@
 // carries an owner proof (the signing key's signature over the link ID and
 // the account ID). Told another account has the key (signing_key_taken: one
 // shared before keys were one account's), the app makes a new signing key
-// and a link with it; senders' tags, labels and blocks for it start over.
+// and a link with it; senders' tags, labels and blocks for it start over,
+// which the user is told (newKeyToTell, kept until then).
 
 import {
   exportPublicKey,
@@ -49,6 +50,8 @@ const META_CHANGE = 'link-change';
 /** The account's link signing key (sealed), and its public key (meta). */
 const SIGNING = 'link-signing';
 const META_SIGNING_PUBLIC = 'link-signing-public';
+/** Set when the account's link got a new signing key, until the user is told (newKeyToTell). */
+const META_NEW_KEY = 'link-new-key';
 const KEY_VAULT = 'vault-key';
 const LOCK = 'links';
 const ID_ATTEMPTS = 3;
@@ -68,9 +71,6 @@ export interface LinkRecord extends LinkRef {
    */
   mailbox?: string;
 }
-
-/** A link just made, and whether it has a new signing key (another account had the old one), so its labels and blocks start over. */
-export type NewLink = LinkRecord & { newSigningKey?: true };
 
 /** What a rotation did: nothing, a new key, or a new link with a new signing key in place of one that couldn't get new keys. */
 export type Rotation = boolean | 'new-link';
@@ -188,12 +188,29 @@ async function linkSigningKey(db: Database, vaultKey: CryptoKey): Promise<{ priv
 /**
  * Gives the account a new link signing key, in place of one the server says
  * another account has: links made with it get new senders' tags, so their
- * labels and blocks start over.
+ * labels and blocks start over. The user is to be told (noted first, so it's
+ * never missed, whatever becomes of the link).
  */
 async function renewSigningKey(db: Database, vaultKey: CryptoKey): Promise<{ privateKey: CryptoKey; publicKey: Uint8Array<ArrayBuffer>; fp: string }> {
+  await putMeta(db, META_NEW_KEY, true);
   await deleteMeta(db, META_SIGNING_PUBLIC);
   await deleteSealed(db, SIGNING);
   return linkSigningKey(db, vaultKey);
+}
+
+/**
+ * Whether the user is still to be told that their link has a new signing key
+ * (another account had the old one, or it was gone from this device): they
+ * share the new link, and its labels and blocks start over. Kept on the
+ * device, in every copy of the app, until told (toldNewKey).
+ */
+export async function newKeyToTell(db: Database): Promise<boolean> {
+  return (await getMeta<unknown>(db, META_NEW_KEY)) === true;
+}
+
+/** The user has seen that their link has a new signing key. */
+export function toldNewKey(db: Database): Promise<void> {
+  return deleteMeta(db, META_NEW_KEY);
 }
 
 /** This account's ID, which owner proofs name. */
@@ -213,7 +230,7 @@ async function ownerProof(db: Database, signingKey: CryptoKey, linkId: string): 
  * link_limit if it has one. A link change whose answer was lost is settled
  * first: if the server made it, its link is the one created.
  */
-export function createLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<NewLink> {
+export function createLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
   return withLock(LOCK, async () => (await settle(db, session, api, now(), true)) ?? makeLink(db, session, now, null));
 }
 
@@ -223,7 +240,7 @@ export function createLink(db: Database, session: Session, api: Api, now: () => 
  * they no longer go through the link. A link change whose answer was lost
  * is settled first: if the server made it, its link is the replacement.
  */
-export function replaceLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<NewLink> {
+export function replaceLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
   return withLock(LOCK, async () => {
     const settled = await settle(db, session, api, now(), true);
     if (settled) return settled;
@@ -246,9 +263,9 @@ export function replaceLink(db: Database, session: Session, api: Api, now: () =>
 /**
  * New encryption keys, sealed here first, then the bundle on the server (in
  * place of replaces, if set). If the server says another account has the
- * signing key, it's made again once with a new one (newSigningKey).
+ * signing key, it's made again once with a new one (renewSigningKey).
  */
-async function makeLink(db: Database, session: Session, now: () => number, replaces: LinkRecord | null): Promise<NewLink> {
+async function makeLink(db: Database, session: Session, now: () => number, replaces: LinkRecord | null): Promise<LinkRecord> {
   const vaultKey = await getKey(db, KEY_VAULT);
   if (!vaultKey) throw new Error('no vault key');
   let signing = await linkSigningKey(db, vaultKey);
@@ -292,8 +309,7 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
       }
       throw err;
     }
-    const record = await adoptLink(db, change, mailboxOf(created), now());
-    return renewed ? { ...record, newSigningKey: true } : record;
+    return adoptLink(db, change, mailboxOf(created), now());
   }
 }
 
@@ -372,11 +388,12 @@ export function rotateLinkKey(db: Database, session: Session, now: number): Prom
       key: { key: toBase64Url(encryptionKey), from, until, signature: toBase64Url(signature) },
       at: now,
     };
+    // Made before anything is noted, so a failure here leaves nothing behind.
+    const proof = await ownerProof(db, signingKey, link.id);
     // Indexed before it's published: if the answer is lost, the bundle may
     // list only this key, and first messages to it must still open.
     await begin(db, vaultKey, encryption.privateKey, change, { id: link.id, fingerprint: link.fingerprint, ...(link.mailbox ? { mailbox: link.mailbox } : {}) });
     try {
-      const proof = await ownerProof(db, signingKey, link.id);
       await session.call('PUT', `/links/${link.id}/keys`, { keys: [change.key], proof }, checkObject, { sign: true });
     } catch (err) {
       // Without a clear refusal the server may have taken it: kept, to settle.
@@ -394,9 +411,11 @@ export function rotateLinkKey(db: Database, session: Session, now: number): Prom
 /**
  * Replaces a link that can't get new keys any more with one that can: a
  * new signing key first if the account's is the one another account has.
+ * Either way the link's key changes, which the user is to be told.
  */
 async function replaceStuck(db: Database, session: Session, vaultKey: CryptoKey, link: LinkRecord, now: number): Promise<Rotation> {
   if ((await linkSigningKey(db, vaultKey)).fp === link.fingerprint) await renewSigningKey(db, vaultKey);
+  else await putMeta(db, META_NEW_KEY, true);
   await makeLink(db, session, () => now, link);
   return 'new-link';
 }
@@ -405,11 +424,16 @@ async function replaceStuck(db: Database, session: Session, vaultKey: CryptoKey,
  * Finds out what became of a link change whose answer was lost, from the
  * link's bundle, and takes that: run at upkeep, before anything else that
  * needs the link. `now` in Unix seconds. Returns whether the account's link
- * changed (a new link the server made is now the account's). Throws
- * (keeping the change) while the bundle can't be fetched.
+ * changed (a new link the server made is now the account's), 'new-key' if
+ * it did and the user is still to be told it has a new signing key
+ * (newKeyToTell). Throws (keeping the change) while the bundle can't be
+ * fetched.
  */
-export function settleLinkChange(db: Database, session: Session, api: Api, now: number): Promise<boolean> {
-  return withLock(LOCK, async () => (await settle(db, session, api, now, false)) !== null);
+export function settleLinkChange(db: Database, session: Session, api: Api, now: number): Promise<boolean | 'new-key'> {
+  return withLock(LOCK, async () => {
+    if ((await settle(db, session, api, now, false)) === null) return false;
+    return (await newKeyToTell(db)) ? 'new-key' : true;
+  });
 }
 
 /** The link change waiting to be settled, if any. */

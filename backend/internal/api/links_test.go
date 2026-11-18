@@ -523,6 +523,13 @@ func TestSigningKeyIsOneAccounts(t *testing.T) {
 		t.Fatalf("replace keeping the key: %d %v", status, out)
 	}
 
+	// Nor once the owner revoked its link: the key stays the owner's.
+	if status, out := h.as(t, owner, http.MethodDelete, "/links/"+next.id, nil, true); status != http.StatusOK {
+		t.Fatalf("revoke: %d %v", status, out)
+	}
+	status, out = h.as(t, other, http.MethodPost, "/links", linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+
 	// A link from before keys were claimed, whose key another account
 	// claimed first, can't be rotated.
 	early := newLinkKeys(t)

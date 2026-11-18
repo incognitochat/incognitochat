@@ -947,7 +947,7 @@ describe('links', () => {
     expect(sender.app.screen.value).toMatchObject({ kind: 'link', status: 'not-found' });
   });
 
-  it('makes the link with a new signing key when another account has the old one, and says so', async () => {
+  it('makes the link with a new signing key when another account has the old one, and says so once', async () => {
     const server = fakeServer({ createLink: [new ApiError(409, 'signing_key_taken')] });
     const owner = await registered(server.api);
     await owner.app.createLink();
@@ -955,6 +955,34 @@ describe('links', () => {
     expect(screen).toMatchObject({ notice: 'new-signing-key' });
     expect(screen.links).toHaveLength(1);
     expect(server.bundles.size).toBe(1);
+    await owner.app.home();
+    expect(home(owner.app.screen.value).notice).toBeNull();
+  });
+
+  it("says the link has a new key though the new link's answer was lost, at the next home screen", async () => {
+    const server = fakeServer({ createLink: [new ApiError(409, 'signing_key_taken')] });
+    const owner = await registered(server.api);
+    // Refused once (the key is taken), then made with a new key, but the answer is lost.
+    const request = server.api.request;
+    let posts = 0;
+    server.api.request = async function (method, path, init, check) {
+      if (method !== 'POST' || path !== '/links' || ++posts < 2) return request(method, path, init, check);
+      server.api.request = request;
+      await request(method, path, init, check);
+      throw new NetworkError('answer lost');
+    } as Api['request'];
+    await owner.app.createLink();
+    // The error is said first; the new key waits, kept on the device.
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'network' });
+    await owner.app.refresh();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'network' });
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'new-signing-key' });
+    // A redraw keeps it; the next home screen doesn't say it again.
+    await owner.app.refresh();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'new-signing-key' });
+    await owner.app.home();
+    expect(home(owner.app.screen.value).notice).toBeNull();
   });
 
   it('says when an invitation is needed', async () => {
