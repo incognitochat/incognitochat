@@ -55,24 +55,15 @@ async function main(): Promise<void> {
   // Another copy holding the storage open: said only if it doesn't let go
   // at once (an older copy closes and reloads on its own, within moments).
   let blocked: ReturnType<typeof setTimeout> | undefined;
-  const storageProblem = (err: unknown): void => {
-    // On this device only, for whoever debugs it: the app sends no logs.
-    console.error(err instanceof StorageError ? err.cause : err);
-    render(<StorageScreen problem={err instanceof StorageError ? err.kind : 'failed'} language={language} />, root);
-  };
-  let erased = (_reopened: Promise<void>): void => {};
   try {
     db = await openDatabase(databaseName(profile), {
       // Shown until the other copy closes; then the app starts over it.
       onBlocked: () => (blocked ??= setTimeout(() => render(<StorageScreen problem="blocked" language={language} />, root), BLOCKED_DELAY_MS)),
-      // Another copy deleted the database (deleting the account, or setting
-      // up again): this one starts over on the fresh one.
-      onErased: (reopened) => erased(reopened),
-      // The fresh one couldn't be opened.
-      onLost: storageProblem,
     });
   } catch (err) {
-    storageProblem(err);
+    // On this device only, for whoever debugs it: the app sends no logs.
+    console.error(err instanceof StorageError ? err.cause : err);
+    render(<StorageScreen problem={err instanceof StorageError ? err.kind : 'failed'} language={language} />, root);
     return;
   } finally {
     clearTimeout(blocked);
@@ -95,7 +86,6 @@ async function main(): Promise<void> {
     broadcast: (event) => channel?.send(event),
   });
   restart = () => void app.accountChanged();
-  erased = (reopened) => void app.erasedElsewhere(reopened);
   // No browser menu on a long press (messages open their own); fields keep theirs.
   document.addEventListener('contextmenu', (e) => {
     if (!(e.target instanceof Element && e.target.closest('input, textarea'))) e.preventDefault();

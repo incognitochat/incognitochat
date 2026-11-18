@@ -291,13 +291,13 @@ export const en = {
   deleteHereOnlyNote:
     "If the server can't finish it, you can delete everything on this device now. What the server still holds stays unused until you set up again, which ends it.",
   accountDeletedHere:
-    'The app deleted its data on this device. A backup or copy of the device made earlier, or traces left in its storage, may still hold it. What the server still holds stays unused until you set up again.',
+    "The app cleared your chats and keys on this device. On some devices they can stay in the app's storage files, and a copy of the device made earlier may still hold them. What the server still holds stays unused until you set up again.",
   deleteHereOnlyConfirm: "Delete all your chats and keys from this device now? This can't be undone.",
   deletionPausedNotice: "Your account's deletion couldn't finish yet. Your chats are read-only until it does.",
   deletePhrase: 'delete my account',
   deleteAccountConfirm: 'Delete my account',
   accountDeleted:
-    'Your account was deleted from the server, and the app deleted its data on this device. A backup or copy of the device made earlier, or traces left in its storage, may still hold it.',
+    "Your account was deleted from the server, and the app cleared your chats and keys on this device. On some devices they can stay in the app's storage files, and a copy of the device made earlier may still hold them.",
 
   replacedTitle: 'Your account was replaced',
   replacedBody:
@@ -311,7 +311,7 @@ export const en = {
   setUpAgain: 'Set up again',
   resetTitle: 'Set up again?',
   resetBody:
-    'Setting up again deletes everything Incognito Chat keeps on this device, for good: your chats, your keys and your link. Then you set up a new account.',
+    "Setting up again deletes your chats, your keys and your link from this device. This can't be undone. Then you set up a new account.",
   resetWarning: 'If you think the server is wrong, stop here: keep your chats and try again later.',
   resetPhrase: 'delete my chats',
   resetConfirm: 'Delete and set up again',

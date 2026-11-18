@@ -23,7 +23,7 @@ import { generateVaultKey, seal, unseal } from '../crypto/vault';
 import { ApiError, checkTokenResponse, NetworkError, type Api, type TokenResponse } from '../net/api';
 import { createClock, withServerTime, type Clock } from '../net/clock';
 import { encodeDeviceList, firstList } from '../protocol/device-list';
-import { deleteMeta, erase, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair } from '../storage/db';
+import { deleteMeta, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair, wipe } from '../storage/db';
 import { withLock } from '../sync/locks';
 
 /** The start parameter prefix of a registration launch. */
@@ -101,15 +101,13 @@ export function isSetUp(record: AccountRecord | undefined): record is Extract<Ac
 /**
  * Prepares a setup and returns the start parameter the registration launch
  * must carry. A pending setup is reused, so asking again reopens with the same
- * code; otherwise new keys are created, in a fresh database: everything of
- * an account before is deleted from this device, the database included
- * (erase; onBlocked runs if another copy of the app holds that up). Over a
- * device with an account (registered, replaced or refused, which includes
- * being deleted elsewhere) that takes restart, which only the typed
- * confirmation gives: no answer from the server alone ever deletes a
- * device's chats.
+ * code; otherwise new keys are created, and everything of an account before
+ * is deleted from this device. Over a device with an account (registered,
+ * replaced or refused, which includes being deleted elsewhere) that takes
+ * restart, which only the typed confirmation gives: no answer from the
+ * server alone ever deletes a device's chats.
  */
-export function prepareSetup(db: Database, options: { restart?: boolean; onBlocked?: () => void } = {}): Promise<string> {
+export function prepareSetup(db: Database, options: { restart?: boolean } = {}): Promise<string> {
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
     if (isSetUp(current) && !options.restart) throw new Error('already set up');
@@ -120,7 +118,7 @@ export function prepareSetup(db: Database, options: { restart?: boolean; onBlock
     // A new account starts with nothing from an earlier one on this device
     // (its mailboxes and links are gone on the server), except a link opened
     // just before and the choice to start over.
-    await erase(db, [META_PENDING_LINK, META_START_OVER], options);
+    await wipe(db, [META_PENDING_LINK, META_START_OVER]);
     const vaultKey = await generateVaultKey();
     const account = await generateCopyableSigningKey();
     const sealed = await seal(vaultKey, account.privateKey, KEY_ACCOUNT);

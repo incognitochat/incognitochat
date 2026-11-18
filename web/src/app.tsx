@@ -171,8 +171,6 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
       );
     case 'registering':
       return <Page title={tr('appName')} body={tr('registering')} busy />;
-    case 'storage-blocked':
-      return <Page title={tr('appName')} body={tr('storageBlocked')} busy />;
     case 'elsewhere':
       return (
         <Page title={tr('elsewhereTitle')} body={tr('elsewhereBody')}>

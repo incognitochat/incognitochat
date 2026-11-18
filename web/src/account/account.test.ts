@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { fromBase64Url, fromHex, toHex } from '../crypto/encoding';
 import { importSigningPublicKey } from '../crypto/keys';
 import { LABEL_REGISTER, LABEL_REQUEST, LABEL_SESSION, message, verify } from '../crypto/signing';
@@ -151,16 +151,7 @@ describe('setup', () => {
     // Only when asked to start over (after the typed confirmation): the server saying so isn't enough.
     await expect(prepareSetup(db)).rejects.toThrow();
     expect(await listConversations(db)).toHaveLength(1);
-    // The database itself goes, so the engine can drop its files; the new
-    // account is set up in a fresh one.
-    const deleted = vi.spyOn(indexedDB, 'deleteDatabase');
-    let code: string;
-    try {
-      code = await prepareSetup(db, { restart: true });
-      expect(deleted).toHaveBeenCalledWith(db.name);
-    } finally {
-      deleted.mockRestore();
-    }
+    const code = await prepareSetup(db, { restart: true });
     expect(await readAccount(db)).toMatchObject({ state: 'pending', fingerprint: code.slice(3) });
     expect(await listConversations(db)).toEqual([]);
     expect(await getMeta(db, 'mailbox-pool')).toBeUndefined();

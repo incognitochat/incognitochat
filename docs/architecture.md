@@ -351,17 +351,13 @@ The panel under the message box has emoji and stickers, as in Telegram.
   non-extractable storage key. Non-extractable only stops code from reading a
   key out: the keys live in the web view's storage, next to the data, and on
   Android, Windows and Linux the web view writes them to disk as they are. So
-  an image of the device's app storage clones the account
+  an image of the device's app storage clones the account. Deleting the
+  account or setting up again clears the storage, but some engines
+  (Chromium's) keep cleared data in their files until they compact them
   ([data.md](data.md#on-the-device)).
-- **Deleting the account or setting up again** deletes the whole database,
-  not just its contents (some engines only mark cleared data as deleted, in
-  files that keep it), then opens a fresh one.
 - **Several copies at once** (a reopened app, several windows) share storage,
   so they coordinate with Web Locks and announce changes over a
-  BroadcastChannel. A copy whose database another copy deletes closes it at
-  once, so the delete can go ahead, and starts over on the fresh one. If a
-  copy doesn't let go (a frozen one, say), the delete waits, and the app says
-  to close the other copy.
+  BroadcastChannel.
 - **Lockdown:** a strict Content Security Policy (only the app's own scripts;
   connections only to the API, the socket and the bucket), Trusted Types, one
   deterministic JavaScript file, and no code or settings loaded from the
