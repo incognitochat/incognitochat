@@ -34,6 +34,7 @@ export type ErrorCode =
   | 'uploads_paused'
   | 'downloads_paused'
   | 'in_progress'
+  | 'unavailable'
   | 'internal'
   | 'not_found'
   | 'method_not_allowed';
@@ -68,6 +69,7 @@ const CODES = new Set<string>([
   'uploads_paused',
   'downloads_paused',
   'in_progress',
+  'unavailable',
   'internal',
   'not_found',
   'method_not_allowed',
@@ -82,6 +84,8 @@ export class ApiError extends Error {
     readonly serverTime?: number,
     /** With tokens_needed: how many send tokens the envelope costs. */
     readonly needed?: number,
+    /** How many seconds the server asked to wait (Retry-After), if it said. */
+    readonly retryAfter?: number,
   ) {
     super(`API error ${status} ${code}`);
     this.name = 'ApiError';
@@ -150,7 +154,7 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
         if (known === 'tokens_needed') {
           throw new ApiError(response.status, known, undefined, typeof needed === 'number' && Number.isSafeInteger(needed) && needed > 0 ? needed : undefined);
         }
-        throw new ApiError(response.status, known);
+        throw new ApiError(response.status, known, undefined, undefined, retryAfter(response.headers.get('Retry-After')));
       }
       try {
         return check(value);
@@ -160,6 +164,12 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
     },
   };
   return api;
+}
+
+/** Retry-After in seconds (its other form, a date, the server doesn't send), at most a day. */
+function retryAfter(value: string | null): number | undefined {
+  if (value === null || !/^\d{1,9}$/.test(value.trim())) return undefined;
+  return Math.min(Number(value.trim()), 86_400);
 }
 
 async function sha256Hex(text: string): Promise<string> {

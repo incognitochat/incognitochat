@@ -449,7 +449,11 @@ resource "aws_lambda_function_url" "api" {
     # for apps built before it); x-amz-content-sha256 is the body's hash,
     # which Lambda needs once CloudFront signs requests to this URL.
     allow_headers = ["authorization", "content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
-    max_age       = 3600
+    # So the app can read how long to wait after 503 unavailable or
+    # daily_limit; a browser hides other headers from a page on another
+    # origin.
+    expose_headers = ["retry-after"]
+    max_age        = 3600
   }
 }
 

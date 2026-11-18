@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/config"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
@@ -37,11 +37,17 @@ func main() {
 		log.Error("startup failed", logx.ErrorKind(err))
 		os.Exit(1)
 	}
-	lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
+	lambda.Start(awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		out, err := handle(ctx, raw, sealer, notifier)
 		return out, report(log, err)
-	})
+	}))
 }
+
+// requestDeadline bounds an invocation's calls (DynamoDB, Telegram), under
+// the function's timeout (10 s, infra/functions.tf), with room for one wait
+// for Telegram's flood control (notices.MaxRetryWait) before the time
+// Notifier keeps at the end.
+const requestDeadline = 7 * time.Second
 
 // report logs an invocation's failure and returns the error for Lambda. A
 // notice refused by Telegram's flood control is dropped as Telegram asked,
@@ -110,7 +116,7 @@ func load(ctx context.Context) (*notices.Sealer, *notices.Notifier, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	aws, err := awsconfig.LoadDefaultConfig(ctx)
+	aws, err := awsconf.Load(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

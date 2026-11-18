@@ -28,6 +28,7 @@
 //	downloads_paused                      the operator has paused downloads of attachments for now (switches.go); try later
 //	in_progress                           the account is being deleted in steps; repeat the request
 //	not_found                             no such route, or no such link (revoked links included)
+//	unavailable                           503: the server is overloaded for now (AWS throttled it, or it ran out of time); try again after Retry-After
 //	internal                              something failed on the server
 package api
 
@@ -37,8 +38,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
@@ -229,13 +232,29 @@ func (s *Server) issue(route, accountID, deviceID string, now time.Time) httpapi
 	return httpapi.JSON(http.StatusOK, tokenResponse{Account: accountID, Token: token, Expires: expires.Unix()})
 }
 
+// RetryAfter is how many seconds the app is asked to wait after 503
+// unavailable.
+const RetryAfter = 2
+
 // internal logs a server-side failure, without anything about the request.
+// One that may pass in a moment, AWS throttling or a deadline that passed
+// (awsconf.Unavailable), is answered 503 unavailable with Retry-After: the
+// app's background syncs then back off, rather than everyone's polling
+// keeping the load up.
 func (s *Server) internal(route string, err error) httpapi.Response {
+	status, code := http.StatusInternalServerError, "internal"
+	if awsconf.Unavailable(err) {
+		status, code = http.StatusServiceUnavailable, "unavailable"
+	}
 	s.Log.Warn("request failed",
 		slog.String(logx.KeyRoute, route),
-		slog.Int(logx.KeyStatus, http.StatusInternalServerError),
+		slog.Int(logx.KeyStatus, status),
 		logx.ErrorKind(err))
-	return httpapi.Error(http.StatusInternalServerError, "internal")
+	resp := httpapi.Error(status, code)
+	if status == http.StatusServiceUnavailable {
+		resp.Headers["retry-after"] = strconv.Itoa(RetryAfter)
+	}
+	return resp
 }
 
 // bytes64 is a byte string written in JSON as unpadded base64url.

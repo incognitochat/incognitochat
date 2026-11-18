@@ -45,6 +45,7 @@ import type { Recording, RoundRecording } from '../media/record';
 import { saveUrl } from '../media/save';
 import { fileName, type Media, type Sticker } from '../protocol/message';
 import { ApiError, checkObject, NetworkError, type Api } from '../net/api';
+import { createBackoff } from '../net/backoff';
 import { createClock } from '../net/clock';
 import { createSession, type AppSession, type Session } from '../net/session';
 import { createPushSocket } from '../net/socket';
@@ -243,6 +244,12 @@ export interface Deps {
 const POLL_MS = 20_000;
 /** While a push socket is open, poll only every this many POLL_MS. */
 const SOCKET_POLL_EVERY = 6;
+/**
+ * The longest the app's background syncs wait while the server is in
+ * trouble (net/backoff): the first wait is up to POLL_MS, and each failure
+ * in a row doubles it, up to this.
+ */
+const SYNC_BACKOFF_MAX_MS = 5 * 60_000;
 
 /** A link of this account, with its shareable URL. */
 export interface LinkView extends LinkRecord {
@@ -295,9 +302,15 @@ export function createApp(deps: Deps) {
   let backgroundStarted = false;
   // Stops the inbox poll and the push socket (the account was deleted).
   let stopBackground = (): void => {};
+  /** Holds back the syncs the app asks for by itself (backgroundSync) while the server is in trouble. */
+  const syncBackoff = createBackoff({ baseMs: POLL_MS, maxMs: SYNC_BACKOFF_MAX_MS });
+  /** The one sync waiting for the backoff to end, for all asked for meanwhile. */
+  let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   /** Stops messaging and everything started for it: the poll, the socket, a sync waiting out a server's pause. */
   function stopMessaging(): void {
     stopBackground();
+    clearTimeout(backoffTimer);
+    backoffTimer = undefined;
     messaging?.stop();
     messaging = null;
   }
@@ -483,10 +496,10 @@ export function createApp(deps: Deps) {
           issuer,
           ...(mediaIssuer ? { mediaIssuer } : {}),
           onTokens: () => void refreshBudget(),
-          onWaiting: () => void sync(),
+          onWaiting: () => backgroundSync(),
           // Only while the app syncs in the background (not signed out).
           onResume: () => {
-            if (backgroundStarted) void sync();
+            if (backgroundStarted) backgroundSync();
           },
         });
       } catch {
@@ -507,8 +520,9 @@ export function createApp(deps: Deps) {
     // Pushes, while shown (hidden, the server sends a Telegram notice instead).
     const socket =
       deps.config?.wsUrl && session
-        ? createPushSocket({ url: deps.config.wsUrl, token: () => session.token(), onHint: () => void sync() })
+        ? createPushSocket({ url: deps.config.wsUrl, token: () => session.token(), onHint: () => backgroundSync() })
         : null;
+    // Being shown is the user's doing: it syncs, backoff or not.
     const visibility = () => {
       socket?.setVisible(shown());
       if (shown()) void sync();
@@ -519,7 +533,7 @@ export function createApp(deps: Deps) {
     let ticks = 0;
     const poll = setInterval(() => {
       ticks++;
-      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) void sync();
+      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync();
     }, POLL_MS);
     document.addEventListener('visibilitychange', visibility);
     const offVisible = deps.bridge?.on('visibility_changed', ({ is_visible }) => {
@@ -565,15 +579,36 @@ export function createApp(deps: Deps) {
     return syncing;
   }
 
+  /**
+   * A sync the app asks for by itself (the poll, a push, the end of a
+   * pause): while the server is in trouble (syncBackoff), it waits, and all
+   * asked for meanwhile become one when the wait ends.
+   */
+  function backgroundSync(): void {
+    const wait = syncBackoff.remaining();
+    if (wait === 0) {
+      void sync();
+      return;
+    }
+    backoffTimer ??= setTimeout(() => {
+      backoffTimer = undefined;
+      void sync();
+    }, wait);
+  }
+
   async function syncOnce(): Promise<void> {
     if (!messaging) return;
     let received = 0;
     try {
       received = await messaging.sync();
+      syncBackoff.succeeded();
     } catch (err) {
       // What it stored before failing is still shown.
       if (err instanceof SyncFailed) received = err.received;
-      if (handleGone(err instanceof SyncFailed ? err.error : err)) return;
+      const cause = err instanceof SyncFailed ? err.error : err;
+      if (handleGone(cause)) return;
+      // The server in trouble: background syncs wait, longer each time.
+      syncBackoff.failed(cause);
     }
     if (received > 0) {
       deps.broadcast({ type: 'data-changed' });

@@ -19,8 +19,16 @@ const STABLE_MS = 60_000;
  * copies come and go.
  */
 export const REOPEN_MS = 30 * 60_000;
-/** A replacement that couldn't open (refused, say) is tried again after about this long. */
+/**
+ * A replacement that couldn't open (refused, say) is tried again after about
+ * this long, and twice as long after each refusal in a row, up to
+ * MAX_REOPEN_RETRY_MS: the old socket still works meanwhile, so an
+ * overloaded server isn't asked again every minute by every open app. The
+ * longest keeps a replacement within the 40 minutes the server keeps the
+ * old socket's record, if it gets through by the fourth try.
+ */
 export const REOPEN_RETRY_MS = 60_000;
+export const MAX_REOPEN_RETRY_MS = 4 * REOPEN_RETRY_MS;
 
 export interface PushSocketDeps {
   url: string;
@@ -55,6 +63,7 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let reopenTimer: ReturnType<typeof setTimeout> | null = null;
   let backoff = FIRST_RETRY_MS;
+  let reopenBackoff = REOPEN_RETRY_MS;
   let openedAt = 0;
 
   const wanted = () => running && visible;
@@ -82,6 +91,7 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
   /** The socket in use is open: keep it alive, replace it in a while, and fetch what may have been missed. */
   function opened(ws: WebSocket): void {
     openedAt = Date.now();
+    reopenBackoff = REOPEN_RETRY_MS;
     heartbeat = setInterval(() => ws.readyState === WS.OPEN && ws.send('{"action":"ping"}'), HEARTBEAT_MS);
     reopenTimer = setTimeout(() => void reopen(ws), REOPEN_MS * jitter());
     deps.onHint();
@@ -115,7 +125,9 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
     reopenTimer = null;
     if (socket !== ws || replacement) return;
     const later = () => {
-      if (socket === ws && !reopenTimer) reopenTimer = setTimeout(() => void reopen(ws), REOPEN_RETRY_MS * jitter());
+      if (socket !== ws || reopenTimer) return;
+      reopenTimer = setTimeout(() => void reopen(ws), reopenBackoff * jitter());
+      reopenBackoff = Math.min(reopenBackoff * 2, MAX_REOPEN_RETRY_MS);
     };
     let token: string;
     try {

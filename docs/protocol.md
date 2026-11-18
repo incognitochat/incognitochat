@@ -91,6 +91,16 @@ send and media tokens, and a message's `at`. The app believes `now` only
 within two days of its own clock; further off, it signs nothing and asks the
 user to set the device's date and time.
 
+**Overload.** When AWS throttles the server (a table at its cap, a function
+out of instances) or a request runs out of time, the server answers
+`503 {"error": "unavailable"}` with `Retry-After: 2`, rather than
+`500 internal`, which stays for other failures. The functions try an AWS
+call at most twice, waiting at most 200 ms in between, and cut a request's
+calls off after 5 seconds (3 in `ws`, 7 in `notify`), so a throttled table
+fails requests fast instead of holding the functions' instances. The app
+doesn't retry what the user does by itself; its background syncs back off
+(below, Delivery).
+
 **Refusals.** These answers about the device itself:
 
 | Answer | Meaning |
@@ -630,7 +640,13 @@ each mailbox's owner, to deliver, but not who writes to it.
   they are. Told `rate_limited`, it waits 30 to 60 seconds and then syncs,
   from the page it was refused at, whether or not a push came meanwhile;
   told `daily_limit`, it waits until the next UTC day. A pause longer than
-  that (the device's clock was set back) is over. An envelope the app
+  that (the device's clock was set back) is over. When a sync gets no
+  answer, a server error (`503 unavailable`, say) or a `429`, the syncs the
+  app asks for by itself (the poll, pushes) wait: half to all of 20
+  seconds, twice as long after each such failure in a row, up to 5
+  minutes, and at least the server's `Retry-After`; whatever asked
+  meanwhile becomes one sync when the wait ends. Being shown still syncs at
+  once, and a sync that gets through ends the wait. An envelope the app
   can't take in yet (its chat is busy, or its link can't be asked now)
   stays unconfirmed, and the walk goes past it. Undelivered envelopes
   expire after 30 days.
@@ -671,7 +687,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   before writing. A connect at 7 records forgets the oldest, which may be of
   a socket still open; that one gets no pushes until its app replaces it.
   The app opens the replacement before closing the old socket, and keeps the
-  old one if the replacement is refused.
+  old one if the replacement is refused, trying again after about 1, 2,
+  then every 4 minutes. A socket that closes is reopened after about a
+  second, then twice as long each time, up to a minute.
 - `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
   conversation); a link's intro mailbox ends with the link.
 - `POST /mailboxes/check {ids}` returns which of the given mailboxes aren't
@@ -902,6 +920,15 @@ Both only read the counters the limits keep anyway.
 The two kinds have different issuer keys. A blind signer can't see what it
 signs, so only a key of its own gives a kind its own daily budget; a token
 of one kind is refused where the other is asked for.
+
+The server signs with the Chinese remainder theorem, in constant-time
+arithmetic (`filippo.io/bigmod`, the code Go's `crypto/rsa` uses), about
+three times faster than a plain `m^d mod n`. Each signature is blinded with
+a fresh random `r` (it exponentiates `m·rᵉ`), and checked (`sᵉ = m mod n`)
+before it is sent, so a fault in the computation, which would give away a
+factor of the key, is answered `500 internal` instead. The signatures are
+the same bytes as RFC 9474's `BlindSign` (`backend/internal/tokens`, checked
+against circl's and the RFC's test vector).
 
 **What a send costs.** An envelope of `n` bytes costs `ceil(n / 2560)` send
 tokens, at least one. Storing it costs the database a write unit per

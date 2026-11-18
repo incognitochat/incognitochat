@@ -2,13 +2,16 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 )
 
 type fakeSSM struct {
@@ -64,6 +67,97 @@ func TestLoad(t *testing.T) {
 	f.values["/empty"] = ""
 	if _, err := Load(context.Background(), f, "/empty"); err == nil {
 		t.Fatal("accepted an empty parameter")
+	}
+}
+
+// flakySSM fails its first calls with err, then answers as fakeSSM.
+type flakySSM struct {
+	fakeSSM
+	failures int
+	err      error
+}
+
+func (f *flakySSM) GetParameters(ctx context.Context, in *ssm.GetParametersInput, opts ...func(*ssm.Options)) (*ssm.GetParametersOutput, error) {
+	// The SDK mustn't retry as well.
+	var o ssm.Options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.RetryMaxAttempts != 1 {
+		return nil, fmt.Errorf("RetryMaxAttempts = %d", o.RetryMaxAttempts)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return nil, errors.New("no deadline")
+	}
+	if f.failures > 0 {
+		f.failures--
+		f.calls++
+		return nil, f.err
+	}
+	return f.fakeSSM.GetParameters(ctx, in)
+}
+
+// waits records Load's waits instead of sleeping.
+func waits(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var got []time.Duration
+	old := wait
+	wait = func(_ context.Context, d time.Duration) error {
+		got = append(got, d)
+		return nil
+	}
+	t.Cleanup(func() { wait = old })
+	return &got
+}
+
+func TestLoadRetries(t *testing.T) {
+	throttled := &smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}
+	values := map[string]string{"/a": "1"}
+
+	// Throttled twice, then answered: within its first two waits.
+	waited := waits(t)
+	f := &flakySSM{fakeSSM: fakeSSM{values: values}, failures: 2, err: throttled}
+	got, err := Load(context.Background(), f, "/a")
+	if err != nil || got["/a"] != "1" || f.calls != 3 {
+		t.Fatalf("Load = %v, %v after %d calls", got, err, f.calls)
+	}
+	if len(*waited) != 2 || (*waited)[0] >= firstWait || (*waited)[1] >= 2*firstWait {
+		t.Fatalf("waits %v", *waited)
+	}
+
+	// Throttled throughout: loadAttempts calls, the waits within the
+	// budget, and the throttle as the error.
+	waited = waits(t)
+	f = &flakySSM{fakeSSM: fakeSSM{values: values}, failures: 100, err: throttled}
+	if _, err := Load(context.Background(), f, "/a"); !errors.Is(err, throttled) || f.calls != loadAttempts {
+		t.Fatalf("Load = %v after %d calls", err, f.calls)
+	}
+	var total time.Duration
+	for _, d := range *waited {
+		total += d
+	}
+	if len(*waited) != loadAttempts-1 || total >= loadBudget {
+		t.Fatalf("waits %v", *waited)
+	}
+
+	// Errors that won't pass aren't tried again.
+	for _, permanent := range []error{
+		&smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"},
+		&smithy.GenericAPIError{Code: "ValidationException", Message: "bad name"},
+		errors.New("something else"),
+	} {
+		waited = waits(t)
+		f = &flakySSM{fakeSSM: fakeSSM{values: values}, failures: 1, err: permanent}
+		if _, err := Load(context.Background(), f, "/a"); err == nil || f.calls != 1 || len(*waited) != 0 {
+			t.Fatalf("%v: tried %d times, %v", permanent, f.calls, err)
+		}
+	}
+
+	// A call that hangs is cut off and tried again.
+	waited = waits(t)
+	f = &flakySSM{fakeSSM: fakeSSM{values: values}, failures: 1, err: fmt.Errorf("send: %w", context.DeadlineExceeded)}
+	if got, err := Load(context.Background(), f, "/a"); err != nil || got["/a"] != "1" || f.calls != 2 {
+		t.Fatalf("after a timeout: %v, %v, %d calls", got, err, f.calls)
 	}
 }
 

@@ -59,7 +59,7 @@ var (
 // Issuer holds the issuer key of one kind of token.
 type Issuer struct {
 	label    string
-	signer   blindrsa.Signer
+	signer   *signer
 	verifier blindrsa.Verifier
 	public   *rsa.PublicKey
 	keyID    [32]byte
@@ -89,7 +89,11 @@ func NewIssuer(pemKey []byte, label string) (*Issuer, error) {
 	if err != nil {
 		return nil, ErrKey
 	}
-	return &Issuer{label: label, signer: blindrsa.NewSigner(key), verifier: verifier, public: &key.PublicKey, keyID: id, k: key.Size()}, nil
+	sig, err := newSigner(key)
+	if err != nil {
+		return nil, ErrKey
+	}
+	return &Issuer{label: label, signer: sig, verifier: verifier, public: &key.PublicKey, keyID: id, k: key.Size()}, nil
 }
 
 // KeyID is the SHA-256 of a public key's SubjectPublicKeyInfo (DER).
@@ -110,12 +114,12 @@ func (i *Issuer) KeyID() [32]byte { return i.keyID }
 // BlindedLen is the length of a blinded message and of its signature.
 func (i *Issuer) BlindedLen() int { return i.k }
 
-// Sign signs a blinded message. It never sees what it signs.
+// Sign signs a blinded message (RFC 9474's BlindSign; see signer). It never
+// sees what it signs. It returns ErrInvalid for a message that can't be
+// signed (the wrong length, or not below the modulus), and ErrSign if the
+// signature failed its check.
 func (i *Issuer) Sign(blinded []byte) ([]byte, error) {
-	if len(blinded) != i.k {
-		return nil, ErrInvalid
-	}
-	return i.signer.BlindSign(blinded)
+	return i.signer.sign(blinded)
 }
 
 // EpochOf returns the epoch a time falls in.

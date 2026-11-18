@@ -54,6 +54,7 @@ function fakeServer(
     account?: Outcome[];
     createLink?: Outcome[];
     deleteAccount?: Outcome[];
+    inbox?: Outcome[];
     elsewhere?: boolean;
   } = {},
 ) {
@@ -97,6 +98,7 @@ function fakeServer(
       if (path === '/accounts/lookup') return check({ exists: outcomes.elsewhere === true });
       if (method === 'GET' && path.startsWith('/inbox')) {
         await state.inboxGate;
+        take(outcomes.inbox);
         return check({ items: [], more: false });
       }
       if (path === '/register') {
@@ -671,6 +673,59 @@ describe('syncing', () => {
     open();
     await Promise.all(syncs);
     expect(inbox()).toBe(before + 2);
+  });
+
+  it('backs its poll off while the server is in trouble, but syncs when shown', async () => {
+    const trouble: Outcome[] = [];
+    const server = fakeServer({ inbox: trouble });
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(server.api, { issuer });
+    let show!: (data: { is_visible: boolean }) => void;
+    const bridge: Bridge = {
+      transport: 'webview-proxy',
+      post: () => {},
+      on: (type, handler) => {
+        if (type === 'visibility_changed') show = handler as typeof show;
+        return () => {};
+      },
+    };
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    try {
+      // Overloaded from the start: 503 unavailable, Retry-After 2.
+      for (let i = 0; i < 50; i++) trouble.push(new ApiError(503, 'unavailable', undefined, undefined, 2));
+      const { app } = await setup({ api: server.api, bridge, launch: launchWith(''), db, issuer, background: true });
+      await app.start();
+      const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+      const first = inbox();
+      expect(first).toBeGreaterThan(0);
+
+      // Polling every 20 seconds would fetch 15 times in 5 minutes; backing
+      // off (20 s, then 40, 80, 160, each half to all of it), at most 5.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      const backedOff = inbox() - first;
+      expect(backedOff).toBeGreaterThanOrEqual(2);
+      expect(backedOff).toBeLessThanOrEqual(5);
+
+      // Shown by the user: it syncs at once, backoff or not.
+      const before = inbox();
+      show({ is_visible: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before + 1);
+
+      // The server is fine again: once a sync gets through, the poll is
+      // back to every 20 seconds.
+      trouble.length = 0;
+      show({ is_visible: true });
+      await vi.advanceTimersByTimeAsync(0);
+      const fine = inbox();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(inbox() - fine).toBeGreaterThanOrEqual(3);
+      await app.home();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

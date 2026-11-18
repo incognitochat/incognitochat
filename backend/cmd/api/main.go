@@ -11,13 +11,13 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambda"
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/incognitochat/incognitochat/backend/internal/api"
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/config"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
@@ -37,6 +37,12 @@ const (
 	minSecretLen = 32
 	// slowRequest is how long a request takes before it is logged.
 	slowRequest = time.Second
+	// requestDeadline cuts off AWS calls a request still waits on, half the
+	// function's timeout (10 s, infra/functions.tf), so the request is
+	// answered (503 unavailable) and its instance freed. A request takes
+	// about 30 ms. A batch of 50 tokens signs for about 2 s at 256 MB
+	// (estimated), after its last AWS call, so this doesn't cut it off.
+	requestDeadline = 5 * time.Second
 )
 
 func main() {
@@ -59,7 +65,7 @@ func main() {
 				slog.Int64(logx.KeyDuration, elapsed.Milliseconds()))
 		}
 	}
-	lambda.Start(router.Serve)
+	lambda.Start(awsconf.WithDeadline(requestDeadline, router.Serve))
 }
 
 func setup(ctx context.Context) (*api.Server, error) {
@@ -69,7 +75,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	aws, err := awsconfig.LoadDefaultConfig(ctx)
+	aws, err := awsconf.Load(ctx)
 	if err != nil {
 		return nil, err
 	}

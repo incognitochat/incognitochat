@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/envelope"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+	"github.com/incognitochat/incognitochat/backend/internal/tokens"
 )
 
 const (
@@ -160,8 +162,12 @@ func (s *Server) signTokens(ctx context.Context, req httpapi.Request, route stri
 	signatures := make([]string, len(blinded))
 	for i, b := range blinded {
 		sig, err := issuer.Sign(b)
-		if err != nil {
+		if errors.Is(err, tokens.ErrInvalid) {
 			return httpapi.Error(http.StatusBadRequest, "bad_request")
+		}
+		if err != nil {
+			// A signature that failed its check (tokens.ErrSign): none goes out.
+			return s.internal(route, err)
 		}
 		signatures[i] = base64.RawURLEncoding.EncodeToString(sig)
 	}

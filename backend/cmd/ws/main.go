@@ -28,12 +28,12 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/config"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
@@ -80,15 +80,20 @@ func main() {
 		os.Exit(1)
 	}
 	h.log = log
-	lambda.Start(h.handle)
+	lambda.Start(awsconf.WithDeadline(requestDeadline, h.handle))
 }
+
+// requestDeadline bounds an invocation's calls (DynamoDB, the socket API,
+// invoking notify), well under the function's timeout (5 s,
+// infra/functions.tf).
+const requestDeadline = 3 * time.Second
 
 func setup(ctx context.Context) (*handler, error) {
 	env, err := config.Env(os.Getenv, "PARAM_SESSION_KEY", "TABLE_EPHEMERAL", "WS_ENDPOINT", "NOTIFY_FUNCTION")
 	if err != nil {
 		return nil, err
 	}
-	aws, err := awsconfig.LoadDefaultConfig(ctx)
+	aws, err := awsconf.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
