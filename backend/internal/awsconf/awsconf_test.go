@@ -31,6 +31,15 @@ func responseError(status int, err error) error {
 	}
 }
 
+// cancelled is a cancelled transaction with these reasons, one per item.
+func cancelled(codes ...string) error {
+	reasons := make([]types.CancellationReason, len(codes))
+	for i, c := range codes {
+		reasons[i] = types.CancellationReason{Code: aws.String(c)}
+	}
+	return &types.TransactionCanceledException{Message: aws.String("cancelled"), CancellationReasons: reasons}
+}
+
 func TestUnavailable(t *testing.T) {
 	code := func(c string) error { return &smithy.GenericAPIError{Code: c, Message: "x"} }
 	for name, tc := range map[string]struct {
@@ -51,6 +60,11 @@ func TestUnavailable(t *testing.T) {
 		"500":                       {responseError(500, code("InternalServerError")), false},
 		"conditional check":         {responseError(400, &types.ConditionalCheckFailedException{}), false},
 		"access denied":             {responseError(400, code("AccessDeniedException")), false},
+		"transaction throttled":     {responseError(400, cancelled("None", "ThrottlingError", "None")), true},
+		"transaction over capacity": {responseError(400, cancelled("ProvisionedThroughputExceeded", "RequestLimitExceeded")), true},
+		"transaction conflict":      {responseError(400, cancelled("ThrottlingError", "ConditionalCheckFailed")), false},
+		"transaction contended":     {responseError(400, cancelled("TransactionConflict")), false},
+		"transaction, no reasons":   {responseError(400, cancelled("None")), false},
 		"deadline":                  {fmt.Errorf("get: %w", context.DeadlineExceeded), true},
 		"deadline while waiting":    {&aws.RequestCanceledError{Err: context.DeadlineExceeded}, true},
 		"canceled":                  {context.Canceled, false},

@@ -79,6 +79,25 @@ describe('push socket', () => {
     expect(ws.sent).toEqual(['{"action":"ping"}', '{"action":"ping"}']);
   });
 
+  it('says when a socket opens, apart from hints, if asked', async () => {
+    let hints = 0;
+    let opens = 0;
+    const socket = createPushSocket({
+      url: 'wss://ws.example/live',
+      token: async () => 'v1.token',
+      onHint: () => hints++,
+      onOpen: () => opens++,
+      WebSocket: FakeSocket as unknown as typeof WebSocket,
+    });
+    socket.start();
+    await flush();
+    FakeSocket.all[0]!.open();
+    expect([opens, hints]).toEqual([1, 0]);
+    FakeSocket.all[0]!.receive('{"t":"sync"}');
+    expect([opens, hints]).toEqual([1, 1]);
+    socket.stop();
+  });
+
   it('replaces an open socket about every half hour, opening the new one first', async () => {
     const { socket, hints } = make();
     socket.start();

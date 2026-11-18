@@ -55,6 +55,9 @@ import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
 import type { SyncEvent } from '../sync/locks';
 
+/** Whether the device says it's offline (its saying online proves nothing). */
+const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+
 /** Between the steps of deleting an account (DELETE /account answers in_progress until done). */
 const DELETE_STEP_PAUSE_MS = 1000;
 
@@ -520,7 +523,16 @@ export function createApp(deps: Deps) {
     // Pushes, while shown (hidden, the server sends a Telegram notice instead).
     const socket =
       deps.config?.wsUrl && session
-        ? createPushSocket({ url: deps.config.wsUrl, token: () => session.token(), onHint: () => backgroundSync() })
+        ? createPushSocket({
+            url: deps.config.wsUrl,
+            token: () => session.token(),
+            onHint: () => backgroundSync(),
+            // The server is reachable again: no more waiting.
+            onOpen: () => {
+              endWait();
+              void sync();
+            },
+          })
         : null;
     // Being shown is the user's doing: it syncs, backoff or not.
     const visibility = () => {
@@ -536,6 +548,13 @@ export function createApp(deps: Deps) {
       if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync();
     }, POLL_MS);
     document.addEventListener('visibilitychange', visibility);
+    // Back online: whatever the backoff, sync now.
+    const backOnline = () => {
+      endWait();
+      if (shown()) void sync();
+    };
+    const win = typeof window === 'undefined' ? null : window;
+    win?.addEventListener('online', backOnline);
     const offVisible = deps.bridge?.on('visibility_changed', ({ is_visible }) => {
       telegramVisible = is_visible;
       visibility();
@@ -550,6 +569,7 @@ export function createApp(deps: Deps) {
       clearTimeout(upkeep);
       socket?.stop();
       document.removeEventListener('visibilitychange', visibility);
+      win?.removeEventListener('online', backOnline);
       offVisible?.();
       backgroundStarted = false;
       stopBackground = () => {};
@@ -571,7 +591,12 @@ export function createApp(deps: Deps) {
         do {
           syncAgain = false;
           await syncOnce();
-        } while (syncAgain);
+          // Not again at once after a failure: when the wait is over.
+        } while (syncAgain && syncBackoff.remaining() === 0);
+        if (syncAgain) {
+          syncAgain = false;
+          backgroundSync();
+        }
       } finally {
         syncing = null;
       }
@@ -590,10 +615,22 @@ export function createApp(deps: Deps) {
       void sync();
       return;
     }
-    backoffTimer ??= setTimeout(() => {
+    // For when the wait ends now, which may be sooner than before (it
+    // started over).
+    clearTimeout(backoffTimer);
+    backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
-      void sync();
+      backgroundSync();
     }, wait);
+  }
+
+  /** Ends the wait. Returns whether a sync was waiting for it, which is then up to the caller. */
+  function endWait(): boolean {
+    syncBackoff.succeeded();
+    if (backoffTimer === undefined) return false;
+    clearTimeout(backoffTimer);
+    backoffTimer = undefined;
+    return true;
   }
 
   async function syncOnce(): Promise<void> {
@@ -601,14 +638,17 @@ export function createApp(deps: Deps) {
     let received = 0;
     try {
       received = await messaging.sync();
-      syncBackoff.succeeded();
+      // Through: what was waiting runs now.
+      if (endWait()) syncAgain = true;
     } catch (err) {
       // What it stored before failing is still shown.
       if (err instanceof SyncFailed) received = err.received;
       const cause = err instanceof SyncFailed ? err.error : err;
       if (handleGone(cause)) return;
-      // The server in trouble: background syncs wait, longer each time.
-      syncBackoff.failed(cause);
+      // The server in trouble: background syncs wait, longer each time. Not
+      // while the device says it's offline: that costs the server nothing,
+      // and coming online syncs at once.
+      if (!(cause instanceof NetworkError && offline())) syncBackoff.failed(cause);
     }
     if (received > 0) {
       deps.broadcast({ type: 'data-changed' });

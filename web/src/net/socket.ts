@@ -25,7 +25,7 @@ export const REOPEN_MS = 30 * 60_000;
  * MAX_REOPEN_RETRY_MS: the old socket still works meanwhile, so an
  * overloaded server isn't asked again every minute by every open app. The
  * longest keeps a replacement within the 40 minutes the server keeps the
- * old socket's record, if it gets through by the fourth try.
+ * old socket's record, if it gets through by the third try.
  */
 export const REOPEN_RETRY_MS = 60_000;
 export const MAX_REOPEN_RETRY_MS = 4 * REOPEN_RETRY_MS;
@@ -34,8 +34,10 @@ export interface PushSocketDeps {
   url: string;
   /** A current session token. */
   token: () => Promise<string>;
-  /** Something arrived (or the socket just opened and may have missed some). */
+  /** Something arrived. */
   onHint: () => void;
+  /** A socket opened: the server is reachable, and hints may have been missed meanwhile. onHint if not given. */
+  onOpen?: () => void;
   /** For tests. */
   WebSocket?: typeof WebSocket;
 }
@@ -94,7 +96,7 @@ export function createPushSocket(deps: PushSocketDeps): PushSocket {
     reopenBackoff = REOPEN_RETRY_MS;
     heartbeat = setInterval(() => ws.readyState === WS.OPEN && ws.send('{"action":"ping"}'), HEARTBEAT_MS);
     reopenTimer = setTimeout(() => void reopen(ws), REOPEN_MS * jitter());
-    deps.onHint();
+    (deps.onOpen ?? deps.onHint)();
   }
 
   async function connect(): Promise<void> {

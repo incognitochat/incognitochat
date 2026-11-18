@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
+	dynamotypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -71,12 +72,35 @@ func Unavailable(err error) bool {
 	if retry.IsErrorThrottles(retry.DefaultThrottles).IsErrorThrottle(err) == aws.TrueTernary {
 		return true
 	}
+	// A transaction DynamoDB cancelled only because items were throttled
+	// says so in each item's reason, not in its error code.
+	var canceled *dynamotypes.TransactionCanceledException
+	if errors.As(err, &canceled) {
+		return throttledOnly(canceled.CancellationReasons)
+	}
 	var resp *smithyhttp.ResponseError
 	if errors.As(err, &resp) {
 		status := resp.HTTPStatusCode()
 		return status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests
 	}
 	return false
+}
+
+// throttledOnly reports whether a cancelled transaction's reasons are all
+// throttling or capacity ("None" for the items that were fine), and at least
+// one is.
+func throttledOnly(reasons []dynamotypes.CancellationReason) bool {
+	throttled := false
+	for _, r := range reasons {
+		switch aws.ToString(r.Code) {
+		case "None", "":
+		case "ThrottlingError", "ProvisionedThroughputExceeded", "RequestLimitExceeded":
+			throttled = true
+		default:
+			return false
+		}
+	}
+	return throttled
 }
 
 // WithDeadline wraps a Lambda handler so that each invocation's context

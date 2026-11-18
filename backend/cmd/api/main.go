@@ -40,7 +40,7 @@ const (
 	// requestDeadline cuts off AWS calls a request still waits on, half the
 	// function's timeout (10 s, infra/functions.tf), so the request is
 	// answered (503 unavailable) and its instance freed. A request takes
-	// about 30 ms. A batch of 50 tokens signs for about 2 s at 256 MB
+	// about 30 ms. A batch of 50 tokens signs for about 3 s at 256 MB
 	// (estimated), after its last AWS call, so this doesn't cut it off.
 	requestDeadline = 5 * time.Second
 )

@@ -97,9 +97,12 @@ out of instances) or a request runs out of time, the server answers
 `500 internal`, which stays for other failures. The functions try an AWS
 call at most twice, waiting at most 200 ms in between, and cut a request's
 calls off after 5 seconds (3 in `ws`, 7 in `notify`), so a throttled table
-fails requests fast instead of holding the functions' instances. The app
-doesn't retry what the user does by itself; its background syncs back off
-(below, Delivery).
+fails requests fast instead of holding the functions' instances. When the
+`api` function itself has no instance free, Lambda answers `429` on its
+own, without `Retry-After` (and the app may see no answer at all, if it
+lacks the CORS headers); the app backs off from that too. The app doesn't
+retry what the user does by itself; its background syncs back off (below,
+Delivery).
 
 **Refusals.** These answers about the device itself:
 
@@ -646,7 +649,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   seconds, twice as long after each such failure in a row, up to 5
   minutes, and at least the server's `Retry-After`; whatever asked
   meanwhile becomes one sync when the wait ends. Being shown still syncs at
-  once, and a sync that gets through ends the wait. An envelope the app
+  once, and a sync that gets through ends the wait, as do the push socket
+  opening and the device coming back online, which sync at once too. No
+  answer while the device says it's offline doesn't count. An envelope the app
   can't take in yet (its chat is busy, or its link can't be asked now)
   stays unconfirmed, and the walk goes past it. Undelivered envelopes
   expire after 30 days.
@@ -923,7 +928,8 @@ of one kind is refused where the other is asked for.
 
 The server signs with the Chinese remainder theorem, in constant-time
 arithmetic (`filippo.io/bigmod`, the code Go's `crypto/rsa` uses), about
-three times faster than a plain `m^d mod n`. Each signature is blinded with
+twice as fast as a plain `m^d mod n` on the functions' arm64 (about three
+times on amd64). Each signature is blinded with
 a fresh random `r` (it exponentiates `m·rᵉ`), and checked (`sᵉ = m mod n`)
 before it is sent, so a fault in the computation, which would give away a
 factor of the key, is answered `500 internal` instead. The signatures are

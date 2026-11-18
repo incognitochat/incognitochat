@@ -164,7 +164,10 @@ func TestSignerKeepsFaultsIn(t *testing.T) {
 	}
 }
 
-// One signer serves concurrent requests (go test -race).
+// One signer gives right answers to concurrent calls. This checks the
+// results only: bigmod marks its loops go:norace, so -race doesn't see
+// them. That it is safe rests on sign writing only Nats it makes itself
+// (the signer's are read, never written).
 func TestSignerConcurrent(t *testing.T) {
 	key := keys(t)[0]
 	s, err := newSigner(key)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +140,29 @@ func TestLoadRetries(t *testing.T) {
 	if len(*waited) != loadAttempts-1 || total >= loadBudget {
 		t.Fatalf("waits %v", *waited)
 	}
+
+	// The waits' ceilings grow to maxWait and together reach past the
+	// budget, so tries spread over all of it.
+	oldJitter := jitter
+	jitter = func(ceiling time.Duration) time.Duration { return ceiling }
+	t.Cleanup(func() { jitter = oldJitter })
+	waited = waits(t)
+	f = &flakySSM{fakeSSM: fakeSSM{values: values}, failures: 100, err: throttled}
+	if _, err := Load(context.Background(), f, "/a"); err == nil {
+		t.Fatal("Load worked")
+	}
+	want := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 2 * time.Second}
+	if !slices.Equal(*waited, want) {
+		t.Fatalf("ceilings %v, want %v", *waited, want)
+	}
+	total = 0
+	for _, d := range *waited {
+		total += d
+	}
+	if total < loadBudget {
+		t.Fatalf("the waits' ceilings (%v) leave the budget (%v) unused", total, loadBudget)
+	}
+	jitter = oldJitter
 
 	// Errors that won't pass aren't tried again.
 	for _, permanent := range []error{

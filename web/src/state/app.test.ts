@@ -12,7 +12,22 @@ import type { TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
+import type { MessagingDeps } from '../messaging/engine';
 import { confirmationMatches, createApp, type Deps, type Screen } from './app';
+
+// The engine as it is, but what the app gives it is kept, so tests can call
+// its callbacks (onWaiting, onResume) as the engine would.
+const engines = vi.hoisted(() => ({ deps: [] as MessagingDeps[] }));
+vi.mock('../messaging/engine', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../messaging/engine')>();
+  return {
+    ...original,
+    createMessaging: (deps: MessagingDeps) => {
+      engines.deps.push(deps);
+      return original.createMessaging(deps);
+    },
+  };
+});
 
 let n = 0;
 const config = {
@@ -725,6 +740,111 @@ describe('syncing', () => {
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("holds back the engine's and the socket's syncs, until the socket opens or the device is back online", async () => {
+    const trouble: Outcome[] = [];
+    const server = fakeServer({ inbox: trouble });
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(server.api, { issuer });
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      static OPEN = 1;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        sockets.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+      open() {
+        this.readyState = 1;
+        this.onopen?.();
+      }
+      hint() {
+        this.onmessage?.({ data: '{"t":"sync"}' });
+      }
+    }
+    const listeners = new Map<string, () => void>();
+    let online = true;
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal('window', { addEventListener: (type: string, fn: () => void) => listeners.set(type, fn), removeEventListener: (type: string) => listeners.delete(type) });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const unavailable = () => new ApiError(503, 'unavailable', undefined, undefined, 2);
+    try {
+      for (let i = 0; i < 50; i++) trouble.push(unavailable());
+      engines.deps.length = 0;
+      const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db, issuer, background: true, config: { ...config, wsUrl: 'wss://ws.example/live' } });
+      await app.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+      const engine = engines.deps.at(-1)!;
+      expect(sockets).toHaveLength(1);
+      const socket = sockets[0]!;
+
+      // The first sync failed: what the engine (a chat no longer busy, a
+      // pause over) and the socket ask for waits, and comes as one sync.
+      let before = inbox();
+      engine.onWaiting?.();
+      engine.onResume?.();
+      socket.hint();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(inbox()).toBe(before + 1);
+
+      // The socket opening ends the wait, and syncs at once.
+      before = inbox();
+      socket.open();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before + 1);
+      // So does the device coming back online.
+      before = inbox();
+      listeners.get('online')!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before + 1);
+
+      // No answer while the device says it's offline doesn't count: the
+      // next push syncs at once.
+      trouble.length = 0;
+      listeners.get('online')!();
+      await vi.advanceTimersByTimeAsync(0);
+      online = false;
+      trouble.push(new NetworkError('request failed'), new NetworkError('request failed'));
+      before = inbox();
+      socket.hint();
+      await vi.advanceTimersByTimeAsync(0);
+      socket.hint();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before + 2);
+      online = true;
+
+      // A sync asked for while one is failing doesn't run right after it,
+      // but when the wait is over.
+      trouble.push(unavailable(), unavailable());
+      let release!: () => void;
+      server.state.inboxGate = new Promise((resolve) => (release = resolve));
+      before = inbox();
+      socket.hint();
+      await vi.advanceTimersByTimeAsync(0);
+      socket.hint();
+      server.state.inboxGate = null;
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(inbox()).toBe(before + 1);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(inbox()).toBe(before + 2);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      Reflect.deleteProperty(navigator, 'onLine');
     }
   });
 });

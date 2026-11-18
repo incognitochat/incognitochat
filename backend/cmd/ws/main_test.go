@@ -146,6 +146,41 @@ func (m *memNotices) Notify(_ context.Context, account string) error {
 	return m.fail
 }
 
+// stuckPusher's posts hang until their deadline.
+type stuckPusher struct{}
+
+func (stuckPusher) Push(ctx context.Context, _ string) (bool, error) {
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+// liveNotices records whether each notice was asked for in time.
+type liveNotices struct{ live []bool }
+
+func (l *liveNotices) Notify(ctx context.Context, _ string) error {
+	l.live = append(l.live, ctx.Err() == nil)
+	return ctx.Err()
+}
+
+// A push that hangs has a deadline of its own: the notice is still asked
+// for within the invocation's.
+func TestDeliverStuckPush(t *testing.T) {
+	old := pushDeadline
+	pushDeadline = 20 * time.Millisecond
+	t.Cleanup(func() { pushDeadline = old })
+	n := &liveNotices{}
+	h := &handler{pusher: stuckPusher{}, notices: n, log: logx.New(&bytes.Buffer{}, "ws")}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	h.deliver(ctx, push.Delivery{Account: ids.New()})
+	if len(n.live) != 1 || !n.live[0] {
+		t.Fatalf("notice asked for in time: %v", n.live)
+	}
+	if old >= requestDeadline {
+		t.Fatal("the push's deadline leaves no time for the notice")
+	}
+}
+
 // After a send, ws pushes to the recipient's open apps, and asks for a
 // notice only if none took it and the envelope isn't quiet.
 func TestDeliver(t *testing.T) {

@@ -87,6 +87,11 @@ and CI builds everything twice and compares. Keep it that way:
   cooldown.
 - The app loads no third-party code at runtime. Its only runtime dependencies
   are Preact, its signals, and `idb`.
+- The backend's are the AWS SDK and Lambda runtime, Cloudflare's `circl`
+  (checking blind-RSA tokens), and
+  `filippo.io/bigmod` (constant-time arithmetic for signing tokens, the code
+  Go's `crypto/rsa` uses). bigmod compiles in `golang.org/x/sys/cpu` (the
+  Go team's, BSD-licensed), to pick its assembly for the CPU.
 
 ## Conventions
 

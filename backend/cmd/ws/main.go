@@ -88,6 +88,10 @@ func main() {
 // infra/functions.tf).
 const requestDeadline = 3 * time.Second
 
+// pushDeadline bounds the push within an invocation, so a post to a socket
+// that hangs still leaves time to ask for the notice (a variable for tests).
+var pushDeadline = 1500 * time.Millisecond
+
 func setup(ctx context.Context) (*handler, error) {
 	env, err := config.Env(os.Getenv, "PARAM_SESSION_KEY", "TABLE_EPHEMERAL", "WS_ENDPOINT", "NOTIFY_FUNCTION")
 	if err != nil {
@@ -158,7 +162,9 @@ func (h *handler) deliver(ctx context.Context, d push.Delivery) {
 		h.log.Warn("push refused: bad account")
 		return
 	}
-	took, err := h.pusher.Push(ctx, d.Account)
+	pushCtx, cancel := context.WithTimeout(ctx, pushDeadline)
+	took, err := h.pusher.Push(pushCtx, d.Account)
+	cancel()
 	if err != nil {
 		h.log.Warn("push failed", logx.ErrorKind(err))
 	}

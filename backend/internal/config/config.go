@@ -31,10 +31,18 @@ const (
 	// attemptTimeout bounds each try.
 	attemptTimeout = time.Second
 	// firstWait is the most Load waits before trying again the first time;
-	// each wait after that may be twice as long, up to maxWait.
-	firstWait = 200 * time.Millisecond
-	maxWait   = time.Second
+	// each wait after that may be twice as long, up to maxWait: 0.5, 1, 2
+	// and 2 s, which together (5.5 s) reach past loadBudget, so instances
+	// throttled together spread their tries over the whole budget rather
+	// than its first second or two. (Simulated at SSM's 40 calls a second:
+	// of 200 instances starting at once, about 7% fail, against 38% with
+	// waits up to 0.2, 0.4, 0.8 and 1 s.)
+	firstWait = 500 * time.Millisecond
+	maxWait   = 2 * time.Second
 )
+
+// jitter picks a wait up to ceiling (tests replace it).
+var jitter = func(ceiling time.Duration) time.Duration { return rand.N(ceiling) }
 
 // wait sleeps for d, or until ctx ends (tests replace it).
 var wait = func(ctx context.Context, d time.Duration) error {
@@ -120,7 +128,7 @@ func getParameters(ctx context.Context, client Parameters, names []string) (*ssm
 		if err == nil || attempt == loadAttempts || ctx.Err() != nil || !transient(err) {
 			return out, err
 		}
-		if wait(ctx, rand.N(ceiling)) != nil {
+		if wait(ctx, jitter(ceiling)) != nil {
 			return nil, err
 		}
 		ceiling = min(2*ceiling, maxWait)

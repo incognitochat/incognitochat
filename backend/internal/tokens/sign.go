@@ -14,7 +14,8 @@ import (
 var ErrSign = errors.New("tokens: signing failed its check")
 
 // signer computes RFC 9474's BlindSign, s = m^d mod n: the same bytes as
-// circl's blindrsa.Signer, about three times faster. circl raises m to the
+// circl's blindrsa.Signer, two to three times faster (about 1.9 times on
+// arm64, as Lambda runs it; 2.9 on amd64 with ADX). circl raises m to the
 // full-size d; this uses the Chinese remainder theorem instead, as Go's
 // crypto/rsa does: two exponentiations with half-size exponents and moduli.
 //
@@ -27,7 +28,8 @@ var ErrSign = errors.New("tokens: signing failed its check")
 //     fault in one half of the computation (which would give away a factor
 //     of n: the Bellcore attack) never leaves the function.
 //
-// It holds only values it reads, so one signer can be used concurrently.
+// It holds only values sign reads, never writes, so one signer can be used
+// concurrently.
 type signer struct {
 	n, p, q *bigmod.Modulus
 	nBig    *big.Int
