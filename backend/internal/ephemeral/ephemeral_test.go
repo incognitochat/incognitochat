@@ -54,17 +54,17 @@ func TestQuiet(t *testing.T) {
 	table := dynamotest.Table(t, client)
 	q := &Quiet{DB: client, Table: table, Now: func() time.Time { return clock }}
 	ctx := context.Background()
-	begin := func(key string, until time.Time) bool {
+	begin := func(key string, until time.Time) string {
 		t.Helper()
-		ok, err := q.Start(ctx, key, until)
+		token, err := q.Start(ctx, key, until)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ok
+		return token
 	}
-	move := func(key string, from, until time.Time) {
+	move := func(key, token string, until time.Time) {
 		t.Helper()
-		if err := q.Move(ctx, key, from, until); err != nil {
+		if err := q.Move(ctx, key, token, until); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -82,40 +82,43 @@ func TestQuiet(t *testing.T) {
 	}
 
 	// Worked: the period runs its whole length from then.
-	lease := clock.Add(30 * time.Second)
-	if !begin("a", lease) || begin("a", clock.Add(3*time.Minute)) {
+	a := begin("a", clock.Add(30*time.Second))
+	if a == "" || begin("a", clock.Add(3*time.Minute)) != "" {
 		t.Fatal("a period started twice, or not at all")
 	}
-	move("a", lease, clock.Add(3*time.Minute))
+	move("a", a, clock.Add(3*time.Minute))
 	if e, _ := ends("a"); e != start.Add(4*time.Minute).Unix() {
 		t.Fatalf("moved to end at %d", e)
 	}
 	clock = start.Add(2 * time.Minute) // past the lease, within the period
-	if begin("a", clock.Add(time.Minute)) {
+	if begin("a", clock.Add(time.Minute)) != "" {
 		t.Fatal("the moved period ended with its lease")
 	}
 
 	// Failed: the period ends on the minute that has begun, and the next
 	// may start at once.
 	clock = start.Add(2*time.Minute + 20*time.Second)
-	lease = clock.Add(30 * time.Second)
-	if !begin("b", lease) {
+	b := begin("b", clock.Add(30*time.Second))
+	if b == "" {
 		t.Fatal("start refused")
 	}
-	move("b", lease, time.Time{})
+	move("b", b, time.Time{})
 	if e, _ := ends("b"); e != start.Add(2*time.Minute).Unix() {
 		t.Fatalf("ended at %d", e)
 	}
-	if !begin("b", clock.Add(3*time.Minute)) {
-		t.Fatal("an ended period still holds")
+	// A new one in the same minute, with the same end as the last.
+	b2 := begin("b", clock.Add(30*time.Second))
+	if b2 == "" || b2 == b {
+		t.Fatal("an ended period still holds, or tokens repeat")
 	}
 
-	// Someone else's period, or none, is left alone.
-	move("b", lease, time.Time{})
-	if begin("b", clock.Add(time.Minute)) {
+	// Someone else's period, or none, is left alone: the first holder's
+	// end, tried again, doesn't end the new one.
+	move("b", b, time.Time{})
+	if begin("b", clock.Add(time.Minute)) != "" {
 		t.Fatal("a stale move ended another's period")
 	}
-	move("c", lease, clock.Add(3*time.Minute))
+	move("c", b, clock.Add(3*time.Minute))
 	if _, ok := ends("c"); ok {
 		t.Fatal("a move started a period")
 	}

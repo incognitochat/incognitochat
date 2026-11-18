@@ -78,12 +78,12 @@ locals {
     # Generic "New message" notices through the bot. api invokes it to seal
     # chat IDs (POST /notices waits for that, sharing this concurrency with
     # notices), and ws without waiting after a delivery no open app took.
-    # It reaches only the notice fields of account items in the directory,
-    # and its quiet periods in the ephemeral table: both get their own,
-    # narrower statements below, and no table-wide one. The timeout must
-    # stay below notices.Lease (30 s), the quiet period held while a notice
-    # is sent; it leaves room for one wait of up to 3 s when Telegram's
-    # flood control asks for it.
+    # In the directory it reaches only account partitions, and in the
+    # ephemeral table only its quiet periods: both get their own, narrower
+    # statements below, and no table-wide one. The timeout must stay below
+    # notices.Lease (30 s), the quiet period held while a notice is sent
+    # (infra/tests checks it); it leaves room for one wait of up to 3 s when
+    # Telegram's flood control asks for it.
     notify = {
       timeout     = 10
       concurrency = 10
@@ -188,12 +188,15 @@ data "aws_iam_policy_document" "fn" {
     }
   }
 
-  # notify reads an account's notice settings and nothing else: only
-  # account items ("A#" partitions; Null keeps out a request without a
-  # partition key, such as a Scan), and of them only the key and the sealed
-  # chat ID (cid), language (lg), last notice (nm) and "notices off" (no)
-  # (backend/internal/directory, Notices). A read that names no attributes
-  # would return the whole item, so it must name them (Select). See
+  # notify reads an account's notice settings (backend/internal/directory,
+  # Notices): only in account partitions ("A#"; Null keeps out a request
+  # without a partition key, such as a Scan), and only the key and the
+  # sealed chat ID (cid), language (lg), last notice (nm) and "notices off"
+  # (no). A read that names no attributes would return the whole item, so
+  # it must name them (Select). IAM can't limit sort keys, nor an update's
+  # ReturnValuesOnConditionCheckFailure, so this doesn't confine it to
+  # account items or their notice fields: docs/security.md says what's left.
+  # See
   # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/specifying-conditions.html
   # and https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html
   # (which condition keys each action has).
@@ -229,7 +232,9 @@ data "aws_iam_policy_document" "fn" {
   # It writes the last notice (nm) and "notices off" (no) on account items,
   # with conditions on the key alone, and gets nothing back (NoticeSent,
   # NoticesOff). No PutItem or DeleteItem: they replace or remove whole
-  # items.
+  # items. An update creates the item it names if it isn't there, so this
+  # still lets it create items, holding only these fields, under any sort
+  # key in an account partition.
   dynamic "statement" {
     for_each = each.key == "notify" ? [1] : []
     content {
@@ -407,8 +412,10 @@ resource "aws_lambda_function" "fn" {
 
 # Notices are sent at once or not at all: a late notice is little use, and
 # a retry after Telegram's flood control refused one would only add to the
-# flood. A notice that failed ends its quiet period instead, so the next
-# message can notify (backend/internal/notices).
+# flood. Instead (backend/internal/notices), a notice refused outright
+# ends its quiet period, so the next message can notify; one refused by
+# flood control keeps the account quiet for as long as Telegram asked (at
+# least a minute), and the instance sends none until then.
 resource "aws_lambda_function_event_invoke_config" "notify" {
   function_name                = aws_lambda_function.fn["notify"].function_name
   maximum_retry_attempts       = 0

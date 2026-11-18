@@ -20,6 +20,10 @@ type Event struct {
 	Notify *struct {
 		Account string `json:"account"`
 	} `json:"notify,omitempty"`
+	// Check asks notify to make its directory calls for a random account
+	// that doesn't exist (Notifier.Check), as the deploy does to check its
+	// role allows them; it fails if one is refused.
+	Check *struct{} `json:"check,omitempty"`
 }
 
 // SealResult is the notify function's answer to a Seal event.

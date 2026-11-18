@@ -3,9 +3,12 @@
 // Notices are generic: "New message" in the user's language with a button
 // that opens the app. No labels, counts or names. At most one per account
 // every few minutes, and the previous one is deleted once a new one went
-// out. A notice that couldn't be sent (Telegram's flood control among
-// other reasons) leaves the previous one in place and uses up no quiet
-// period, so the next message can notify.
+// out. A notice that couldn't be sent leaves the previous one in place.
+// Refused outright, it uses up no quiet period, so the next message can
+// notify; refused by Telegram's flood control, the account waits as long
+// as Telegram asks (at least a minute) and the function instance sends
+// none meanwhile; and one that may have gone out after all (a timeout, say)
+// keeps its short quiet period, so no second notice follows at once.
 //
 // The chat ID (the user's Telegram ID) is kept sealed with a key only the
 // notify function holds, so neither the api function nor a copy of the
@@ -23,9 +26,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/keyed"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
@@ -35,15 +40,20 @@ const Interval = 3 * time.Minute
 
 // Lease is how long an account's quiet period first lasts, while its notice
 // is being sent: longer than the notify function may run (10 s,
-// infra/functions.tf), so a second invocation can't send one meanwhile.
-// Once the notice is out, the quiet period runs Interval from then; if it
-// didn't go out, it ends. Rounded up to the minute, as quiet periods are.
+// infra/functions.tf, whose test checks it), so a second invocation can't
+// send one meanwhile. Once the notice is out, the quiet period runs
+// Interval from then; if it surely didn't go out, it ends; if it may have,
+// it runs out. Rounded up to the minute, as quiet periods are.
 const Lease = 30 * time.Second
 
 // MaxRetryWait is the longest notify waits, once, when Telegram's flood
 // control refuses a notice and says when to try again. Asked to wait
 // longer, it gives up (ErrRateLimited).
 const MaxRetryWait = 3 * time.Second
+
+// FloodQuiet is the least an account waits for its next notice after
+// Telegram's flood control refused one, if Telegram asked for less.
+const FloodQuiet = time.Minute
 
 const (
 	// reserve is kept at the end of an invocation, after the Bot API
@@ -59,9 +69,9 @@ var (
 	// ErrSealed is returned for a sealed chat ID that doesn't open.
 	ErrSealed = errors.New("notices: sealed chat ID doesn't open")
 	// ErrRateLimited is returned when Telegram's flood control refused a
-	// notice, and notify couldn't wait to try again or was refused again.
-	// The notice is dropped and the previous one stays; the account's
-	// quiet period was ended, so the next message can notify.
+	// notice, and notify couldn't wait to try again or was refused again,
+	// or when it still asks this instance to wait. The notice is dropped
+	// and the previous one stays.
 	ErrRateLimited = errors.New("notices: refused by Telegram's flood control")
 )
 
@@ -116,12 +126,13 @@ type Directory interface {
 
 // Quiet holds the quiet period after a notice (ephemeral.Quiet).
 type Quiet interface {
-	// Start begins a quiet period for key until until, and reports false
-	// if one is already running. It is atomic: of two at once, one starts.
-	Start(ctx context.Context, key string, until time.Time) (bool, error)
-	// Move moves the end of the quiet period Start began until from to
+	// Start begins a quiet period for key until until, unless one is
+	// already running, and returns its token ("" if one was running). It
+	// is atomic: of two at once, one starts.
+	Start(ctx context.Context, key string, until time.Time) (string, error)
+	// Move moves the end of the quiet period Start began with token to
 	// until, or ends it if until has passed; another period is left alone.
-	Move(ctx context.Context, key string, from, until time.Time) error
+	Move(ctx context.Context, key, token string, until time.Time) error
 }
 
 const (
@@ -150,6 +161,11 @@ type Notifier struct {
 	Now      func() time.Time
 	// Sleep waits for d or until ctx ends; nil for a timer.
 	Sleep func(ctx context.Context, d time.Duration) error
+
+	// floodUntil is when Telegram's flood control lets this instance send
+	// again, after it refused a notice.
+	mu         sync.Mutex
+	floodUntil time.Time
 }
 
 // Notify sends an account its notice, unless it has notices off, has none
@@ -158,8 +174,16 @@ type Notifier struct {
 // The quiet period is started for Lease before sending, so two deliveries
 // at once still send one notice. Only once the notice went out does the
 // quiet period run its whole Interval, and is the previous notice deleted.
-// If it didn't go out, the previous notice stays and the quiet period
-// ends, so the next message can notify.
+// If it didn't go out, the previous notice stays, and:
+//   - refused outright (other than "blocked"), the quiet period ends, so
+//     the next message can notify;
+//   - refused by flood control, the quiet period runs as long as Telegram
+//     asked, at least FloodQuiet, and this instance tries no notice to
+//     anyone until Telegram allows (ErrRateLimited, without a call);
+//   - with no answer, or one that doesn't say (a timeout, a server
+//     error), it may have gone out: the quiet period runs out by itself,
+//     so no second notice follows at once that would never be recorded or
+//     deleted.
 func (n *Notifier) Notify(ctx context.Context, accountID string) error {
 	target, err := n.Directory.Notices(ctx, accountID)
 	if errors.Is(err, directory.ErrNotFound) || (err == nil && target.Off) {
@@ -173,32 +197,35 @@ func (n *Notifier) Notify(ctx context.Context, accountID string) error {
 		// Sealed under an earlier key: wait for the app to set it up again.
 		return n.Directory.NoticesOff(ctx, accountID)
 	}
+	if n.flooded() {
+		return ErrRateLimited
+	}
 	key := "notice#" + keyed.Name(n.QuietKey, labelQuietName, []byte(accountID))
-	lease := n.Now().Add(Lease)
-	ok, err := n.Quiet.Start(ctx, key, lease)
-	if err != nil || !ok {
+	token, err := n.Quiet.Start(ctx, key, n.Now().Add(Lease))
+	if err != nil || token == "" {
 		return err
 	}
 
 	id, err := n.send(ctx, chat, target.Language)
 	var apiErr *botapi.Error
-	if errors.As(err, &apiErr) && apiErr.Forbidden() {
+	isAPI := errors.As(err, &apiErr)
+	switch {
+	case err == nil:
+	case isAPI && apiErr.Forbidden():
 		// Blocked, or never allowed to write: stop until the app turns
-		// notices on again. (The quiet period ends with its lease.)
+		// notices on again. (The quiet period runs out by itself.)
 		return n.Directory.NoticesOff(ctx, accountID)
-	}
-	if err != nil {
-		if errors.As(err, &apiErr) && apiErr.TooManyRequests() {
-			err = ErrRateLimited
-		}
-		if endErr := n.Quiet.Move(ctx, key, lease, time.Time{}); endErr != nil {
-			return errors.Join(err, endErr)
-		}
+	case isAPI && apiErr.TooManyRequests():
+		n.flood(max(apiErr.RetryAfter, time.Second))
+		return also(ErrRateLimited, n.Quiet.Move(ctx, key, token, n.Now().Add(max(apiErr.RetryAfter, FloodQuiet))))
+	case mayHaveSent(err):
 		return err
+	default:
+		return also(err, n.Quiet.Move(ctx, key, token, time.Time{}))
 	}
 
 	err = errors.Join(
-		n.Quiet.Move(ctx, key, lease, n.Now().Add(Interval)),
+		n.Quiet.Move(ctx, key, token, n.Now().Add(Interval)),
 		n.Directory.NoticeSent(ctx, accountID, id),
 	)
 	if target.LastMessage > 0 {
@@ -247,6 +274,59 @@ func canWait(ctx context.Context, wait time.Duration) bool {
 	}
 	deadline, ok := ctx.Deadline()
 	return !ok || time.Until(deadline) >= wait+minCall
+}
+
+// flooded reports whether Telegram's flood control still asks this
+// instance to wait.
+func (n *Notifier) flooded() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.Now().Before(n.floodUntil)
+}
+
+// flood records that Telegram's flood control asked this instance to wait
+// for d.
+func (n *Notifier) flood(d time.Duration) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if until := n.Now().Add(d); until.After(n.floodUntil) {
+		n.floodUntil = until
+	}
+}
+
+// mayHaveSent reports whether a failed send may have gone out after all:
+// there was no answer (a timeout, the network), an answer of success that
+// couldn't be read, or a server error.
+func mayHaveSent(err error) bool {
+	var apiErr *botapi.Error
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	return apiErr.Status == 0 || apiErr.Status < 300 || apiErr.Status >= 500
+}
+
+// also returns err, joined with other if that failed too.
+func also(err, other error) error {
+	if other == nil {
+		return err
+	}
+	return errors.Join(err, other)
+}
+
+// Check makes the directory calls Notify makes, for a new random account
+// that doesn't exist, and returns an error if one failed: the deploy asks
+// for it, so a role that refuses them (infra/functions.tf) fails the
+// deploy instead of stopping notices. It changes nothing: the account
+// isn't there, so the writes' conditions fail.
+func (n *Notifier) Check(ctx context.Context) error {
+	account := ids.New()
+	if _, err := n.Directory.Notices(ctx, account); !errors.Is(err, directory.ErrNotFound) {
+		if err == nil {
+			err = errors.New("notices: a new account has notices set up")
+		}
+		return err
+	}
+	return errors.Join(n.Directory.NoticeSent(ctx, account, 0), n.Directory.NoticesOff(ctx, account))
 }
 
 func (n *Notifier) sleep(ctx context.Context, d time.Duration) error {

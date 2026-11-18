@@ -350,19 +350,23 @@ jobs:
           fi
           echo "Webhook, menu button and /start command are set"
 
-      - name: Smoke test – the notify function starts
+      - name: Smoke test – the notify function starts and may read notices
         working-directory: infra
         run: |
-          # A notice for an empty account is a no-op; it proves the function
-          # reads its parameters and starts.
+          # The check event has the function read its parameters, then make
+          # its directory calls (a read of the notice fields, and both
+          # writes) for a random account that doesn't exist, under its
+          # narrowed role: a refusal fails the invocation. Nothing changes,
+          # since the account isn't there. IAM's simulator can't check
+          # these calls' conditions (which items and attributes).
           function=$(terraform output -raw notify_function_name)
           failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
-            --payload '{"notify":{"account":""}}' --query FunctionError --output text "$RUNNER_TEMP/notify.json")
+            --payload '{"check":{}}' --query FunctionError --output text "$RUNNER_TEMP/notify.json")
           if [ "$failed" != "None" ]; then
-            echo "::error::The notify function failed"
+            echo "::error::The notify function failed, or its role refused its directory calls"
             exit 1
           fi
-          echo "The notify function starts"
+          echo "The notify function starts, and its role allows its directory calls"
 
       - name: Smoke test – sockets refuse unauthenticated connections
         run: |

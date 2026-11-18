@@ -836,19 +836,27 @@ function holds the bot token.
 - In order: `notify` reads the account's notice settings, then starts its
   quiet period for 30 seconds (rounded up to the minute), longer than it
   can run, with a conditional write, so of two deliveries at once only one
-  goes on. It sends the new notice; once that went out, the quiet period is
-  set to 3 minutes from then, the new notice's message ID recorded, and the
+  goes on. The row holds a random token, and only a write naming it can
+  change the period later, so a late one can't end a newer period. It
+  sends the new notice; once that went out, the quiet period is set to 3
+  minutes from then, the new notice's message ID recorded, and the
   previous notice deleted. Telegram lets bots delete their messages only
-  for 48 hours, so an older one stays in the chat. If the send fails
-  another way than "blocked", nothing is deleted or recorded and the quiet
-  period ends at once, so the next message can notify.
+  for 48 hours, so an older one stays in the chat. If the send fails,
+  nothing is deleted or recorded, and:
+  - refused outright (other than "blocked"), the quiet period ends at once,
+    so the next message can notify;
+  - with no answer or a server error, the notice may have gone out, so the
+    30 seconds run out first: no second notice follows at once that would
+    never be recorded or deleted.
 - Telegram's flood control (about 30 messages a second per bot, one a
   second per chat) answers 429 with `parameters.retry_after`, in seconds.
   `notify` waits that long and tries once more if it's at most 3 seconds
-  and the invocation has time left for it; otherwise, or if it's refused
-  again, it drops the notice as above. Failed notices aren't retried
-  later (Lambda's retries are off): a late notice is little use, and
-  retrying into a flood only adds to it.
+  and the invocation has time left for it. Otherwise, or if it's refused
+  again, it drops the notice: the account's quiet period runs as long as
+  Telegram asked, at least a minute, and that function instance tries no
+  notice to anyone until Telegram allows, without calling it. Failed
+  notices aren't retried later (Lambda's retries are off): a late notice
+  is little use, and retrying into a flood only adds to it.
 
 What this tells the server: that an account has a Telegram chat, which it
 already knows from registration, and when the account gets messages, which

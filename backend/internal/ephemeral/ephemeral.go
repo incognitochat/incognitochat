@@ -4,7 +4,7 @@
 //
 //	N#<nonce>  N              a used login nonce
 //	S#<nonce>  S              a spent send token's nonce
-//	Q#<key>    Q              a quiet period (e.g. after a notice)
+//	Q#<key>    Q              a quiet period (e.g. after a notice), with a random token (t)
 //	R#<key>    <window start> a rate counter (c)
 //	C#<name>   <connection>   a socket (sockets.go)
 //	U#<id>     U              an upload (uploads.go)
@@ -26,6 +26,7 @@ package ephemeral
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"slices"
@@ -196,22 +197,42 @@ type Quiet struct {
 	Now   func() time.Time
 }
 
-// Start begins a quiet period for key until until. It reports false if one
-// is already running.
-func (q *Quiet) Start(ctx context.Context, key string, until time.Time) (bool, error) {
-	return once(ctx, q.DB, q.Table, "Q#"+key, "Q", until, q.Now())
+// Start begins a quiet period for key until until, unless one is already
+// running, atomically: of two at once, one starts. It returns the period's
+// token, for Move, or "" if one was running. The token is random: it says
+// nothing but which start this is.
+func (q *Quiet) Start(ctx context.Context, key string, until time.Time) (string, error) {
+	token := rand.Text()
+	_, err := q.DB.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &q.Table,
+		Item: map[string]types.AttributeValue{
+			"pk": s("Q#" + key),
+			"sk": s("Q"),
+			"e":  num(expiry(until)),
+			"t":  s(token),
+		},
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":now": num(q.Now().Unix())},
+	})
+	if conditionFailed(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
-// Move moves the end of the quiet period Start began for key until from,
-// to until. An until that has passed ends it: it is stored as the minute
-// that has begun, since no row holds an exact time. A period that isn't
-// that one (none, or another begun after it ran out) is left alone.
+// Move moves the end of the quiet period Start began with token, to until.
+// An until that has passed ends it: it is stored as the minute that has
+// begun, since no row holds an exact time. Any other period (none, or one
+// started since, even within the same minute) is left alone, so a Move
+// tried again late can't end a newer period.
 //
-// So whoever starts a short period while it acts can, before it runs out,
-// keep it for longer once the action worked, or end it if it didn't,
-// without moving a period someone else started. Once only: after it ended,
-// another may start with the same end.
-func (q *Quiet) Move(ctx context.Context, key string, from, until time.Time) error {
+// So whoever starts a short period while it acts can keep it for longer
+// once the action worked, or end it if it didn't, without moving a period
+// someone else started.
+func (q *Quiet) Move(ctx context.Context, key, token string, until time.Time) error {
 	e := expiry(until)
 	if now := q.Now(); !until.After(now) {
 		e = now.Truncate(time.Minute).Unix()
@@ -222,9 +243,10 @@ func (q *Quiet) Move(ctx context.Context, key string, from, until time.Time) err
 			"pk": s("Q#" + key),
 			"sk": s("Q"),
 			"e":  num(e),
+			"t":  s(token),
 		},
-		ConditionExpression:       aws.String("e = :from"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":from": num(expiry(from))},
+		ConditionExpression:       aws.String("t = :t"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":t": s(token)},
 	})
 	if conditionFailed(err) {
 		return nil

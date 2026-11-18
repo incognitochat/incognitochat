@@ -1,7 +1,9 @@
 # Renders the notify function's role policy with the AWS provider's own
-# policy document, and checks that it reaches only what notify needs: no
-# table-wide DynamoDB action, and in the directory only the notice fields
-# of account items (finding BOT-5). Nothing touches AWS: the provider has
+# policy document, and checks what it reaches: no table-wide DynamoDB
+# action, and in the directory only account partitions, with the notice
+# fields named (finding BOT-5; what IAM can't narrow further is in
+# docs/security.md). Also that notify's timeout stays below the quiet
+# period it holds while sending. Nothing touches AWS: the provider has
 # fake credentials and makes no calls (a policy document is rendered
 # locally), and every resource the policy refers to is overridden, so
 # "apply" creates nothing. Run by CI (terraform test).
@@ -125,6 +127,14 @@ run "notify_role" {
       ]) if contains(flatten([s.Resource]), "arn:aws:dynamodb:eu-west-1:123456789012:table/incognitochat-test-directory")
     ])
     error_message = "A directory statement of notify's role reaches beyond the notice fields of account items."
+  }
+
+  # notify must stop before the quiet period it holds while sending a
+  # notice runs out (notices.Lease, 30 s in backend/internal/notices), or a
+  # second invocation could send another meanwhile.
+  assert {
+    condition     = local.functions["notify"].timeout < 30
+    error_message = "notify's timeout must stay below notices.Lease (30 s)."
   }
 
   # No other table but its quiet periods' (the ephemeral table).
