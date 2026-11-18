@@ -34,6 +34,17 @@ variable "github_environment" {
   }
 }
 
+variable "existing_function_roles" {
+  description = "Functions (api, bot, ws, notify) whose roles exist but aren't in this stack's state: the app stack created them before they moved here, so they are imported. scripts/bootstrap.sh fills it in"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for f in var.existing_function_roles : contains(["api", "bot", "ws", "notify"], f)])
+    error_message = "existing_function_roles may only name api, bot, ws and notify."
+  }
+}
+
 variable "monthly_budget_usd" {
   description = "Monthly cost budget for the account, in US dollars (default: 50 for production, 15 otherwise). Alerts go out at half of it, at all of it, and when the month is forecast to pass it"
   type        = number

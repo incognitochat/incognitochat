@@ -23,7 +23,4 @@ locals {
   partition      = data.aws_partition.current.partition
   prefix         = "incognitochat-${var.environment}"
   parameter_path = "/incognitochat/${var.environment}"
-
-  # Created by infra/init. Every function role must carry it.
-  lambda_boundary_arn = "arn:${local.partition}:iam::${local.account_id}:policy/${local.prefix}-lambda-boundary"
 }

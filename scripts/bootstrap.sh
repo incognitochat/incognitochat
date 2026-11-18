@@ -2,7 +2,8 @@
 # One-time setup (rerun it to apply changes) of everything GitHub Actions
 # needs to deploy:
 #   - AWS: Terraform state bucket, GitHub OIDC provider, least-privilege deploy
-#     role, the Lambda permissions boundary, Lambda code signing (build
+#     role (checked afterwards with IAM's policy simulator), the functions'
+#     roles and their permissions boundary, Lambda code signing (build
 #     bucket, signing profile, code signing config), and cost and health
 #     alerts (a monthly budget, alarms, and the topic they publish to)
 #     (infra/init)
@@ -67,10 +68,29 @@ tf_vars=(
 apply_args=(-input=false "${tf_vars[@]}")
 [[ "${AUTO_APPROVE:-}" == "1" ]] && apply_args+=(-auto-approve)
 
+# The functions' roles that exist but aren't in this stack's state, as a
+# JSON list: the app stack created them before they moved to infra/init
+# (function_roles.tf), which imports them instead of creating them.
+existing_function_roles() {
+  local state fn out names=()
+  state=$(tf state list 2>/dev/null || true)
+  for fn in api bot ws notify; do
+    grep -qxF "aws_iam_role.fn[\"${fn}\"]" <<<"$state" && continue
+    if out=$(aws iam get-role --role-name "${environment_prefix}-fn-${fn}" --query Role.RoleName --output text 2>&1); then
+      names+=("$fn")
+    elif [[ $out != *NoSuchEntity* ]]; then
+      echo "Couldn't check whether the ${fn} function's role exists: ${out}" >&2
+      return 1
+    fi
+  done
+  jq -cn '$ARGS.positional' --args "${names[@]}"
+}
+
 # --- AWS (Terraform) ----------------------------------------------------------
 if aws s3api head-bucket --bucket "$state_bucket" --region "$region" 2>/dev/null; then
   tf init -input=false -reconfigure "${backend_args[@]}"
-  tf apply "${apply_args[@]}"
+  roles=$(existing_function_roles)
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
 else
   # First run: the state bucket doesn't exist yet. Apply with local state,
   # then move that state into the bucket that was just created.
@@ -79,7 +99,8 @@ else
   trap 'rm -f "$override"' EXIT
   printf 'terraform {\n  backend "local" {}\n}\n' >"$override"
   tf init -input=false -reconfigure
-  tf apply "${apply_args[@]}"
+  roles=$(existing_function_roles)
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
   rm -f "$override"
   tf init -input=false -migrate-state -force-copy "${backend_args[@]}"
   rm -f "$init_dir/terraform.tfstate" "$init_dir/terraform.tfstate.backup"
@@ -89,6 +110,12 @@ deploy_role_arn=$(tf output -raw deploy_role_arn)
 builds_bucket=$(tf output -raw builds_bucket)
 signing_profile=$(tf output -raw signing_profile_name)
 code_signing_config=$(tf output -raw code_signing_config_arn)
+
+# The deploy role must now be denied reading user data and leaving access
+# behind, and be allowed what a deploy does with the functions. Each deploy
+# checks the same before applying.
+echo "Checking the deploy role's limits with IAM's policy simulator"
+AWS_REGION=$region "$root/scripts/check-function-roles.sh" deploy-role "$deploy_role_arn" "$environment_prefix"
 
 # --- GitHub -------------------------------------------------------------------
 echo "Configuring GitHub environment '${environment}'"

@@ -109,24 +109,24 @@ resource "aws_cloudwatch_log_group" "fn" {
   retention_in_days = var.log_retention_days
 }
 
-data "aws_iam_policy_document" "lambda_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "fn" {
+# Each function's role is created by infra/init (function_roles.tf),
+# trusted by Lambda alone and capped by the permissions boundary, so the
+# deploy role can't create roles or change whom they trust. This stack
+# writes their policies. A new function needs its role there first.
+data "aws_iam_role" "fn" {
   for_each = local.functions
 
-  name                 = "${local.prefix}-fn-${each.key}"
-  description          = "Execution role of the ${each.key} function"
-  assume_role_policy   = data.aws_iam_policy_document.lambda_trust.json
-  permissions_boundary = local.lambda_boundary_arn
+  name = "${local.prefix}-fn-${each.key}"
+}
+
+# The roles were created here before they moved to infra/init, which
+# imports them: forget them without deleting them.
+removed {
+  from = aws_iam_role.fn
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 data "aws_iam_policy_document" "fn" {
@@ -327,7 +327,7 @@ resource "aws_iam_role_policy" "fn" {
   for_each = local.functions
 
   name   = "runtime"
-  role   = aws_iam_role.fn[each.key].id
+  role   = data.aws_iam_role.fn[each.key].name
   policy = data.aws_iam_policy_document.fn[each.key].json
 }
 
@@ -370,7 +370,7 @@ resource "aws_lambda_function" "fn" {
 
   function_name           = "${local.prefix}-${each.key}"
   description             = "Incognito Chat ${each.key} (${var.environment})"
-  role                    = aws_iam_role.fn[each.key].arn
+  role                    = data.aws_iam_role.fn[each.key].arn
   runtime                 = "provided.al2023"
   handler                 = "bootstrap"
   architectures           = ["arm64"]

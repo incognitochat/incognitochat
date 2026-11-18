@@ -172,6 +172,15 @@ jobs:
       - name: Check the permissions boundary is up to date
         run: scripts/check-function-roles.sh boundary "incognitochat-${ENVIRONMENT}"
 
+      # Likewise the deploy role itself: it must be denied what a deploy
+      # never needs (reading user data, and leaving access behind that no
+      # plan would show), and still be allowed what this workflow does with
+      # the functions. An older infra/init stops the deploy here.
+      - name: Check the deploy role's limits
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: scripts/check-function-roles.sh deploy-role "$AWS_ROLE_ARN" "incognitochat-${ENVIRONMENT}"
+
       - name: Terraform init
         working-directory: infra
         env:

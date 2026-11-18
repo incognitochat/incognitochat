@@ -182,10 +182,13 @@ jobs:
       # infra/tests: renders function role policies and checks what they
       # reach; plans the secret parameters and checks that each generated
       # secret is written again only when its own version changes, and none
-      # while no version is set. Fake credentials, overridden resources: no
-      # AWS calls.
+      # while no version is set. infra/init/tests: renders the deploy role's
+      # policies and checks each fits IAM's size limit and allows no whole
+      # service. Fake credentials, overridden resources: no AWS calls.
       - name: Test
-        run: terraform -chdir=infra test
+        run: |
+          terraform -chdir=infra test
+          terraform -chdir=infra/init test
 
       # The deploy must pass each of those versions from its own GitHub
       # variable: Terraform's tests can't see the workflow.

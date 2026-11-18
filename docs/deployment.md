@@ -18,7 +18,9 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   stored AWS keys), builds the Lambda bundles reproducibly and attests them,
   and applies `infra/` with Terraform, which uploads each bundle, has AWS
   Signer sign it, and deploys the signed copy. The deploy role is limited by
-  the bootstrap stack and can't change its own permissions.
+  the bootstrap stack and can't change its own permissions, read user data,
+  or leave access behind that no plan would show
+  ([what it may do](#what-the-deploy-role-may-do)).
 - It checks that each function runs the attested bundle plus its signature
   ([verifying.md](verifying.md#the-backend)).
 - It then sets up the bot (the function registers its own webhook, menu
@@ -81,12 +83,24 @@ AWS_PROFILE=<profile> DEPLOY_TAGS='v*.*.*' REVIEWERS=<login> scripts/bootstrap.s
 ```
 
 It creates the Terraform state bucket, the GitHub OIDC provider, the deploy
-role, the Lambda permissions boundary, code signing and the alerts below
-(`infra/init`), and the GitHub environment `<env>`, which accepts deploys from `main` only (dev)
+role, the functions' roles and their permissions boundary, code signing and
+the alerts below (`infra/init`), and the GitHub environment `<env>`, which accepts deploys from `main` only (dev)
 or from release tags only, with required reviewers (production), with the
 secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 `TF_STATE_BUCKET`, `LAMBDA_BUILDS_BUCKET`, `LAMBDA_SIGNING_PROFILE`,
-`LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`).
+`LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`). Then it asks IAM's policy
+simulator whether the deploy role is denied what it should be
+([below](#what-the-deploy-role-may-do)), and stops if not.
+
+The functions' execution roles (`<prefix>-fn-api`, `-bot`, `-ws` and
+`-notify`, trusted by Lambda alone) belong to the bootstrap stack, so the
+deploy role never creates a role or changes whom one trusts; the app stack
+writes their policies. A new function needs its role added there
+(`infra/init/main.tf`, `functions`) and applied first. In environments set
+up before, the app stack created these roles: the bootstrap imports those
+that exist instead of creating them (it passes them as
+`existing_function_roles`), and the app stack's next deploy forgets them
+without deleting them.
 
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
@@ -98,14 +112,18 @@ stopped.
 - Before applying anything, it asks whether the permissions boundary lets
   the existing roles make the invokes this code makes (`api` invoking `ws`
   and `notify`, `ws` invoking `notify`), as if the roles' own policies
-  allowed them. A first deploy, with no roles yet, skips this.
+  allowed them. Roles not created yet are skipped; the check after applying
+  covers them.
+- Before applying, it also asks whether the deploy role itself is denied
+  what it should be, and allowed what the deploy does with the functions
+  ([below](#what-the-deploy-role-may-do)), as the bootstrap does.
 - After applying, it asks whether each function's role, its policy and the
   boundary together, allows every call the functions make to each other
   (those, and `ws` posting to sockets).
 
-Either fails the deploy if a call is refused, or if the deploy role may not
-ask (an older `infra/init`), and asks again a few times when IAM is slow or
-throttles.
+Each fails the deploy if a call isn't decided as it should be, or if the
+deploy role may not ask (an older `infra/init`), and asks again a few times
+when IAM is slow or throttles.
 
 The simulator can't check the conditions on `notify`'s directory access
 (which items and attributes; [infra/functions.tf](../infra/functions.tf)),
@@ -255,6 +273,59 @@ The app is served from `<org>/<org>.github.io` in a GitHub organization of its
 own. How to create and configure it, and the variables it needs (`API_URL`,
 `WS_URL`, `MEDIA_ORIGIN` from Terraform's outputs, `BOT_USERNAME`,
 `APP_NAME`, `ISSUER_KEY`), is in [hosting/README.md](../hosting/README.md).
+
+### What the deploy role may do
+
+The deploy role ([`infra/init/github_deploy.tf`](../infra/init/github_deploy.tf))
+may make only the calls the app stack's Terraform makes, on the app stack's
+own resources. What a deploy never needs is denied outright (the
+`<prefix>-github-deploy-limits` and `-github-deploy-no-items` policies), so
+that a compromised deploy job, or a deploy someone got approved, can't read
+user data or leave access behind that no Terraform plan would show:
+
+- **Tables**: it manages them, but can't read or write their items, scan,
+  query, export, back up or restore them, stream their changes, or give
+  them a resource policy.
+- **Functions**: it deploys signed code and changes their settings. It
+  invokes only `bot` (setting it up) and `notify` (its check), creates no
+  other function, gives URLs only to `api` and `bot`, and buys no
+  provisioned concurrency. The permissions it gives may let invoke them
+  only CloudFront (`api`), the WebSocket API (`ws`), and anyone through a
+  URL that needs no signature (`api` and `bot`): no account or role, and
+  no one directly.
+- **Roles**: it may only write the four functions' roles' own policies,
+  which the permissions boundary caps, and pass those roles to Lambda. It
+  can't create a role, user or access key, change whom a role trusts, or
+  attach a policy, its own roles' included.
+- **Logs**: it manages the functions' log groups, but can't read them,
+  subscribe to them or export them.
+- **The media bucket**: it manages only the settings `infra/media.tf` sets,
+  so a change to any of them shows in the next plan, which undoes it. It
+  can't turn on versions, notifications, request logs, replication or
+  inventories, nor read, write or delete attachments.
+- **Parameters**: it writes them, and reads their current values: the AWS
+  provider reads every parameter it manages, decrypted, on each plan,
+  write-only ones too. It can't read their older versions, read them all
+  by path, or share them.
+
+The bootstrap and every deploy check these with IAM's policy simulator
+(`scripts/check-function-roles.sh deploy-role`), printing each check. What a
+compromised deploy can still do is in
+[security.md](security.md#other-limits).
+
+**Applying the change that brought this** (the functions' roles moving to
+`infra/init`, and the denies), in each environment in turn, dev first:
+
+1. Rerun the bootstrap, while no deploy runs. Its plan should import the
+   four roles and change nothing in them (no role created or destroyed),
+   add the `-github-deploy-functions` and `-github-deploy-limits` policies
+   and narrow `-github-deploy`; then every simulator check should pass. A deploy from before the change still works with it: its plan
+   finds nothing to change in the roles.
+2. Deploy the change (dev: merge it; production: release it). Its plan
+   should say the four `aws_iam_role.fn` "will no longer be managed by
+   Terraform" and destroy nothing, and the deploy's own simulator checks
+   should pass. A deploy of the change against a bootstrap from before it
+   stops at those checks, before applying anything.
 
 ## Secrets at rest
 
