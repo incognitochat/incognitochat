@@ -15,6 +15,10 @@ on:
         description: What the hosting repository builds (a commit SHA for dev, the release tag for production)
         required: true
         type: string
+      bundles:
+        description: The SHA-256 of each Lambda bundle as the backend job built it (sha256sum's lines)
+        required: true
+        type: string
 
 permissions: {}
 
@@ -223,6 +227,32 @@ jobs:
         with:
           name: lambda-bundles
           path: backend/dist
+
+      # Exactly the bundles the backend job built, before anything attests or
+      # deploys them: any job of the run could replace the artifact, but not
+      # the backend job's outputs, which carry the hashes (ci.yml).
+      - name: Check the bundles are the backend job's
+        working-directory: backend/dist
+        env:
+          BUNDLES: ${{ inputs.bundles }}
+        run: |
+          built=$(sed '/^$/d' <<<"$BUNDLES" | sort)
+          if [ -z "$built" ] || grep -vqE '^[0-9a-f]{64}  [a-z0-9_-]+\.zip$' <<<"$built"; then
+            echo "::error::The backend job's bundle hashes are missing or malformed"
+            exit 1
+          fi
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "::error::No bundles were downloaded"
+            exit 1
+          fi
+          if ! diff <(echo "$built") <(sha256sum -- "${zips[@]}" | sort); then
+            echo "::error::The downloaded bundles aren't the ones the backend job built (< built, > downloaded)"
+            exit 1
+          fi
+          echo "The bundles are the ones the backend job built:"
+          echo "$built"
 
       # Public, signed provenance for the function builds about to be
       # deployed. The builds are reproducible, so anyone can rebuild this

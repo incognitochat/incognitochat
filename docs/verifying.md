@@ -149,8 +149,9 @@ Users can't look into the AWS account, so the backend is checked through
 what CI publishes:
 
 - **Reproducible and attested.** The four Lambda bundles are byte-identical
-  for the same commit (`scripts/build-lambdas.sh` prints their SHA-256), and
-  each deploy attests them with Sigstore before deploying them.
+  for the same commit (`scripts/build-lambdas.sh` prints their SHA-256). Each
+  deploy checks that the bundles it received are the ones CI's build job
+  hashed, then attests them with Sigstore before deploying them.
 - **Only signed code runs.** Each bundle is signed with the environment's AWS
   Signer profile, and every function has a code signing config that makes
   Lambda refuse anything not signed by it. CI is the only place that signs;
