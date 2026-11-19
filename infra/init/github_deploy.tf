@@ -501,12 +501,12 @@ resource "aws_iam_role_policy_attachment" "deploy_no_items" {
 }
 
 # What a deploy never needs, denied outright whatever the policies above
-# allow: reading user data, and leaving access behind that no Terraform
-# plan shows (a role trusted by another account, a function permission for
-# one, a log subscription, a bucket notification). The app stack's
-# Terraform never makes these calls. IAM's policy simulator
-# checks that they are denied (scripts/check-function-roles.sh deploy-role),
-# after each bootstrap and before each deploy.
+# allow: reading user data, leaving access behind that no Terraform plan
+# shows (a role trusted by another account, a function permission for one,
+# a log subscription, a bucket notification), and touching the audit
+# trail. The app stack's Terraform never makes these calls. IAM's policy
+# simulator checks that they are denied (scripts/check-function-roles.sh
+# deploy-role), after each bootstrap and before each deploy.
 data "aws_iam_policy_document" "deploy_limits" {
   # Items, streams, exports, backups and anything that copies a table or
   # shows its keys. Writes: deploy_no_items.
@@ -739,6 +739,25 @@ data "aws_iam_policy_document" "deploy_limits" {
     effect    = "Deny"
     actions   = ["ssm:GetParameterHistory", "ssm:GetParametersByPath", "ssm:PutResourcePolicy"]
     resources = ["*"]
+  }
+
+  # The record of what it does (audit.tf): it can't stop, change or delete
+  # the trail, nor make another (one recording data events would record
+  # each attachment fetched, with the user's IP address, into any bucket).
+  statement {
+    sid       = "NoTrailChanges"
+    effect    = "Deny"
+    actions   = ["cloudtrail:*"]
+    resources = ["*"]
+  }
+
+  # Nor touch the trail's bucket or what it holds: its settings, its policy,
+  # its lifecycle, the records.
+  statement {
+    sid       = "NoAuditBucket"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [local.arns.audit_buckets, "${local.arns.audit_buckets}/*"]
   }
 }
 

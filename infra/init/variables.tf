@@ -37,6 +37,17 @@ variable "github_environment" {
   }
 }
 
+variable "audit_retention_days" {
+  description = "Days the audit trail's files are kept (audit.tf; docs/data.md says 365); a file deleted or replaced before then stays 30 days more as an older version"
+  type        = number
+  default     = 365
+
+  validation {
+    condition     = var.audit_retention_days >= 1 && floor(var.audit_retention_days) == var.audit_retention_days
+    error_message = "audit_retention_days must be a whole number of days, at least 1."
+  }
+}
+
 variable "existing_function_roles" {
   description = "Functions (api, bot, ws, notify) whose roles exist but aren't in this stack's state: the app stack created them before they moved here, so they are imported. scripts/bootstrap.sh fills it in"
   type        = list(string)

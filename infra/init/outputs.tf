@@ -34,11 +34,21 @@ output "code_signing_config_arn" {
 }
 
 output "alerts_topic_arn" {
-  description = "SNS topic the budget and the alarms publish to; subscribe an address to it to receive them"
+  description = "SNS topic the budget, the alarms, the change alerts of the app's region and Access Analyzer's findings publish to; subscribe an address to it to receive them"
   value       = aws_sns_topic.alerts.arn
 }
 
 output "edge_alerts_topic_arn" {
-  description = "SNS topic in us-east-1 the alarms on CloudFront and its firewall publish to; subscribe an address to it too"
+  description = "SNS topic in us-east-1 the alarms on CloudFront and its firewall, and the change alerts recorded there (IAM, CloudFront, the firewall…), publish to; subscribe an address to it too"
   value       = aws_sns_topic.edge_alerts.arn
+}
+
+output "audit_trail_arn" {
+  description = "The account's audit trail (CloudTrail), for checking its files (aws cloudtrail validate-logs)"
+  value       = aws_cloudtrail.audit.arn
+}
+
+output "audit_bucket" {
+  description = "Bucket holding the audit trail's files, for records older than CloudTrail's 90-day event history"
+  value       = aws_s3_bucket.audit.bucket
 }

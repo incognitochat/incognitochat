@@ -17,9 +17,10 @@
 #       applying covers them.
 #   deploy-role <deploy-role-ARN> <function-prefix>
 #       Before applying, and after each bootstrap (scripts/bootstrap.sh):
-#       whether the deploy role is denied reading user data and leaving
-#       access behind (infra/init, deploy_limits), and still allowed what
-#       the deploy does with the functions and the edge. A deploy role
+#       whether the deploy role is denied reading user data, leaving
+#       access behind and touching the audit trail (infra/init,
+#       deploy_limits), and still allowed what the deploy does with the
+#       functions and the edge. A deploy role
 #       older than this code stops the deploy before anything changes.
 #   roles
 #       After applying: every call in the JSON on standard input (Terraform's
@@ -183,6 +184,8 @@ deploy-role)
   boundary="arn:${partition}:iam::${account}:policy/${prefix}-lambda-boundary"
   request_policy="arn:${partition}:cloudfront::${account}:origin-request-policy/check"
   ip_set="arn:${partition}:wafv2:us-east-1:${account}:global/ipset/${prefix}-check/check"
+  trail="arn:${partition}:cloudtrail:${region}:${account}:trail/${prefix}-audit"
+  audit="arn:${partition}:s3:::${prefix}-audit-check"
   # An account that isn't this one (AWS's example account ID).
   outsider=111122223333
 
@@ -217,6 +220,12 @@ deploy-role)
   check explicitDeny "subscribing to a log group" "$role" logs:PutSubscriptionFilter "$log_group"
   check explicitDeny "keeping versions of attachments" "$role" s3:PutBucketVersioning "$media"
   check explicitDeny "getting notices of uploads" "$role" s3:PutBucketNotification "$media"
+
+  # The audit trail, the record of what the deploy did (infra/init/audit.tf).
+  check explicitDeny "stopping the audit trail" "$role" cloudtrail:StopLogging "$trail"
+  check explicitDeny "creating another trail" "$role" cloudtrail:CreateTrail "${trail}-check"
+  check explicitDeny "deleting the audit trail's records" "$role" s3:DeleteObject "${audit}/AWSLogs/check"
+  check explicitDeny "changing the audit bucket's policy" "$role" s3:PutBucketPolicy "$audit"
 
   # What the deploy does need, so the denies don't reach too far, and
   # what Terraform calls through the narrowed allows.

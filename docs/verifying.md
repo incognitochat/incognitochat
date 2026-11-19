@@ -200,10 +200,12 @@ What this doesn't prove:
   code, or change the functions' settings, once the check has run. The next
   deploy's check fails if that code still runs (unless the deploy replaced
   it first, with a changed bundle), and its plan shows and undoes changed
-  settings, but only the account's own records (CloudTrail) show what ran
-  in between.
+  settings, but only the account's own audit trail shows what ran in
+  between ([deployment.md](deployment.md#audit-trail-and-change-alerts)).
 - That signing stayed on: whoever controls the AWS account can switch it
-  off and deploy something else, and only CloudTrail would show it.
+  off and deploy something else, and only the account's own records would
+  show it (the audit trail, and an email to its admin, which they can turn
+  off too).
 
 Signing in a separate role that signs only attested hashes, and change
 alerts held by an independent party, are
