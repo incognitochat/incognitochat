@@ -248,7 +248,7 @@ variable "api_access" {
 }
 
 variable "firewall" {
-  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login, and a list of addresses to block (edge.tf). About $9 a month, plus $0.60 per million requests"
+  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login, and a list of addresses to block (edge.tf). About $10 a month, plus $0.60 per million requests"
   type        = bool
   default     = false
 }

@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -191,6 +192,97 @@ func TestDelete(t *testing.T) {
 	}
 	if err := bucket.Delete(context.Background(), "denied"); err == nil {
 		t.Error("a refused delete succeeded")
+	}
+}
+
+func TestDeleteAll(t *testing.T) {
+	// S3's DeleteObjects: one POST /<bucket>?delete naming the keys, which
+	// must carry a checksum of its body (S3 refuses it without one). Quiet,
+	// it answers only the keys it couldn't delete, each with its own error.
+	type request struct {
+		Objects []struct {
+			Key string `xml:"Key"`
+		} `xml:"Object"`
+		Quiet bool `xml:"Quiet"`
+	}
+	var asked []request
+	answer := `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/b" || !r.URL.Query().Has("delete") {
+			t.Errorf("%s %s", r.Method, r.URL)
+		}
+		checksum := r.Header.Get("Content-MD5") != ""
+		for name := range r.Header {
+			checksum = checksum || strings.HasPrefix(strings.ToLower(name), "x-amz-checksum-")
+		}
+		if !checksum {
+			t.Errorf("no checksum of the body: %v", r.Header)
+		}
+		var req request
+		if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		asked = append(asked, req)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	client := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String(srv.URL),
+		UsePathStyle: true,
+		Credentials:  credentials.NewStaticCredentialsProvider("AKIDEXAMPLE", "secret", ""),
+		// As the api function's client is set (cmd/api): DeleteObjects
+		// still gets its checksum.
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
+	})
+	bucket := &Bucket{S3: client, Name: "b"}
+	ctx := context.Background()
+
+	// All of them go: nothing failed.
+	failed, err := bucket.DeleteAll(ctx, []string{"one", "two", "three"})
+	if err != nil || len(failed) != 0 {
+		t.Fatalf("DeleteAll = %v, %v", failed, err)
+	}
+	if len(asked) != 1 || !asked[0].Quiet || len(asked[0].Objects) != 3 || asked[0].Objects[0].Key != "m/one" || asked[0].Objects[2].Key != "m/three" {
+		t.Fatalf("asked %+v", asked)
+	}
+
+	// Some fail on their own: only those are reported.
+	answer = `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+		`<Error><Key>m/two</Key><Code>InternalError</Code><Message>try again</Message></Error>` +
+		`<Error><Key>m/four</Key><Code>SlowDown</Code><Message>slow down</Message></Error>` +
+		`</DeleteResult>`
+	failed, err = bucket.DeleteAll(ctx, []string{"one", "two", "three", "four"})
+	if err != nil || strings.Join(failed, ",") != "two,four" {
+		t.Fatalf("DeleteAll = %v, %v", failed, err)
+	}
+
+	// An error about a key it wasn't asked about can't be told apart: the
+	// whole request counts as failed.
+	answer = `<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+		`<Error><Key>m/other</Key><Code>InternalError</Code></Error></DeleteResult>`
+	if failed, err := bucket.DeleteAll(ctx, []string{"one"}); err == nil {
+		t.Fatalf("DeleteAll = %v with an unknown key's error", failed)
+	}
+
+	// The request fails as a whole.
+	status, answer = http.StatusForbidden, `<Error><Code>AccessDenied</Code></Error>`
+	if _, err := bucket.DeleteAll(ctx, []string{"one"}); err == nil {
+		t.Fatal("a refused request succeeded")
+	}
+
+	// Nothing to delete asks nothing; too many is refused before asking.
+	asked = nil
+	if failed, err := bucket.DeleteAll(ctx, nil); err != nil || failed != nil {
+		t.Fatalf("DeleteAll(nil) = %v, %v", failed, err)
+	}
+	if _, err := bucket.DeleteAll(ctx, make([]string, MaxDeleteAll+1)); err == nil {
+		t.Fatal("more than S3 takes in one request was sent")
+	}
+	if len(asked) != 0 {
+		t.Fatalf("asked %+v", asked)
 	}
 }
 

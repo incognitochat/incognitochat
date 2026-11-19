@@ -129,8 +129,29 @@ run "firewall" {
       "1" = "rate-per-ip"
       "2" = "anonymous-per-ip"
       "3" = "lookups-total"
+      "4" = "deletes-total"
     })
-    error_message = "The firewall's rules must be the block list (priority 0), then rate-per-ip, anonymous-per-ip and lookups-total."
+    error_message = "The firewall's rules must be the block list (priority 0), then rate-per-ip, anonymous-per-ip, lookups-total and deletes-total."
+  }
+
+  # Batches of uploads to delete have their own total, sized by the read
+  # cap (200 in a test environment: 60 a minute), and aren't counted as
+  # lookups.
+  assert {
+    condition = alltrue([
+      for r in aws_wafv2_web_acl.api[0].rule : alltrue([
+        r.statement[0].rate_based_statement[0].limit == 60,
+        r.statement[0].rate_based_statement[0].aggregate_key_type == "CONSTANT",
+        r.statement[0].rate_based_statement[0].evaluation_window_sec == 60,
+      ])
+      if r.name == "deletes-total"
+    ])
+    error_message = "deletes-total must count everyone's batches of deletes together, over a minute, at 0.3 times the read cap."
+  }
+
+  assert {
+    condition     = local.delete_routes == { POST = "(^|/)media/delete$" } && !strcontains(local.lookup_routes.POST, "|media/delete") && strcontains(local.anonymous_routes.POST, "|media/delete)")
+    error_message = "POST /media/delete must count towards deletes-total and anonymous-per-ip, not lookups-total."
   }
 
   # Priority 0 blocks what the IP set holds.

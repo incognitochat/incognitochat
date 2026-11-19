@@ -119,13 +119,22 @@ import {
   type LocalMedia,
   type MessageBody,
   type MessageView,
+  type UploadDelete,
 } from './store';
 import { decryptFile, encryptFile, newFileKey, uploadSize } from '../crypto/media';
 import { httpTransfer, TransferError, WrongSize, type Transfer } from '../net/transfer';
 
 /** The most reactions to messages not here yet that a conversation keeps. */
 const MAX_PENDING_REACTIONS = 100;
-/** How many uploads are deleted from the server at once. */
+/** How many uploads one request deletes from the server (POST /media/delete takes at most 100). */
+const UPLOAD_DELETE_BATCH = 100;
+/**
+ * The pause between two such requests, one at a time: a chat with thousands
+ * of attachments goes at about 40 uploads a second, as an account's
+ * deletion steps do, leaving the database's capacity to everyone else.
+ */
+const UPLOAD_DELETE_PAUSE_MS = 2_000;
+/** How many uploads are deleted at once, one per request, from an older server without POST /media/delete. */
 const UPLOAD_DELETE_PARALLEL = 6;
 /**
  * How long before an upload of ours, deleted just after it was made, is
@@ -273,7 +282,7 @@ export interface MessagingDeps {
   messageNow?: () => number;
   /** Uploads and downloads attachments (tests use a fake). */
   transfer?: Transfer;
-  /** Waits ms before an upload is tried again (tests don't wait). */
+  /** Waits ms: before an upload is tried again, and between requests deleting uploads (tests don't wait). */
   wait?: (ms: number) => Promise<void>;
   /** Runs fn after ms, for work in the background (tests run it when they choose); returns what cancels it. */
   later?: (fn: () => void, ms: number) => () => void;
@@ -330,6 +339,13 @@ function checkUpload(value: unknown): { id: string; url: string } {
   const { id, url } = checkObject(value);
   if (typeof id !== 'string' || typeof url !== 'string' || !url.startsWith('https://')) throw new Error('bad upload');
   return { id, url };
+}
+
+/** POST /media/delete's answer: one result for each upload asked about, in their order. */
+function checkDeleteResults(value: unknown, count: number): string[] {
+  const { results } = checkObject(value);
+  if (!Array.isArray(results) || results.length !== count || results.some((r) => typeof r !== 'string')) throw new Error('bad delete results');
+  return results as string[];
 }
 
 /** A fresh upload URL, or word that the upload is stored already. */
@@ -834,9 +850,13 @@ export function createMessaging(deps: MessagingDeps) {
   /** Whether a flush was asked for while one ran (flushing): it then runs again, for what was queued too late for it. */
   let flushAgain = false;
   /**
-   * Works through the uploads waiting to be deleted, several at a time. One
-   * already gone counts as done; with the server unreachable or busy, the
-   * rest wait for the next try (each start, and upkeep).
+   * Works through the uploads waiting to be deleted, up to
+   * UPLOAD_DELETE_BATCH with each request (POST /media/delete), one request
+   * at a time, pausing UPLOAD_DELETE_PAUSE_MS between them. One already gone
+   * counts as done; with the server unreachable, busy or failing (or the
+   * bucket failing to delete some), the rest wait for the next try (each
+   * start, and upkeep). A server without that route (older than this app)
+   * is asked one upload at a time, several at once, as before it.
    */
   function flushUploadDeletes(): Promise<void> {
     if (flushing) {
@@ -847,11 +867,13 @@ export function createMessaging(deps: MessagingDeps) {
       // Our own uploads, just made, that the server said it didn't know:
       // asked again later, not in this run.
       const deferred = new Set<string>();
+      // Whether the server has POST /media/delete, until it says otherwise.
+      const server = { batches: true };
       try {
         let reached: boolean;
         do {
           flushAgain = false;
-          reached = await withLock('upload-deletes-flush', () => flushOnce(deferred));
+          reached = await withLock('upload-deletes-flush', () => flushOnce(deferred, server));
         } while (flushAgain && reached);
       } finally {
         flushing = null;
@@ -865,33 +887,83 @@ export function createMessaging(deps: MessagingDeps) {
     return flushing;
   }
 
-  /** One run of flushUploadDeletes, holding its lock; returns false if it stopped because the server couldn't be reached or was busy. */
-  async function flushOnce(deferred: Set<string>): Promise<boolean> {
+  /** What a try at deleting uploads did: those done, those of ours to ask about again later, and whether to stop for now. */
+  interface DeleteTry {
+    done: string[];
+    again: string[];
+    stop: boolean;
+  }
+
+  /**
+   * One run of flushUploadDeletes, holding its lock; returns false if it
+   * stopped because the server couldn't be reached, was busy or failed, or
+   * the app stopped (stop()) between two requests.
+   */
+  async function flushOnce(deferred: Set<string>, server: { batches: boolean }): Promise<boolean> {
+    let sent = false;
     for (;;) {
       const items = (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
       if (items.length === 0) return true;
-      const done: string[] = [];
-      const again: string[] = [];
-      let stop = false;
-      let next = 0;
-      const worker = async () => {
-        while (!stop && next < items.length) {
-          const item = items[next++]!;
-          try {
-            await api.post(`/media/${item.id}/delete`, { secret: item.d }, checkObject);
-            done.push(item.id);
-          } catch (err) {
-            if (err instanceof ApiError && err.code === 'not_found') (item.recent ? again : done).push(item.id);
-            else stop = true;
-          }
+      let tried: DeleteTry | null = null;
+      if (server.batches) {
+        if (sent) {
+          await wait(UPLOAD_DELETE_PAUSE_MS);
+          if (stopped) return false;
         }
-      };
-      await Promise.all(Array.from({ length: UPLOAD_DELETE_PARALLEL }, worker));
-      await forgetUploadDeletes(db, done);
-      await triedUploadDeletes(db, again);
-      for (const id of again) deferred.add(id);
-      if (stop) return false;
+        sent = true;
+        tried = await deleteBatch(items.slice(0, UPLOAD_DELETE_BATCH));
+        server.batches = tried !== null;
+      }
+      tried ??= await deleteEach(items);
+      await forgetUploadDeletes(db, tried.done);
+      await triedUploadDeletes(db, tried.again);
+      for (const id of tried.again) deferred.add(id);
+      if (tried.stop) return false;
     }
+  }
+
+  /**
+   * Deletes uploads with one request (POST /media/delete), which answers for
+   * each: deleted, not_found (gone, as the single route answers it), or
+   * failed (kept, for the next try). Returns null if the server doesn't have
+   * the route: an older one answers 404 or 405 for it.
+   */
+  async function deleteBatch(batch: UploadDelete[]): Promise<DeleteTry | null> {
+    let results: string[];
+    try {
+      results = await api.post('/media/delete', { items: batch.map((u) => ({ id: u.id, secret: u.d })) }, (v) => checkDeleteResults(v, batch.length));
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 404 || err.status === 405)) return null;
+      return { done: [], again: [], stop: true };
+    }
+    const tried: DeleteTry = { done: [], again: [], stop: false };
+    batch.forEach((item, i) => {
+      if (results[i] === 'deleted') tried.done.push(item.id);
+      else if (results[i] === 'not_found') (item.recent ? tried.again : tried.done).push(item.id);
+      // failed, or an answer this version doesn't know: kept for the next try.
+      else tried.stop = true;
+    });
+    return tried;
+  }
+
+  /** Deletes uploads one per request (POST /media/{id}/delete), several at once: for a server without POST /media/delete. */
+  async function deleteEach(items: UploadDelete[]): Promise<DeleteTry> {
+    const tried: DeleteTry = { done: [], again: [], stop: false };
+    let next = 0;
+    const worker = async () => {
+      while (!tried.stop && next < items.length) {
+        const item = items[next++]!;
+        try {
+          await api.post(`/media/${item.id}/delete`, { secret: item.d }, checkObject);
+          tried.done.push(item.id);
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'not_found') (item.recent ? tried.again : tried.done).push(item.id);
+          else tried.stop = true;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: UPLOAD_DELETE_PARALLEL }, worker));
+    return tried;
   }
 
   /**

@@ -246,6 +246,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodPost, "/media/{id}/upload", s.renewUpload)
 	r.Handle(http.MethodGet, "/media/{id}", s.download)
 	r.Handle(http.MethodPost, "/media/{id}/delete", s.deleteUpload)
+	r.Handle(http.MethodPost, "/media/delete", s.deleteUploads)
 }
 
 // tokenResponse is what a successful registration or login returns.

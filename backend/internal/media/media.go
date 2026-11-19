@@ -11,11 +11,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 const (
@@ -68,7 +70,12 @@ type Presigner interface {
 type Objects interface {
 	HeadObject(context.Context, *s3.HeadObjectInput, ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	DeleteObject(context.Context, *s3.DeleteObjectInput, ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	DeleteObjects(context.Context, *s3.DeleteObjectsInput, ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
+
+// MaxDeleteAll is the most uploads DeleteAll takes: S3 deletes at most
+// 1,000 objects a request.
+const MaxDeleteAll = 1000
 
 // Bucket is the media bucket.
 type Bucket struct {
@@ -140,4 +147,40 @@ func (b *Bucket) Stored(ctx context.Context, id string) (bool, error) {
 func (b *Bucket) Delete(ctx context.Context, id string) error {
 	_, err := b.S3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &b.Name, Key: key(id)})
 	return err
+}
+
+// DeleteAll deletes the ciphertext of each of ids (at most MaxDeleteAll)
+// with one request, and returns those S3 couldn't delete: it answers for
+// each object, so some can fail while the rest go. Deleting one that's gone
+// is fine. It fails as a whole if the request does, or if S3 names an object
+// it wasn't asked to delete.
+func (b *Bucket) DeleteAll(ctx context.Context, ids []string) (failed []string, err error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > MaxDeleteAll {
+		return nil, errors.New("media: too many uploads to delete at once")
+	}
+	asked := make(map[string]bool, len(ids))
+	objects := make([]types.ObjectIdentifier, len(ids))
+	for i, id := range ids {
+		asked[id] = true
+		objects[i] = types.ObjectIdentifier{Key: key(id)}
+	}
+	// Quiet: S3 lists only the objects it couldn't delete.
+	out, err := b.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: &b.Name,
+		Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range out.Errors {
+		id, ok := strings.CutPrefix(aws.ToString(e.Key), "m/")
+		if !ok || !asked[id] {
+			return nil, errors.New("media: S3 named an upload it wasn't asked to delete")
+		}
+		failed = append(failed, id)
+	}
+	return failed, nil
 }
