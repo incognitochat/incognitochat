@@ -151,3 +151,49 @@ func TestSendAtCapGivesBackEveryToken(t *testing.T) {
 		t.Fatalf("next minute: %d %v", status, out)
 	}
 }
+
+// A first message refused by its link's hourly cap gives back the tokens
+// it paid with, as the mailbox's cap does (CQ-3). The limiter's counters
+// are named by their window, so they roll over by the minute and the hour.
+func TestIntroCapGivesBackTokens(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	spent := h.server.Spent.(*memSpent)
+	owner := h.account(t, userID)
+	l := newLinkKeys(t)
+	_, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true)
+	intro := out["mailbox"].(string)
+	if !h.now.Truncate(time.Hour).Equal(h.now) {
+		t.Fatal("the test starts on the hour")
+	}
+	// The link's cap, spread over minutes under the mailbox's own cap.
+	for i := range IntroSendsPerHour {
+		if i > 0 && i%SendsPerMailboxPerMinute == 0 {
+			h.now = h.now.Add(time.Minute)
+		}
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": clientEnvelope(t), "token": mintToken(t, h.now)}); status != http.StatusOK {
+			t.Fatalf("send %d: %d %v", i, status, out)
+		}
+	}
+	h.now = h.now.Add(time.Minute)
+	largest := testEnvelope(envelope.MaxWraps, 16384)
+	paid := mintTokens(t, h.now, envelope.MaxTokens)
+	before := spent.calls
+	status, out := h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if spent.calls-before != envelope.MaxTokens {
+		t.Fatalf("%d tokens were spent before the cap refused the send", spent.calls-before)
+	}
+	if n := spent.count(t, paid); n != 0 {
+		t.Fatalf("%d tokens stayed spent", n)
+	}
+	// They pay for a send elsewhere.
+	if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": largest, "tokens": paid}); status != http.StatusOK {
+		t.Fatalf("the same tokens elsewhere: %d %v", status, out)
+	}
+	// The next hour, the link takes first messages again.
+	h.now = h.now.Truncate(time.Hour).Add(time.Hour)
+	if status, out := h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": clientEnvelope(t), "token": mintToken(t, h.now)}); status != http.StatusOK {
+		t.Fatalf("next hour: %d %v", status, out)
+	}
+}

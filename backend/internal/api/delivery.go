@@ -276,6 +276,10 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 			return s.internal(route, err)
 		}
 		if !ok {
+			// As at the mailbox's cap, the sender gets the tokens back.
+			if err := s.unspendAll(ctx, tokens); err != nil {
+				return s.internal(route, err)
+			}
 			return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 		}
 	}
