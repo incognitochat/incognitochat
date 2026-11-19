@@ -6,6 +6,10 @@
 # function's request counts are the exception: CI deploys what they read
 # (the log line, the metric filters, the log level), so it could.
 #
+# The change alerts and Access Analyzer's findings (audit.tf) publish to
+# the same topics: those of the app's region to the first, those of
+# us-east-1 (IAM, CloudFront, the firewall) to the second.
+#
 # The topics start without subscribers: whoever runs the deployment
 # subscribes an address to each themselves (docs/deployment.md), so no
 # address is ever written to the repository or to Terraform state.
@@ -29,6 +33,28 @@ data "aws_iam_policy_document" "alerts_topic" {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [local.account_id]
+    }
+  }
+
+  # The change alerts and Access Analyzer's findings (audit.tf).
+  statement {
+    sid       = "ChangeAlertsPublish"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.alerts.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values = [
+        aws_cloudwatch_event_rule.changes.arn,
+        aws_cloudwatch_event_rule.audit_changes.arn,
+        aws_cloudwatch_event_rule.access_findings.arn,
+      ]
     }
   }
 }
@@ -482,6 +508,8 @@ resource "aws_cloudwatch_metric_alarm" "token_requests" {
 # --- us-east-1: CloudFront and its firewall --------------------------------
 # Their metrics are there, whatever the app's region, and an alarm notifies
 # only a topic in its own region: a second topic, subscribed like the first.
+# The change alerts on IAM, CloudFront and the firewall, whose events are
+# recorded there too, publish to it as well (audit.tf).
 
 resource "aws_sns_topic" "edge_alerts" {
   provider = aws.global
@@ -503,6 +531,27 @@ data "aws_iam_policy_document" "edge_alerts_topic" {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [local.account_id]
+    }
+  }
+
+  # The change alerts on IAM, CloudFront and the firewall (audit.tf).
+  statement {
+    sid       = "ChangeAlertsPublish"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.edge_alerts.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values = [
+        aws_cloudwatch_event_rule.iam_changes.arn,
+        aws_cloudwatch_event_rule.edge_changes.arn,
+      ]
     }
   }
 }

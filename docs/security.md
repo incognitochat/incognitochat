@@ -547,6 +547,11 @@ it. This is how close it gets.
     plan, which undoes them, but cost until then.
   - Other settings Terraform manages (the media bucket's policy, a function
     URL's auth type): a change shows in the next plan, which undoes it.
+  - Unseen changes: it can't touch the audit trail, and its IAM changes are
+    emailed, but its other changes aren't, since deploys make them as their
+    job. A deploy's public log shows its plan, but a compromised job can
+    lie in its own log; the trail records each call it makes, for a year,
+    for an admin who looks.
 - **Users can't verify the backend directly.** Its builds are reproducible
   and attested, and each deploy's public log shows the hashes of what it
   deployed, which anyone can compare with their own rebuild
@@ -561,6 +566,18 @@ it. This is how close it gets.
   doesn't depend on it: a malicious backend can drop or delay messages and
   watch timing, but can't read content or forge messages, because apps check
   keys themselves.
+- **The record of changes is in the account it watches.** The account
+  records its management calls (an audit trail kept a year) and emails
+  changes to permissions, functions, secrets, buckets' settings and the
+  trail itself ([deployment.md](deployment.md#audit-trail-and-change-alerts)).
+  That holds against the deploy role, which can't touch the trail, not
+  against an account admin, or whoever has an admin's access: they can stop
+  the trail, change its bucket's policy and delete records, turn off the
+  rules, or unsubscribe the email address. Each of those sends an alert
+  while the alerts still work, but one done first can silence the rest
+  (the rule that watches the rules can't report its own removal), and
+  AWS's own 90-day event history is all that stays. Nothing outside the
+  account holds a copy.
 
 ## How the remaining gaps could close
 
@@ -568,7 +585,9 @@ it. This is how close it gets.
   and can be checked, with keys in the phone's security chip.
 - An independent relay that hides IP addresses, random notice delays, and a
   setting to turn "seen" receipts off.
-- Change alerts from AWS's audit logs, ideally held by an independent party.
+- The audit trail and its alerts held by an independent party: an
+  organization trail into a locked bucket in another account, which an
+  admin of this one can't stop or empty.
 - Signing in a separate role, used only by a job of its own, that signs only
   the bundle hashes CI attested, so the deploy role can no longer sign
   whatever it uploads.

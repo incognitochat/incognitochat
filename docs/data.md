@@ -109,6 +109,7 @@ The keyed hashes and the edits are kept apart from the conversation itself
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 | Request counts: once a minute, how many requests each server instance answered, by route (`POST /send`, never the path with its IDs) and status, and by error code (`rate_limited`, say). Counts only, nothing about who | Alarms on limits being hit, refused requests, and how many accounts and tokens are given out ([deployment.md](deployment.md#request-counts)) | The log lines 7 days. The metrics made from them (registrations, token batches, 429s overall and by route, three kinds of refusal): kept by CloudWatch for 15 days a minute at a time, 63 days 5 minutes at a time and 15 months an hour at a time, and they can't be deleted |
 | Request counts at the firewall, only where the API has one in front of it (by default in production alone): how many requests it allowed and blocked, overall and by rule, and, added by AWS, how many per country and per device type (desktop or mobile, say). Counts only, nothing about who | The alarm on blocked requests, and seeing which rule blocks ([deployment.md](deployment.md#the-firewall)) | Kept by CloudWatch for 15 days a minute at a time, 63 days 5 minutes at a time and 15 months an hour at a time, and they can't be deleted |
+| The audit trail: a record of the AWS account's management calls, each call that reads or changes the account's settings (its roles, functions, buckets' settings, parameters and so on), by the operator's admins, the deploy and AWS services (the functions too, when they read their secrets at startup), with who made it, from which IP address (theirs, not users') and when. Nothing about users: the app's reads and writes of table items and attachments, and its invocations, are data events, which the trail doesn't record; and AWS leaves out values it treats as secret, such as parameters' values and the functions' environment variables | Finding out who changed what in the account, and alerts on changes ([deployment.md](deployment.md#audit-trail-and-change-alerts)) | 365 days; a file deleted before then, 30 days more. CloudTrail's event history, which every AWS account has and can't be turned off, keeps the last 90 days of the same calls |
 
 DynamoDB can take some days to delete an item after it expires; an expired
 one is never used again, but a copy of the table made meanwhile still holds
@@ -161,7 +162,8 @@ account does, unused.
 
 **Never stored:** the content of any message or attachment in readable form,
 who sent a message, which conversations belong together, which mailboxes got
-messages when, the user's name, username or phone number, and IP addresses.
+messages when, the user's name, username or phone number, and users' IP
+addresses.
 Senders don't log in to send: they pay with anonymous tokens that can't be
 linked to their account.
 

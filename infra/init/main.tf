@@ -79,5 +79,7 @@ locals {
     # policies' tests don't have to create it).
     state_bucket  = "arn:${local.partition}:s3:::${var.state_bucket_name}"
     media_buckets = "arn:${local.partition}:s3:::${local.prefix}-media-*"
+    # The audit trail's bucket (audit.tf), from its name's prefix.
+    audit_buckets = "arn:${local.partition}:s3:::${local.prefix}-audit-*"
   }
 }
