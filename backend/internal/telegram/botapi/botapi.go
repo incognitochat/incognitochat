@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 // DefaultAPI is Telegram's Bot API.
@@ -37,6 +40,20 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("botapi: %s failed (HTTP %d)", e.Method, e.Status)
+}
+
+// LogAttrs describes the failure for the logs (logx.Detailed): the method,
+// and the HTTP status and Telegram's error code when there was an answer
+// that gave them. Never the description, the chat or the token.
+func (e *Error) LogAttrs() []slog.Attr {
+	attrs := []slog.Attr{slog.String(logx.KeyMethod, e.Method)}
+	if e.Status != 0 {
+		attrs = append(attrs, slog.Int(logx.KeyTelegramStatus, e.Status))
+	}
+	if e.Code != 0 {
+		attrs = append(attrs, slog.Int(logx.KeyErrorCode, e.Code))
+	}
+	return attrs
 }
 
 // Forbidden reports whether the bot may not write to the chat (blocked by

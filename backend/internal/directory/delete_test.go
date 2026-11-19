@@ -32,6 +32,8 @@ func TestDelete(t *testing.T) {
 	if err := s.SetNotices(ctx, n.ID, []byte("sealed chat"), "en"); err != nil {
 		t.Fatal(err)
 	}
+	// An older account's device list goes too.
+	olderDeviceList(t, client, s.Table, n.ID)
 
 	if done, err := s.Delete(ctx, n.ID, n.TelegramHash, 100); err != nil || !done {
 		t.Fatalf("delete: %v %v", done, err)
@@ -115,7 +117,7 @@ func TestDeleteInSteps(t *testing.T) {
 			t.Fatal("never finishes")
 		}
 	}
-	if steps < 8 {
+	if steps < 7 {
 		t.Errorf("only %d steps", steps)
 	}
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})

@@ -91,6 +91,8 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 	}
 
+	// The first device list is checked but not stored: with one device per
+	// account, nothing reads it.
 	list, err := devicelist.Verify(in.DeviceList, in.DeviceListSig, accountKey)
 	if err != nil || !isFirstList(list, in.Device, in.DeviceKey) {
 		return httpapi.Error(http.StatusBadRequest, "invalid_device_list")
@@ -106,14 +108,11 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 
 	telegramHash := directory.TelegramHash(s.Pepper, launch.UserID)
 	account := directory.NewAccount{
-		ID:            ids.New(),
-		TelegramHash:  telegramHash,
-		AccountKey:    in.AccountKey,
-		DeviceID:      in.Device,
-		DeviceKey:     in.DeviceKey,
-		DeviceList:    in.DeviceList,
-		DeviceListSig: in.DeviceListSig,
-		DeviceListSeq: list.Seq,
+		ID:           ids.New(),
+		TelegramHash: telegramHash,
+		AccountKey:   in.AccountKey,
+		DeviceID:     in.Device,
+		DeviceKey:    in.DeviceKey,
 	}
 
 	// Counted before anything is read, whatever comes of it. Then only the

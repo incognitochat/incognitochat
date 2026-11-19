@@ -40,6 +40,16 @@ func TestSignedRequestsRejects(t *testing.T) {
 	h.now = start
 	token = h.token(t, d)
 
+	// A token in Authorization, as apps before X-Session sent it: no more
+	// (AUTH-7).
+	var bearer httpapi.Request
+	bearer.RawPath = "/account"
+	bearer.RequestContext.HTTP.Method = http.MethodGet
+	bearer.Headers = map[string]string{"authorization": "Bearer " + token}
+	if resp, _ := h.router.Serve(context.Background(), bearer); resp.StatusCode != http.StatusUnauthorized || resp.Body != `{"error":"session_expired"}` {
+		t.Fatalf("a token in Authorization: %d %s", resp.StatusCode, resp.Body)
+	}
+
 	// A token without a signature.
 	status, out = h.call(t, d, token, http.MethodPost, "/links", body, false)
 	wantError(t, status, out, http.StatusUnauthorized, "signature_rejected")
@@ -54,7 +64,7 @@ func TestSignedRequestsRejects(t *testing.T) {
 	sig := signP1363(t, d.dsk, devicesig.Message(devicesig.LabelRequest, session.RequestParts(signed)...))
 	req.Headers = map[string]string{
 		"content-type":       "application/json",
-		"authorization":      "Bearer " + token,
+		"x-session":          token,
 		"x-device-signature": strconv.FormatInt(signed.Timestamp, 10) + "." + signed.Nonce + "." + b64(sig),
 	}
 	req.Body = string(raw)

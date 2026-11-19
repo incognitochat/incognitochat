@@ -1,6 +1,6 @@
 // Package awsconf is what the four functions share about calling AWS: few,
-// quick retries, a deadline for each invocation, and telling throttling
-// apart from failure.
+// quick retries, a deadline for each invocation, telling throttling apart
+// from failure, and giving the Lambda runtime nothing it would log.
 //
 // The SDK's default retryer tries a call three times, and after a throttle
 // waits up to 2 s, then up to 4 s. A function has a fixed number of
@@ -13,8 +13,13 @@ package awsconf
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +27,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	dynamotypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 const (
@@ -112,5 +119,106 @@ func WithDeadline[In, Out any](d time.Duration, handler func(context.Context, In
 		ctx, cancel := context.WithTimeout(ctx, d)
 		defer cancel()
 		return handler(ctx, in)
+	}
+}
+
+// ErrFailed is the only error, and the only panic value, the functions give
+// the Lambda runtime (Guard).
+var ErrFailed = errors.New("invocation failed")
+
+// Guard wraps a Lambda handler so that the runtime gets no error but
+// ErrFailed. The runtime (aws-lambda-go) writes an error it gets, or a
+// panic's value, to the function's log as they are, outside logx. So an
+// error the handler returns becomes ErrFailed (the handler logs it, by
+// kind, itself). A panic, in the handler or in a goroutine it ran with
+// Workers, is logged by its kind and where it happened (no values), and
+// then the handler panics again with ErrFailed: the runtime logs that, with
+// the stack's functions, files and lines (no values either), and ends the
+// instance as after any panic, so the next invocation starts from a clean
+// state rather than one the panic left halfway.
+//
+// What happens before the handler runs, decoding the event, can still fail
+// with the decoder's error, which the runtime logs: the events come from
+// AWS (function URLs, API Gateway) and the functions themselves, so they
+// decode.
+func Guard[In, Out any](log *slog.Logger, handler func(context.Context, In) (Out, error)) func(context.Context, In) (Out, error) {
+	return func(ctx context.Context, in In) (Out, error) {
+		defer func() {
+			if v := recover(); v != nil {
+				kind, at := fmt.Sprintf("%T", v), panicAt()
+				if p, ok := v.(*workerPanic); ok {
+					kind, at = p.kind, p.at
+				}
+				log.Error("handler panicked", slog.String(logx.KeyErrorKind, kind), slog.String(logx.KeyPanicAt, at))
+				panic(ErrFailed)
+			}
+		}()
+		out, err := handler(ctx, in)
+		if err != nil {
+			err = ErrFailed
+		}
+		return out, err
+	}
+}
+
+// Workers runs a handler's goroutines, as a sync.WaitGroup does, so that a
+// panic in one reaches Guard: it is recovered there, and Wait, once all
+// have ended, panics with its kind and where it happened (not its value) in
+// the goroutine that waits, which runs the handler. A panic left in a
+// goroutine would end the process with Go's own report, which shows each
+// frame's arguments, outside logx.
+type Workers struct {
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	panicked *workerPanic
+}
+
+// workerPanic is a goroutine's panic, as Workers carries it to Guard.
+type workerPanic struct{ kind, at string }
+
+// Go runs f in a goroutine.
+func (w *Workers) Go(f func()) {
+	w.wg.Go(func() {
+		defer func() {
+			if v := recover(); v != nil {
+				p := &workerPanic{kind: fmt.Sprintf("%T", v), at: panicAt()}
+				w.mu.Lock()
+				if w.panicked == nil {
+					w.panicked = p
+				}
+				w.mu.Unlock()
+			}
+		}()
+		f()
+	})
+}
+
+// Wait waits for the goroutines to end, and panics if one did.
+func (w *Workers) Wait() {
+	w.wg.Wait()
+	if w.panicked != nil {
+		panic(w.panicked)
+	}
+}
+
+// panicAt is where the panic being recovered happened: the function and
+// line (the package's base name, e.g. "api.(*Server).send:42"), of the
+// first frame outside the runtime past its panic. Called from the deferred
+// function that recovers.
+func panicAt() string {
+	pc := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pc[:runtime.Callers(1, pc)])
+	panicking := false
+	for {
+		f, more := frames.Next()
+		if panicking && !strings.HasPrefix(f.Function, "runtime.") {
+			return fmt.Sprintf("%s:%d", f.Function[strings.LastIndexByte(f.Function, '/')+1:], f.Line)
+		}
+		if f.Function == "runtime.gopanic" {
+			panicking = true
+		}
+		if !more {
+			return ""
+		}
 	}
 }

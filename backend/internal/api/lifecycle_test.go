@@ -13,7 +13,9 @@ import (
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
+	"github.com/incognitochat/incognitochat/backend/internal/envelope"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/inbox"
 )
 
 // mailboxes gives an account n mailboxes, written straight to the table as
@@ -393,5 +395,48 @@ func TestDeleteAccountFinishesALeftover(t *testing.T) {
 	}
 	if len(h.dir.boxes) != 0 || h.dir.accounts[second.account] != nil {
 		t.Fatalf("left behind: mailboxes %d, account %v", len(h.dir.boxes), h.dir.accounts[second.account])
+	}
+}
+
+// Deleting an account with the largest envelopes waiting takes steps of
+// about DeleteStep write units on the messages table, not DeleteStep
+// envelopes (some 19 times that), and each reads about what it deletes
+// (DLV-12).
+func TestDeleteAccountStepsBySize(t *testing.T) {
+	if largest := (inbox.Item{Size: inbox.MaxItemSize}).Units(); DeleteStep < largest {
+		t.Fatalf("a step of %d write units can't delete the largest envelope (%d)", DeleteStep, largest)
+	}
+	h, tb := newDeliveryTables(t)
+	owner := h.account(t, userID)
+	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	mailbox := out["mailboxes"].([]any)[0].(string)
+	const waiting = 12
+	for range waiting {
+		if status, out := h.post(t, "/send", map[string]any{"mailbox": mailbox, "envelope": testEnvelope(envelope.MaxWraps, 16384), "tokens": mintTokens(t, h.now, envelope.MaxTokens)}); status != http.StatusOK {
+			t.Fatalf("send: %d %v", status, out)
+		}
+	}
+	steps := 0
+	var most dynamotest.Units
+	for {
+		if steps++; steps > 20 {
+			t.Fatal("never finishes")
+		}
+		h.now = h.now.Add(time.Second)
+		tb.meter.Reset()
+		status, out := h.as(t, owner, http.MethodDelete, "/account", nil, true)
+		u := tb.meter.Units(tb.messages)
+		most.Read, most.Write = max(most.Read, u.Read), max(most.Write, u.Write)
+		if status == http.StatusOK {
+			break
+		}
+		wantError(t, status, out, http.StatusConflict, "in_progress")
+	}
+	t.Logf("DELETE /account over %d of the largest envelopes: %d steps, each at most messages %+v", waiting, steps, most)
+	if most.Write > DeleteStep || most.Read > 20 {
+		t.Fatalf("a step cost up to %+v", most)
+	}
+	if n := tb.waiting(t, owner.d.account, owner.d.id); n != 0 {
+		t.Fatalf("%d envelopes left", n)
 	}
 }

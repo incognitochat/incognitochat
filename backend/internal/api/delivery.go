@@ -21,7 +21,6 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/inbox"
 	"github.com/incognitochat/incognitochat/backend/internal/keyed"
-	"github.com/incognitochat/incognitochat/backend/internal/links"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
@@ -106,9 +105,10 @@ type Inbox interface {
 	// there. It reports how many weren't there, and which it couldn't
 	// delete.
 	Ack(ctx context.Context, accountID, deviceID string, itemIDs []string, maxMissing int) (missing int, failed []string)
-	// Clear deletes up to max of a device's items; it reports how many, and
+	// Clear deletes a device's items within units write units (what each
+	// costs to delete: inbox.Item.Units); it reports the units it took, and
 	// whether more may be left.
-	Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error)
+	Clear(ctx context.Context, accountID, deviceID string, units int) (int, bool, error)
 }
 
 type sendRequest struct {
@@ -276,6 +276,10 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 			return s.internal(route, err)
 		}
 		if !ok {
+			// As at the mailbox's cap, the sender gets the tokens back.
+			if err := s.unspendAll(ctx, tokens); err != nil {
+				return s.internal(route, err)
+			}
 			return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 		}
 	}
@@ -314,8 +318,15 @@ func accepted() httpapi.Response {
 	return httpapi.JSON(http.StatusOK, map[string]string{})
 }
 
-// MailboxChecksPerDay limits POST /mailboxes/check per account.
-const MailboxChecksPerDay = 20
+const (
+	// MailboxChecksPerDay limits POST /mailboxes/check per person
+	// (Telegram user).
+	MailboxChecksPerDay = 20
+	// MailboxCheckBatch is the most IDs one POST /mailboxes/check takes: as
+	// many as the app sends in one (web/src/messaging/engine.ts,
+	// CHECK_CHUNK), well within the body limit.
+	MailboxCheckBatch = 1000
+)
 
 // checkMailboxes tells the app which of the mailboxes it holds are no longer
 // its own, so it stops handing them out as reply addresses. That happens
@@ -330,7 +341,7 @@ func (s *Server) checkMailboxes(ctx context.Context, req httpapi.Request, c call
 	if err := httpapi.DecodeJSON(req, &in); err != nil {
 		return httpapi.DecodeError(err)
 	}
-	if len(in.IDs) == 0 || len(in.IDs) > MaxMailboxes+links.MaxActive {
+	if len(in.IDs) == 0 || len(in.IDs) > MailboxCheckBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	for _, id := range in.IDs {

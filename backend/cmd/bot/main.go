@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"time"
 
@@ -35,8 +36,15 @@ func main() {
 		log.Error("startup failed", logx.ErrorKind(err))
 		os.Exit(1)
 	}
-	lambda.Start(awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		out, err := handle(ctx, raw, b, setup.Run)
+	lambda.Start(invocation(log, b, setup.Run))
+}
+
+// invocation is the function's handler. Lambda gets no error but
+// awsconf.ErrFailed: what failed is logged by its kind (and, for a Bot API
+// call, its method and Telegram's answer).
+func invocation(log *slog.Logger, b *bot.Bot, setup func(context.Context, string) error) func(context.Context, json.RawMessage) (any, error) {
+	return awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		out, err := handle(ctx, raw, b, setup)
 		if err != nil {
 			log.Error("setup failed", logx.ErrorKind(err))
 		}

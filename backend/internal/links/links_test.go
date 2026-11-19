@@ -7,7 +7,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,9 +149,32 @@ func TestValidID(t *testing.T) {
 		"AAAAAAAAAA=":  false,
 		"AAAAAAAAAA+":  false,
 		"AAAAAAAAAAB":  false, // non-canonical: trailing bits set
+		// CR and LF, which the decoder skips, anywhere and in any number
+		// (TST-1).
+		"00000\r000000":   false,
+		"AAAA\nAAAAAAA":   false,
+		"AAAAAAAAAAA\r\n": false,
+		"AAA" + strings.Repeat("\r\n", 1000) + "AAAAAAAA": false,
 	} {
 		if ValidID(id) != want {
 			t.Errorf("ValidID(%q) = %v", id, !want)
 		}
 	}
+}
+
+// Whatever ValidID accepts is the canonical spelling of 8 bytes, so a link
+// has one ID (TST-1).
+func FuzzValidID(f *testing.F) {
+	for _, seed := range []string{"AAAAAAAAAAA", "aB-_012345w", "00000\r000000", "AAAAAAAAAAB", ""} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, id string) {
+		if !ValidID(id) {
+			return
+		}
+		b, err := base64.RawURLEncoding.DecodeString(id)
+		if err != nil || len(id) != 11 || base64.RawURLEncoding.EncodeToString(b) != id {
+			t.Fatalf("non-canonical link ID %q accepted", id)
+		}
+	})
 }

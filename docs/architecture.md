@@ -75,16 +75,17 @@ flowchart LR
   and its device is refused as after a deletion, not told it was replaced.
 - **Accounts end in a few writes, and are taken apart in steps.** Replacing
   or deleting an account changes only its account item and its link (and,
-  for a replacement, its device list), however much it owns: a delivery
-  reads the owner's account item with its devices, in the one query it made
-  anyway, so every mailbox of an ended account stops at once, and so do its
-  invitation codes; nothing new joins it. The rest goes in steps of about
-  50 writes that read only what they delete, delete a shared item only if
-  the account owns it, and can be repeated or cut short safely; one step
-  at a time runs per account (a short lease on its item). The app asks for
-  them (a deletion's, or the new device's after a replacement) and carries
-  on at its next launch, so a big account never outlasts a request or takes
-  the table's write capacity, and is never left half deleted and in use.
+  for a replacement, its device list, if it has one), however much it owns:
+  a delivery reads the owner's account item with its devices, in the one
+  query it made anyway, so every mailbox of an ended account stops at once,
+  and so do its invitation codes; nothing new joins it. The rest goes in
+  steps of about 50 write units that read about what they delete, delete a
+  shared item only if the account owns it, and can be repeated or cut short
+  safely; one step at a time runs per account (a short lease on its item).
+  The app asks for them (a deletion's, or the new device's after a
+  replacement) and carries on at its next launch, so a big account never
+  outlasts a request or takes the table's write capacity, and is never left
+  half deleted and in use.
 - **Nothing is deleted on the server's word.** A device the server says was
   replaced, no longer accepts, or is being deleted (when this device didn't
   start that), keeps its chats, readable (nothing can be sent), and asks

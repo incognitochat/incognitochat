@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -33,14 +34,24 @@ func publicKey(t *testing.T) []byte {
 
 func newAccount(t *testing.T, telegramHash string) NewAccount {
 	return NewAccount{
-		ID:            ids.New(),
-		TelegramHash:  telegramHash,
-		AccountKey:    publicKey(t),
-		DeviceID:      ids.New(),
-		DeviceKey:     publicKey(t),
-		DeviceList:    []byte("list"),
-		DeviceListSig: []byte("sig"),
-		DeviceListSeq: 1,
+		ID:           ids.New(),
+		TelegramHash: telegramHash,
+		AccountKey:   publicKey(t),
+		DeviceID:     ids.New(),
+		DeviceKey:    publicKey(t),
+	}
+}
+
+// olderDeviceList gives an account the device list item registrations
+// stored before they stopped (CQ-7), as older accounts still have.
+func olderDeviceList(t *testing.T, client *dynamodb.Client, table, accountID string) {
+	t.Helper()
+	_, err := client.PutItem(context.Background(), &dynamodb.PutItemInput{
+		TableName: &table,
+		Item:      item(accountPK(accountID), skDeviceList, attrs{"b": bv([]byte("list")), "s": bv([]byte("sig")), "q": nv(1)}),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -60,7 +71,7 @@ func TestTelegramHash(t *testing.T) {
 }
 
 func TestCreateAndRead(t *testing.T) {
-	s, _ := store(t)
+	s, client := store(t)
 	ctx := context.Background()
 
 	if _, err := s.ByTelegram(ctx, "th-1", ids.New()); !errors.Is(err, ErrNotFound) {
@@ -72,6 +83,10 @@ func TestCreateAndRead(t *testing.T) {
 	}
 	if err := s.Create(ctx, newAccount(t, "th-1")); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second account for one Telegram user: %v", err)
+	}
+	// The account and its device, and no device list (CQ-7).
+	if sks := partitionKeys(t, client, s.Table, n.ID); !slices.Equal(sks, []string{skAccount, devicePrefix + n.DeviceID}) {
+		t.Fatalf("a new account's items: %v", sks)
 	}
 
 	got, err := s.ByTelegram(ctx, "th-1", n.DeviceID)
@@ -102,6 +117,8 @@ func TestReplace(t *testing.T) {
 	if err := s.Create(ctx, first); err != nil {
 		t.Fatal(err)
 	}
+	// An older account, with a device list, which goes with the swap.
+	olderDeviceList(t, client, s.Table, first.ID)
 	old, err := s.ByTelegram(ctx, "th-1", first.DeviceID)
 	if err != nil {
 		t.Fatal(err)

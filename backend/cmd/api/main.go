@@ -72,8 +72,14 @@ func main() {
 		}
 	}
 	// SIGTERM, when the instance shuts down, logs the last minute's counts.
-	lambda.StartWithOptions(awsconf.WithDeadline(requestDeadline, router.Serve),
-		lambda.WithEnableSIGTERM(counts.Flush))
+	lambda.StartWithOptions(invocation(log, router), lambda.WithEnableSIGTERM(counts.Flush))
+}
+
+// invocation is the function's handler: the router, under awsconf.Guard,
+// so Lambda gets no error but awsconf.ErrFailed (Serve returns none) and a
+// panic is logged by its kind.
+func invocation(log *slog.Logger, router *httpapi.Router) func(context.Context, httpapi.Request) (httpapi.Response, error) {
+	return awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, router.Serve))
 }
 
 func setup(ctx context.Context) (*api.Server, error) {

@@ -37,8 +37,14 @@ func main() {
 		log.Error("startup failed", logx.ErrorKind(err))
 		os.Exit(1)
 	}
-	lambda.Start(awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
-		out, err := handle(ctx, raw, sealer, notifier)
+	lambda.Start(invocation(log, sealer, notifier))
+}
+
+// invocation is the function's handler. Lambda gets no error but
+// awsconf.ErrFailed: what failed is logged by its kind (report).
+func invocation(log *slog.Logger, sealer *notices.Sealer, n notifier) func(context.Context, json.RawMessage) (any, error) {
+	return awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		out, err := handle(ctx, raw, sealer, n)
 		return out, report(log, err)
 	}))
 }
@@ -49,9 +55,10 @@ func main() {
 // Notifier keeps at the end.
 const requestDeadline = 7 * time.Second
 
-// report logs an invocation's failure and returns the error for Lambda. A
-// notice refused by Telegram's flood control is dropped as Telegram asked,
-// and isn't the function's failure; anything that failed with it is.
+// report logs an invocation's failure, by kind, and returns what failed
+// (which Lambda gets as awsconf.ErrFailed). A notice refused by Telegram's
+// flood control is dropped as Telegram asked, and isn't the function's
+// failure; anything that failed with it is.
 func report(log *slog.Logger, err error) error {
 	if !errors.Is(err, notices.ErrRateLimited) {
 		if err != nil {

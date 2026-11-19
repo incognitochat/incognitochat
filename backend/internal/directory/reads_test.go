@@ -433,6 +433,7 @@ func TestAccountSortKeys(t *testing.T) {
 	if err := s.CreateInvitation(ctx, n.ID, "abcd-efgh", 1, 0, -1); err != nil {
 		t.Fatal(err)
 	}
+	olderDeviceList(t, client, s.Table, n.ID)
 	out, err := client.Query(ctx, &dynamodb.QueryInput{
 		TableName:                 &s.Table,
 		KeyConditionExpression:    aws.String("pk = :pk"),

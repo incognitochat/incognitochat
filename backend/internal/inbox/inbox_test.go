@@ -166,14 +166,17 @@ func list(t *testing.T, s *Store, account, device string, now time.Time) []Item 
 // fails the deletes of some items.
 type counting struct {
 	DB
-	limits  []int32
-	failing map[string]bool
+	limits []int32
+	// consistent is whether a query read strongly consistent.
+	consistent bool
+	failing    map[string]bool
 	// slow deletes answer only when the caller gives up.
 	slow bool
 }
 
 func (c *counting) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	c.limits = append(c.limits, aws.ToInt32(in.Limit))
+	c.consistent = c.consistent || aws.ToBool(in.ConsistentRead)
 	return c.DB.Query(ctx, in, opts...)
 }
 
@@ -457,5 +460,170 @@ func TestClear(t *testing.T) {
 	// Another account's device of the same ID keeps its items.
 	if kept := list(t, s, other, phone, now); len(kept) != 1 {
 		t.Fatalf("other account has %d items", len(kept))
+	}
+}
+
+// Clear's steps are sized by what deleting each item costs, not by how
+// many there are, and read about what they delete, eventually consistent
+// (DLV-12): a step over the largest envelopes deletes two, not fifty.
+func TestClearBySize(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	q := &counting{DB: meter}
+	s := &Store{DB: q, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone, mailbox := ids.New(), ids.New(), ids.New()
+	largest := make([]byte, envelope.MaxLen)
+	for range 6 {
+		if err := s.Deliver(ctx, account, []string{phone}, mailbox, largest, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	each := Item{Size: MaxItemSize}.Units()
+	const units = 50
+	meter.Reset()
+	spent, more, err := s.Clear(ctx, account, phone, units)
+	if err != nil || !more || spent != 2*each || spent > units {
+		t.Fatalf("a step over the largest items: %d units, more %v, %v", spent, more, err)
+	}
+	cost := meter.Units(s.Table)
+	t.Logf("deleting 2 of the largest items: %+v (%d units each)", cost, each)
+	// What it deleted, as it costs; and one read of at most ClearStep items,
+	// eventually consistent: each 4 KiB read takes half a unit.
+	readCap := float64(ClearStep*MaxItemSize/4096+1) / 2
+	if cost.Write > units || cost.Read > readCap || q.consistent || !slices.Equal(q.limits, []int32{ClearStep}) {
+		t.Fatalf("the step cost %+v (at most %d write units and %v read units), in reads of %v, consistent %v",
+			cost, units, readCap, q.limits, q.consistent)
+	}
+	if left := list(t, s, account, phone, now); len(left) != 4 {
+		t.Fatalf("%d items left", len(left))
+	}
+	// Units that don't pay for the next item delete nothing.
+	if spent, more, err := s.Clear(ctx, account, phone, each-1); err != nil || spent != 0 || !more {
+		t.Fatalf("too few units: %d, more %v, %v", spent, more, err)
+	}
+	// Then the rest.
+	for steps := 0; more; steps++ {
+		if steps > 3 {
+			t.Fatal("never finishes")
+		}
+		if _, more, err = s.Clear(ctx, account, phone, units); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if left := list(t, s, account, phone, now); len(left) != 0 {
+		t.Fatalf("%d items left", len(left))
+	}
+}
+
+// putItems stores a device's items under the given IDs, which sort as
+// given, with envelopes of the given sizes.
+func putItems(t *testing.T, s *Store, account, device string, sizes map[string]int) {
+	t.Helper()
+	for id, size := range sizes {
+		_, err := s.DB.BatchWriteItem(context.Background(), &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			s.Table: {{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{
+				"pk": &types.AttributeValueMemberS{Value: devicePK(account, device)},
+				"sk": &types.AttributeValueMemberS{Value: id},
+				"m":  &types.AttributeValueMemberS{Value: ids.New()},
+				"b":  &types.AttributeValueMemberB{Value: make([]byte, size)},
+				"e":  &types.AttributeValueMemberN{Value: "4102444800"},
+			}}}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// left is the IDs of a device's items, in order.
+func left(t *testing.T, s *Store, account, device string) []string {
+	t.Helper()
+	var out []string
+	for _, it := range list(t, s, account, device, now) {
+		out = append(out, it.ID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// A step stops at the first item its units can't pay for, though smaller
+// ones follow, and reads at most ClearStep items it leaves.
+func TestClearStopsAtTheFirstItemItCantPay(t *testing.T) {
+	client := dynamotest.Client(t)
+	q := &counting{DB: client}
+	s := &Store{DB: q, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone := ids.New(), ids.New()
+	putItems(t, s, account, phone, map[string]int{
+		"a1": 10, "a2": 10, "a3": 10, "a4": 10, "a5": 10, "b": envelope.MaxLen, "c1": 10, "c2": 10, "c3": 10,
+	})
+	large := Item{Size: MaxItemSize}.Units()
+	for i, want := range []struct {
+		spent int
+		more  bool
+		left  []string
+	}{
+		{5, true, []string{"b", "c1", "c2", "c3"}}, // b doesn't fit after the a's
+		{large + 1, true, []string{"c2", "c3"}},    // b, then c1
+		{2, false, nil},
+	} {
+		q.limits = nil
+		spent, more, err := s.Clear(ctx, account, phone, large+1)
+		if err != nil || spent != want.spent || more != want.more {
+			t.Fatalf("step %d: %d units, more %v, %v", i, spent, more, err)
+		}
+		if i == 0 && !slices.Equal(q.limits, []int32{ClearStep}) {
+			t.Fatalf("step %d read %v", i, q.limits)
+		}
+		if got := left(t, s, account, phone); !slices.Equal(got, want.left) {
+			t.Fatalf("step %d left %v", i, got)
+		}
+	}
+}
+
+// lagging hides some items from eventually consistent reads, as a replica
+// that hasn't caught up with their writes yet does.
+type lagging struct {
+	DB
+	hidden map[string]bool // by item ID
+}
+
+func (l *lagging) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	out, err := l.DB.Query(ctx, in, opts...)
+	if err != nil || aws.ToBool(in.ConsistentRead) {
+		return out, err
+	}
+	var kept []map[string]types.AttributeValue
+	for _, it := range out.Items {
+		if sk, ok := it["sk"].(*types.AttributeValueMemberS); !ok || !l.hidden[sk.Value] {
+			kept = append(kept, it)
+		}
+	}
+	out.Items = kept
+	return out, nil
+}
+
+// An item the eventually consistent reads missed (delivered just before
+// the account ended) keeps the device from being reported empty: the next
+// step takes it, rather than it staying for 30 days (DLV-12).
+func TestClearFindsWhatAReadMissed(t *testing.T) {
+	client := dynamotest.Client(t)
+	db := &lagging{DB: client, hidden: map[string]bool{"late": true}}
+	s := &Store{DB: db, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone := ids.New(), ids.New()
+	putItems(t, s, account, phone, map[string]int{"a": 10, "b": 10, "late": 10})
+	spent, more, err := s.Clear(ctx, account, phone, 50)
+	if err != nil || spent != 2 || !more {
+		t.Fatalf("with an item missed: %d units, more %v, %v", spent, more, err)
+	}
+	// The replica caught up.
+	db.hidden = nil
+	if spent, more, err = s.Clear(ctx, account, phone, 50); err != nil || spent != 1 || more {
+		t.Fatalf("the next step: %d units, more %v, %v", spent, more, err)
+	}
+	if got := left(t, s, account, phone); len(got) != 0 {
+		t.Fatalf("left %v", got)
 	}
 }

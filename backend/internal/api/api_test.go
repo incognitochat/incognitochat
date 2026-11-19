@@ -25,6 +25,7 @@ import (
 	"github.com/cloudflare/circl/blindsign/blindrsa"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicelist"
+	"github.com/incognitochat/incognitochat/backend/internal/devicelist/devicelisttest"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
@@ -305,13 +306,22 @@ func (m *memInbox) List(_ context.Context, account, device, after string, limits
 	return inbox.Page{Items: items, Read: len(items), Units: float64(len(items)) / 10}, nil
 }
 
-func (m *memInbox) Clear(_ context.Context, account, device string, max int) (int, bool, error) {
+// Clear deletes items within units, by what each costs to delete, as
+// inbox.Store.Clear does.
+func (m *memInbox) Clear(_ context.Context, account, device string, units int) (int, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := account + "#" + device
-	n := min(max, len(m.items[key]))
+	spent, n := 0, 0
+	for _, it := range m.items[key] {
+		if spent+it.Units() > units {
+			break
+		}
+		spent += it.Units()
+		n++
+	}
 	m.items[key] = m.items[key][n:]
-	return n, len(m.items[key]) > 0, nil
+	return spent, len(m.items[key]) > 0, nil
 }
 
 func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string, _ int) (missing int, failed []string) {
@@ -753,6 +763,9 @@ func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) in
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool
+	// givenBack is the tokens given back once: as ephemeral.Spent does,
+	// they aren't given back again.
+	givenBack map[string]bool
 	// calls counts Spend calls, refused ones too: each costs the table a
 	// write.
 	calls int
@@ -787,9 +800,17 @@ func (m *memSpent) SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) 
 	return len(tokens) > 0, nil
 }
 
+// Unspend gives a spent token back, once at most (ephemeral.Spent.Unspend).
 func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.spent[string(nonce)] || m.givenBack[string(nonce)] {
+		return nil
+	}
+	if m.givenBack == nil {
+		m.givenBack = map[string]bool{}
+	}
+	m.givenBack[string(nonce)] = true
 	delete(m.spent, string(nonce))
 	return nil
 }
@@ -1030,7 +1051,7 @@ func (d *device) registration(t *testing.T, now time.Time, change func(r map[str
 	if change != nil {
 		change(body, &list, &initData)
 	}
-	listBytes := devicelist.Encode(list)
+	listBytes := devicelisttest.Encode(list)
 	parts := RegisterParts(initData, raw(t, d.ak), d.id, raw(t, d.dsk))
 	msg := devicesig.Message(devicesig.LabelRegister, parts...)
 	defaults := map[string]any{
@@ -1235,7 +1256,7 @@ func TestRegisterRejects(t *testing.T) {
 			list.Expires = list.Issued.Add(time.Hour)
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"list signed by the device key", func(t *testing.T, d *device, r map[string]any, list *devicelist.List, _ *string) {
-			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelist.Encode(*list)))
+			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelisttest.Encode(*list)))
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"bad device ID", func(t *testing.T, d *device, r map[string]any, _ *devicelist.List, _ *string) {
 			r["device"] = "short"

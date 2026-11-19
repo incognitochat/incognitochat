@@ -3,7 +3,7 @@
 // and reads treat expired items as missing because TTL deletion can lag.
 //
 //	N#<nonce>  N              a used login nonce
-//	S#<nonce>  S              a spent send token's nonce
+//	S#<nonce>  S              a spent send or media token's nonce (Spent)
 //	Q#<key>    Q              a quiet period (e.g. after a notice), with a random token (t)
 //	R#<key>    <window start> a rate counter (c)
 //	C#<name>   <connection>   a socket (sockets.go)

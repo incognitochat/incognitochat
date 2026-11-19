@@ -157,13 +157,14 @@ old account then fails still counts against the 3.
 **Replacing** ends the old account at once, in one transaction of a few
 writes however much it owns: its account item becomes a marker that, with
 its device keys, expires after 90 days (so its device can be told), and its
-link and device list are deleted. From then on nothing of it is used: a send
+link (and, for an account set up while the server stored it, its device
+list) is deleted. From then on nothing of it is used: a send
 to one of its mailboxes goes nowhere, doing exactly what a send to an ended
 mailbox does (the server finds the mailbox's account ended; it reads the
 account item with the devices, in the same query), its invitation codes
 don't work, and nothing new can be made under it. The rest (its mailboxes,
 invitation codes, and envelopes still waiting for its device) is deleted in
-steps of about 50 writes, as a deletion is (below): the first in the
+steps of about 50 write units, as a deletion is (below): the first in the
 registration itself, the rest as the new device's app asks, `POST
 /account/cleanup` (signed), which answers `409 in_progress` while more is
 left, or while another step for the account runs, and `200 {}` once nothing
@@ -194,9 +195,9 @@ nothing undoes that, so this can't take over an account in use.
 **Deleting an account:** `DELETE /account`, signed. The server deletes the
 account's waiting envelopes, links (their bundles then answer "not found"),
 mailboxes (sends to them get the usual answer and are dropped), invitation
-codes, device list, devices and the account itself, and the item that keeps
-one account per Telegram user, so the same user can set up again, and, in
-the last step, its socket records. Unlike a replacement, it keeps no
+codes, device list (if it has one), devices and the account itself, and
+the item that keeps one account per Telegram user, so the same user can set
+up again, and, in the last step, its socket records. Unlike a replacement, it keeps no
 marker, also when setting up again replaces it before it's done (above);
 only rate-limit counters remain until they expire (within about a
 day; DynamoDB can take longer to delete them). The daily limits (send and
@@ -204,7 +205,7 @@ media tokens, new mailboxes, link changes, notice setups, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that
 keeps one account per user, so deleting an account and setting up again
 doesn't start a fresh day. It works in steps of about 50
-writes, each reading only what it deletes, so a big account neither outlasts
+write units, each reading about what it deletes, so a big account neither outlasts
 a request nor takes the table's write capacity: while more is left the
 server answers `409 in_progress`, and the app repeats the request a second
 later. One step at a time runs for an account: it holds a lease on the
@@ -264,7 +265,9 @@ conversation isn't told.
 first), issued (8), expires (8, at most 30 days later), then per device: ID
 (16 raw bytes), signing key (65), added (8). A new account's first list must
 be issued from 2 hours before to 1 hour after the server's clock (on the
-hour, as signed times are), or registration answers `clock_skew`.
+hour, as signed times are), or registration answers `clock_skew`. The server
+checks it and doesn't store it: with one device per account, nothing reads
+it (accounts set up before keep theirs until they end).
 
 ## Links
 
@@ -972,9 +975,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   second, then twice as long each time, up to a minute.
 - `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
   conversation); a link's intro mailbox ends with the link.
-- `POST /mailboxes/check {ids}` returns which of the given mailboxes aren't
-  the caller's (any more). At upkeep, at most once a day and 1,000 IDs a
-  request, the app drops those from its pool and
+- `POST /mailboxes/check {ids}` (at most 1,000 IDs) returns which of the
+  given mailboxes aren't the caller's (any more). At upkeep, at most once a
+  day, the app drops those from its pool and
   gives conversations that used one as their reply address a new one, which
   their next message carries. Nothing is stored.
 - **Blocking** discards our mailbox for the conversation and, for someone who
