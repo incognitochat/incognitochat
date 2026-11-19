@@ -857,7 +857,10 @@ each mailbox's owner, to deliver, but not who writes to it.
   take that leaves the pool low has it topped up at a random moment after,
   so creating one happens right before a send only rarely: when more chats
   start in one burst than the pool holds, or a top-up failed (offline, or
-  the day's mailboxes used up) or didn't run (the app closed first).
+  the day's mailboxes used up) or didn't run (the app closed first). Once
+  the account holds 4,000 (`409 mailbox_limit`), the app stops topping the
+  pool up until it blocks someone, which discards a mailbox (deleting a
+  chat doesn't), and says so when a chat can't be started or answered.
 - `POST /send {mailbox, envelope, token | tokens, quiet?}` needs no login,
   only send tokens: as many as the envelope costs, one per started 2.5 KiB
   (Send tokens, below), so one for all but long texts. The server checks
@@ -1028,9 +1031,10 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   that creates an object without `If-None-Match`, and any presigned request
   whose signature is over two minutes old. So an upload can't be replaced
   after it was sent.
-- **Trying again.** If a PUT fails, the app tries again, up to four tries in
-  all, waiting 2, 10 and 30 seconds, with no new tokens. Before each later
-  try it asks `POST /media/{id}/upload {secret}` (the delete secret; no
+- **Trying again.** If a PUT fails, or sends nothing for 60 seconds, the
+  app tries again, up to four tries in all, waiting 2, 10 and 30 seconds,
+  with no new tokens. Before each later try it asks
+  `POST /media/{id}/upload {secret}` (the delete secret; no
   login); if that request can't get through, or the server fails, that try
   counts as failed too. The
   server checks the secret, then looks in the bucket: if the upload is

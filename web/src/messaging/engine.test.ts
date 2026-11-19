@@ -17,7 +17,7 @@ import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, ret
 import { editable, MAX_TEXT_BYTES, newId, sealMessage } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
-import { canResend, createMessaging, LINK_KEY_RETRY_MS, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
+import { canResend, createMessaging, LINK_KEY_RETRY_MS, MailboxLimit, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
 import {
   addMessage,
   clearMedia,
@@ -968,6 +968,45 @@ describe('topping up in the background', () => {
     await owner.messaging.maintain();
     return { backend, owner, chats };
   }
+
+  it('says when the account holds all the mailboxes it may, and tops the pool up no more until a block frees one', async () => {
+    const { backend, owner, chats } = await ownerWithChats(3);
+    await owner.messaging.send(chats[0]!, 'hello');
+    // From now on the account is at the limit (4,000).
+    const server = { full: true, asked: 0 };
+    const call = owner.session.call;
+    owner.session.call = async (method, path, body, check, options) => {
+      if (method === 'POST' && path === '/mailboxes') {
+        server.asked++;
+        if (server.full) throw new ApiError(409, 'mailbox_limit');
+      }
+      return call(method, path, body, check, options);
+    };
+    // Upkeep finds the pool low and is refused: nothing to do, not a failure.
+    await putMeta(owner.db, 'mailbox-pool', (await pooled(owner.db)).slice(0, 1));
+    await owner.messaging.maintain();
+    expect(server.asked).toBe(1);
+    // After that, neither a reply that empties the pool nor upkeep asks
+    // again: each try would be refused, and count against the day's.
+    backend.later.length = 0;
+    await owner.messaging.send(chats[1]!, 'hello');
+    expect(await poolSize(owner.db)).toBe(0);
+    for (const job of backend.later.splice(0)) job.fn();
+    await owner.messaging.maintain();
+    expect(server.asked).toBe(1);
+    // A reply that finds the pool empty still asks (a block in another copy
+    // of the app may have freed one), and says why it can't go.
+    await expect(owner.messaging.send(chats[2]!, 'hello')).rejects.toBeInstanceOf(MailboxLimit);
+    expect(server.asked).toBe(2);
+    // Blocking someone frees one: the pool is topped up again.
+    server.full = false;
+    await owner.messaging.block(chats[0]!);
+    await owner.messaging.maintain();
+    expect(server.asked).toBe(3);
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL);
+    await owner.messaging.send(chats[2]!, 'hello again');
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL - 1);
+  });
 
   it("doesn't make a reply wait for a top-up under way: it takes a mailbox the pool has", async () => {
     const { backend, owner, chats } = await ownerWithChats(2);
@@ -4276,6 +4315,7 @@ describe('a send refused after its upload', () => {
   it("deletes the upload of a first reply that had no mailbox to give; keeps it when the server failed on the way", async () => {
     for (const [failure, kept] of [
       [new ApiError(429, 'rate_limited'), 0],
+      [new ApiError(409, 'mailbox_limit'), 0],
       [new ApiError(500, 'internal'), 1],
     ] as const) {
       const backend = await fakeBackend();
@@ -4291,7 +4331,7 @@ describe('a send refused after its upload', () => {
       const photo = crypto.getRandomValues(new Uint8Array(2000));
       const sending = owner.messaging.sendMedia(local, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
       if (kept) await expect(sending).rejects.toBe(failure);
-      else await expect(sending).rejects.toBeInstanceOf(NoMailboxes);
+      else await expect(sending).rejects.toBeInstanceOf(failure.code === 'mailbox_limit' ? MailboxLimit : NoMailboxes);
       await owner.messaging.flushUploadDeletes();
       expect(backend.uploads.size).toBe(kept);
     }
@@ -5109,8 +5149,10 @@ describe('envelopes that come again, or late', () => {
     it('an older edit never replaces a newer one, in whatever order they and the message come', async () => {
       let clock = Date.now();
       const now = () => clock;
+      // One chat for all the orders, a message of its own for each: setting
+      // up a chat is most of the time this takes (six took over 5 s in CI).
+      const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
       for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [2, 1, 0], [1, 2, 0], [2, 0, 1]]) {
-        const { backend, owner, sender, conv, mine } = await chat({ owner: now, sender: now });
         clock += 1000;
         await sender.messaging.send(conv, 'helo');
         const m = (await listMessages(sender.db, conv)).at(-1)!;
@@ -5119,6 +5161,7 @@ describe('envelopes that come again, or late', () => {
         clock += 1000;
         await sender.messaging.edit(conv, m.id, 'hello there');
         const items = backend.inboxes.get('owner')!.splice(0);
+        expect(items).toHaveLength(3);
         backend.inboxes.get('owner')!.push(...order.map((i) => items[i]!));
         await owner.messaging.sync();
         // Dated in whole seconds.

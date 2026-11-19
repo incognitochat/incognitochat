@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { createTransfer, TransferError, WrongSize } from './transfer';
+import { describe, expect, it, vi } from 'vitest';
+import { createTransfer, TransferError, UPLOAD_IDLE_MS, WrongSize } from './transfer';
 import type { Fetch } from './api';
 
 const SIZE = 16 * 1024;
@@ -139,8 +139,10 @@ class FakeXhr {
   onerror: (() => void) | null = null;
   ontimeout: (() => void) | null = null;
   onabort: (() => void) | null = null;
+  aborted = false;
 
-  constructor(private readonly answer: number | 'unreachable') {}
+  /** held: nothing happens until the test says (progress, finish). */
+  constructor(private readonly answer: number | 'unreachable' | 'held') {}
 
   open(method: string, url: string) {
     this.method = method;
@@ -153,16 +155,31 @@ class FakeXhr {
 
   send(body: unknown) {
     this.body = body;
+    if (this.answer === 'held') return;
+    const answer = this.answer;
     queueMicrotask(() => {
-      if (this.answer === 'unreachable') return this.onerror?.();
-      this.status = this.answer;
-      this.onload?.();
+      if (answer === 'unreachable') return this.onerror?.();
+      this.finish(answer);
     });
+  }
+
+  abort() {
+    this.aborted = true;
+    this.onabort?.();
+  }
+
+  progress(fraction: number) {
+    this.upload.onprogress?.({ lengthComputable: true, loaded: fraction * SIZE, total: SIZE } as ProgressEvent);
+  }
+
+  finish(status: number) {
+    this.status = status;
+    this.onload?.();
   }
 }
 
 describe('uploads', () => {
-  const put = (answer: number | 'unreachable') => {
+  const put = (answer: number | 'unreachable' | 'held') => {
     const xhr = new FakeXhr(answer);
     const transfer = createTransfer(undefined, () => xhr as unknown as XMLHttpRequest);
     return { xhr, done: transfer.put('https://bucket.example/m/x?signed', new Uint8Array(SIZE)) };
@@ -173,6 +190,47 @@ describe('uploads', () => {
     await done;
     expect(xhr.method).toBe('PUT');
     expect(xhr.headers).toEqual({ 'Content-Type': 'application/octet-stream', 'If-None-Match': '*' });
+  });
+
+  it('gives up, as unreachable, when no more bytes go for a while, but not while they keep going', async () => {
+    vi.useFakeTimers();
+    try {
+      // Nothing goes at all.
+      const silent = put('held');
+      const failed = silent.done.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(UPLOAD_IDLE_MS - 1);
+      expect(silent.xhr.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await failed).toBeInstanceOf(TransferError);
+      expect(await failed).toMatchObject({ status: 0 });
+      expect(silent.xhr.aborted).toBe(true);
+
+      // Some goes, then it stops.
+      const stopped = put('held');
+      const stoppedFailed = stopped.done.catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(UPLOAD_IDLE_MS - 1000);
+      stopped.xhr.progress(0.5);
+      await vi.advanceTimersByTimeAsync(UPLOAD_IDLE_MS - 1);
+      expect(stopped.xhr.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await stoppedFailed).toMatchObject({ name: 'TransferError', status: 0 });
+
+      // A slow one that keeps going isn't stopped, however long it takes,
+      // nor while the bucket answers.
+      const slow = put('held');
+      for (let i = 1; i <= 8; i++) {
+        await vi.advanceTimersByTimeAsync(UPLOAD_IDLE_MS - 1000);
+        slow.xhr.progress(i / 8);
+      }
+      await vi.advanceTimersByTimeAsync(UPLOAD_IDLE_MS - 1000);
+      slow.xhr.finish(200);
+      await expect(slow.done).resolves.toBeUndefined();
+      expect(slow.xhr.aborted).toBe(false);
+      // Nothing left waiting once it's done.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('says how the bucket refused, or that it could not be reached', async () => {

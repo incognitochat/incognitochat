@@ -233,6 +233,18 @@ export class NoMailboxes extends Error {
   }
 }
 
+/**
+ * The account holds as many mailboxes as the server allows (one for each
+ * chat it started or answered, 4,000 in all): no new chat can be started or
+ * answered until blocking someone frees one. Deleting a chat doesn't.
+ */
+export class MailboxLimit extends Error {
+  constructor() {
+    super('mailbox limit');
+    this.name = 'MailboxLimit';
+  }
+}
+
 /** A message of ours was deleted here (or its chat) before it went out: it isn't sent. */
 class Cancelled extends Error {
   constructor() {
@@ -338,15 +350,15 @@ export function isPaused(err: unknown): boolean {
  * Whether a send's failure says for sure that its message didn't go out:
  * the server refused it, or what came before it (a 4xx answer: a cap,
  * invalid_token, tokens_needed, a bad envelope), or there was nothing to
- * pay or answer with (NoTokens, NoMailboxes). Not a lost answer, a timeout
- * or a failing server (5xx): the message may have arrived. The server
- * answers every 4xx of POST /send before it stores the envelope. This also
- * relies on deliver() never trying a send again after a lost answer: a
- * refusal of that second try (invalid_token, its tokens spent by the first)
- * would no longer say the message didn't go out.
+ * pay or answer with (NoTokens, NoMailboxes, MailboxLimit). Not a lost
+ * answer, a timeout or a failing server (5xx): the message may have
+ * arrived. The server answers every 4xx of POST /send before it stores the
+ * envelope. This also relies on deliver() never trying a send again after
+ * a lost answer: a refusal of that second try (invalid_token, its tokens
+ * spent by the first) would no longer say the message didn't go out.
  */
 function refusedOutright(err: unknown): boolean {
-  return err instanceof NoTokens || err instanceof NoMailboxes || (err instanceof ApiError && err.status >= 400 && err.status < 500);
+  return err instanceof NoTokens || err instanceof NoMailboxes || err instanceof MailboxLimit || (err instanceof ApiError && err.status >= 400 && err.status < 500);
 }
 
 /** Whether one of our attachments can be sent again: it failed before it was uploaded, and its file is here. */
@@ -478,6 +490,14 @@ export function createMessaging(deps: MessagingDeps) {
     });
   /** Set by stop(): background work (refillSoon, deleting uploads again) starts no more timers, and upkeep no more steps. */
   let stopped = false;
+  /**
+   * The server said the account holds all the mailboxes it may
+   * (mailbox_limit). The pool isn't topped up meanwhile: every try would be
+   * refused, and still count against the day's new mailboxes. Until a block
+   * frees one, or the app starts again.
+   */
+  let atMailboxLimit = false;
+  const isMailboxLimit = (err: unknown) => err instanceof ApiError && err.code === 'mailbox_limit';
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
   /** When a conversation whose link-key fetch failed may fetch again (Unix ms; refreshLinkKey). */
   const linkKeyRetryAt = new Map<string, number>();
@@ -977,6 +997,10 @@ export function createMessaging(deps: MessagingDeps) {
           mailbox = await takeMailbox(db, session);
         } catch (err) {
           if (err instanceof ApiError && err.code === 'rate_limited') throw new NoMailboxes();
+          if (isMailboxLimit(err)) {
+            atMailboxLimit = true;
+            throw new MailboxLimit();
+          }
           throw err;
         }
         // Left low: topped up at a random moment, not with a send.
@@ -1143,6 +1167,8 @@ export function createMessaging(deps: MessagingDeps) {
       if (current.myMailbox) {
         try {
           await session.call('POST', `/mailboxes/${current.myMailbox}/discard`, undefined, checkObject);
+          // One fewer: the pool may be topped up again.
+          atMailboxLimit = false;
         } catch (err) {
           if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
         }
@@ -1448,7 +1474,7 @@ export function createMessaging(deps: MessagingDeps) {
       low: async () => !!mediaIssuer && (await countTokens(db, mediaIssuer.keyId, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER,
       topUp: topUpMedia,
     },
-    pool: { low: async () => (await poolSize(db)) < POOL_LOW, topUp: topUpPool },
+    pool: { low: async () => !atMailboxLimit && (await poolSize(db)) < POOL_LOW, topUp: topUpPool },
   };
   /** The top-ups waiting to run (refillSoon), each with what cancels it. */
   const toppingUp = new Map<keyof typeof supplies, () => void>();
@@ -1495,9 +1521,16 @@ export function createMessaging(deps: MessagingDeps) {
     await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, seconds, 'media', MEDIA_LOW_WATER);
   }
 
-  /** Adds mailboxes to the pool if fewer than POOL_LOW are left. */
+  /** Adds mailboxes to the pool if fewer than POOL_LOW are left, and the account may have more. */
   async function topUpPool(): Promise<void> {
-    if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session, POOL_REFILL, POOL_LOW);
+    if (atMailboxLimit || (await poolSize(db)) >= POOL_LOW) return;
+    try {
+      await refillPool(db, session, POOL_REFILL, POOL_LOW);
+    } catch (err) {
+      // Not a failure: there's nothing to do until a block frees one.
+      if (!isMailboxLimit(err)) throw err;
+      atMailboxLimit = true;
+    }
   }
 
   /**

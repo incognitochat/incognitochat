@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
-import { openDB, type IDBPDatabase } from 'idb';
+import { forceCloseDatabase } from 'fake-indexeddb';
+import { openDB, unwrap, type IDBPDatabase } from 'idb';
 import { describe, expect, it, vi } from 'vitest';
 import { concat, utf8 } from '../crypto/encoding';
 import { generateCopyableSigningKey, generateSigningKey } from '../crypto/keys';
@@ -37,6 +38,7 @@ import {
   putKey,
   putMeta,
   putSealed,
+  RELOAD_GAP_MS,
   StorageError,
   type Database,
 } from './db';
@@ -441,6 +443,43 @@ describe('upgrades', () => {
       expect(reload).toHaveBeenCalledOnce();
       newer.close();
     } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reloads when the browser drops the connection, but not again within a minute', async () => {
+    const reload = vi.fn();
+    const kept = new Map<string, string>();
+    vi.stubGlobal('location', { reload });
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v) });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const dropped = async () => {
+      const db = await openDatabase(`terminated-test-${n++}`);
+      forceCloseDatabase(unwrap(db) as never);
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    try {
+      await dropped();
+      expect(reload).toHaveBeenCalledOnce();
+      // The reloaded page loses it again at once: no reload loop.
+      clock.mockReturnValue(1_800_000_000_000 + RELOAD_GAP_MS - 1);
+      await dropped();
+      expect(reload).toHaveBeenCalledOnce();
+      // Later on, it reloads again.
+      clock.mockReturnValue(1_800_000_000_000 + RELOAD_GAP_MS);
+      await dropped();
+      expect(reload).toHaveBeenCalledTimes(2);
+      // Without sessionStorage (blocked), it can't tell, and doesn't.
+      clock.mockReturnValue(1_800_000_000_000 + 3 * RELOAD_GAP_MS);
+      vi.stubGlobal('sessionStorage', {
+        getItem: () => {
+          throw new DOMException('blocked', 'SecurityError');
+        },
+      });
+      await dropped();
+      expect(reload).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
       vi.unstubAllGlobals();
     }
   });

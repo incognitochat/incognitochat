@@ -41,8 +41,9 @@ async function backend() {
   const bundles = new Map<string, Record<string, unknown>>();
   // uploadsPaused: the operator has paused uploads; mediaSigned: media
   // tokens signed; keyRetired: the issuer keys the apps' build names are
-  // replaced, and no longer held.
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false };
+  // replaced, and no longer held; mailboxesFull: accounts hold all the
+  // mailboxes they may (4,000).
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false };
   /** Requests to the media routes. */
   const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
@@ -90,6 +91,7 @@ async function backend() {
         return check(b);
       }
       if (path === '/mailboxes') {
+        if (state.mailboxesFull) throw new ApiError(409, 'mailbox_limit');
         const ids = Array.from({ length: body.count as number }, rand);
         ids.forEach((id) => owners.set(id, account));
         return check({ mailboxes: ids });
@@ -173,6 +175,21 @@ async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', t
 function screenOf<K extends Screen['kind']>(screen: Screen, kind: K): Extract<Screen, { kind: K }> {
   if (screen.kind !== kind) throw new Error(`expected ${kind}, got ${screen.kind}`);
   return screen as Extract<Screen, { kind: K }>;
+}
+
+/** Holds the next request to a path that matches, until the test fails it. */
+function holdAndFail(b: Awaited<ReturnType<typeof backend>>, match: RegExp) {
+  const request = b.api.request.bind(b.api);
+  let reached: () => void = () => {};
+  const atServer = new Promise<void>((r) => (reached = r));
+  let fail: (err: Error) => void = () => {};
+  b.api.request = (async (method, path, init, check) => {
+    if (!match.test(path)) return request(method, path, init, check);
+    b.api.request = request;
+    reached();
+    return new Promise<never>((_, reject) => (fail = reject));
+  }) as Api['request'];
+  return { atServer, fail: (err: Error) => fail(err) };
 }
 
 /** The chat a link screen offers to open (a link of someone we already write to). */
@@ -789,6 +806,74 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it("doesn't take the user back to where an action failed once they've gone elsewhere", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+
+    // The first message: its chat opens, the user goes home, then it fails.
+    // They stay home, not taken back to the link.
+    const sending = holdAndFail(b, /^\/send$/);
+    const writing = sender.writeToLink('hello');
+    await sending.atServer;
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.home();
+    sending.fail(new NetworkError('no answer'));
+    await writing;
+    expect(sender.screen.value.kind).toBe('home');
+
+    // Blocking, the same: the user went home meanwhile.
+    await sender.openConversation(conv);
+    let discard = holdAndFail(b, /\/discard$/);
+    const blocking = sender.block();
+    await discard.atServer;
+    await sender.home();
+    discard.fail(new NetworkError('no answer'));
+    await blocking;
+    expect(sender.screen.value.kind).toBe('home');
+    // Still in the chat when it fails: it says why there, no longer busy.
+    await sender.openConversation(conv);
+    discard = holdAndFail(b, /\/discard$/);
+    const again = sender.block();
+    await discard.atServer;
+    discard.fail(new NetworkError('no answer'));
+    await again;
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ id: conv, busy: false, error: 'network', blocked: false });
+
+    // Unblocking from the Blocked list, the same.
+    await sender.block();
+    await sender.blocked();
+    const telling = holdAndFail(b, /^\/send$/);
+    const unblocking = sender.unblock(conv);
+    await telling.atServer;
+    await sender.home();
+    telling.fail(new ApiError(400, 'bad_request'));
+    await unblocking;
+    expect(sender.screen.value.kind).toBe('home');
+  });
+
+  it('says when a reply would start more chats than an account may have', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    b.state.mailboxesFull = true;
+    await owner.sendMessage('hi');
+    const conv = screenOf(owner.screen.value, 'conversation');
+    expect(conv.error).toBe('mailbox-limit');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([
+      ['hello', 'read'],
+      ['hi', 'failed'],
+    ]);
   });
 
   it("says to reopen the app once the server no longer holds its build's issuer key", async () => {

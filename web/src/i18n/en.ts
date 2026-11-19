@@ -202,6 +202,7 @@ export const en = {
   conversationEnded: 'This conversation has ended.',
   errorNoTokens: "You've sent a lot today. Try again tomorrow.",
   errorNoMailboxes: "You've started or answered a lot of new chats today. Try again tomorrow.",
+  errorMailboxLimit: "You've reached the limit of 4,000 chats. Blocking someone frees one; deleting a chat doesn't. See Usage.",
   errorTooFast: 'Too many messages to this person right now. Try again in a minute.',
   errorMediaPaused: 'Attachments are paused for now; try again later.',
   errorOutdated: 'This version of the app is out of date. Close it and open it again to send.',
