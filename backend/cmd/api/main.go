@@ -150,7 +150,9 @@ func newServer(aws awsv2.Config, getenv func(string) string, params map[string]s
 	}
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same
-	// one their account stores, so the plain IDs go no further than here.
+	// one their account stores. The plain IDs come from a plain environment
+	// variable, so they are also in Terraform state, and anyone who can read
+	// the function's configuration can read them.
 	adminIDs, err := config.TelegramIDs(getenv("ADMIN_TELEGRAM_IDS"))
 	if err != nil {
 		return nil, err

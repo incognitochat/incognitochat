@@ -29,8 +29,8 @@ const (
 	MaxMailboxes = 4000
 	// MailboxBatch is the most mailboxes one request creates.
 	MailboxBatch = 10
-	// MailboxesPerDay limits how many mailboxes an account creates per UTC
-	// day: each new chat it starts or answers takes one.
+	// MailboxesPerDay limits how many mailboxes a person (Telegram user)
+	// creates per UTC day: each new chat they start or answer takes one.
 	MailboxesPerDay = 100
 	// SendsPerMailboxPerMinute caps messages to one mailbox.
 	SendsPerMailboxPerMinute = 30

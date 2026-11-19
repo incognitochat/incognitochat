@@ -3,8 +3,7 @@
 // keys, but the same signing key, whose fingerprint is in the link. Senders'
 // tags are made from that fingerprint, so after a replacement the same
 // people get the same labels, and blocked people stay blocked. Keys are
-// generated here and sealed in the vault (they are copied to new devices
-// later).
+// generated here and sealed in the vault (crypto/vault.ts).
 //
 // The server gives a signing key to one account for good, so no two
 // accounts' links share senders' tags: every create, replace and rotation

@@ -10,8 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// Uploads records media uploads until they're fetched and deleted, or
-// expire:
+// Uploads records media uploads until they're deleted, or expire:
 //
 //	U#<id>  U  the SHA-256 of its delete secret (d), its size (s), how many
 //	           fresh upload URLs it was given after the first (r)

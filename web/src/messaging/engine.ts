@@ -1537,7 +1537,7 @@ export function createMessaging(deps: MessagingDeps) {
         if (refilled) throw new NoTokens();
         // Out of tokens: fetching right before an upload is a timing hint,
         // but the wallet is normally refilled well ahead (maintain(),
-        // refillSoon()), with what the largest upload costs. Not if, by
+        // refillSoon()), with what a 25 MiB file costs. Not if, by
         // then, another upload's refill has brought what this one needs.
         try {
           const needed = count - taken.length;

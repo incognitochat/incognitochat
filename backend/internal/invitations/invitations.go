@@ -25,7 +25,8 @@ const (
 	MaxLevel = 100
 	// MaxAllowance bounds a level's allowance and a single grant.
 	MaxAllowance = 10000
-	// RedeemsPerDay limits attempts to redeem a code, per account.
+	// RedeemsPerDay limits attempts to redeem a code, per person (Telegram
+	// user) and UTC day.
 	RedeemsPerDay = 10
 
 	// PayloadPrefix starts an invitation's start parameter.

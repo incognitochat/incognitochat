@@ -6,9 +6,9 @@
 // token, so anyone holding the token could forge it. The Ed25519 signature can
 // only come from Telegram.
 //
-// Only the Telegram user ID, the start parameter, the write-access flag and the
-// signing time are returned. Names, usernames, photos and chat details are
-// never read, so they can't be stored by mistake.
+// Only the Telegram user ID, the language code, the start parameter, the
+// write-access flag and the signing time are returned. Names, usernames,
+// photos and chat details are never read, so they can't be stored by mistake.
 package initdata
 
 import (

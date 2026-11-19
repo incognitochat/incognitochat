@@ -169,7 +169,7 @@ variable "invite_only" {
 }
 
 variable "admin_telegram_ids" {
-  description = "Comma-separated Telegram user IDs of admins. The api function keeps only their keyed hashes"
+  description = "Comma-separated Telegram user IDs of admins. A plain environment variable of the api function (so also in Terraform state), which recognises admins by their keyed hashes"
   type        = string
   default     = ""
   sensitive   = true

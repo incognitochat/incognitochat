@@ -25,7 +25,8 @@ type lookupResponse struct {
 // The app asks on a plain launch, so a second device (say Telegram Desktop,
 // opened from a notice) can say so instead of offering setup, which would
 // replace the account. Only plain launches are accepted, as for notices, so
-// this never tells the server whose link someone opened. Nothing is stored.
+// this never tells the server whose link someone opened. Nothing is stored
+// but the Telegram user's daily count of lookups (LookupsPerDay).
 func (s *Server) lookupAccount(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /accounts/lookup"
 	var in lookupRequest

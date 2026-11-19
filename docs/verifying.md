@@ -166,7 +166,7 @@ To check a deploy, rebuild its commit and compare:
 
 ```shell
 git checkout <commit> && cd backend && ../scripts/build-lambdas.sh
-gh attestation verify dist/api.zip --repo <org>/<org>
+gh attestation verify dist/api.zip --repo <owner>/<repo>   # this repository
 ```
 
 The hashes printed should match the deploy log, and the attestation proves

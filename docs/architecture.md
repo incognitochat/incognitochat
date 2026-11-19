@@ -101,15 +101,21 @@ flowchart LR
   each gets its own local profile on the device, named after a hash of its
   Telegram user ID.
 - **Sessions:** the device signs a login with its device key and gets a
-  15-minute token. Sensitive actions (links, invitations, admin) also carry a
-  fresh signature. Both are timed by the server's clock: if the device's own
-  is off, the server says so with its time, and the app corrects for it and
-  asks again, without the user seeing an error. Only within two days, though:
-  further off, the app asks the user to set the device's date and time. Each
-  request reads the device and its account once, so a replaced or deleted
-  account is refused at once; logins and registrations check what they can
-  before reading anything, and registrations count every attempt that gets
-  past the signature checks, per Telegram user.
+  15-minute token. Deleting the account (or what is left of one it
+  replaced), changing its link, creating invitation codes and admin changes
+  also carry a fresh signature; other requests, redeeming an invitation code
+  among them, need only the token. Both are timed by the server's clock: if
+  the device's own is off, the server says so with its time, and the app
+  corrects for it and asks again, without the user seeing an error. Only
+  within two days, though: further off, the app asks the user to set the
+  device's date and time. Each request reads the device and its account
+  once, so a replaced or deleted account is refused at once. Opening a push
+  socket is the exception: `ws` checks only the token, so one issued before
+  the account ended still opens sockets until it expires, though nothing is
+  pushed to an ended account ([security.md](security.md#other-limits)).
+  Logins and registrations check what they can before reading anything, and
+  registrations count every attempt that gets past the signature checks,
+  per Telegram user.
 
 ## Links
 
@@ -407,7 +413,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
 | Table | Holds | Expires |
 |---|---|---|
 | `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | a replaced account's marker and device keys, after 90 days |
-| `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
+| `messages` | one item per undelivered envelope, keyed by the recipient's account and device: the mailbox, the ciphertext. No sender | 30 days |
 | `ephemeral` | socket records, rate counters, notice quiet periods (each named by a keyed hash, not a mailbox, link or account ID), login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 
 - No precise timestamps: keys are random IDs or keyed hashes, and times are

@@ -226,8 +226,9 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	return httpapi.JSON(http.StatusOK, map[string]string{"url": url})
 }
 
-// deleteUpload deletes an upload for whoever holds its delete secret: the
-// recipient, once the file is safely on their device.
+// deleteUpload deletes an upload for whoever holds its delete secret (the
+// sender, and the recipient, whose message carries it): the app asks when
+// the upload's message is deleted.
 func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/{id}/delete"
 	id := httpapi.Param(ctx, "id")
