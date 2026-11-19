@@ -56,10 +56,10 @@ func RegisterParts(initData string, accountKey []byte, deviceID string, deviceKe
 }
 
 // register creates an account for the Telegram user present in initData
-// (design §7). The launch must carry "reg" + the account key's fingerprint,
-// which only Telegram sets, so initData collected by any other page can't be
-// used to register someone else's keys. Nothing from initData is kept except
-// a keyed hash of the user ID.
+// (docs/protocol.md, Registration and sessions). The launch must carry "reg" +
+// the account key's fingerprint, which only Telegram sets, so initData
+// collected by any other page can't be used to register someone else's keys.
+// Nothing from initData is kept except a keyed hash of the user ID.
 func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /register"
 	var in registerRequest

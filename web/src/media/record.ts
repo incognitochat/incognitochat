@@ -1,11 +1,11 @@
-// Voice messages (phase 5.4) and round video messages (5.5), recorded with
-// MediaRecorder. Voice: AAC in MP4 where the browser can, so iPhone and
-// Android play each other's, else Opus in WebM or Ogg; the waveform comes
-// from the microphone's level while recording, so nothing has to decode the
-// result. Video: the camera's picture is cropped to a square on a canvas
-// (mirrored for the front camera, as the person saw it) and that canvas is
-// recorded with the microphone, as H.264 in MP4 where the browser can.
-// A recording carries no metadata about the device or place.
+// Voice messages and round video messages, recorded with MediaRecorder. Voice:
+// AAC in MP4 where the browser can, so iPhone and Android play each other's,
+// else Opus in WebM or Ogg; the waveform comes from the microphone's level
+// while recording, so nothing has to decode the result. Video: the camera's
+// picture is cropped to a square on a canvas (mirrored for the front camera,
+// as the person saw it) and that canvas is recorded with the microphone, as
+// H.264 in MP4 where the browser can. A recording carries no metadata about
+// the device or place.
 
 import { stripVideoMetadata } from './mp4';
 import { preview } from './prepare';
@@ -17,9 +17,9 @@ export const MAX_ROUND_MS = 60 * 1000;
 /** Bars in a voice message's waveform. */
 export const WAVEFORM_BARS = 48;
 /** Recordings shorter than this are dropped, as Telegram does. */
-export const MIN_VOICE_MS = 500;
+const MIN_VOICE_MS = 500;
 /** A video message's width and height, in pixels (Telegram's size). */
-export const ROUND_SIDE = 384;
+const ROUND_SIDE = 384;
 const LEVEL_EVERY_MS = 50;
 const SNAPSHOT_SIDE = 192;
 

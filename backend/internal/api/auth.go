@@ -33,13 +33,11 @@ type caller struct {
 
 // person names the caller for daily limits: their Telegram user, by the
 // keyed hash the directory already keeps for one account per user, so
-// deleting the account and setting up again doesn't start a fresh day. The
-// account itself only for one without a Telegram user.
+// deleting the account and setting up again doesn't start a fresh day. Every
+// account has one: registration stores it, and a replaced account, whose
+// hash is gone, is refused before any handler runs.
 func (c caller) person() string {
-	if c.device.TelegramHash != "" {
-		return "t." + c.device.TelegramHash
-	}
-	return "a." + c.AccountID
+	return "t." + c.device.TelegramHash
 }
 
 type callerHandler func(ctx context.Context, req httpapi.Request, c caller) httpapi.Response

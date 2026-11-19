@@ -1,5 +1,5 @@
 // Package inbox stores undelivered envelopes in the messages table, one item
-// per message per device (design §12, §14):
+// per message per device (docs/protocol.md, Delivery):
 //
 //	D#<account>#<device>  <random ID>  mailbox (m), envelope (b), expiry (e)
 //
@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	// TTL is how long an undelivered message is kept (design D13).
+	// TTL is how long an undelivered message is kept.
 	TTL = 30 * 24 * time.Hour
 
 	batchSize  = 25

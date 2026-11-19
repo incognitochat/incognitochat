@@ -16,7 +16,7 @@ export function isServerTrouble(err: unknown): boolean {
   return err instanceof ApiError && (err.status === 429 || err.status >= 500);
 }
 
-export interface BackoffOptions {
+interface BackoffOptions {
   /** The longest first wait (ms); each failure in a row doubles it. */
   baseMs: number;
   /** The longest wait (ms), whatever the server asks. */
@@ -25,7 +25,7 @@ export interface BackoffOptions {
   random?: () => number;
 }
 
-export interface Backoff {
+interface Backoff {
   /** How long background requests should still wait (ms), 0 if not. */
   remaining(): number;
   /**

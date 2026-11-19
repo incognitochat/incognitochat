@@ -1,6 +1,6 @@
-// Anonymous tokens (design §11, backend/internal/tokens): send tokens pay
-// for messages, media tokens for uploads. Each kind has its own issuer key
-// and its own label.
+// Anonymous tokens (docs/protocol.md, Send tokens and media tokens;
+// backend/internal/tokens): send tokens pay for messages, media tokens for
+// uploads. Each kind has its own issuer key and its own label.
 //
 //   token     = type (2) ‖ nonce (32) ‖ challenge (32) ‖ key ID (32) ‖ authenticator (256)
 //   challenge = SHA-256(Message(label, [suite], u64(epoch)))
@@ -13,7 +13,7 @@ import { concat, randomBytes } from '../crypto/encoding';
 import { SUITE } from '../crypto/keys';
 import { message } from '../crypto/signing';
 
-export const TOKEN_TYPE = 0x0002;
+const TOKEN_TYPE = 0x0002;
 export const EPOCH_SECONDS = 7 * 24 * 3600;
 export const LABEL_SEND_TOKEN = 'incognitochat/v2/send-token';
 export const LABEL_MEDIA_TOKEN = 'incognitochat/v2/media-token';

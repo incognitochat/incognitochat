@@ -1,5 +1,5 @@
-// The account secret (design §6, §9, §11): 32 random bytes shared by an
-// account's devices and nobody else. It derives:
+// The account secret (docs/protocol.md, Inner message): 32 random bytes shared
+// by an account's devices and nobody else. It derives:
 //   - sender tags: HMAC(secret, Message("incognitochat/v2/sender-tag", link fp)),
 //     the same for every conversation an account starts through one link, so
 //     the link's owner can block the person and not just a conversation;
@@ -23,10 +23,10 @@ const NAME = 'account-secret';
 const KEY_VAULT = 'vault-key';
 const HMAC: HmacImportParams = { name: 'HMAC', hash: 'SHA-256' };
 
-export const LABEL_SENDER_TAG = 'incognitochat/v2/sender-tag';
-export const LABEL_LABEL = 'incognitochat/v2/label';
+const LABEL_SENDER_TAG = 'incognitochat/v2/sender-tag';
+const LABEL_LABEL = 'incognitochat/v2/label';
 /** Local only: ID tags are never sent. */
-export const LABEL_ID_TAG = 'incognitochat/v2/local-id-tag';
+const LABEL_ID_TAG = 'incognitochat/v2/local-id-tag';
 
 // Frozen with v1's labels: changing or reordering either changes everyone's labels.
 const EMOJI = [

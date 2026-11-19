@@ -30,7 +30,7 @@ export const DEFAULT_MEDIA_SETTINGS: MediaSettings = { keep: 'forever', auto: { 
  * for recorders that don't keep to the bitrate asked. A GIF is sent as it
  * is.
  */
-export const AUTO_LIMITS = { photo: 5 * MiB, voice: 10 * MiB, round: 10 * MiB, gif: 10 * MiB } as const;
+const AUTO_LIMITS = { photo: 5 * MiB, voice: 10 * MiB, round: 10 * MiB, gif: 10 * MiB } as const;
 
 /**
  * Whether a received attachment is fetched as soon as its conversation is

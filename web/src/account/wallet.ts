@@ -1,8 +1,9 @@
-// The token wallets: tokens fetched while logged in and spent without
-// logging in (design §11). Send tokens pay for what goes to another person,
-// one per started 2.5 KiB of envelope (protocol/envelope.ts, sendTokensFor):
-// one for anything but a long text. Media tokens pay one per started MiB of
-// an upload, from a budget of their own. Kept on the device only.
+// The token wallets: tokens fetched while logged in and spent without logging
+// in (docs/protocol.md, Send tokens and media tokens). Send tokens pay for
+// what goes to another person, one per started 2.5 KiB of envelope
+// (protocol/envelope.ts, sendTokensFor): one for anything but a long text.
+// Media tokens pay one per started MiB of an upload, from a budget of their
+// own. Kept on the device only.
 //
 // Tokens are fetched in batches ahead of time, at random moments, rarely
 // right before a send: the issuer would otherwise see an account fetch one

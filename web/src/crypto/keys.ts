@@ -3,11 +3,12 @@
 // Device keys are generated non-extractable: they can be used, but never read
 // out by code, not even by our own. That's all the flag does: the web view
 // still stores them in the app's storage, readable to a copy of it (see
-// vault.ts). Keys that must be copied to a new device (the account key, link
-// keys, persona keys) are generated once as extractable, sealed into the
+// vault.ts). Copyable keys (the account key, link keys and conversation keys,
+// made so to be copied to another device, which the app doesn't do: one
+// device per account) are generated once as extractable, sealed into the
 // vault (vault.ts), and then used through a non-extractable working copy.
 
-import { concat, toBase64Url } from './encoding';
+import { toBase64Url } from './encoding';
 import { message } from './signing';
 
 /** Algorithm suite: P-256, HKDF-SHA256, AES-256-GCM. Recorded with every key. */
@@ -31,7 +32,7 @@ export function generateCopyableSigningKey(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey(SIGNING, true, ['sign', 'verify']);
 }
 
-/** A new ECDH key pair whose private key can be sealed and copied (link and persona keys). */
+/** A new ECDH key pair whose private key can be sealed and copied (link and conversation keys). */
 export function generateCopyableAgreementKey(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey(AGREEMENT, true, ['deriveBits']);
 }
@@ -64,9 +65,4 @@ export async function fingerprint(publicKey: CryptoKey): Promise<string> {
   const raw = await exportPublicKey(publicKey);
   const digest = await crypto.subtle.digest('SHA-256', message('incognitochat/v2/fingerprint', new Uint8Array([SUITE]), raw));
   return toBase64Url(new Uint8Array(digest));
-}
-
-/** Prefixes data with the suite byte, for anything stored or sent with a key. */
-export function withSuite(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-  return concat(new Uint8Array([SUITE]), bytes);
 }

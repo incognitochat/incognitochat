@@ -1145,11 +1145,12 @@ func roundUp(t time.Time) int64 {
 	return t.Add(time.Hour - time.Nanosecond).Truncate(time.Hour).Unix()
 }
 
-// Notices are the Telegram "New message" notices (design §12). The account
-// item keeps the chat ID sealed by the notify function (cid), which nobody
-// else can read; the language for the notice (lg); the last notice's message
-// ID, to delete it when a new one is sent (nm); and whether Telegram refused
-// the last notice, meaning notices are off for this user (no).
+// Notices are the Telegram "New message" notices (docs/protocol.md, Notices).
+// The account item keeps the chat ID sealed by the notify function (cid),
+// which nobody else can read; the language for the notice (lg); the last
+// notice's message ID, to delete it when a new one is sent (nm); and whether
+// Telegram refused the last notice, meaning notices are off for this user
+// (no).
 //
 // The notify function may touch nothing else (infra/functions.tf): it reads
 // cid, lg, nm and no, naming them, and writes nm and no, with conditions on

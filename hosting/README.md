@@ -1,7 +1,8 @@
 # Hosting
 
 The client is served by GitHub Pages from a hosting repository,
-`<org>/<org>.github.io`, in a GitHub organization of its own (design §16):
+`<org>/<org>.github.io`, in a GitHub organization of its own
+([verifying.md](../docs/verifying.md#how-the-app-is-published)):
 all Pages sites of one owner share an origin, and with it the keys stored in
 the browser. The dev site has its own organization too.
 

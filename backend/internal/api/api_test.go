@@ -760,6 +760,24 @@ func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) in
 	return l.Counted(key, window)
 }
 
+// memNonces stands in for ephemeral.Nonces: a nonce is refused until the
+// expiry it was first used with.
+type memNonces struct {
+	mu   sync.Mutex
+	used map[string]time.Time
+	now  func() time.Time
+}
+
+func (m *memNonces) Use(_ context.Context, nonce string, expires time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if until, ok := m.used[nonce]; ok && m.now().Before(until) {
+		return false, nil
+	}
+	m.used[nonce] = expires
+	return true, nil
+}
+
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool
@@ -933,7 +951,7 @@ func newHarness(t *testing.T) *harness {
 		Telegram:    initdatatest.Verifier(botID),
 		Sessions:    issuer,
 		Directory:   h.dir,
-		Nonces:      session.NewMemoryNonces(func() time.Time { return h.now }),
+		Nonces:      &memNonces{used: map[string]time.Time{}, now: func() time.Time { return h.now }},
 		Limits:      &memLimiter{counts: map[string]int{}},
 		Pepper:      []byte("pepper-pepper-pepper-pepper-pepper"),
 		Log:         logx.New(h.logs, "api"),

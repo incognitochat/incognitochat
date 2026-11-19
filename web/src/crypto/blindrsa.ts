@@ -12,7 +12,7 @@
 
 const HASH = 'SHA-384';
 const H_LEN = 48;
-export const SALT_LENGTH = 48;
+const SALT_LENGTH = 48;
 
 export interface IssuerKey {
   /** WebCrypto RSA-PSS key, for verifying. */
@@ -102,7 +102,7 @@ export async function importIssuerKey(spki: Uint8Array<ArrayBuffer>): Promise<Is
   return { key, n: os2ip(nBytes), e: os2ip(b64(jwk.e!)), k: nBytes.length };
 }
 
-export interface BlindState {
+interface BlindState {
   /** r⁻¹ mod n, kept to unblind the signature. */
   inv: bigint;
 }

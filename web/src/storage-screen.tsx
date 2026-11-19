@@ -8,7 +8,7 @@ import { t, type Language } from './i18n';
  * newer version of the app has been used on this device; blocked: another
  * copy of the app, on an older version, still has the storage open.
  */
-export type StorageProblem = 'failed' | 'newer' | 'blocked';
+type StorageProblem = 'failed' | 'newer' | 'blocked';
 
 const TEXT = { failed: 'storageFailed', newer: 'storageNewer', blocked: 'storageBlocked' } as const;
 

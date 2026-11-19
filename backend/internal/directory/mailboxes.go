@@ -13,8 +13,9 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
 
-// Mailboxes (design §9): the server routes by mailbox, never by account. It
-// knows each mailbox's owner, to deliver, but not who writes to it.
+// Mailboxes (docs/architecture.md, Conversations and mailboxes): the server
+// routes by mailbox, never by account. It knows each mailbox's owner, to
+// deliver, but not who writes to it.
 //
 //	M#<mailbox>  M          owner (o); for a link's intro mailbox, the link (i)
 //	A#<account>  M#<mailbox> marks a mailbox the account owns (intro mailboxes: i = 1)

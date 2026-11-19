@@ -1,9 +1,9 @@
-// The mailbox pool (design §9): mailboxes created ahead of time, so taking
-// one for a new conversation rarely comes right after creating it. A take
-// that leaves the pool low has it topped up at a random moment after (the
-// engine's refillSoon); only a take that finds the pool empty creates
-// mailboxes first: more chats started in one burst than it holds, or a
-// top-up that failed or didn't run.
+// The mailbox pool (docs/architecture.md, Conversations and mailboxes):
+// mailboxes created ahead of time, so taking one for a new conversation rarely
+// comes right after creating it. A take that leaves the pool low has it topped
+// up at a random moment after (the engine's refillSoon); only a take that
+// finds the pool empty creates mailboxes first: more chats started in one
+// burst than it holds, or a top-up that failed or didn't run.
 
 import { checkObject } from '../net/api';
 import type { Session } from '../net/session';

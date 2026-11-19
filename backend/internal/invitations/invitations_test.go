@@ -2,8 +2,14 @@ package invitations
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
+
+// payload is the start parameter of an invitation link, as the app makes it.
+func payload(code string) string {
+	return PayloadPrefix + strings.ReplaceAll(code, "-", "")
+}
 
 func TestNewCode(t *testing.T) {
 	seen := map[string]bool{}
@@ -45,8 +51,8 @@ func TestNormalize(t *testing.T) {
 }
 
 func TestPayload(t *testing.T) {
-	if p := Payload("abcd-efgh"); p != "invabcdefgh" {
-		t.Fatalf("Payload = %q", p)
+	if p := payload("abcd-efgh"); p != "invabcdefgh" {
+		t.Fatalf("payload = %q", p)
 	}
 }
 

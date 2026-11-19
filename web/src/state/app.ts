@@ -145,7 +145,7 @@ export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'gene
  * asked again at every launch; nothing is deleted for it (a deletion is
  * finished only after the typed confirmation).
  */
-export type SignedOutReason = 'refused' | 'replaced' | 'deleting';
+type SignedOutReason = 'refused' | 'replaced' | 'deleting';
 
 /** A short message on the home screen after an action. */
 export type HomeNotice =
@@ -177,7 +177,7 @@ function withNewKey(notice: HomeNotice | null, newKey: boolean): HomeNotice | nu
 export type InvitationsNotice = 'created' | 'none-left' | 'network' | 'generic';
 
 /** What the Data and storage screen shows: attachments on this device, in bytes. */
-export interface StorageUsage {
+interface StorageUsage {
   media: number;
   /** Conversations holding attachments, largest first. */
   chats: { id: string; label: string; bytes: number }[];
@@ -208,7 +208,7 @@ export type SendError =
   | 'generic';
 
 /** A conversation in the list. */
-export interface ConversationView {
+interface ConversationView {
   id: string;
   label: string;
   role: 'owner' | 'sender';
@@ -220,7 +220,7 @@ export interface ConversationView {
 }
 
 /** A message: its conversation (on this device) and its ID, which is unique only within that conversation. */
-export type MessageRef = Pick<MessageView, 'conv' | 'id'>;
+type MessageRef = Pick<MessageView, 'conv' | 'id'>;
 
 /** A key for one message on this device, e.g. for its transfer's progress. */
 export function messageKey(m: MessageRef): string {
@@ -231,7 +231,7 @@ export function messageKey(m: MessageRef): string {
 export type SendAs = 'photo' | 'video' | 'gif' | 'audio' | 'file';
 
 /** An attachment being prepared to send, shown before its message is stored. */
-export interface Preparing {
+interface Preparing {
   key: string;
   conv: string;
   as: SendAs | 'voice' | 'round';
@@ -245,7 +245,7 @@ export interface Preparing {
 }
 
 /** An invitation code with its shareable URL. */
-export interface InvitationView extends InvitationCode {
+interface InvitationView extends InvitationCode {
   url: string;
 }
 
@@ -362,7 +362,7 @@ export interface Deps {
   stepPauseMs?: number;
 }
 
-/** How often an open app checks its inbox (until sockets arrive in phase 3). */
+/** How often an open app checks its inbox while it has no push socket. */
 const POLL_MS = 20_000;
 /** While a push socket is open, poll only every this many POLL_MS. */
 const SOCKET_POLL_EVERY = 6;
@@ -378,7 +378,7 @@ export interface LinkView extends LinkRecord {
   url: string;
 }
 
-/** How long the old copy waits before closing, so Telegram handles the link first (tested in phase 0). */
+/** How long the old copy waits before closing, so Telegram handles the link first (found by testing). */
 const CLOSE_DELAY_MS = 400;
 /**
  * After the server says downloads are paused, attachments aren't fetched by
@@ -467,9 +467,10 @@ export function createApp(deps: Deps) {
     });
   }
 
-  // Telegram notices (design §12) are set up with this launch's signed data,
-  // and only from a plain or registration launch: never one that names a
-  // link or an invitation, which would tell the server whose link this is.
+  // Telegram notices (docs/protocol.md, Notices) are set up with this launch's
+  // signed data, and only from a plain or registration launch: never one that
+  // names a link or an invitation, which would tell the server whose link this
+  // is.
   const signedStart = new URLSearchParams(deps.launch.initData).get('start_param') ?? '';
   const noticeLaunch = deps.launch.initData !== '' && (signedStart === '' || isRegistrationLaunch(signedStart));
   let writeAllowed = deps.launch.allowsWriteToPm;
@@ -977,8 +978,8 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Tells the other side, at once, what we've just read (design D12). In the
-   * background: the screen doesn't wait, and a failure is retried next time.
+   * Tells the other side, at once, what we've just read. In the background:
+   * the screen doesn't wait, and a failure is retried next time.
    */
   function seen(id: string): void {
     // Redrawn whether or not it all went: a call that joined one under way
@@ -1007,10 +1008,9 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Deletes a conversation from this device (and first blocks it, if asked),
-   * then shows the list.
+   * Deletes a conversation from this device, and on theirs too if forBoth;
+   * blocks them too if asked; then shows the list.
    */
-  /** Deletes a conversation from this device, and on theirs too if forBoth; then blocks them if asked. */
   async function deleteConversation(id: string, alsoBlock: boolean, forBoth = false): Promise<void> {
     if (!messaging) return;
     const current = screen.value;
@@ -2238,8 +2238,6 @@ export function createApp(deps: Deps) {
     mediaUrl,
     transfers,
     preparing,
-    /** The Telegram app's platform, e.g. "ios", "android", "tdesktop". */
-    platform: deps.launch.platform,
     /**
      * Deletes one message from this device (the other side keeps theirs).
      * One of theirs stays deleted if it's delivered again.

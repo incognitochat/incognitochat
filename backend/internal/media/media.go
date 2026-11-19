@@ -1,10 +1,10 @@
-// Package media handles encrypted attachments (design phase 5). The app
-// encrypts a file, pads it, and uploads only the ciphertext, straight to S3
-// with a presigned URL. The recipient downloads it the same way, decrypts it
-// and keeps it on the device. The upload stays, so it can be fetched again,
+// Package media handles encrypted attachments (docs/protocol.md, Media). The
+// app encrypts a file, pads it, and uploads only the ciphertext, straight to
+// S3 with a presigned URL. The recipient downloads it the same way, decrypts
+// it and keeps it on the device. The upload stays, so it can be fetched again,
 // until the app deletes it with its delete secret (when its message is
-// deleted) or it expires (Retention). The server never sees a file's key,
-// name or type.
+// deleted) or it expires (Retention). The server never sees a file's key, name
+// or type.
 package media
 
 import (

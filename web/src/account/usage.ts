@@ -6,13 +6,13 @@
 import { checkObject } from '../net/api';
 
 /** One limit: how much of it is used. */
-export interface UsageItem {
+interface UsageItem {
   used: number;
   limit: number;
 }
 
 /** GET /usage. The daily items reset at resetsAt (Unix seconds, 00:00 UTC). */
-export interface UsageInfo {
+interface UsageInfo {
   resetsAt: number;
   send: UsageItem;
   media: UsageItem;

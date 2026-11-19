@@ -1,6 +1,7 @@
-// Command bot is the Telegram bot (design §15). Telegram's webhook reaches it
-// through a Lambda function URL; the deploy invokes it directly with a setup
-// event, so the bot token and webhook secret never leave the function.
+// Command bot is the Telegram bot (docs/architecture.md, Parts). Telegram's
+// webhook reaches it through a Lambda function URL; the deploy invokes it
+// directly with a setup event, so the bot token and webhook secret never leave
+// the function.
 package main
 
 import (

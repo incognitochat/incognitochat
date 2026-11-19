@@ -4,7 +4,7 @@
 import { toHex } from '../crypto/encoding';
 
 /** Error codes the backend returns (backend/internal/api). */
-export type ErrorCode =
+type ErrorCode =
   | 'bad_request'
   | 'unsupported_media_type'
   | 'init_data_rejected'
