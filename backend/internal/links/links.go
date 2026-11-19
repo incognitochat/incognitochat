@@ -54,10 +54,12 @@ type Key struct {
 	Signature []byte // by the link signing key
 }
 
-// ValidID reports whether id is a link ID: 8 bytes as 11 base64url characters.
+// ValidID reports whether id is a link ID: 8 bytes as 11 base64url
+// characters, in their one canonical spelling (the decoder alone skips CR
+// and LF anywhere), since the ID names the link's items in the directory.
 func ValidID(id string) bool {
 	b, err := base64.RawURLEncoding.Strict().DecodeString(id)
-	return err == nil && len(b) == idBytes
+	return err == nil && len(b) == idBytes && base64.RawURLEncoding.EncodeToString(b) == id
 }
 
 // KeyParts are the signed parts of an encryption key.

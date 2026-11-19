@@ -114,12 +114,13 @@ func (i *Issuer) Verify(token string, now time.Time) (Claims, error) {
 	if !ok {
 		return Claims{}, ErrToken
 	}
+	// Only as Issue spells them: the decoder alone skips CR and LF anywhere.
 	payload, err := base64.RawURLEncoding.Strict().DecodeString(encPayload)
-	if err != nil || len(payload) != 1+8+16+16 {
+	if err != nil || len(payload) != 1+8+16+16 || base64.RawURLEncoding.EncodeToString(payload) != encPayload {
 		return Claims{}, ErrToken
 	}
 	mac, err := base64.RawURLEncoding.Strict().DecodeString(encMAC)
-	if err != nil {
+	if err != nil || base64.RawURLEncoding.EncodeToString(mac) != encMAC {
 		return Claims{}, ErrToken
 	}
 	key, ok := i.keys[payload[0]]

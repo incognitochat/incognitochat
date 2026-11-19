@@ -24,7 +24,7 @@ var (
 	device  = ids.New()
 )
 
-func issuer(t *testing.T, keys map[byte][]byte, current byte) *Issuer {
+func issuer(t testing.TB, keys map[byte][]byte, current byte) *Issuer {
 	t.Helper()
 	i, err := NewIssuer(keys, current)
 	if err != nil {
@@ -119,11 +119,37 @@ func TestVerifyRejectsTampering(t *testing.T) {
 		"padded":           token + "=",
 		"short payload":    tokenPrefix + payload[:10] + "." + mac,
 		"trailing garbage": token + ".x",
+		// CR and LF, which the decoder skips (TST-1).
+		"CR in the payload": tokenPrefix + payload[:4] + "\r" + payload[4:] + "." + mac,
+		"LF in the mac":     tokenPrefix + payload + "." + mac[:3] + "\n" + mac[3:],
+		"CRLF at the end":   token + "\r\n",
 	} {
 		if _, err := i.Verify(bad, now); !errors.Is(err, ErrToken) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
+}
+
+// Whatever Verify accepts is a token as Issue writes it (TST-1).
+func FuzzVerify(f *testing.F) {
+	i := issuer(f, map[byte][]byte{1: keyA}, 1)
+	token, _, err := i.Issue(account, device, now)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(token)
+	f.Add(token[:7] + "\r" + token[7:])
+	f.Add(token + "\n")
+	f.Fuzz(func(t *testing.T, token string) {
+		claims, err := i.Verify(token, now)
+		if err != nil {
+			return
+		}
+		again, _, err := i.Issue(claims.AccountID, claims.DeviceID, claims.Expires.Add(-TTL))
+		if err != nil || again != token {
+			t.Fatalf("accepted %q, which Issue writes %q", token, again)
+		}
+	})
 }
 
 func TestNewIssuerRejects(t *testing.T) {
