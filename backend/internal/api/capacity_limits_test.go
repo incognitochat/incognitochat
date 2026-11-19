@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/envelope"
@@ -262,11 +265,12 @@ func TestInboxBudgetConcurrent(t *testing.T) {
 }
 
 // A device fetched at once from 100 instances, every minute: each instance
-// starts each minute knowing nothing of it. After the first minute, those
-// instances take the page before reading anything, and every fetch that
-// cost the tables something counts against the person's day, at least
-// MinRequestUnits: so the day bounds what it all reads, and the writes of
-// the fetches refused; then it costs nothing.
+// starts each minute knowing nothing of it, and all of them read its count
+// before any writes it (atOnce). After the first minute, those instances
+// take the page before reading anything. Every page counts what it read
+// against the person's day, and every fetch refused after it read messages
+// or wrote a count at least MinRequestUnits: so the day bounds what it all
+// reads, and the writes of the fetches refused; then it costs nothing.
 func TestInboxConcurrentEveryMinute(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -281,20 +285,42 @@ func TestInboxConcurrentEveryMinute(t *testing.T) {
 			owner := h.account(t, userID)
 			tc.fill(h, owner)
 			const c = 100
+			gate := &atOnce{DB: tb.meter}
 			routers := make([]*httpapi.Router, c)
 			for i := range routers {
-				routers[i] = tb.instance(h)
+				routers[i] = tb.instanceOn(h, gate)
 			}
+			// Until every instance knows that the day is over, a minute
+			// serves at most InboxUnitsPerMinute/MinRequestUnits of the
+			// fetches (each leaves at least MinRequestUnits counted in it).
+			// All of them found the minute empty, so it refuses the others
+			// after a write, each counting at least MinRequestUnits on the
+			// day. An instance holds back less than a batch of what it
+			// counts (ephemeral's tallyBatch, 50). So the table has the
+			// day's count within dayBy minutes. In the next, an instance may
+			// still go by a count it learned the minute before; in the one
+			// after, every instance has asked again (CheckAt trusts a count
+			// for a minute), and the minute costs nothing.
+			const perMinute = (c - InboxUnitsPerMinute/MinRequestUnits) * MinRequestUnits
+			const dayBy = (InboxUnitsPerDay + c*(50-1) + perMinute - 1) / perMinute
 			var total, first, steady dynamotest.Units
 			minutes, free := 0, false
-			for ; minutes < 150 && !free; minutes++ {
+			for ; minutes < dayBy+2 && !free; minutes++ {
 				if minutes%10 == 0 {
 					owner.token = h.token(t, owner.d)
 				}
 				tb.meter.Reset()
+				gate.minute(c)
 				var wg sync.WaitGroup
+				var ended atomic.Int32 // fetches answered daily_limit
 				for _, r := range routers {
-					wg.Go(func() { serve(r, owner, http.MethodGet, "/inbox", nil) })
+					wg.Go(func() {
+						ctx, done := gate.fetch()
+						defer done()
+						if resp, _ := serveIn(ctx, r, owner, http.MethodGet, "/inbox", nil); httpapi.ErrorCode(resp) == "daily_limit" {
+							ended.Add(1)
+						}
+					})
 				}
 				wg.Wait()
 				m, e := tb.meter.Units(tb.messages), tb.meter.Units(tb.ephemeral)
@@ -306,7 +332,10 @@ func TestInboxConcurrentEveryMinute(t *testing.T) {
 					steady.Read += m.Read / 10
 					steady.Write += e.Write / 10
 				}
-				free = minutes > 0 && m.Read == 0 && e.Write == 0
+				// The day ended it: every fetch was told so, and none read or
+				// wrote anything. (A minute in which DynamoDB Local failed
+				// every call costs nothing either.)
+				free = minutes > 0 && ended.Load() == c && m.Read == 0 && e.Write == 0
 				h.now = h.now.Add(time.Minute)
 			}
 			t.Logf("first minute: %.1f R messages, %.0f W ephemeral; then about %.1f R and %.0f W a minute; %d minutes (free: %v), %.0f R and %.0f W in all",
@@ -329,6 +358,90 @@ func TestInboxConcurrentEveryMinute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// atOnce is the ephemeral table as the rate limits of fetches that all
+// start at once see it: no write to a device's minute counter goes through
+// until each fetch of the minute has read the counter, or ended without
+// it. So every instance new to the minute finds it empty, whatever order
+// DynamoDB Local serves the calls in. Left to that order, some fetches read
+// the counter after others have reserved it full, and are refused there,
+// having written nothing and read no messages, which the day doesn't count:
+// how many differs from run to run, and so does how long the day takes to
+// end it (60 to past 150 minutes, measured).
+type atOnce struct {
+	ephemeral.DB
+
+	mu      sync.Mutex
+	waiting int           // fetches of the minute yet to arrive
+	open    chan struct{} // closed once none is
+}
+
+// arrival is one fetch's place at the gate, in its context.
+type arrival struct {
+	once sync.Once
+	gate *atOnce
+}
+
+type arrivalKey struct{}
+
+// minute starts a minute of n fetches.
+func (g *atOnce) minute(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.waiting, g.open = n, make(chan struct{})
+}
+
+// fetch returns the context of one of the minute's fetches, and what to
+// call once it has ended.
+func (g *atOnce) fetch() (context.Context, func()) {
+	a := &arrival{gate: g}
+	return context.WithValue(context.Background(), arrivalKey{}, a), a.arrive
+}
+
+func (a *arrival) arrive() {
+	a.once.Do(func() {
+		g := a.gate
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.waiting--; g.waiting == 0 {
+			close(g.open)
+		}
+	})
+}
+
+// minuteCounter reports whether key is a device's minute of inbox fetches
+// (rateName "inbox"; the person's day is "inboxday").
+func minuteCounter(key map[string]types.AttributeValue) bool {
+	pk, ok := key["pk"].(*types.AttributeValueMemberS)
+	return ok && strings.HasPrefix(pk.Value, "R#inbox#")
+}
+
+// GetItem arrives once a fetch has read the minute's count.
+func (g *atOnce) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	out, err := g.DB.GetItem(ctx, in, opts...)
+	if a, ok := ctx.Value(arrivalKey{}).(*arrival); ok && minuteCounter(in.Key) {
+		a.arrive()
+	}
+	return out, err
+}
+
+// UpdateItem holds a fetch's write to the minute's count until every fetch
+// of the minute has arrived. It arrives first itself, so none waits on
+// another that is waiting too.
+func (g *atOnce) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if a, ok := ctx.Value(arrivalKey{}).(*arrival); ok && minuteCounter(in.Key) {
+		a.arrive()
+		g.mu.Lock()
+		open := g.open
+		g.mu.Unlock()
+		select {
+		case <-open:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return g.DB.UpdateItem(ctx, in, opts...)
 }
 
 // Every fetch that reads something counts, at least MinRequestUnits: an

@@ -57,6 +57,11 @@ func (tb *deliveryTables) wire(h *harness) {
 // instance is another instance of the function, alongside h's: its own
 // stores on the tables, with nothing in memory, and its own router.
 func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
+	return tb.instanceOn(h, tb.meter)
+}
+
+// instanceOn is instance with its rate counters on limits.
+func (tb *deliveryTables) instanceOn(h *harness, limits ephemeral.DB) *httpapi.Router {
 	now := func() time.Time { return h.now }
 	o := h.server
 	s := Server{
@@ -66,7 +71,7 @@ func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
 		Switches:  o.Switches,
 		Directory: &directory.Store{DB: tb.meter, Table: tb.directory},
 		Inbox:     &inbox.Store{DB: tb.meter, Table: tb.messages},
-		Limits:    &ephemeral.Limiter{DB: tb.meter, Table: tb.ephemeral, Now: now, Timeout: testTimeout},
+		Limits:    &ephemeral.Limiter{DB: limits, Table: tb.ephemeral, Now: now, Timeout: testTimeout},
 		Spent:     &ephemeral.Spent{DB: tb.meter, Table: tb.ephemeral, Now: now},
 	}
 	r := httpapi.NewRouter()
@@ -77,9 +82,15 @@ func (tb *deliveryTables) instance(h *harness) *httpapi.Router {
 // serve makes a logged-in request without a device signature on r, and
 // returns its status; it can run alongside others.
 func serve(r *httpapi.Router, m member, method, path string, body any) (int, error) {
+	resp, err := serveIn(context.Background(), r, m, method, path, body)
+	return resp.StatusCode, err
+}
+
+// serveIn is serve with the request's context, returning the response.
+func serveIn(ctx context.Context, r *httpapi.Router, m member, method, path string, body any) (httpapi.Response, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return 0, err
+		return httpapi.Response{}, err
 	}
 	var req httpapi.Request
 	req.RawPath = path
@@ -88,8 +99,7 @@ func serve(r *httpapi.Router, m member, method, path string, body any) (int, err
 	if body != nil {
 		req.Body = string(raw)
 	}
-	resp, err := r.Serve(context.Background(), req)
-	return resp.StatusCode, err
+	return r.Serve(ctx, req)
 }
 
 // cost reports and returns what the messages and ephemeral tables consumed
