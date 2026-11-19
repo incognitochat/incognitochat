@@ -1400,8 +1400,10 @@ logged-in admin, and every change also a device signature
 | Device list | `backend/internal/devicelist`, `web/src/protocol/device-list.test.ts` |
 | Register, session and request messages | `backend/internal/api/vectors_test.go`, `web/src/account/account.test.ts` |
 | Link keys, owner proofs | `backend/internal/links`, `web/src/protocol/link.test.ts` |
-| HPKE (RFC 9180 Appendix A, AES-128-GCM and AES-256-GCM) | `web/src/crypto/hpke-vectors.json` |
+| HPKE, AES-128-GCM and AES-256-GCM (the CFRG's `test-vectors.json`; only the AES-128-GCM one is also in RFC 9180 Appendix A, as A.3.1) | `web/src/crypto/hpke-vectors.json` |
 | Envelope layout (sealed by the client) | `backend/internal/envelope/testdata` |
+| Key ID, envelopes and inner messages from fixed keys and randomness (wrap info, body AAD, message tag) | `backend/internal/envelope/testdata/vectors.json`: `web/src/protocol/vectors.test.ts` seals them again byte for byte, `backend/internal/envelope/vectors_test.go` opens them with Go's `crypto/hpke` |
+| Sender tags, ID tags, labels | the same file: `web/src/messaging/secret.test.ts` (all three), `backend/internal/envelope/vectors_test.go` (sender and ID tags) |
 | Blind RSA (RFC 9474 Appendix A, PSS-Deterministic) | `web/src/crypto/blindrsa-vectors.json`, `backend/internal/tokens/testdata` |
 | Send-token challenge | `backend/internal/tokens`, `web/src/protocol/token.test.ts` |
 | Send tokens an envelope costs | `backend/internal/envelope`, `web/src/protocol/envelope.test.ts` |

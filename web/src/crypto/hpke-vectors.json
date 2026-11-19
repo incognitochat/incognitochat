@@ -1,5 +1,5 @@
 {
-  "source": "https://github.com/cfrg/draft-irtf-cfrg-hpke/blob/master/test-vectors.json (RFC 9180 Appendix A): mode_base, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-128-GCM and AES-256-GCM, first encryption",
+  "source": "https://github.com/cfrg/draft-irtf-cfrg-hpke/blob/master/test-vectors.json: mode_base, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-128-GCM and AES-256-GCM, first encryption. The AES-128-GCM vector is also RFC 9180 Appendix A.3.1; the AES-256-GCM one is only in that file (RFC 9180 Appendix A has no P-256 suite with AES-256-GCM)",
   "vectors": [
     {
       "aead_id": 1,
