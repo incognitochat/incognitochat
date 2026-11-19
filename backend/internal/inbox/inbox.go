@@ -356,34 +356,65 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 	return missing, failed
 }
 
-// Clear deletes up to max of a device's undelivered items (its account is
-// being deleted, in steps), and reports how many it deleted and whether
-// any may be left.
-func (s *Store) Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error) {
-	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
-		TableName:              &s.Table,
-		KeyConditionExpression: aws.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": &types.AttributeValueMemberS{Value: devicePK(accountID, deviceID)},
-		},
-		ProjectionExpression: aws.String("pk, sk"),
-		ConsistentRead:       aws.Bool(true),
-		Limit:                aws.Int32(int32(max)),
-	})
-	if err != nil {
-		return 0, false, err
-	}
-	requests := make([]types.WriteRequest, 0, len(out.Items))
-	for _, it := range out.Items {
-		requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
-			"pk": it["pk"],
-			"sk": it["sk"],
-		}}})
+// ClearStep is the fewest items one of Clear's reads asks for.
+const ClearStep = 8
+
+// Clear deletes a device's undelivered items (its account is being deleted,
+// or was replaced, in steps) within units write units, by what each costs
+// to delete (Item.Units: a large envelope costs some 19), and reports the
+// units it took and whether any items may be left.
+//
+// It reads what it deletes in steps, eventually consistent, at half the
+// cost, since what an item costs to read doesn't depend on what is asked
+// for: each read asks for as many items as what is left of units could
+// delete were each as big as can be (MaxItemSize), but at least ClearStep,
+// and it stops at the first item that units can't pay for, or after
+// maxReads. So it reads little more than it deletes: at most ClearStep-1
+// items it leaves. A read may miss an item delivered in about the last
+// second (its device was found before the account ended), or list again
+// one a step deleted in about the last second (deleting it again costs a
+// unit); the next step, or the item's expiry, takes what one left.
+func (s *Store) Clear(ctx context.Context, accountID, deviceID string, units int) (int, bool, error) {
+	pk := devicePK(accountID, deviceID)
+	largest := Item{Size: MaxItemSize}.Units()
+	spent, more := 0, true
+	var requests []types.WriteRequest
+	var start map[string]types.AttributeValue
+read:
+	for reads := 0; reads < maxReads && spent < units; reads++ {
+		out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
+			TableName:              &s.Table,
+			KeyConditionExpression: aws.String("pk = :pk"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":pk": &types.AttributeValueMemberS{Value: pk},
+			},
+			ExclusiveStartKey: start,
+			Limit:             aws.Int32(int32(max((units-spent)/largest, ClearStep))),
+		})
+		if err != nil {
+			return 0, false, err
+		}
+		for _, it := range out.Items {
+			cost := Item{Size: itemSize(it)}.Units()
+			if spent+cost > units {
+				break read
+			}
+			spent += cost
+			requests = append(requests, types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{
+				"pk": it["pk"],
+				"sk": it["sk"],
+			}}})
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			more = false
+			break
+		}
+		start = out.LastEvaluatedKey
 	}
 	if err := s.write(ctx, requests); err != nil {
 		return 0, false, err
 	}
-	return len(requests), out.LastEvaluatedKey != nil, nil
+	return spent, more, nil
 }
 
 func (s *Store) write(ctx context.Context, requests []types.WriteRequest) error {

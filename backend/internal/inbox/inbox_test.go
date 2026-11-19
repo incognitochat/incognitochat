@@ -166,14 +166,17 @@ func list(t *testing.T, s *Store, account, device string, now time.Time) []Item 
 // fails the deletes of some items.
 type counting struct {
 	DB
-	limits  []int32
-	failing map[string]bool
+	limits []int32
+	// consistent is whether a query read strongly consistent.
+	consistent bool
+	failing    map[string]bool
 	// slow deletes answer only when the caller gives up.
 	slow bool
 }
 
 func (c *counting) Query(ctx context.Context, in *dynamodb.QueryInput, opts ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
 	c.limits = append(c.limits, aws.ToInt32(in.Limit))
+	c.consistent = c.consistent || aws.ToBool(in.ConsistentRead)
 	return c.DB.Query(ctx, in, opts...)
 }
 
@@ -457,5 +460,58 @@ func TestClear(t *testing.T) {
 	// Another account's device of the same ID keeps its items.
 	if kept := list(t, s, other, phone, now); len(kept) != 1 {
 		t.Fatalf("other account has %d items", len(kept))
+	}
+}
+
+// Clear's steps are sized by what deleting each item costs, not by how
+// many there are, and read about what they delete, eventually consistent
+// (DLV-12): a step over the largest envelopes deletes two, not fifty.
+func TestClearBySize(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	q := &counting{DB: meter}
+	s := &Store{DB: q, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	account, phone, mailbox := ids.New(), ids.New(), ids.New()
+	largest := make([]byte, envelope.MaxLen)
+	for range 6 {
+		if err := s.Deliver(ctx, account, []string{phone}, mailbox, largest, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	each := Item{Size: MaxItemSize}.Units()
+	const units = 50
+	meter.Reset()
+	spent, more, err := s.Clear(ctx, account, phone, units)
+	if err != nil || !more || spent != 2*each || spent > units {
+		t.Fatalf("a step over the largest items: %d units, more %v, %v", spent, more, err)
+	}
+	cost := meter.Units(s.Table)
+	t.Logf("deleting 2 of the largest items: %+v (%d units each)", cost, each)
+	// What it deleted, as it costs; and one read of at most ClearStep items,
+	// eventually consistent: each 4 KiB read takes half a unit.
+	readCap := float64(ClearStep*MaxItemSize/4096+1) / 2
+	if cost.Write > units || cost.Read > readCap || q.consistent || !slices.Equal(q.limits, []int32{ClearStep}) {
+		t.Fatalf("the step cost %+v (at most %d write units and %v read units), in reads of %v, consistent %v",
+			cost, units, readCap, q.limits, q.consistent)
+	}
+	if left := list(t, s, account, phone, now); len(left) != 4 {
+		t.Fatalf("%d items left", len(left))
+	}
+	// Units that don't pay for the next item delete nothing.
+	if spent, more, err := s.Clear(ctx, account, phone, each-1); err != nil || spent != 0 || !more {
+		t.Fatalf("too few units: %d, more %v, %v", spent, more, err)
+	}
+	// Then the rest.
+	for steps := 0; more; steps++ {
+		if steps > 3 {
+			t.Fatal("never finishes")
+		}
+		if _, more, err = s.Clear(ctx, account, phone, units); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if left := list(t, s, account, phone, now); len(left) != 0 {
+		t.Fatalf("%d items left", len(left))
 	}
 }

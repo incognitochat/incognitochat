@@ -13,15 +13,18 @@ import (
 
 // DeleteStep is about how many writes one step of deleting an account, or
 // what is left of one it replaced, makes (DELETE /account, POST
-// /account/cleanup), however much is left: each step reads only what it
+// /account/cleanup), however much is left, in write units: a directory
+// item takes one, and a waiting envelope one per started KiB, some 19 for
+// the largest (inbox.Store.Clear). Each step reads only about what it
 // deletes, and one step at a time runs for an account
-// (directory.Store.Lease). A table takes at most 200 writes a second in
-// production and 100 elsewhere (infra: table_max_write_units): a step of 50
-// takes a quarter of a second of production's (half a second elsewhere),
-// and with the app's one-second pause between steps a deletion makes about
-// 40 writes a second, so two at once, even back to back, leave at least
-// half of production's capacity to everyone else. An account with 4,000
-// mailboxes (some 8,000 items) takes about 160 steps, three minutes or so.
+// (directory.Store.Lease). A table takes at most 200 write units a second
+// in production and 100 elsewhere (infra: table_max_write_units): a step of
+// 50 takes a quarter of a second of production's (half a second
+// elsewhere), and with the app's one-second pause between steps a deletion
+// makes about 40 a second, so two at once, even back to back, leave at
+// least half of production's capacity to everyone else. An account with
+// 4,000 mailboxes (some 8,000 items) takes about 160 steps, three minutes
+// or so. It must cover the largest envelope, or a step couldn't delete it.
 const DeleteStep = 50
 
 // deleteAccount deletes what the server holds for the caller's account: its
@@ -86,14 +89,14 @@ func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller)
 	budget := DeleteStep
 	// Envelopes first: once the account is gone, the device can't ask again.
 	for _, d := range devices {
-		n, more, err := s.Inbox.Clear(ctx, c.AccountID, d, budget)
+		spent, more, err := s.Inbox.Clear(ctx, c.AccountID, d, budget)
 		if err != nil {
 			return s.internal(route, err)
 		}
-		if more || n >= budget {
+		if more || spent >= budget {
 			return inProgress()
 		}
-		budget -= n
+		budget -= spent
 	}
 	done, err := s.Directory.Delete(ctx, c.AccountID, c.device.TelegramHash, budget)
 	if errors.Is(err, directory.ErrNotFound) {
@@ -184,14 +187,14 @@ func (s *Server) cleanUpStep(ctx context.Context, accountID, old string, budget 
 		return false, err
 	}
 	for _, d := range devices {
-		n, more, err := s.Inbox.Clear(ctx, old, d, budget)
+		spent, more, err := s.Inbox.Clear(ctx, old, d, budget)
 		if err != nil {
 			return false, err
 		}
-		if more || n >= budget {
+		if more || spent >= budget {
 			return false, nil
 		}
-		budget -= n
+		budget -= spent
 	}
 	return s.Directory.CleanUp(ctx, accountID, old, budget)
 }

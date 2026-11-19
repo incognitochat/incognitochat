@@ -106,9 +106,10 @@ type Inbox interface {
 	// there. It reports how many weren't there, and which it couldn't
 	// delete.
 	Ack(ctx context.Context, accountID, deviceID string, itemIDs []string, maxMissing int) (missing int, failed []string)
-	// Clear deletes up to max of a device's items; it reports how many, and
+	// Clear deletes a device's items within units write units (what each
+	// costs to delete: inbox.Item.Units); it reports the units it took, and
 	// whether more may be left.
-	Clear(ctx context.Context, accountID, deviceID string, max int) (int, bool, error)
+	Clear(ctx context.Context, accountID, deviceID string, units int) (int, bool, error)
 }
 
 type sendRequest struct {

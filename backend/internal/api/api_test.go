@@ -306,13 +306,22 @@ func (m *memInbox) List(_ context.Context, account, device, after string, limits
 	return inbox.Page{Items: items, Read: len(items), Units: float64(len(items)) / 10}, nil
 }
 
-func (m *memInbox) Clear(_ context.Context, account, device string, max int) (int, bool, error) {
+// Clear deletes items within units, by what each costs to delete, as
+// inbox.Store.Clear does.
+func (m *memInbox) Clear(_ context.Context, account, device string, units int) (int, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := account + "#" + device
-	n := min(max, len(m.items[key]))
+	spent, n := 0, 0
+	for _, it := range m.items[key] {
+		if spent+it.Units() > units {
+			break
+		}
+		spent += it.Units()
+		n++
+	}
 	m.items[key] = m.items[key][n:]
-	return n, len(m.items[key]) > 0, nil
+	return spent, len(m.items[key]) > 0, nil
 }
 
 func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string, _ int) (missing int, failed []string) {
