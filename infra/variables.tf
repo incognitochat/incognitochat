@@ -207,9 +207,14 @@ variable "lambda_code_signing_config_arn" {
 }
 
 variable "log_retention_days" {
-  description = "Retention for function logs"
+  description = "Days the functions' logs are kept: one of the values CloudWatch Logs takes, never 0 (forever). docs/data.md tells users 7. GitHub variable LOG_RETENTION_DAYS"
   type        = number
   default     = 7
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.log_retention_days)
+    error_message = "log_retention_days must be one of CloudWatch Logs' retention periods: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288 or 3653 (0, forever, isn't allowed)."
+  }
 }
 
 variable "deletion_protection" {
@@ -230,7 +235,7 @@ variable "api_access" {
 }
 
 variable "firewall" {
-  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login (edge.tf). About $8 a month, plus $0.60 per million requests"
+  description = "Put a firewall (AWS WAF) in front of CloudFront, with rate limits per IP address and on the routes that need no login, and a list of addresses to block (edge.tf). About $9 a month, plus $0.60 per million requests"
   type        = bool
   default     = false
 }

@@ -248,7 +248,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
-| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
+| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits and a list of addresses to block ([below](#the-firewall)). Off by default: about $9 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
 | `SESSION_KEY_VERSION`, `WEBHOOK_SECRET_VERSION`, `CHAT_KEY_VERSION`, `TELEGRAM_ID_PEPPER_VERSION` | variables | Unset by default (1). Raise one to replace that generated secret alone: [what each does](#replacing-a-generated-secret). The pepper's is only for starting over. Keep a raised version set: deleting it means 1, which replaces the secret again. |
 | `SECRETS_VERSION` | variable | Retired: leave it unset, or the deploy stops ([below](#replacing-a-generated-secret)). |
@@ -268,6 +268,7 @@ anything else), so an environment comes from the repository alone.
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |
 | `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. At least 1. |
+| `LOG_RETENTION_DAYS` | 7 | Days the functions' logs are kept. One of the periods CloudWatch Logs takes (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, and longer ones up to 3653); never 0, which keeps them forever. [What the software stores](data.md) tells people 7 days: change it there before keeping them longer. |
 
 A change takes effect at the environment's next deploy: for dev, the next
 push to `main` or a manual run of CI on `main`; for production, the next
@@ -649,8 +650,9 @@ follows ([the firewall](#the-firewall)).
 
 The WebSocket API is throttled (`WS_THROTTLE_RATE_LIMIT`,
 `WS_THROTTLE_BURST_LIMIT`), and nothing runs when idle. Logs are kept 7
-days. A budget and alarms watch the account, and each function can be given
-its own share of concurrency (`RESERVE_CONCURRENCY`), both above.
+days (`LOG_RETENTION_DAYS`). A budget and alarms watch the account, and
+each function can be given its own share of concurrency
+(`RESERVE_CONCURRENCY`), both above.
 
 ## Emergency switches
 
@@ -897,8 +899,11 @@ allow-listed fields.
 
 A CloudFront distribution stands in front of the `api` function URL
 (`infra/edge.tf`), so floods can be limited before they reach Lambda. It
-caches nothing and logs nothing. `API_ACCESS` moves the app behind it one
-step at a time:
+caches nothing and logs nothing, and passes on only what the API reads: the
+query string and a few headers (`Origin` and the CORS request headers,
+`Content-Type`, `X-Session`, `X-Device-Signature`), with the body's hash
+under its signature. No cookies, and not the headers CloudFront can add on
+where a viewer is. `API_ACCESS` moves the app behind it one step at a time:
 
 1. `direct` (default): the app calls the function URL. The distribution
    exists but isn't used; its address is the `api_cloudfront_url` output, to
@@ -949,12 +954,14 @@ deploy role may now manage (`infra/init`).
 
 ### The firewall
 
-`FIREWALL=true` adds AWS WAF in front of CloudFront with three rate limits.
-It only protects the API once `API_ACCESS` is `cloudfront-only`: before that,
-the function URL can be called around it. It keeps no sampled requests,
-which would hold addresses. It costs $5 a month, $1 a month per rule, and
-$0.60 per million requests it looks at, blocked ones included: $8 a month
-plus requests.
+`FIREWALL=true` adds AWS WAF in front of CloudFront with three rate limits,
+and before them a list of addresses to block, empty until an admin fills it
+([blocking addresses](#blocking-addresses)). It only protects the API once
+`API_ACCESS` is `cloudfront-only`: before that, the function URL can be
+called around it. It keeps no sampled requests, which would hold addresses.
+It costs $5 a month, $1 a month per rule (four, the block list's included),
+and $0.60 per million requests it looks at, blocked ones included: $9 a
+month plus requests.
 
 | Rule | Counts | Limit | Variable |
 |---|---|---|---|
@@ -1051,10 +1058,10 @@ blocked (sometimes longer, AWS says), and a block can outlast it by as long.
 
 **What to watch**, in CloudWatch in us-east-1 (namespace AWS/WAFV2,
 dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:
-`<prefix>-api-rate-per-ip`, `<prefix>-api-anonymous-per-ip`,
-`<prefix>-api-lookups-total`): `BlockedRequests` for each rule, and
-`AllowedRequests` with Rule `ALL`. The metrics are free; no alarm watches
-them yet.
+`<prefix>-api-blocked`, `<prefix>-api-rate-per-ip`,
+`<prefix>-api-anonymous-per-ip`, `<prefix>-api-lookups-total`):
+`BlockedRequests` for each rule, and `AllowedRequests` with Rule `ALL`. The
+metrics are free; no alarm watches them yet.
 
 - `anonymous-per-ip` blocking now and then is one busy address. Blocks
   that recur every day while the tables are far below their caps, and
@@ -1065,3 +1072,42 @@ them yet.
   caps it was a flood, or real growth: if it's growth, raise the caps (the
   limit follows).
 - `rate-per-ip` as before.
+
+### Blocking addresses
+
+During an incident, an admin can block addresses at the firewall (where
+`FIREWALL` is on) by adding them to its IP set `<prefix>-blocked`
+(us-east-1, scope CloudFront). Its rule, `blocked`, runs before the rate
+limits, so they don't count what it refuses, and answers as they do (429,
+`{"error":"rate_limited"}`): an app caught by a blocked range waits instead
+of asking again at once. A change takes effect within about a minute.
+
+Addresses are IPv4 (the API answers over IPv4 alone), in CIDR form:
+`192.0.2.7/32` for one address, `198.51.100.0/24` for a range. In the
+console: WAF & Shield, IP sets, region Global (CloudFront), then
+`<prefix>-blocked`, Add IP address. With the CLI, as an admin
+(`update-ip-set` replaces the whole list, so name the addresses already
+there too, from `get-ip-set`, with its `LockToken`):
+
+```shell
+id=$(aws wafv2 list-ip-sets --scope CLOUDFRONT --region us-east-1 \
+  --query "IPSets[?Name=='incognitochat-<env>-blocked'].Id" --output text)
+aws wafv2 get-ip-set --scope CLOUDFRONT --region us-east-1 --name incognitochat-<env>-blocked --id "$id"
+aws wafv2 update-ip-set --scope CLOUDFRONT --region us-east-1 --name incognitochat-<env>-blocked --id "$id" \
+  --lock-token <LockToken> --addresses 192.0.2.7/32 198.51.100.0/24
+```
+
+Terraform ignores the set's addresses, so deploys keep them. Everything
+else in the firewall is Terraform's: a rule added or a limit changed in the
+console is undone by the next deploy (for production, the next release),
+with no one asked. For a lasting change, change `infra/edge.tf` or the
+limits' variables.
+
+The rule costs $1 a month, empty or not. Blocked requests are still billed
+(CloudFront and the firewall, about $1.80 per million), show as
+`BlockedRequests` with Rule `<prefix>-api-blocked`, and count towards the
+`firewall-blocks` alarm, which may stay on while a blocked host keeps
+sending. Remove the addresses once the incident is over: a shared address
+blocks everyone behind it. Empty the set before turning `FIREWALL` off,
+too: the deploy that deletes it prints its addresses in the plan, in public
+logs.
