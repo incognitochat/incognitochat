@@ -25,9 +25,10 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
 - It checks that each function runs the attested bundle plus its signature
   ([verifying.md](verifying.md#the-backend)).
 - It then sets up the bot (the function registers its own webhook, menu
-  button and commands, so the bot token never passes through CI), and runs
-  smoke tests: the API, the webhook and the socket refuse what they should,
-  and `notify` may make its directory calls (below).
+  button and commands, so the calls to Telegram are made inside it, not in
+  CI, though the bot token reaches CI too: [secrets at rest](#secrets-at-rest)),
+  and runs smoke tests: the API, the webhook and the socket refuse what they
+  should, and `notify` may make its directory calls (below).
 - Last, it asks the hosting repository to build and deploy the app from the
   same commit (production: the release tag), and waits until the site serves
   it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)). The
@@ -153,11 +154,12 @@ new notice, and the first is gone from the chat.
 Code signing is a versioned bucket for the bundles, an AWS Signer profile,
 and a code signing config set to enforce. Every function must use the config,
 so Lambda runs only code signed by the profile. The deploy role can upload
-and sign, but can't change the bucket's settings, the profile or the config,
-nor create a function without the config or remove it. If CI were ever
-compromised, an admin can revoke the profile from a given time, after which
-Lambda refuses to deploy anything it signed, and replace the profile by
-rerunning the bootstrap.
+and sign (any object it uploads: a signature shows that code came through
+the deploy role, not what it was built from), but can't change the bucket's
+settings, the profile or the config, nor create a function without the
+config or remove it. If CI were ever compromised, an admin can revoke the
+profile from a given time, after which Lambda refuses to deploy anything it
+signed, and replace the profile by rerunning the bootstrap.
 
 Alerts are a monthly cost budget (`MONTHLY_BUDGET=<dollars>` when
 bootstrapping; 50 for production and 15 otherwise by default) and a few
@@ -412,6 +414,12 @@ otherwise those parameters hold `none`), from the environment's secrets, and fou
 generates, the session key, the webhook secret, the chat key (which seals
 chat IDs) and the Telegram-ID pepper. Each function's role can read only the
 parameters it needs: only `bot` and `notify` can read the bot token.
+
+They do pass through CI. Every deploy hands the bot token and the issuer
+keys to its checks and to Terraform's plan and apply, though Terraform
+writes each to SSM only when its version rises, and Terraform makes the
+generated secrets on the runner. The deploy role can also read each of
+them from SSM ([what it may do](#what-the-deploy-role-may-do)).
 
 Each new instance of a function reads its parameters once, as it starts.
 SSM serves an account 40 such calls a second by default, so when many
@@ -959,9 +967,11 @@ and before them a list of addresses to block, empty until an admin fills it
 ([blocking addresses](#blocking-addresses)). It only protects the API once
 `API_ACCESS` is `cloudfront-only`: before that, the function URL can be
 called around it. It keeps no sampled requests, which would hold addresses.
-It costs $5 a month, $1 a month per rule (four, the block list's included),
-and $0.60 per million requests it looks at, blocked ones included: $9 a
-month plus requests.
+Its metrics are counts only, but AWS adds counts per country and device
+type, which CloudWatch keeps for 15 months; they can't be deleted
+([data.md](data.md#on-the-server)). It costs $5 a month, $1 a month per
+rule (four, the block list's included), and $0.60 per million requests it
+looks at, blocked ones included: $9 a month plus requests.
 
 | Rule | Counts | Limit | Variable |
 |---|---|---|---|

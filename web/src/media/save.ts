@@ -11,7 +11,8 @@
 // until the recipient deletes the message or the conversation, or it
 // expires, so the app can always fetch it again until then. The link
 // carries no delete secret, so one left in a browser's history can only
-// fetch what its holder could already open.
+// fetch what its holder could already open. It does carry the file's name
+// and type, which anyone reading that history can read (docs/data.md).
 
 import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { decryptFile, uploadSize } from '../crypto/media';

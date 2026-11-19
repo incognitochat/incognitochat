@@ -21,7 +21,10 @@
 #   aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowInvokeAction
 #
 # Nothing is logged here: no access logs on the distribution, and no sampled
-# requests in the firewall (they would hold IP addresses).
+# requests in the firewall (they would hold IP addresses). The firewall's
+# CloudWatch metrics, which its alarm reads, are counts only, but AWS also
+# counts its requests per country and device type, which CloudWatch keeps
+# for 15 months; they can't be deleted (docs/data.md).
 
 # CloudFront's firewalls live in us-east-1, whatever the app's region.
 provider "aws" {

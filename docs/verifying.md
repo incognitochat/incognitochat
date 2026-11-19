@@ -152,30 +152,59 @@ what CI publishes:
   for the same commit (`scripts/build-lambdas.sh` prints their SHA-256). Each
   deploy checks that the bundles it received are the ones CI's build job
   hashed, then attests them with Sigstore before deploying them.
-- **Only signed code runs.** Each bundle is signed with the environment's AWS
-  Signer profile, and every function has a code signing config that makes
-  Lambda refuse anything not signed by it. CI is the only place that signs;
-  the deploy role can't change the profile or the config, nor create or keep
-  a function without it.
-- **Each deploy checks itself.** After deploying, CI fetches the code each
-  function runs from Lambda and checks that it is the attested bundle plus
-  AWS's signature, and nothing else (`scripts/check-lambda-deploy.py`). The
-  public log of the "Check the deployed code" step shows both hashes.
+- **Only signed code runs.** Each bundle is signed with the environment's
+  AWS Signer profile, and every function has a code signing config that
+  makes Lambda refuse anything not signed by it. The deploy role is what
+  signs, and it can sign any object it uploads: a signature shows that the
+  code came through that role, not that it was built from this repository.
+  The deploy role can't change the profile or the config, nor create or
+  keep a function without it.
+- **Each deploy checks what it deployed.** After deploying, the same job
+  fetches the code each function runs from Lambda and checks that it is the
+  attested bundle plus AWS's signature, and nothing else, and that it runs
+  as the app stack sets it: a .zip with no layers, on the stack's runtime,
+  architecture and handler (`scripts/check-lambda-deploy.py`). The public
+  log of the "Check the deployed code" step shows both hashes. The check
+  runs inside the deploy it checks, so a compromised deploy could lie in
+  its own log, and it covers the code, not the rest of the functions'
+  settings (their environment variables, say).
 
-To check a deploy, rebuild its commit and compare:
+So what ties the running code to this repository is a rebuild made
+elsewhere, compared with the hashes in the deploy log. To check a deploy,
+rebuild its commit and compare:
 
 ```shell
 git checkout <commit> && cd backend && ../scripts/build-lambdas.sh
-gh attestation verify dist/api.zip --repo <owner>/<repo>   # this repository
+gh attestation verify dist/api.zip --repo <owner>/<repo> \
+  --signer-workflow <owner>/<repo>/.github/workflows/deploy-environment.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
-The hashes printed should match the deploy log, and the attestation proves
-the bundle was built by this repository's workflow. The script builds with
-the Go toolchain `backend/go.mod` pins (its `toolchain` line), whatever Go is
-installed: with another version, Go downloads the pinned one first, checked
-against Go's checksum database (the installed Go must be 1.21 or later).
+The hashes printed should match the deploy log's ("Check the bundles are
+the backend job's" and "Check the deployed code"). The attestation adds
+that the bundle was attested by this repository's deploy workflow, run on
+GitHub's own runners for `main` (dev). For a production deploy, use
+`--source-ref refs/tags/vX.Y.Z`, its release tag. As for the site, use gh
+2.102.0 or later: before it, `--signer-workflow` matched only a prefix and
+`--source-ref` ignored case.
 
-What this doesn't prove: whoever controls the AWS account can switch code
-signing off and deploy something else, and only the account's own records
-(CloudTrail) would show it. Change alerts held by an independent party are a
-[future improvement](security.md#how-the-remaining-gaps-could-close).
+`build-lambdas.sh` builds with the Go toolchain `backend/go.mod` pins (its
+`toolchain` line), whatever Go is installed: with another version, Go
+downloads the pinned one first, checked against Go's checksum database (the
+installed Go must be 1.21 or later).
+
+What this doesn't prove:
+
+- What ran after the check. A compromised deploy, or a stolen session of
+  the deploy role (one lasts up to 30 minutes), can sign and deploy other
+  code, or change the functions' settings, once the check has run. The next
+  deploy's check fails if that code still runs (unless the deploy replaced
+  it first, with a changed bundle), and its plan shows and undoes changed
+  settings, but only the account's own records (CloudTrail) show what ran
+  in between.
+- That signing stayed on: whoever controls the AWS account can switch it
+  off and deploy something else, and only CloudTrail would show it.
+
+Signing in a separate role that signs only attested hashes, and change
+alerts held by an independent party, are
+[future improvements](security.md#how-the-remaining-gaps-could-close).

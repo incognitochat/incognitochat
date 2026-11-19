@@ -132,11 +132,25 @@ export interface Message {
   from: string;
   /** The ID of the recipient key this was written for (8 bytes). */
   to: string;
-  /** Where to write back: a mailbox ID (16 bytes), on first messages or when it changes. */
+  /**
+   * Where to write back: a mailbox ID (16 bytes), on everything sent once
+   * the sender has one for the conversation (receipts and deletes don't
+   * take one).
+   */
   reply?: string;
-  /** Sender tag (32 bytes), on first messages to a link: lets the owner block a person, not just a conversation. */
+  /**
+   * Sender tag (32 bytes), on everything the side that wrote through a link
+   * sends: lets the owner block a person, not just a conversation.
+   */
   tag?: string;
-  /** The ID of the last message received from the other side, so drops show. */
+  /**
+   * The ID of the newest envelope taken in from the other side. The
+   * recipient shows this message after it, and notes that the sender had
+   * it by this one's time, for what a later delete of the whole
+   * conversation takes. In a delete with `all`, the newest of the other
+   * side's messages the sender has. Nothing checks it for envelopes that
+   * never arrived.
+   */
   last?: string;
   text?: string;
   /** The message this one answers. */

@@ -182,6 +182,17 @@ it. This is how close it gets.
     clock, to the second (not fixed yet);
   - anyone still on a version before this one sends the device's clock, to
     the millisecond.
+- **File names and the kind of device, to other users.** A file, an audio
+  file sent as music, or a video the app can't open goes with its own name.
+  Phones often name photos, screenshots and recordings with their brand,
+  the moment they were taken (to the second, some to the millisecond), or
+  a counter that grows with each photo (`IMG_4821`), so close numbers or
+  times in two chats can point to one phone. And attachments can show what
+  kind of device sent them, the same in every conversation: a video keeps
+  its file type (an iPhone's is `video/quicktime`) and its encoder's names
+  and settings; photos, previews and recordings are made by the app's web
+  view, whose output differs between iPhones, Android and computers; and a
+  photo keeps its camera's proportions.
 - **Not to other users: whether someone's app is open, or whether a mailbox
   still exists.** A send is answered after the same steps whatever the
   mailbox. Pushing to the recipient's open apps (and the notice, if none is
@@ -239,7 +250,10 @@ it. This is how close it gets.
   account is on, at twice the signing work; it isn't done.)
 - **Which messages are quiet.** "Seen" receipts, reactions, edits, deletes
   and key updates are marked so they don't trigger a notice. The server sees the mark, not
-  which of these it is or who sent it.
+  who sent it, and mostly not which of these it is: reactions, deletes and
+  key updates always fit the smallest size class, but a receipt for more
+  than a few messages (opening a chat with a backlog), or a long edit,
+  takes a larger one, so the server can tell those apart by size.
 - **Attachment sizes, roughly.** Files are padded before upload (to the next
   power of two from 16 KiB up to 1 MiB, then the next whole MiB; the server
   takes no other size), and paid with one media token per started MiB. So
@@ -255,12 +269,13 @@ it. This is how close it gets.
   can't swap it after sending, and once the recipient deleted it, it can
   come back only from a link given in that same minute, as a copy that
   still expires within 30 days. The link used to save a file in the device's
-  browser can stay in that browser's history, with the file's key; it
-  carries no delete secret. Once the upload is gone the link fetches
-  nothing, but its key still opens any copy of the encrypted file kept
-  elsewhere. Downloads are marked not to be cached (`Cache-Control:
-  no-store`), so the browser keeps no copy of its own; one cached before
-  downloads were marked so may remain.
+  browser can stay in that browser's history, with the file's key, name and
+  type, all readable by anyone who reads that history; it carries no delete
+  secret. Once the upload is gone the link fetches nothing, but its key
+  still opens any copy of the encrypted file kept elsewhere. Downloads are
+  marked not to be cached (`Cache-Control: no-store`), so the browser keeps
+  no copy of its own; one cached before downloads were marked so may
+  remain.
 - **"Seen" right after a link.** Opening a link from Telegram never opens a
   chat or sends "seen" by itself, so a link's owner can't send someone their
   link and watch for a "seen" to learn whether that person writes to them.
@@ -502,9 +517,15 @@ it. This is how close it gets.
   - Other settings Terraform manages (the media bucket's policy, a function
     URL's auth type): a change shows in the next plan, which undoes it.
 - **Users can't verify the backend directly.** Its builds are reproducible
-  and attested, Lambda runs only code CI signed, and each deploy's public log
-  shows that the running code is the attested build
-  ([verifying.md](verifying.md#the-backend)). But users can't look into AWS,
+  and attested, and each deploy's public log shows the hashes of what it
+  deployed, which anyone can compare with their own rebuild
+  ([verifying.md](verifying.md#the-backend)). Lambda runs only code signed
+  through the deploy role, but that role signs whatever it uploads, so a
+  signature shows that code came through that role, not that it was built
+  from this repository. The deploy's check of the running code runs inside
+  the deploy it checks, and covers the code and how it runs (package,
+  runtime, layers), not the rest of the functions' settings (their
+  environment variables, say). Users can't look into AWS,
   and whoever controls the AWS account could switch signing off. The design
   doesn't depend on it: a malicious backend can drop or delay messages and
   watch timing, but can't read content or forge messages, because apps check
@@ -517,6 +538,9 @@ it. This is how close it gets.
 - An independent relay that hides IP addresses, random notice delays, and a
   setting to turn "seen" receipts off.
 - Change alerts from AWS's audit logs, ideally held by an independent party.
+- Signing in a separate role, used only by a job of its own, that signs only
+  the bundle hashes CI attested, so the deploy role can no longer sign
+  whatever it uploads.
 - The backend in an attested enclave (such as AWS Nitro Enclaves), so the app
   can check that the server runs this repository's code before talking to
   it. The operator could then no longer learn which Telegram user owns which
