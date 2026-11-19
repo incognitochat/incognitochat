@@ -164,7 +164,7 @@ mailbox does (the server finds the mailbox's account ended; it reads the
 account item with the devices, in the same query), its invitation codes
 don't work, and nothing new can be made under it. The rest (its mailboxes,
 invitation codes, and envelopes still waiting for its device) is deleted in
-steps of about 50 writes, as a deletion is (below): the first in the
+steps of about 50 write units, as a deletion is (below): the first in the
 registration itself, the rest as the new device's app asks, `POST
 /account/cleanup` (signed), which answers `409 in_progress` while more is
 left, or while another step for the account runs, and `200 {}` once nothing
@@ -205,7 +205,7 @@ media tokens, new mailboxes, link changes, notice setups, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that
 keeps one account per user, so deleting an account and setting up again
 doesn't start a fresh day. It works in steps of about 50
-writes, each reading only what it deletes, so a big account neither outlasts
+write units, each reading about what it deletes, so a big account neither outlasts
 a request nor takes the table's write capacity: while more is left the
 server answers `409 in_progress`, and the app repeats the request a second
 later. One step at a time runs for an account: it holds a lease on the
