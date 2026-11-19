@@ -207,9 +207,11 @@ jobs:
       # infra/tests: renders function role policies and checks what they
       # reach; plans the secret parameters and checks that each generated
       # secret is written again only when its own version changes, and none
-      # while no version is set. infra/init/tests: renders the deploy role's
-      # policies and checks each fits IAM's size limit and allows no whole
-      # service. Fake credentials, overridden resources: no AWS calls.
+      # while no version is set; plans the edge (what CloudFront passes on,
+      # the firewall's block list) and checks the log retention's bounds.
+      # infra/init/tests: renders the deploy role's policies and checks each
+      # fits IAM's size limit and allows no whole service. Fake credentials,
+      # overridden resources: no AWS calls.
       - name: Test
         run: |
           terraform -chdir=infra test

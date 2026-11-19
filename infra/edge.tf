@@ -45,14 +45,55 @@ locals {
   api_origin_host = trimsuffix(trimprefix(aws_lambda_function_url.api.function_url, "https://"), "/")
 }
 
-# The API's answers are never cached, and every header of the request goes on
-# to the function (except Host, which must be the function URL's own).
+# The API's answers are never cached.
 data "aws_cloudfront_cache_policy" "disabled" {
   name = "Managed-CachingDisabled"
 }
 
-data "aws_cloudfront_origin_request_policy" "all_but_host" {
-  name = "Managed-AllViewerExceptHostHeader"
+# What of a request goes on to the function: what the API reads, and what
+# the function URL needs to answer CORS. Not cookies, nor the
+# CloudFront-Viewer-* headers that AWS's all-viewer policies add (the
+# viewer's city, postal code and coordinates), which nothing here reads.
+#
+#   origin, access-control-request-method, access-control-request-headers
+#                       CORS: the function URL answers the preflight, and
+#                       allows client_origins (functions.tf)
+#   content-type        the API takes JSON bodies only (httpapi.DecodeJSON)
+#   x-session           the session token (backend/internal/api/auth.go)
+#   x-device-signature  a device's signature on a sensitive request
+#
+# All query strings (GET /inbox?after=...). Host is the function URL's own.
+# Not listed, and CloudFront refuses both in a policy: authorization, which
+# the app doesn't send and CloudFront's signature replaces anyway; and
+# x-amz-content-sha256, the body's hash, which CloudFront takes from the
+# viewer's request when it signs the request to the function URL, and
+# sends on with its signature.
+resource "aws_cloudfront_origin_request_policy" "api" {
+  name    = "${local.prefix}-api"
+  comment = "Only what the Incognito Chat API reads, and CORS"
+
+  cookies_config {
+    cookie_behavior = "none"
+  }
+
+  headers_config {
+    header_behavior = "whitelist"
+
+    headers {
+      items = [
+        "origin",
+        "access-control-request-method",
+        "access-control-request-headers",
+        "content-type",
+        "x-session",
+        "x-device-signature",
+      ]
+    }
+  }
+
+  query_strings_config {
+    query_string_behavior = "all"
+  }
 }
 
 # CloudFront signs its requests to the function URL (SigV4), so the URL can
@@ -97,7 +138,7 @@ resource "aws_cloudfront_distribution" "api" {
     allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
     cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
-    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_but_host.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
     compress                 = true
   }
 
@@ -188,9 +229,30 @@ locals {
   blocked_origin = var.client_origins[0]
 }
 
-# The firewall: three rate limits. $5 a month, plus $1 per rule and $0.60
-# per million requests, so it is optional.
+# Addresses an admin blocks during an incident (docs/deployment.md, Blocking
+# addresses), in the console or with the CLI: empty here. Terraform ignores
+# the addresses, so a deploy keeps them; it still undoes any other change
+# made to the firewall by hand.
+resource "aws_wafv2_ip_set" "blocked" {
+  count    = var.firewall ? 1 : 0
+  provider = aws.global
+
+  name               = "${local.prefix}-blocked"
+  description        = "Addresses an admin blocks from the Incognito Chat API, ${var.environment}"
+  scope              = "CLOUDFRONT"
+  ip_address_version = "IPV4"
+  addresses          = []
+
+  lifecycle {
+    ignore_changes = [addresses]
+  }
+}
+
+# The firewall: a block list and three rate limits. $5 a month, plus $1 per
+# rule and $0.60 per million requests, so it is optional.
 #
+#   blocked           the addresses in the block list (above), first, so
+#                     that the rate limits don't count what it refuses.
 #   rate-per-ip       any route, per IP address. Many people can share one
 #                     address (a mobile carrier, a VPN), so the limit is far
 #                     above what one person's app sends.
@@ -232,6 +294,39 @@ resource "aws_wafv2_web_acl" "api" {
     key          = local.blocked_body
     content      = jsonencode({ error = "rate_limited" })
     content_type = "APPLICATION_JSON"
+  }
+
+  # Answered as the rate limits are, so that an app caught by a block of a
+  # range waits instead of asking again at once.
+  rule {
+    name     = "blocked"
+    priority = 0
+
+    action {
+      block {
+        custom_response {
+          response_code            = 429
+          custom_response_body_key = local.blocked_body
+
+          response_header {
+            name  = "Access-Control-Allow-Origin"
+            value = local.blocked_origin
+          }
+        }
+      }
+    }
+
+    statement {
+      ip_set_reference_statement {
+        arn = aws_wafv2_ip_set.blocked[0].arn
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${local.prefix}-api-blocked"
+      sampled_requests_enabled   = false
+    }
   }
 
   rule {
