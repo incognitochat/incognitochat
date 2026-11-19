@@ -4,8 +4,10 @@
 // one for anything but a long text. Media tokens pay one per started MiB of
 // an upload, from a budget of their own. Kept on the device only.
 //
-// Tokens are fetched in batches, never right before a send: the issuer would
-// otherwise see an account fetch one and, a moment later, an anonymous send.
+// Tokens are fetched in batches ahead of time, at random moments, rarely
+// right before a send: the issuer would otherwise see an account fetch one
+// and, a moment later, an anonymous send. Only a wallet emptied faster than
+// that (more spent in one burst than it keeps) has a send fetch first.
 //
 // Each build names one issuer key of each kind (config.ts): its tokens are
 // fetched for that key, which the request names, and only those are counted
@@ -138,6 +140,10 @@ export async function countTokens(db: Database, keyId: Uint8Array, now = nowSeco
  * issuer key (the request names it), unblinded. If the server doesn't hold
  * that key, it refuses with unknown_issuer_key (ApiError) before counting
  * the batch: this build is for a key it no longer takes, or not yet.
+ *
+ * With `below`, only if fewer than that of the build's key are here once
+ * this holds the wallet's lock (another copy of the app may just have
+ * topped it up). Returns how many of the build's key are here.
  */
 export function refillTokens(
   db: Database,
@@ -146,9 +152,12 @@ export function refillTokens(
   count = TOKEN_BATCH,
   now = nowSeconds(),
   kind: TokenKind = 'send',
+  below = Infinity,
 ): Promise<number> {
   const { meta, lock, path, label } = KINDS[kind];
   return withLock(lock, async () => {
+    const held = usable(await stored(db, kind), now, issuer.keyId).length;
+    if (held >= below) return held;
     const epoch = epochOf(now);
     const inputs: Uint8Array<ArrayBuffer>[] = [];
     const states: Awaited<ReturnType<typeof blind>>['state'][] = [];

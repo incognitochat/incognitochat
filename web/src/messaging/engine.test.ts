@@ -13,10 +13,10 @@ import type { Session } from '../net/session';
 import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, ownerParts, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
-import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
+import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, returnTokens, takeTokens, TOKEN_BATCH } from '../account/wallet';
 import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
-import { POOL_LOW, poolSize } from './pool';
+import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
 import {
   clearMedia,
@@ -34,6 +34,7 @@ import {
   mediaUsage,
   pendingUploadDeletes,
   putConversation,
+  queueUploadDeletes,
   saveConversation,
   setFile,
   type IdKind,
@@ -855,6 +856,111 @@ describe('paying for sends by size', () => {
   });
 });
 
+describe('topping up in the background', () => {
+  /** Counts someone's requests for new mailboxes. */
+  function countNewMailboxes(p: Person) {
+    const calls = { count: 0 };
+    const call = p.session.call;
+    p.session.call = async (method, path, body, check, options) => {
+      if (method === 'POST' && path === '/mailboxes') calls.count++;
+      return call(method, path, body, check, options);
+    };
+    return calls;
+  }
+
+  it('a reply that leaves the mailbox pool low tops it up at a random moment after, not with the send', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const chats: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const sender = await person(backend, `s${i}`);
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+      await owner.messaging.sync();
+      chats.push(await across(sender.db, conv, owner.db));
+    }
+    await owner.messaging.maintain();
+    await putMeta(owner.db, 'mailbox-pool', (await pooled(owner.db)).slice(0, POOL_LOW));
+    const created = countNewMailboxes(owner);
+    backend.later.length = 0;
+    // The first reply takes one and leaves the pool low: nothing is created
+    // now, a top-up is put off to 10 to 90 seconds later.
+    await owner.messaging.send(chats[0]!, 'hello');
+    expect(created.count).toBe(0);
+    expect(await poolSize(owner.db)).toBe(POOL_LOW - 1);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    // Another meanwhile puts off no second one.
+    await owner.messaging.send(chats[1]!, 'hello');
+    expect(backend.later).toHaveLength(1);
+    expect(created.count).toBe(0);
+    // When it runs: one batch, with no send near it.
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await poolSize(owner.db)).toBe(POOL_LOW - 2 + POOL_REFILL));
+    expect(created.count).toBe(1);
+    // Only a reply that finds the pool empty creates mailboxes first.
+    await putMeta(owner.db, 'mailbox-pool', []);
+    await owner.messaging.send(chats[2]!, 'hello');
+    expect(created.count).toBe(2);
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL - 1);
+  });
+
+  it('an upload that leaves the media wallet low tops it up at a random moment after, not with the upload', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await sender.messaging.maintain();
+    const media = await countTokens(sender.db, backend.issuer.keyId, undefined, 'media');
+    await takeTokens(sender.db, backend.issuer.keyId, media - MEDIA_LOW_WATER, undefined, 'media');
+    const signed = backend.mediaSigned();
+    backend.later.length = 0;
+    const photo = crypto.getRandomValues(new Uint8Array(300));
+    await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 3, h: 3, m: 'image/jpeg' } });
+    expect(backend.mediaSigned()).toBe(signed);
+    expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(MEDIA_LOW_WATER - 1);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(MEDIA_LOW_WATER - 1 + MEDIA_BATCH));
+    expect(backend.mediaSigned()).toBe(signed + MEDIA_BATCH);
+  });
+
+  it('two copies running upkeep at once fetch one batch of each, not one each', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const tab = copyOf(backend, owner);
+    await owner.messaging.maintain();
+    await putMeta(owner.db, 'mailbox-pool', []);
+    await takeTokens(owner.db, backend.issuer.keyId, await countTokens(owner.db, backend.issuer.keyId));
+    await takeTokens(owner.db, backend.issuer.keyId, await countTokens(owner.db, backend.issuer.keyId, undefined, 'media'), undefined, 'media');
+    const created = countNewMailboxes(owner);
+    const signed = backend.signed();
+    const mediaSigned = backend.mediaSigned();
+    await Promise.all([owner.messaging.maintain(), tab.maintain()]);
+    expect(created.count).toBe(1);
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL);
+    expect(backend.signed() - signed).toBe(TOKEN_BATCH);
+    expect(backend.mediaSigned() - mediaSigned).toBe(MEDIA_BATCH);
+  });
+
+  it('tells other copies when upkeep deletes keys, so they forget them too', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    await linkOf(backend, owner);
+    let told = 0;
+    const app = owner.open({ onKeysDeleted: () => told++ });
+    await app.maintain().catch(() => {});
+    expect(told).toBe(0);
+    await scheduleKeyDeletion(owner.db, (e) => e.link !== undefined, Date.now() - 1);
+    await app.maintain().catch(() => {});
+    expect(told).toBe(1);
+  });
+});
+
 describe('seen receipts', () => {
   it('tell the sender what was read, once', async () => {
     const backend = await fakeBackend();
@@ -877,6 +983,34 @@ describe('seen receipts', () => {
       ['one', 'seen'],
       ['two', 'seen'],
     ]);
+  });
+
+  it('go one at a time: calls that overlap, here or in another copy, send one receipt', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const tab = copyOf(backend, owner);
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await sender.messaging.send(conv, 'two');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const sends = backend.seenEnvelopes.length;
+    const locks = vi.spyOn(navigator.locks, 'request');
+    // The chat opens as messages arrive: asked again while it runs, the
+    // same run answers, and it runs once more after (for what came
+    // meanwhile), not once per call.
+    const first = owner.messaging.markSeen(mine);
+    expect(owner.messaging.markSeen(mine)).toBe(first);
+    expect(owner.messaging.markSeen(mine)).toBe(first);
+    await Promise.all([first, tab.markSeen(mine), tab.markSeen(mine)]);
+    // Twice in each copy, one at a time across both.
+    expect(locks.mock.calls.filter(([name]) => String(name).endsWith(`:seen:${mine}`))).toHaveLength(4);
+    locks.mockRestore();
+    expect(backend.seenEnvelopes.length).toBe(sends + 1);
+    expect((await listMessages(owner.db, mine)).map((m) => m.status)).toEqual(['read', 'read']);
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).map((m) => m.status)).toEqual(['seen', 'seen']);
   });
 
   it("take none of the owner's mailboxes: only a reply does", async () => {
@@ -2066,6 +2200,36 @@ describe('deleting uploads in the background', () => {
     await sender.messaging.flushUploadDeletes();
     expect(backend.uploads.size).toBe(0);
     expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+  });
+
+  it('runs again for uploads queued as a run was finishing, not at the next start', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const item = () => ({ id: toBase64Url(crypto.getRandomValues(new Uint8Array(16))), d: toBase64Url(crypto.getRandomValues(new Uint8Array(16))) });
+    const a = item();
+    const b = item();
+    // The run is done but still holds its lock (a slow device, say).
+    const finishing = gate();
+    const request = navigator.locks.request.bind(navigator.locks) as (name: string, options: LockOptions, callback: LockGrantedCallback<unknown>) => Promise<unknown>;
+    const locks = vi.spyOn(navigator.locks, 'request').mockImplementation(((name: string, options: LockOptions, callback: LockGrantedCallback<unknown>) =>
+      name.endsWith(':upload-deletes-flush')
+        ? request(name, options, async (lock) => {
+            const result = await callback(lock);
+            await finishing.pass();
+            return result;
+          })
+        : request(name, options, callback)) as never);
+    await queueUploadDeletes(owner.db, [a]);
+    const running = owner.messaging.flushUploadDeletes();
+    await finishing.reached;
+    locks.mockRestore();
+    // Queued then: the run under way answers, and runs once more for it.
+    await queueUploadDeletes(owner.db, [b]);
+    expect(owner.messaging.flushUploadDeletes()).toBe(running);
+    finishing.release();
+    await running;
+    expect(backend.mediaCalls).toEqual([`POST /media/${a.id}/delete`, `POST /media/${b.id}/delete`]);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
   });
 });
 

@@ -1,5 +1,8 @@
 // The mailbox pool (design §9): mailboxes created ahead of time, so taking
-// one for a new conversation never comes right after creating it.
+// one for a new conversation rarely comes right after creating it. A take
+// that leaves the pool low has it topped up at a random moment after (the
+// engine's refillSoon); only a take from an empty pool, with more chats
+// started in one burst than it holds, creates mailboxes first.
 
 import { checkObject } from '../net/api';
 import type { Session } from '../net/session';
@@ -21,9 +24,15 @@ export async function poolSize(db: Database): Promise<number> {
   return (await pool(db)).length;
 }
 
-/** Adds mailboxes to the pool. */
-export function refillPool(db: Database, session: Session, count = POOL_REFILL): Promise<number> {
+/**
+ * Adds mailboxes to the pool; with `below`, only if it holds fewer than
+ * that once this holds its lock (another copy of the app may just have
+ * topped it up). Returns how many it holds.
+ */
+export function refillPool(db: Database, session: Session, count = POOL_REFILL, below = Infinity): Promise<number> {
   return withLock(LOCK, async () => {
+    const held = (await pool(db)).length;
+    if (held >= below) return held;
     const created = await session.call('POST', '/mailboxes', { count }, (v) => {
       const m = checkObject(v).mailboxes;
       if (!Array.isArray(m) || m.length !== count || !m.every((x) => typeof x === 'string' && ID.test(x))) throw new Error('bad mailboxes');
@@ -49,7 +58,7 @@ export function pooled(db: Database): Promise<string[]> {
 
 /** Takes a mailbox from the pool, refilling first only if it is empty. */
 export async function takeMailbox(db: Database, session: Session): Promise<string> {
-  if ((await poolSize(db)) === 0) await refillPool(db, session);
+  if ((await poolSize(db)) === 0) await refillPool(db, session, POOL_REFILL, 1);
   return withLock(LOCK, async () => {
     const [first, ...rest] = await pool(db);
     if (!first) throw new Error('no mailbox');

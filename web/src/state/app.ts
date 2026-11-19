@@ -646,6 +646,8 @@ export function createApp(deps: Deps) {
         onResume: () => {
           if (backgroundStarted) backgroundSync();
         },
+        // Other copies drop their unsealed copies of the deleted keys too (keysChanged).
+        onKeysDeleted: () => deps.broadcast({ type: 'keys-changed' }),
         // A link the server made though its answer was lost: shown here and in other copies.
         onLinks: () => {
           deps.broadcast({ type: 'data-changed' });
@@ -2081,6 +2083,8 @@ export function createApp(deps: Deps) {
       session?.setUp();
       return start();
     },
+    /** Another copy deleted keys whose time had come: the unsealed copies kept here go too. */
+    keysChanged: () => messaging?.forgetKeys(),
     setUp: () => setUp(),
     /** Asks the server again whether it takes this device. */
     recheck,

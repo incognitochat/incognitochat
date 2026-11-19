@@ -54,7 +54,7 @@ import {
   sealedMatches,
   type KeyEntry,
 } from './keys';
-import { dropFromPool, pooled, POOL_LOW, poolSize, refillPool, takeMailbox } from './pool';
+import { dropFromPool, pooled, POOL_LOW, POOL_REFILL, poolSize, refillPool, takeMailbox } from './pool';
 import { couldCome, DAY, dayOf, endOf, forgetOld, isNewer, MAX_AGE, MAX_APPLIED, MAX_DROPPED, MAX_GONE, MAX_MINE, remember, remembers, tidy } from './replay';
 import { accountSecret, idTag, label, senderTag } from './secret';
 import {
@@ -261,6 +261,8 @@ export interface MessagingDeps {
   onWaiting?: () => void;
   /** Called when a pause the server asked for ends (rate_limited), so the app syncs then: pushes that came meanwhile weren't acted on. */
   onResume?: () => void;
+  /** Called when upkeep deleted keys whose time had come, so other copies of the app drop their unsealed copies (forgetKeys). */
+  onKeysDeleted?: () => void;
   /** Called when upkeep found the account's link changed: a create or replace whose answer was lost, which the server had made. */
   onLinks?: () => void;
   /**
@@ -768,44 +770,63 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   let flushing: Promise<void> | null = null;
+  /** Whether a flush was asked for while one ran (flushing): it then runs again, for what was queued too late for it. */
+  let flushAgain = false;
   /**
    * Works through the uploads waiting to be deleted, several at a time. One
    * already gone counts as done; with the server unreachable or busy, the
    * rest wait for the next try (each start, and upkeep).
    */
   function flushUploadDeletes(): Promise<void> {
-    flushing ??= withLock('upload-deletes-flush', async () => {
+    if (flushing) {
+      flushAgain = true;
+      return flushing;
+    }
+    flushing = (async () => {
       // Our own uploads, just made, that the server said it didn't know:
       // asked again later, not in this run.
       const deferred = new Set<string>();
-      for (;;) {
-        const items = (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
-        if (items.length === 0) break;
-        const done: string[] = [];
-        const again: string[] = [];
-        let stop = false;
-        let next = 0;
-        const worker = async () => {
-          while (!stop && next < items.length) {
-            const item = items[next++]!;
-            try {
-              await api.post(`/media/${item.id}/delete`, { secret: item.d }, checkObject);
-              done.push(item.id);
-            } catch (err) {
-              if (err instanceof ApiError && err.code === 'not_found') (item.recent ? again : done).push(item.id);
-              else stop = true;
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: UPLOAD_DELETE_PARALLEL }, worker));
-        await forgetUploadDeletes(db, done);
-        await triedUploadDeletes(db, again);
-        for (const id of again) deferred.add(id);
-        if (stop) break;
+      try {
+        let reached: boolean;
+        do {
+          flushAgain = false;
+          reached = await withLock('upload-deletes-flush', () => flushOnce(deferred));
+        } while (flushAgain && reached);
+      } finally {
+        flushing = null;
       }
       if (deferred.size > 0) later(() => void flushUploadDeletes(), UPLOAD_DELETE_AGAIN_MS);
-    }).finally(() => (flushing = null));
+    })();
     return flushing;
+  }
+
+  /** One run of flushUploadDeletes, holding its lock; returns false if it stopped because the server couldn't be reached or was busy. */
+  async function flushOnce(deferred: Set<string>): Promise<boolean> {
+    for (;;) {
+      const items = (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
+      if (items.length === 0) return true;
+      const done: string[] = [];
+      const again: string[] = [];
+      let stop = false;
+      let next = 0;
+      const worker = async () => {
+        while (!stop && next < items.length) {
+          const item = items[next++]!;
+          try {
+            await api.post(`/media/${item.id}/delete`, { secret: item.d }, checkObject);
+            done.push(item.id);
+          } catch (err) {
+            if (err instanceof ApiError && err.code === 'not_found') (item.recent ? again : done).push(item.id);
+            else stop = true;
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: UPLOAD_DELETE_PARALLEL }, worker));
+      await forgetUploadDeletes(db, done);
+      await triedUploadDeletes(db, again);
+      for (const id of again) deferred.add(id);
+      if (stop) return false;
+    }
   }
 
   /**
@@ -912,6 +933,8 @@ export function createMessaging(deps: MessagingDeps) {
           if (err instanceof ApiError && err.code === 'rate_limited') throw new NoMailboxes();
           throw err;
         }
+        // Left low: topped up at a random moment, not with a send.
+        await refillSoon('pool');
         // In a chat someone started through our link, the link's intro
         // mailbox still counts until they've used this one (introUntil).
         c = { ...c, myMailbox: mailbox };
@@ -1004,6 +1027,10 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
+  /** The markSeen running here for each conversation, and those it's to run once more for. */
+  const seeing = new Map<string, Promise<void>>();
+  const seeAgain = new Set<string>();
+
   /**
    * Opening a conversation: tells the other side, at once, which of their
    * messages we have now read (design D12), and clears the unread count.
@@ -1011,8 +1038,36 @@ export function createMessaging(deps: MessagingDeps) {
    * and if there are more, says the earlier ones were read too (`earlier`).
    * So a chat flooded with thousands costs one send, not one per MAX_SEEN.
    * Versions without `earlier` mark only those it names.
+   *
+   * One at a time per conversation, here and across copies of the app
+   * (`seen:<id>`), so calls that overlap (the chat opening as messages
+   * arrive) don't each send a receipt for the same messages. One asked for
+   * while another runs makes it run once more after, for what came
+   * meanwhile.
    */
-  async function markSeen(conv: string): Promise<void> {
+  function markSeen(conv: string): Promise<void> {
+    const running = seeing.get(conv);
+    if (running) {
+      seeAgain.add(conv);
+      return running;
+    }
+    const done = (async () => {
+      try {
+        do {
+          seeAgain.delete(conv);
+          await withLock(`seen:${conv}`, () => seeOnce(conv));
+        } while (seeAgain.has(conv));
+      } finally {
+        seeing.delete(conv);
+        seeAgain.delete(conv);
+      }
+    })();
+    seeing.set(conv, done);
+    return done;
+  }
+
+  /** One run of markSeen, holding its lock. */
+  async function seeOnce(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (!c) return;
     if (c.unread > 0) await update(conv, (current) => (current.unread > 0 ? { ...current, unread: 0 } : null));
@@ -1331,46 +1386,83 @@ export function createMessaging(deps: MessagingDeps) {
       }
     } finally {
       deps.onTokens?.();
-      await topUpSoon().catch(() => {});
+      await refillSoon('send');
     }
   }
 
-  /** Cancels the refill of send tokens waiting to run (topUpSoon), if any. */
-  let cancelTopUp: (() => void) | undefined;
+  /**
+   * What runs low as it's used, and is fetched ahead: send tokens, media
+   * tokens and the mailbox pool. Whether it's low, and what tops it up (each
+   * looks again under its lock, so copies of the app that check at once
+   * fetch one batch, not one each).
+   */
+  const supplies: Record<'send' | 'media' | 'pool', { low: () => Promise<boolean>; topUp: () => Promise<void> }> = {
+    send: { low: async () => (await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) < LOW_WATER, topUp },
+    media: {
+      low: async () => !!mediaIssuer && (await countTokens(db, mediaIssuer.keyId, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER,
+      topUp: topUpMedia,
+    },
+    pool: { low: async () => (await poolSize(db)) < POOL_LOW, topUp: topUpPool },
+  };
+  /** The top-ups waiting to run (refillSoon), each with what cancels it. */
+  const toppingUp = new Map<keyof typeof supplies, () => void>();
 
   /**
-   * Once fewer than LOW_WATER send tokens are left, fetches more at a random
-   * moment TOP_UP_MIN_MS to TOP_UP_MIN_MS + TOP_UP_SPREAD_MS later, not with
-   * a send: the issuer sees which account fetches when, and a fetch right
-   * before an anonymous send would say whose it was. The wallet keeps enough
-   * for two of the longest messages meanwhile.
+   * Once one runs low (below LOW_WATER send tokens, MEDIA_LOW_WATER media
+   * tokens, or POOL_LOW mailboxes), tops it up at a random moment
+   * TOP_UP_MIN_MS to TOP_UP_MIN_MS + TOP_UP_SPREAD_MS later, not with a send:
+   * the server sees which account fetches when, and a fetch right before an
+   * anonymous send would say whose it was. What's left meanwhile is enough
+   * for two of the longest messages, the largest upload, or a few new
+   * chats; only more than that in one burst has a send fetch first.
    */
-  async function topUpSoon(): Promise<void> {
-    const low = (await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) < LOW_WATER;
-    if (!low || cancelTopUp) return;
-    cancelTopUp = later(() => {
-      cancelTopUp = undefined;
-      void topUp().catch(() => {});
-    }, TOP_UP_MIN_MS + Math.random() * TOP_UP_SPREAD_MS);
+  async function refillSoon(what: keyof typeof supplies): Promise<void> {
+    try {
+      if (!(await supplies[what].low()) || toppingUp.has(what)) return;
+    } catch {
+      return;
+    }
+    toppingUp.set(
+      what,
+      later(() => {
+        toppingUp.delete(what);
+        void supplies[what].topUp().catch(() => {});
+      }, TOP_UP_MIN_MS + Math.random() * TOP_UP_SPREAD_MS),
+    );
   }
 
   /** Fetches a batch of send tokens if fewer than LOW_WATER are left. */
   async function topUp(): Promise<void> {
     if ((await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) >= LOW_WATER) return;
-    await fetchSendTokens(TOKEN_BATCH);
+    await fetchSendTokens(TOKEN_BATCH, LOW_WATER);
     deps.onTokens?.();
+  }
+
+  /** Fetches a batch of media tokens if fewer than MEDIA_LOW_WATER are left. */
+  async function topUpMedia(): Promise<void> {
+    if (!mediaIssuer) return;
+    const seconds = Math.floor(now() / 1000);
+    if ((await countTokens(db, mediaIssuer.keyId, seconds, 'media')) >= MEDIA_LOW_WATER) return;
+    await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, seconds, 'media', MEDIA_LOW_WATER);
+  }
+
+  /** Adds mailboxes to the pool if fewer than POOL_LOW are left. */
+  async function topUpPool(): Promise<void> {
+    if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session, POOL_REFILL, POOL_LOW);
   }
 
   /**
    * Fetches a batch of send tokens, `count` or more, or the day's last few
-   * if fewer are left (batchFor). Throws NoTokens once the day's are used up.
+   * if fewer are left (batchFor); with `below`, only if fewer than that are
+   * here once it holds the wallet's lock. Throws NoTokens once the day's are
+   * used up.
    */
-  async function fetchSendTokens(count: number): Promise<void> {
+  async function fetchSendTokens(count: number, below?: number): Promise<void> {
     const seconds = Math.floor(now() / 1000);
     const batch = await batchFor(db, Math.max(TOKEN_BATCH, count), seconds);
     if (batch < 1) throw new NoTokens();
     try {
-      await refillTokens(db, session, issuer, batch, seconds);
+      await refillTokens(db, session, issuer, batch, seconds, 'send', below);
     } catch (err) {
       // The day's tokens are used up.
       if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
@@ -1395,7 +1487,8 @@ export function createMessaging(deps: MessagingDeps) {
         // A refill that brought nothing: give up rather than ask again.
         if (refilled) throw new NoTokens();
         // Out of tokens: fetching right before an upload is a timing hint,
-        // but the wallet is normally refilled well ahead (maintain()).
+        // but the wallet is normally refilled well ahead (maintain(),
+        // refillSoon()), with what the largest upload costs.
         try {
           await refillTokens(db, session, mediaIssuer, Math.min(MAX_BATCH, Math.max(MEDIA_BATCH, count - taken.length)), seconds(), 'media');
         } catch (err) {
@@ -1409,6 +1502,7 @@ export function createMessaging(deps: MessagingDeps) {
       for (const t of taken) await returnToken(db, t.token, t.epoch, 'media');
       throw err;
     }
+    await refillSoon('media');
     return taken;
   }
 
@@ -1418,7 +1512,7 @@ export function createMessaging(deps: MessagingDeps) {
     let tokens = await takeTokens(db, issuer.keyId, count, seconds());
     if (!tokens) {
       // Too few: fetching right before a send is a timing hint, but the
-      // wallet is normally refilled well ahead (maintain(), topUpSoon()),
+      // wallet is normally refilled well ahead (maintain(), refillSoon()),
       // with twice what the longest message costs.
       await fetchSendTokens(count);
       tokens = await takeTokens(db, issuer.keyId, count, seconds());
@@ -1636,13 +1730,13 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
-   * Stops the timers a pause and a low wallet set: the app no longer syncs
+   * Stops the timers a pause and low supplies set: the app no longer syncs
    * or sends (signed out, or the engine replaced).
    */
   function stop(): void {
     clearResume();
-    cancelTopUp?.();
-    cancelTopUp = undefined;
+    for (const cancel of toppingUp.values()) cancel();
+    toppingUp.clear();
   }
 
   function rememberConfirmed(ids: string[]): void {
@@ -2189,8 +2283,9 @@ export function createMessaging(deps: MessagingDeps) {
 
   /**
    * Upkeep, run at a random moment after the app opens: tops up the mailbox
-   * pool and the token wallet, so neither is fetched right before a send;
-   * deletes old keys whose time has come; forgets what conversations
+   * pool and the token wallets (as refillSoon does once they run low), so a
+   * send rarely has to fetch first; deletes old keys whose time has come
+   * (telling other copies, onKeysDeleted); forgets what conversations
    * remember of envelopes too old to come again, and empty conversations
    * through our link nothing more can come for that we never opened;
    * settles a link change whose answer was lost; fills in what older
@@ -2203,17 +2298,14 @@ export function createMessaging(deps: MessagingDeps) {
       forgetEmpty,
       flushUploadDeletes,
       healMailboxes,
-      async () => {
-        if ((await poolSize(db)) < POOL_LOW) await refillPool(db, session);
-      },
+      topUpPool,
       topUp,
+      topUpMedia,
       async () => {
-        if (mediaIssuer && (await countTokens(db, mediaIssuer.keyId, Math.floor(now() / 1000), 'media')) < MEDIA_LOW_WATER) {
-          await refillTokens(db, session, mediaIssuer, MEDIA_BATCH, Math.floor(now() / 1000), 'media');
+        if ((await deleteExpiredKeys(db, now())) > 0) {
+          findKey.clear();
+          deps.onKeysDeleted?.();
         }
-      },
-      async () => {
-        if ((await deleteExpiredKeys(db, now())) > 0) findKey.clear();
       },
       async () => {
         const changed = await settleLinkChange(db, session, api, Math.floor(now() / 1000));
@@ -2322,7 +2414,12 @@ export function createMessaging(deps: MessagingDeps) {
     }
   }
 
-  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain };
+  /** Drops the unsealed copies of our keys kept here: another copy of the app deleted some (onKeysDeleted). */
+  function forgetKeys(): void {
+    findKey.clear();
+  }
+
+  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

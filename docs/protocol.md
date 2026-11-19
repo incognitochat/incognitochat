@@ -834,8 +834,10 @@ each mailbox's owner, to deliver, but not who writes to it.
 - Each link has an intro mailbox, listed in its bundle (`mailbox`); first
   messages go there. Clients keep a small pool of further mailboxes
   (`POST /mailboxes`, up to 10 a request, 100 a day and 4,000 in all per
-  account) and take one when a conversation needs it, so creating one never
-  happens right before a send.
+  account) and take one when a conversation needs it. A take that leaves
+  the pool low has it topped up at a random moment after, so creating one
+  happens right before a send only rarely: when more chats start in one
+  burst than the pool holds.
 - `POST /send {mailbox, envelope, token | tokens, quiet?}` needs no login,
   only send tokens: as many as the envelope costs, one per started 2.5 KiB
   (Send tokens, below), so one for all but long texts. The server checks

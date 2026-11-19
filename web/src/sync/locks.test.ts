@@ -1,68 +1,138 @@
-import { describe, expect, it } from 'vitest';
-import { openChannel, useProfile, withLock, withLockIfFree, type SyncEvent } from './locks';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { openChannel, useProfile, withLock, withLockIfFree, type LockManagerLike, type SyncEvent } from './locks';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe('withLock', () => {
-  it('never lets two holders of the same lock interleave', async () => {
-    const order: string[] = [];
-    const task = (id: string) =>
-      withLock('test-interleave', async () => {
-        order.push(`${id}:start`);
-        await sleep(10);
-        order.push(`${id}:end`);
-        return id;
-      });
-    const results = await Promise.all([task('a'), task('b'), task('c')]);
-    expect(results).toEqual(['a', 'b', 'c']);
-    for (let i = 0; i < order.length; i += 2) {
-      expect(order[i]!.split(':')[0]).toBe(order[i + 1]!.split(':')[0]);
-    }
+// Every test runs twice: with the device's Web Locks (undefined: the
+// default), and as on an engine without them (null), where the lock is held
+// in this copy of the app only.
+describe.each([
+  ['with Web Locks', undefined],
+  ['without Web Locks', null],
+] as [string, LockManagerLike | null | undefined][])('%s', (_, locks) => {
+  describe('withLock', () => {
+    it('never lets two holders of the same lock interleave', async () => {
+      const order: string[] = [];
+      const task = (id: string) =>
+        withLock(
+          'test-interleave',
+          async () => {
+            order.push(`${id}:start`);
+            await sleep(10);
+            order.push(`${id}:end`);
+            return id;
+          },
+          locks,
+        );
+      const results = await Promise.all([task('a'), task('b'), task('c')]);
+      expect(results).toEqual(['a', 'b', 'c']);
+      expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end', 'c:start', 'c:end']);
+    });
+
+    it('lets different locks run at the same time, one inside another', async () => {
+      let concurrent = 0;
+      let peak = 0;
+      const task = (name: string) =>
+        withLock(
+          name,
+          async () => {
+            concurrent++;
+            peak = Math.max(peak, concurrent);
+            await sleep(10);
+            concurrent--;
+          },
+          locks,
+        );
+      await Promise.all([task('x'), task('y')]);
+      expect(peak).toBe(2);
+      expect(await withLock('outer', () => withLock('inner', async () => 'both', locks), locks)).toBe('both');
+    });
+
+    it('releases the lock when the task fails, and the next holder runs', async () => {
+      const failing = withLock('fails', async () => {
+        await sleep(5);
+        throw new Error('boom');
+      }, locks);
+      const next = withLock('fails', async () => 'ok', locks);
+      await expect(failing).rejects.toThrow('boom');
+      expect(await next).toBe('ok');
+      expect(await withLock('fails', async () => 'again', locks)).toBe('again');
+    });
   });
 
-  it('lets different locks run at the same time', async () => {
-    let concurrent = 0;
-    let peak = 0;
-    const task = (name: string) =>
-      withLock(name, async () => {
-        concurrent++;
-        peak = Math.max(peak, concurrent);
-        await sleep(10);
-        concurrent--;
-      });
-    await Promise.all([task('x'), task('y')]);
-    expect(peak).toBe(2);
-  });
+  describe('withLockIfFree', () => {
+    it('runs holding the lock when nobody has it, and gives up at once when somebody does', async () => {
+      expect(await withLockIfFree('test-free', async () => 1, locks)).toEqual({ value: 1 });
+      let release!: () => void;
+      const holding = withLock('test-free', () => new Promise<void>((r) => (release = r)), locks);
+      let ran = false;
+      expect(
+        await withLockIfFree(
+          'test-free',
+          async () => {
+            ran = true;
+          },
+          locks,
+        ),
+      ).toBeNull();
+      expect(ran).toBe(false);
+      release();
+      await holding;
+      expect(await withLockIfFree('test-free', async () => 2, locks)).toEqual({ value: 2 });
+    });
 
-  it('runs directly where Web Locks are missing', async () => {
-    expect(await withLock('none', async () => 42, undefined)).toBe(42);
+    it('holds the lock while it runs: others wait their turn', async () => {
+      const order: string[] = [];
+      const free = withLockIfFree(
+        'test-held',
+        async () => {
+          await sleep(10);
+          order.push('free');
+        },
+        locks,
+      );
+      const after = withLock('test-held', async () => void order.push('after'), locks);
+      expect(await free).toEqual({ value: undefined });
+      await after;
+      expect(order).toEqual(['free', 'after']);
+    });
   });
 });
 
-describe('withLockIfFree', () => {
-  it('runs holding the lock when nobody has it, and gives up at once when somebody does', async () => {
-    expect(await withLockIfFree('test-free', async () => 1)).toEqual({ value: 1 });
+describe('without Web Locks on the device', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('locks in this copy of the app, by default', async () => {
+    vi.stubGlobal('navigator', {});
+    expect(navigator.locks).toBeUndefined();
+    const order: string[] = [];
+    const task = (id: string) =>
+      withLock('test-default', async () => {
+        order.push(`${id}:start`);
+        await sleep(5);
+        order.push(`${id}:end`);
+      });
     let release!: () => void;
-    const holding = withLock('test-free', () => new Promise<void>((r) => (release = r)));
-    let ran = false;
-    expect(
-      await withLockIfFree('test-free', async () => {
-        ran = true;
-      }),
-    ).toBeNull();
-    expect(ran).toBe(false);
+    const holding = withLock('test-default-free', () => new Promise<void>((r) => (release = r)));
+    expect(await withLockIfFree('test-default-free', async () => 1)).toBeNull();
+    await Promise.all([task('a'), task('b')]);
+    expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end']);
     release();
     await holding;
-    expect(await withLockIfFree('test-free', async () => 2)).toEqual({ value: 2 });
+    expect(await withLockIfFree('test-default-free', async () => 1)).toEqual({ value: 1 });
   });
 
-  it('runs directly where Web Locks are missing', async () => {
-    expect(await withLockIfFree('none', async () => 42, undefined)).toEqual({ value: 42 });
-  });
-
-  it('releases the lock when the task fails', async () => {
-    await expect(withLock('fails', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
-    expect(await withLock('fails', async () => 'ok')).toBe('ok');
+  it('keeps profiles apart', async () => {
+    let release!: () => void;
+    useProfile('p1');
+    const holding = withLock('test-profile', () => new Promise<void>((r) => (release = r)), null);
+    useProfile('p2');
+    expect(await withLockIfFree('test-profile', async () => 1, null)).toEqual({ value: 1 });
+    useProfile('p1');
+    expect(await withLockIfFree('test-profile', async () => 1, null)).toBeNull();
+    useProfile('');
+    release();
+    await holding;
   });
 });
 

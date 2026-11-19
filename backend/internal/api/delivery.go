@@ -131,8 +131,9 @@ type inboxItem struct {
 }
 
 // createMailboxes adds mailboxes to the caller's pool. Clients keep a few
-// spare and take one when they need it, so creating one never happens right
-// before an anonymous send (design §9).
+// spare, take one when they need it and top the pool up at random moments,
+// so creating one happens right before an anonymous send only rarely: when
+// more chats start in one burst than the pool holds (design §9).
 func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "POST /mailboxes"
 	var in struct {

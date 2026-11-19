@@ -76,6 +76,8 @@ async function main(): Promise<void> {
     if (event.type === 'account-changed') restart();
     // Another copy sent or received messages: redraw.
     if (event.type === 'data-changed') void app.refresh();
+    // Another copy deleted old keys: forget them here too.
+    if (event.type === 'keys-changed') app.keysChanged();
   });
   const app = createApp({
     config,

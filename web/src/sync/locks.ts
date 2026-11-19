@@ -19,26 +19,51 @@ export interface LockManagerLike {
   request<T>(name: string, options: { mode: 'exclusive'; ifAvailable?: boolean }, callback: (lock: unknown) => Promise<T>): Promise<T>;
 }
 
-function defaultLocks(): LockManagerLike | undefined {
-  return typeof navigator !== 'undefined' ? (navigator.locks as LockManagerLike | undefined) : undefined;
+/** The device's Web Locks, or null where the engine has none. */
+function defaultLocks(): LockManagerLike | null {
+  return (typeof navigator !== 'undefined' ? (navigator.locks as LockManagerLike | undefined) : undefined) ?? null;
+}
+
+/**
+ * Where Web Locks are missing (rare: Safari before 15.4, some webviews),
+ * locks are held in this copy of the app only, each name's holders in turn.
+ * What is kept for a name settles once its last holder so far is done; a
+ * name nobody holds or waits for isn't kept.
+ */
+const held = new Map<string, Promise<void>>();
+
+function holdHere<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const before = held.get(name) ?? Promise.resolve();
+  let done!: () => void;
+  const mine = new Promise<void>((resolve) => (done = resolve));
+  const last = before.then(() => mine);
+  held.set(name, last);
+  return before.then(fn).finally(() => {
+    done();
+    if (held.get(name) === last) held.delete(name);
+  });
 }
 
 /**
  * Runs fn while holding the named lock across every copy of the app on this
- * device. Engines without Web Locks (rare: Safari before 15.4) run fn directly.
+ * device. Engines without Web Locks hold it in this copy only: other copies
+ * aren't kept out then, but everything in this one still takes turns.
  */
-export function withLock<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | undefined = defaultLocks()): Promise<T> {
-  if (!locks) return fn();
+export function withLock<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | null = defaultLocks()): Promise<T> {
+  if (!locks) return holdHere(PREFIX + namespace + name, fn);
   return locks.request(PREFIX + namespace + name, { mode: 'exclusive' }, fn);
 }
 
 /**
  * Like withLock, but only if nobody holds the lock now: then fn runs holding
  * it, and this resolves to its result; otherwise to null at once, without
- * waiting.
+ * waiting. Without Web Locks, nobody in this copy.
  */
-export function withLockIfFree<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | undefined = defaultLocks()): Promise<{ value: T } | null> {
-  if (!locks) return fn().then((value) => ({ value }));
+export function withLockIfFree<T>(name: string, fn: () => Promise<T>, locks: LockManagerLike | null = defaultLocks()): Promise<{ value: T } | null> {
+  if (!locks) {
+    const full = PREFIX + namespace + name;
+    return held.has(full) ? Promise.resolve(null) : holdHere(full, async () => ({ value: await fn() }));
+  }
   return locks.request(PREFIX + namespace + name, { mode: 'exclusive', ifAvailable: true }, async (lock) => (lock ? { value: await fn() } : null));
 }
 
