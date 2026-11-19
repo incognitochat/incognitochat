@@ -325,9 +325,14 @@ it. This is how close it gets.
   has.
 - **A brand-new user's first message** follows their registration closely in
   time.
-- **Files keep their metadata.** Photos are redrawn and videos have their
-  location and time data removed, but a file sent "as a file" is sent
-  untouched, location included if it has any.
+- **Files, music and GIFs keep their metadata.** Photos are redrawn and
+  videos have their location and time data removed, but a file sent "as a
+  file" is sent untouched, location included if it has any. Music and GIFs
+  are sent as they are too: an audio file sent "as music" keeps its tags
+  (title, artist, album, date, cover picture; a phone's voice recorder may
+  name a recording after the place it was made), and a GIF any comments or
+  XMP data in it (its preview, the first frame drawn again on the device,
+  has none).
 - **Abuse can't be traced to a person**, by design. Blocks, budgets, caps and
   replacing a link are the remedies.
 
