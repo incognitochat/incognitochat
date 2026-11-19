@@ -837,8 +837,11 @@ each mailbox's owner, to deliver, but not who writes to it.
 - Each link has an intro mailbox, listed in its bundle (`mailbox`); first
   messages go there. Clients keep a small pool of further mailboxes
   (`POST /mailboxes`, up to 10 a request, 100 a day and 4,000 in all per
-  account) and take one when a conversation needs it, so creating one never
-  happens right before a send.
+  account) and take one when a conversation needs it. A take that leaves
+  the pool low has it topped up at a random moment after, so creating one
+  happens right before a send only rarely: when more chats start in one
+  burst than the pool holds, or a top-up failed (offline, or the day's
+  mailboxes used up) or didn't run (the app closed first).
 - `POST /send {mailbox, envelope, token | tokens, quiet?}` needs no login,
   only send tokens: as many as the envelope costs, one per started 2.5 KiB
   (Send tokens, below), so one for all but long texts. The server checks
@@ -1333,9 +1336,13 @@ to that try).
 The app keeps at least 14 send tokens, twice what the longest message
 costs. Once fewer are left after a send, it fetches a batch at a random
 moment 10 to 90 seconds later, not with the send, since the issuer sees
-which account fetches when. A send that finds the wallet short fetches
-right then, as a last resort. The server signs a batch whole or not at all,
-so when it has said fewer than a batch are left today, the app asks for
+which account fetches when. Media tokens likewise: once an upload leaves
+fewer than 26 (what the largest upload costs), a batch of 30 comes 10 to
+90 seconds later. A send or upload that finds the wallet short fetches
+right then, as a last resort. A send or upload taking tokens never waits
+for a batch being fetched, so it doesn't go out just after that request
+is answered. The server signs a batch whole or not at all, so when it has
+said fewer than a batch of send tokens are left today, the app asks for
 just those.
 
 A token is accepted in its own week and the next, and only once: the server

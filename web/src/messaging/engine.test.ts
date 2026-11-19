@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { openDB } from 'idb';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLink, keyName, listLinks, newKeyToTell, replaceLink, revokeLink, rotateLinkKey, toldNewKey } from '../account/links';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
@@ -13,10 +13,10 @@ import type { Session } from '../net/session';
 import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, ownerParts, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
-import { countTokens, LOW_WATER, rememberLeft, returnTokens, takeTokens } from '../account/wallet';
+import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, returnTokens, takeTokens, TOKEN_BATCH } from '../account/wallet';
 import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
-import { POOL_LOW, poolSize } from './pool';
+import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
 import {
   clearMedia,
@@ -34,6 +34,7 @@ import {
   mediaUsage,
   pendingUploadDeletes,
   putConversation,
+  queueUploadDeletes,
   saveConversation,
   setFile,
   type IdKind,
@@ -41,6 +42,7 @@ import {
 import { MAX_PENDING_EDIT_BYTES, MAX_PENDING_EDITS } from '../storage/db';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
 import { KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
+import { pendingLocks, withLock } from '../sync/locks';
 
 // A modified app chooses its IDs: tests make it reuse some (nextIds).
 vi.mock('../protocol/message', async (importOriginal) => {
@@ -49,8 +51,12 @@ vi.mock('../protocol/message', async (importOriginal) => {
 });
 
 // Storing a message can be held up (pause.before), so a test can run
-// something else in the middle of taking a message in.
-const pause = vi.hoisted(() => ({ before: null as null | ((conv: string, text: string) => Promise<void>) }));
+// something else in the middle of taking a message in; and so can listing
+// the uploads still to delete (pause.listed), once listed.
+const pause = vi.hoisted(() => ({
+  before: null as null | ((conv: string, text: string) => Promise<void>),
+  listed: null as null | ((count: number) => Promise<void>),
+}));
 vi.mock('./store', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./store')>();
   return {
@@ -58,6 +64,11 @@ vi.mock('./store', async (importOriginal) => {
     addMessage: async (...args: Parameters<typeof actual.addMessage>) => {
       await pause.before?.(args[1].conv, args[2].text);
       return actual.addMessage(...args);
+    },
+    pendingUploadDeletes: async (...args: Parameters<typeof actual.pendingUploadDeletes>) => {
+      const list = await actual.pendingUploadDeletes(...args);
+      await pause.listed?.(list.length);
+      return list;
     },
   };
 });
@@ -95,10 +106,23 @@ vi.mock('../storage/db', async (importOriginal) => {
 /** Resolves once a request for a lock whose name ends with this is waiting. */
 async function waitingFor(lock: string): Promise<void> {
   for (;;) {
-    const { pending = [] } = await navigator.locks.query();
-    if (pending.some((l) => l.name?.endsWith(lock))) return;
+    const pending = navigator.locks ? ((await navigator.locks.query()).pending ?? []).map((l) => l.name ?? '') : pendingLocks();
+    if (pending.some((name) => name.endsWith(lock))) return;
     await new Promise((r) => setTimeout(r, 5));
   }
+}
+
+/**
+ * Runs a group of tests twice: with Web Locks, and as on an engine without
+ * them, where locks hold within one copy of the app only (sync/locks.ts).
+ */
+function withAndWithoutWebLocks(name: string, tests: () => void): void {
+  describe(name, tests);
+  describe(`${name} (without Web Locks)`, () => {
+    beforeEach(() => vi.stubGlobal('navigator', {}));
+    afterEach(() => vi.unstubAllGlobals());
+    tests();
+  });
 }
 
 /** The next IDs the app makes for the wire (conversation, then message, in the order it makes them) are these. */
@@ -118,6 +142,7 @@ const pace = () => Date.now() + 1000 * paceTicks++;
 afterEach(() => {
   vi.mocked(newId).mockReset();
   pause.before = null;
+  pause.listed = null;
   storage.closeAt = null;
   paceTicks = 0;
   older.ms = false;
@@ -855,7 +880,208 @@ describe('paying for sends by size', () => {
   });
 });
 
-describe('seen receipts', () => {
+describe('topping up in the background', () => {
+  /** Counts someone's requests for new mailboxes. */
+  function countNewMailboxes(p: Person) {
+    const calls = { count: 0 };
+    const call = p.session.call;
+    p.session.call = async (method, path, body, check, options) => {
+      if (method === 'POST' && path === '/mailboxes') calls.count++;
+      return call(method, path, body, check, options);
+    };
+    return calls;
+  }
+
+  it('a reply that leaves the mailbox pool low tops it up at a random moment after, not with the send', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const chats: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const sender = await person(backend, `s${i}`);
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+      await owner.messaging.sync();
+      chats.push(await across(sender.db, conv, owner.db));
+    }
+    await owner.messaging.maintain();
+    await putMeta(owner.db, 'mailbox-pool', (await pooled(owner.db)).slice(0, POOL_LOW));
+    const created = countNewMailboxes(owner);
+    backend.later.length = 0;
+    // The first reply takes one and leaves the pool low: nothing is created
+    // now, a top-up is put off to 10 to 90 seconds later.
+    await owner.messaging.send(chats[0]!, 'hello');
+    expect(created.count).toBe(0);
+    expect(await poolSize(owner.db)).toBe(POOL_LOW - 1);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    // Another meanwhile puts off no second one.
+    await owner.messaging.send(chats[1]!, 'hello');
+    expect(backend.later).toHaveLength(1);
+    expect(created.count).toBe(0);
+    // When it runs: one batch, with no send near it.
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await poolSize(owner.db)).toBe(POOL_LOW - 2 + POOL_REFILL));
+    expect(created.count).toBe(1);
+    // Only a reply that finds the pool empty creates mailboxes first.
+    await putMeta(owner.db, 'mailbox-pool', []);
+    await owner.messaging.send(chats[2]!, 'hello');
+    expect(created.count).toBe(2);
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL - 1);
+  });
+
+  /** Holds someone's next logged-in POST to this path at a gate. */
+  function holdNext(p: Person, path: string) {
+    const g = gate();
+    const call = p.session.call;
+    p.session.call = async (method, route, body, check, options) => {
+      if (method === 'POST' && route === path) {
+        p.session.call = call;
+        await g.pass();
+      }
+      return call(method, route, body, check, options);
+    };
+    return g;
+  }
+
+  /** Whether this settles within two seconds. */
+  const settlesSoon = (p: Promise<unknown>) => Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 2000))]);
+
+  /** An owner with chats started through their link, none answered yet. */
+  async function ownerWithChats(count: number) {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const chats: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const sender = await person(backend, `s${i}`);
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+      await owner.messaging.sync();
+      chats.push(await across(sender.db, conv, owner.db));
+    }
+    await owner.messaging.maintain();
+    return { backend, owner, chats };
+  }
+
+  it("doesn't make a reply wait for a top-up under way: it takes a mailbox the pool has", async () => {
+    const { backend, owner, chats } = await ownerWithChats(2);
+    await putMeta(owner.db, 'mailbox-pool', (await pooled(owner.db)).slice(0, POOL_LOW));
+    backend.later.length = 0;
+    await owner.messaging.send(chats[0]!, 'hello');
+    expect(backend.later).toHaveLength(1);
+    // The top-up runs, and its request is on its way.
+    const creating = holdNext(owner, '/mailboxes');
+    backend.later.shift()!.fn();
+    await creating.reached;
+    // A reply meanwhile goes out at once, not just after the account's request is answered.
+    const sends = backend.seenEnvelopes.length;
+    expect(await settlesSoon(owner.messaging.send(chats[1]!, 'hello'))).toBe(true);
+    expect(backend.seenEnvelopes.length).toBe(sends + 1);
+    expect(await poolSize(owner.db)).toBe(POOL_LOW - 2);
+    creating.release();
+    await vi.waitFor(async () => expect(await poolSize(owner.db)).toBe(POOL_LOW - 2 + POOL_REFILL));
+  });
+
+  it("doesn't make a send wait for a top-up of send tokens under way", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hi');
+    const held = (await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId)))!;
+    await returnTokens(sender.db, held.slice(0, LOW_WATER));
+    backend.later.length = 0;
+    await sender.messaging.send(conv, 'low now');
+    expect(backend.later).toHaveLength(1);
+    const fetching = holdNext(sender, '/tokens');
+    backend.later.shift()!.fn();
+    await fetching.reached;
+    const sends = backend.seenEnvelopes.length;
+    expect(await settlesSoon(sender.messaging.send(conv, 'meanwhile'))).toBe(true);
+    expect(backend.seenEnvelopes.length).toBe(sends + 1);
+    fetching.release();
+    await vi.waitFor(async () => expect(await countTokens(sender.db, backend.issuer.keyId)).toBe(LOW_WATER - 2 + TOKEN_BATCH));
+  });
+
+  it('stop() cancels the top-ups put off, and a send still under way then puts off none', async () => {
+    const { backend, owner, chats } = await ownerWithChats(2);
+    // A reply leaves the pool low, and an upload the media wallet.
+    await putMeta(owner.db, 'mailbox-pool', (await pooled(owner.db)).slice(0, POOL_LOW));
+    const media = await countTokens(owner.db, backend.issuer.keyId, undefined, 'media');
+    await takeTokens(owner.db, backend.issuer.keyId, media - MEDIA_LOW_WATER, undefined, 'media');
+    backend.later.length = 0;
+    await owner.messaging.send(chats[0]!, 'hello');
+    const photo = crypto.getRandomValues(new Uint8Array(300));
+    await owner.messaging.sendMedia(chats[0]!, { file: photo, media: { t: 'photo', s: photo.length, w: 3, h: 3, m: 'image/jpeg' } });
+    expect(backend.later).toHaveLength(2);
+    owner.messaging.stop();
+    expect(backend.later).toEqual([]);
+    // Stopped while a reply goes out (signed out, say): the reply leaves the
+    // pool lower still, but nothing is fetched for a stopped app.
+    const app = owner.open();
+    const reply = app.send(chats[1]!, 'hello');
+    app.stop();
+    await reply;
+    expect(await poolSize(owner.db)).toBe(POOL_LOW - 2);
+    expect(backend.later).toEqual([]);
+  });
+
+  it('an upload that leaves the media wallet low tops it up at a random moment after, not with the upload', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await sender.messaging.maintain();
+    const media = await countTokens(sender.db, backend.issuer.keyId, undefined, 'media');
+    await takeTokens(sender.db, backend.issuer.keyId, media - MEDIA_LOW_WATER, undefined, 'media');
+    const signed = backend.mediaSigned();
+    backend.later.length = 0;
+    const photo = crypto.getRandomValues(new Uint8Array(300));
+    await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 3, h: 3, m: 'image/jpeg' } });
+    expect(backend.mediaSigned()).toBe(signed);
+    expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(MEDIA_LOW_WATER - 1);
+    expect(backend.later).toHaveLength(1);
+    expect(backend.later[0]!.ms).toBeGreaterThanOrEqual(10_000);
+    expect(backend.later[0]!.ms).toBeLessThanOrEqual(90_000);
+    backend.later.shift()!.fn();
+    await vi.waitFor(async () => expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(MEDIA_LOW_WATER - 1 + MEDIA_BATCH));
+    expect(backend.mediaSigned()).toBe(signed + MEDIA_BATCH);
+  });
+
+  it('two copies running upkeep at once fetch one batch of each, not one each', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const tab = copyOf(backend, owner);
+    await owner.messaging.maintain();
+    await putMeta(owner.db, 'mailbox-pool', []);
+    await takeTokens(owner.db, backend.issuer.keyId, await countTokens(owner.db, backend.issuer.keyId));
+    await takeTokens(owner.db, backend.issuer.keyId, await countTokens(owner.db, backend.issuer.keyId, undefined, 'media'), undefined, 'media');
+    const created = countNewMailboxes(owner);
+    const signed = backend.signed();
+    const mediaSigned = backend.mediaSigned();
+    await Promise.all([owner.messaging.maintain(), tab.maintain()]);
+    expect(created.count).toBe(1);
+    expect(await poolSize(owner.db)).toBe(POOL_REFILL);
+    expect(backend.signed() - signed).toBe(TOKEN_BATCH);
+    expect(backend.mediaSigned() - mediaSigned).toBe(MEDIA_BATCH);
+  });
+
+  it('tells other copies when upkeep deletes keys, so they forget them too', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    await linkOf(backend, owner);
+    let told = 0;
+    const app = owner.open({ onKeysDeleted: () => told++ });
+    await app.maintain().catch(() => {});
+    expect(told).toBe(0);
+    await scheduleKeyDeletion(owner.db, (e) => e.link !== undefined, Date.now() - 1);
+    await app.maintain().catch(() => {});
+    expect(told).toBe(1);
+  });
+});
+
+withAndWithoutWebLocks('seen receipts', () => {
   it('tell the sender what was read, once', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
@@ -876,6 +1102,79 @@ describe('seen receipts', () => {
     expect((await listMessages(sender.db, conv)).map((m) => [m.text, m.status])).toEqual([
       ['one', 'seen'],
       ['two', 'seen'],
+    ]);
+  });
+
+  it('go one at a time: calls that overlap, here or in another copy, send one receipt', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const tab = copyOf(backend, owner);
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await sender.messaging.send(conv, 'two');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const sends = backend.seenEnvelopes.length;
+    // The chat opens as messages arrive: asked again while it runs, the
+    // same run answers, not one per call.
+    const first = owner.messaging.markSeen(mine);
+    expect(owner.messaging.markSeen(mine)).toBe(first);
+    expect(owner.messaging.markSeen(mine)).toBe(first);
+    await Promise.all([first, tab.markSeen(mine), tab.markSeen(mine)]);
+    expect(backend.seenEnvelopes.length).toBe(sends + 1);
+    expect((await listMessages(owner.db, mine)).map((m) => m.status)).toEqual(['read', 'read']);
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).map((m) => m.status)).toEqual(['seen', 'seen']);
+  });
+
+  it('asked for again while one goes out, run once more after it, for what came meanwhile', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'one');
+    await sender.messaging.send(conv, 'two');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const receipts = () => backend.quietSends.filter(Boolean).length;
+    const before = receipts();
+    // The first receipt is held on its way.
+    const held = gate();
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'POST' && path === '/send') {
+        backend.api.request = request;
+        await held.pass();
+      }
+      return request(method, path, init, check);
+    };
+    const first = owner.messaging.markSeen(mine);
+    await held.reached;
+    // Once it's out, and before the next run: a new message comes in, and
+    // their side sees the first receipt named only what came before.
+    const between = withLock(`seen:${mine}`, async () => {
+      expect(await owner.messaging.sync()).toBe(1);
+      await sender.messaging.sync();
+      expect((await listMessages(sender.db, conv)).map((m) => [m.text, m.status])).toEqual([
+        ['one', 'seen'],
+        ['two', 'seen'],
+        ['three', 'sent'],
+      ]);
+    });
+    await sender.messaging.send(conv, 'three');
+    // Asked again (a message arriving in the open chat) while the first run goes on.
+    expect(owner.messaging.markSeen(mine)).toBe(first);
+    held.release();
+    await between;
+    await first;
+    expect(receipts()).toBe(before + 2);
+    expect((await listMessages(owner.db, mine)).map((m) => m.status)).toEqual(['read', 'read', 'read']);
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).map((m) => [m.text, m.status])).toEqual([
+      ['one', 'seen'],
+      ['two', 'seen'],
+      ['three', 'seen'],
     ]);
   });
 
@@ -2035,7 +2334,7 @@ describe('deleting a whole conversation for both sides', () => {
   });
 });
 
-describe('deleting uploads in the background', () => {
+withAndWithoutWebLocks('deleting uploads in the background', () => {
   it('keeps them on a list while the server is unreachable, and finishes later', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
@@ -2066,6 +2365,48 @@ describe('deleting uploads in the background', () => {
     await sender.messaging.flushUploadDeletes();
     expect(backend.uploads.size).toBe(0);
     expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+  });
+
+  it('runs again for uploads queued as a run was finishing, not at the next start', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const item = () => ({ id: toBase64Url(crypto.getRandomValues(new Uint8Array(16))), d: toBase64Url(crypto.getRandomValues(new Uint8Array(16))) });
+    const a = item();
+    const b = item();
+    // The run has found nothing more to delete, and is about to finish.
+    const finishing = gate();
+    pause.listed = async (count) => {
+      if (count > 0) return;
+      pause.listed = null;
+      await finishing.pass();
+    };
+    await queueUploadDeletes(owner.db, [a]);
+    const running = owner.messaging.flushUploadDeletes();
+    await finishing.reached;
+    // Queued then: the run under way answers, and runs once more for it.
+    await queueUploadDeletes(owner.db, [b]);
+    expect(owner.messaging.flushUploadDeletes()).toBe(running);
+    finishing.release();
+    await running;
+    expect(backend.mediaCalls).toEqual([`POST /media/${a.id}/delete`, `POST /media/${b.id}/delete`]);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+  });
+
+  it('asks again later for one just made, unless the app stopped meanwhile', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    // Ours, just made, that the server doesn't find yet.
+    const recent = () => ({ id: rand(), d: rand(), recent: true as const });
+    backend.later.length = 0;
+    await queueUploadDeletes(owner.db, [recent()]);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.later.map((job) => job.ms)).toEqual([30_000]);
+    backend.later.length = 0;
+    await queueUploadDeletes(owner.db, [recent()]);
+    const running = owner.messaging.flushUploadDeletes();
+    owner.messaging.stop();
+    await running;
+    expect(backend.later).toEqual([]);
   });
 });
 
@@ -2872,7 +3213,7 @@ async function failNewMailboxes(p: Person, err: Error) {
   };
 }
 
-describe('our side changing a chat while something of theirs comes in', () => {
+withAndWithoutWebLocks('our side changing a chat while something of theirs comes in', () => {
   it('keeps the mailbox and key our first reply takes while a message is being taken in', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
@@ -2944,7 +3285,7 @@ describe('our side changing a chat while something of theirs comes in', () => {
   });
 });
 
-describe('our side changing a chat', () => {
+withAndWithoutWebLocks('our side changing a chat', () => {
   async function setting() {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');

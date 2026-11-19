@@ -143,7 +143,9 @@ never who writes to it. Mailbox IDs only travel inside encrypted messages.
 1. A sender opens a link and checks its bundle.
 2. Their app makes a conversation ID and a fresh **conversation key** for this
    one conversation, and takes a reply mailbox from a pool it keeps (refilled
-   at random times, so taking one doesn't happen right before a send).
+   at random times, so creating one happens right before a send only rarely:
+   when more chats start in one burst than the pool holds, or a top-up
+   failed).
 3. The first message goes to the link's intro mailbox. Inside the encryption:
    the conversation key, the reply mailbox, a **sender tag** and the text.
 4. The owner's app shows a new conversation. When the owner replies, their app
@@ -369,8 +371,10 @@ The panel under the message box has emoji and stickers, as in Telegram.
   ([data.md](data.md#on-the-device)).
 - **Several copies at once** (a reopened app, several windows) share storage,
   so they coordinate with Web Locks and announce changes over a
-  BroadcastChannel. A copy of an older version still running closes (and
-  reloads) when a newer one changes how storage is laid out.
+  BroadcastChannel. On the rare engine without Web Locks (Safari before
+  15.4), locks hold within one copy only. A copy of an older version still
+  running closes (and reloads) when a newer one changes how storage is laid
+  out.
 - **Floods.** Anyone with a link can write, so what one person sends can't
   make the app slow or fill the device without bound. The chat list reads
   one small sealed preview per chat, not its messages; a chat opens at its
