@@ -90,11 +90,15 @@ jobs:
           echo "::error::DynamoDB Local didn't start"
           exit 1
 
+      # The fuzz targets' seeds run here as ordinary tests. The coverage
+      # total is only reported: there is no threshold.
       - name: Test
         env:
           DYNAMODB_ENDPOINT: http://localhost:8000
           DYNAMODB_REQUIRED: "1" # store tests must run, not skip
-        run: go test -race ./...
+        run: |
+          go test -race -coverprofile="$RUNNER_TEMP/cover.out" ./...
+          go tool cover -func="$RUNNER_TEMP/cover.out" | tail -1
 
       - name: Scan for known vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
