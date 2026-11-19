@@ -17,8 +17,9 @@ import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, ret
 import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
-import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
+import { canResend, createMessaging, LINK_KEY_RETRY_MS, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
 import {
+  addMessage,
   clearMedia,
   earlyFor,
   getConversation,
@@ -34,6 +35,7 @@ import {
   mediaUsage,
   pendingUploadDeletes,
   putConversation,
+  putMedia,
   queueUploadDeletes,
   saveConversation,
   setFile,
@@ -51,10 +53,12 @@ vi.mock('../protocol/message', async (importOriginal) => {
 });
 
 // Storing a message can be held up (pause.before), so a test can run
-// something else in the middle of taking a message in; and so can listing
-// the uploads still to delete (pause.listed), once listed.
+// something else in the middle of taking a message in, or fail just after
+// (pause.after), as if the app closed then; and listing the uploads still to
+// delete can be held up (pause.listed), once listed.
 const pause = vi.hoisted(() => ({
   before: null as null | ((conv: string, text: string) => Promise<void>),
+  after: null as null | ((conv: string, text: string) => Promise<void>),
   listed: null as null | ((count: number) => Promise<void>),
 }));
 vi.mock('./store', async (importOriginal) => {
@@ -63,7 +67,8 @@ vi.mock('./store', async (importOriginal) => {
     ...actual,
     addMessage: async (...args: Parameters<typeof actual.addMessage>) => {
       await pause.before?.(args[1].conv, args[2].text);
-      return actual.addMessage(...args);
+      await actual.addMessage(...args);
+      await pause.after?.(args[1].conv, args[2].text);
     },
     pendingUploadDeletes: async (...args: Parameters<typeof actual.pendingUploadDeletes>) => {
       const list = await actual.pendingUploadDeletes(...args);
@@ -142,6 +147,7 @@ const pace = () => Date.now() + 1000 * paceTicks++;
 afterEach(() => {
   vi.mocked(newId).mockReset();
   pause.before = null;
+  pause.after = null;
   pause.listed = null;
   storage.closeAt = null;
   paceTicks = 0;
@@ -4127,6 +4133,276 @@ describe('deleting an attachment or message while it goes out', () => {
     expect(mine.media!.id).toBeDefined();
     expect(mine.reactions?.mine?.e).toBe('👍');
     expect(await reached()).toEqual(['hello', '[photo]']);
+  });
+});
+
+describe('a send refused after its upload', () => {
+  /** A chat with a photo sent whose message's send fails as given (just once); delivered: it reaches the server first. */
+  async function failing(failure: Error, delivered = false) {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
+      backend.api.request = request;
+      if (delivered) await request(method, path, init, check);
+      throw failure;
+    };
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await expect(sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } })).rejects.toBe(failure);
+    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ status: 'failed', media: { t: 'photo' } });
+    await sender.messaging.flushUploadDeletes();
+    return { backend, owner, sender, conv };
+  }
+
+  it('deletes the upload when the server refused the message outright: it never went out', async () => {
+    // A mailbox's cap, a bad envelope, tokens of a key it no longer holds.
+    for (const refusal of [new ApiError(429, 'rate_limited'), new ApiError(400, 'invalid_envelope'), new ApiError(409, 'unknown_issuer_key')]) {
+      const { backend, sender } = await failing(refusal);
+      expect(backend.uploads.size).toBe(0);
+      expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+    }
+  });
+
+  it('keeps the upload after a failure that may have delivered the message: no answer, or the server failing', async () => {
+    const { backend, owner, sender, conv } = await failing(new NetworkError('answer lost'), true);
+    expect(backend.uploads.size).toBe(1);
+    expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+    // It did arrive, and the other side can fetch it.
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+    const failingServer = await failing(new ApiError(500, 'internal'));
+    expect(failingServer.backend.uploads.size).toBe(1);
+  });
+
+  it('deletes the upload when it failed before its message could go out', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    // Paid for, but the PUT fails every time.
+    backend.down.puts.push('unreachable', 'unreachable', 'unreachable', 'unreachable');
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await expect(sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } })).rejects.toBeInstanceOf(
+      TransferError,
+    );
+    const mine = (await listMessages(sender.db, conv)).at(-1)!;
+    // Failed, and sent again as a new upload if the user asks.
+    expect(mine).toMatchObject({ status: 'failed' });
+    expect(canResend(mine)).toBe(true);
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it('deletes the upload when there were no tokens to send it with', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    // The wallet is empty, and the day's send tokens are used up.
+    await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId));
+    failRequest(sender, 'POST', /^\/tokens$/, new ApiError(429, 'rate_limited'));
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await expect(sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } })).rejects.toBeInstanceOf(NoTokens);
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it("deletes the upload of a first reply that had no mailbox to give; keeps it when the server failed on the way", async () => {
+    for (const [failure, kept] of [
+      [new ApiError(429, 'rate_limited'), 0],
+      [new ApiError(500, 'internal'), 1],
+    ] as const) {
+      const backend = await fakeBackend();
+      const owner = await person(backend, 'owner');
+      const sender = await person(backend, 'sender');
+      const { ref, bundle } = await linkOf(backend, owner);
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+      await owner.messaging.sync();
+      const local = await across(sender.db, conv, owner.db);
+      expect(await poolSize(owner.db)).toBe(0);
+      // The first reply takes a mailbox, and the pool has to be refilled.
+      failRequest(owner, 'POST', /^\/mailboxes$/, failure);
+      const photo = crypto.getRandomValues(new Uint8Array(2000));
+      const sending = owner.messaging.sendMedia(local, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
+      if (kept) await expect(sending).rejects.toBe(failure);
+      else await expect(sending).rejects.toBeInstanceOf(NoMailboxes);
+      await owner.messaging.flushUploadDeletes();
+      expect(backend.uploads.size).toBe(kept);
+    }
+  });
+});
+
+describe('what a change that stops halfway leaves', () => {
+  async function chat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    return { backend, owner, sender, ref, bundle };
+  }
+
+  it('keeps no file of a message deleted while it downloads', async () => {
+    const { backend, owner, sender, ref, bundle } = await chat();
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
+    // Deleted here once its file has downloaded, before it's kept.
+    const get = backend.transfer.get.bind(backend.transfer);
+    backend.transfer.get = async (url, size, onProgress) => {
+      const body = await get(url, size, onProgress);
+      await owner.messaging.deleteHere(local, theirs.id);
+      return body;
+    };
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('gone');
+    expect(await getMessage(owner.db, local, theirs.id)).toBeUndefined();
+    expect(await owner.db.getAllKeys('media')).toEqual([]);
+  });
+
+  it('stores no file of ours before its message: one whose message could not be stored leaves none', async () => {
+    const { backend, sender, ref, bundle } = await chat();
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    pause.before = async (c) => {
+      if (c === conv) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    };
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await expect(sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } })).rejects.toThrow();
+    pause.before = null;
+    expect(await sender.db.getAllKeys('media')).toEqual([]);
+    expect(backend.mediaCalls).toEqual([]);
+  });
+
+  it('stores a new conversation before its first message: one that failed to be stored is taken in when it comes again', async () => {
+    const { owner, sender, ref, bundle } = await chat();
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    pause.before = async (_, text) => {
+      if (text === 'hello') throw new Error('closed');
+    };
+    await expect(owner.messaging.sync()).rejects.toThrow('closed');
+    pause.before = null;
+    // There, out of the list, with nothing in it.
+    const [c] = await listConversations(owner.db);
+    expect(c).toMatchObject({ hidden: true, unread: 0 });
+    expect(await listMessages(owner.db, c!.id)).toEqual([]);
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await listConversations(owner.db)).toEqual([expect.objectContaining({ id: c!.id, hidden: false, unread: 1 })]);
+    expect((await listMessages(owner.db, c!.id)).map((m) => m.text)).toEqual(['hello']);
+  });
+
+  it('shows a first message stored just before the app closed, when it comes again: never one without its conversation', async () => {
+    const { owner, sender, ref, bundle } = await chat();
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const [first] = await listMessages(sender.db, conv);
+    // Stored, then the app closes before its conversation is written.
+    pause.after = async (_, text) => {
+      if (text === 'hello') throw new Error('closed');
+    };
+    await expect(owner.messaging.sync()).rejects.toThrow('closed');
+    pause.after = null;
+    const [c] = await listConversations(owner.db);
+    expect(c).toMatchObject({ hidden: true, unread: 0 });
+    // Delivered again: not dropped as taken in already.
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await listConversations(owner.db)).toEqual([expect.objectContaining({ id: c!.id, hidden: false, unread: 1 })]);
+    expect((await listMessages(owner.db, c!.id)).map((m) => m.text)).toEqual(['hello']);
+    // As newest as on the usual path: our first reply names it as `last`.
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ lastReceived: first!.id, newest: { at: first!.at }, lastMessage: { id: first!.id } });
+    // And only once.
+    expect(await owner.messaging.sync()).toBe(0);
+    expect(await listMessages(owner.db, c!.id)).toHaveLength(1);
+  });
+
+  it('upkeep deletes messages whose conversation is gone, and files whose message is, once still so an hour later; on this device only', async () => {
+    const { owner } = await chat();
+    // Left by an older version, or a change that stopped halfway.
+    const media = { t: 'photo', s: 1, w: 1, h: 1, id: 'U'.repeat(22), k: 'K'.repeat(43), d: 'D'.repeat(22) };
+    await addMessage(owner.db, { id: 'm1', conv: 'gone', at: 1, out: false, status: 'received', file: 'local' }, { text: 'lost', media });
+    await putMedia(owner.db, 'gone', 'm1', new Uint8Array([1]));
+    await owner.db.put('media', new Uint8Array([2]), ['gone', 'm2']);
+    const left = async () => [await owner.db.getAllKeys('messages'), await owner.db.getAllKeys('media')];
+    const all = await left();
+    // Found and noted, keys only: nothing goes yet (a write under way, in
+    // another copy of the app say, may be about to finish it).
+    await owner.messaging.maintain();
+    expect(await left()).toEqual(all);
+    expect(await owner.db.get('meta', 'sweep')).toMatchObject({ convs: [{ id: 'gone' }], files: [{ key: ['gone', 'm2'] }] });
+    // Still so at an upkeep less than an hour later: still nothing.
+    const later = (ms: number) => owner.open({ now: () => Date.now() + ms });
+    await later(30 * 60_000).maintain();
+    expect(await left()).toEqual(all);
+    // An hour or more after it was found: it goes, and so do the notes.
+    await later(61 * 60_000).maintain();
+    expect(await left()).toEqual([[], []]);
+    expect(await owner.db.get('meta', 'sweep')).toBeUndefined();
+    // Its upload stays: taken in again, the same message may be in a conversation that is here.
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+  });
+
+  it("upkeep never sweeps a conversation's messages while they're being taken in: only under its lock, looked at again", async () => {
+    const { owner } = await chat();
+    // A first message stored and its conversation not yet, as an older copy
+    // of the app takes it in (under the chat's lock); noted long enough ago.
+    await addMessage(owner.db, { id: 'm1', conv: 'new', at: 1, out: false, status: 'received' }, { text: 'hello' });
+    await putMeta(owner.db, 'sweep', { convs: [{ id: 'new', seen: Date.now() - 2 * 60 * 60_000 }], files: [] });
+    let release!: () => void;
+    const held = withLock('send:new', () => new Promise<void>((resolve) => (release = resolve)));
+    const upkeep = owner.messaging.maintain();
+    await waitingFor('send:new');
+    await putConversation(owner.db, {
+      id: 'new',
+      wire: 'W'.repeat(22),
+      role: 'owner',
+      link: { id: 'L'.repeat(11), fingerprint: 'F'.repeat(43) },
+      label: 'x',
+      peerKey: 'k',
+      myKey: null,
+      sendTo: 'S'.repeat(22),
+      myMailbox: null,
+      lastAt: 1,
+      unread: 1,
+      status: 'active',
+      lastReceived: null,
+    });
+    release();
+    await held;
+    await upkeep;
+    expect(await owner.db.getAllKeys('messages')).toEqual([['new', 'm1']]);
+    // Not stray any more: no longer noted.
+    expect(await owner.db.get('meta', 'sweep')).toBeUndefined();
+  });
+});
+
+describe('upkeep and stop()', () => {
+  it('starts no more steps once stopped: the one under way is the last', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const calls: string[] = [];
+    const call = owner.session.call;
+    owner.session.call = async function (method, path, ...rest) {
+      calls.push(`${method} ${path}`);
+      return call(method, path, ...rest);
+    } as Session['call'];
+    // Stopped while it works through the uploads to delete, a step of its own.
+    pause.listed = async () => owner.messaging.stop();
+    await owner.messaging.maintain();
+    // Nothing after it: no mailboxes or tokens fetched.
+    expect(calls).toEqual([]);
+    expect(await poolSize(owner.db)).toBe(0);
+    // The next start's upkeep runs them all.
+    pause.listed = null;
+    await owner.open().maintain();
+    expect(calls).toContain('POST /mailboxes');
+    expect(await poolSize(owner.db)).toBeGreaterThanOrEqual(POOL_LOW);
   });
 });
 
