@@ -9,6 +9,17 @@
 #   cloudfront-only  the function URL answers CloudFront alone: it requires
 #                    AWS's signature, which CloudFront adds to each request
 #
+# The AWS provider adds two statements of its own to api's resource policy
+# when it makes the URL with no auth (FunctionURLAllowPublicAccess and
+# FunctionURLAllowInvokeAction: anyone may call it), never removes them, and
+# doesn't track them, so no plan shows them. Moving to cloudfront-only
+# leaves them behind, and the deploy's check of who may invoke the functions
+# refuses them on a locked api. Remove them once as an admin
+# (docs/deployment.md, CloudFront in front of the API):
+#
+#   aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowPublicAccess
+#   aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowInvokeAction
+#
 # Nothing is logged here: no access logs on the distribution, and no sampled
 # requests in the firewall (they would hold IP addresses).
 

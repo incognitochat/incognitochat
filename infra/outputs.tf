@@ -82,15 +82,17 @@ output "permission_checks" {
 }
 
 # The only sources CloudFront and API Gateway may invoke the functions from,
-# as edge.tf and websocket.tf give them, for the deploy to check the
-# functions' resource policies against (scripts/check-function-roles.sh
-# policies): IAM can't keep the deploy role from naming others. ARNs name
-# the account.
+# as edge.tf and websocket.tf give them, and whether api's URL answers
+# CloudFront alone (then no statement may let anyone call it), for the
+# deploy to check the functions' resource policies against
+# (scripts/check-function-roles.sh policies): IAM can't keep the deploy role
+# from naming others. ARNs name the account.
 output "invoke_sources" {
-  description = "The CloudFront distribution and WebSocket API the functions' resource policies may name"
+  description = "The CloudFront distribution and WebSocket API the functions' resource policies may name, and whether api's URL is locked"
   sensitive   = true
   value = {
     cloudfront = aws_lambda_permission.cloudfront_invoke.source_arn
     websocket  = aws_lambda_permission.ws.source_arn
+    api_locked = local.api_locked
   }
 }

@@ -29,8 +29,9 @@
 #       After applying: each function's resource policy, which says who may
 #       invoke it, must hold only the statements the app stack sets, as it
 #       sets them, with CloudFront and API Gateway limited to the sources
-#       in the JSON on standard input (Terraform's invoke_sources output).
-#       IAM can't keep the deploy role from adding others (another
+#       in the JSON on standard input (Terraform's invoke_sources output),
+#       and anyone only on bot, and on api while its URL needs no auth (not
+#       api_locked). IAM can't keep the deploy role from adding others (another
 #       account's distribution or API, or anyone without a URL), so a
 #       deploy catches what an earlier one added. Prints statement IDs only.
 #
@@ -257,7 +258,8 @@ roles)
 policies)
   prefix=${2:?usage: $0 policies <function-prefix> < invoke_sources.json}
   sources=$(cat)
-  if ! jq -e '(.cloudfront | type == "string") and (.websocket | type == "string")' <<<"$sources" >/dev/null 2>&1; then
+  if ! jq -e '(.cloudfront | type == "string") and (.websocket | type == "string") and (.api_locked | type == "boolean")' \
+    <<<"$sources" >/dev/null 2>&1; then
     echo "::error::The invoke sources are missing or malformed (Terraform output invoke_sources)"
     exit 1
   fi
@@ -266,6 +268,8 @@ policies)
   # websocket.tf; the provider adds the FunctionURLAllow* pair itself when a
   # URL is made with no auth), on which functions, and what it must say.
   # Other conditions only narrow a statement, so they may be there too.
+  # Anyone may call bot's URL, and api's until it answers CloudFront alone
+  # (api_locked): the provider leaves its pair on api then, as a leftover.
   # shellcheck disable=SC2016 # jq's own variables
   expected='
     def anyone: .Principal == "*" or (.Principal | type == "object" and .AWS == "*");
@@ -278,16 +282,19 @@ policies)
     def through_url: anyone and .Action == "lambda:InvokeFunction"
       and cond("Bool"; "lambda:InvokedViaFunctionUrl") == "true";
     def from($s; $action; $arn): service($s) and .Action == $action and cond("ArnLike"; "AWS:SourceArn") == $arn;
+    def open_url($f; $src): $f == "bot" or ($f == "api" and $src.api_locked == false);
     def as_set($f; $src):
       .Effect == "Allow" and (
-        if ($f == "api" or $f == "bot") and (.Sid == "FunctionUrlPublic" or .Sid == "FunctionURLAllowPublicAccess") then public_url
-        elif ($f == "api" or $f == "bot") and (.Sid == "FunctionUrlInvoke" or .Sid == "FunctionURLAllowInvokeAction") then through_url
+        if open_url($f; $src) and (.Sid == "FunctionUrlPublic" or .Sid == "FunctionURLAllowPublicAccess") then public_url
+        elif open_url($f; $src) and (.Sid == "FunctionUrlInvoke" or .Sid == "FunctionURLAllowInvokeAction") then through_url
         elif $f == "api" and .Sid == "CloudFrontUrl" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunctionUrl"; $src.cloudfront)
         elif $f == "api" and .Sid == "CloudFrontInvoke" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunction"; $src.cloudfront)
         elif $f == "ws" and .Sid == "WebSocketApi" then from("apigateway.amazonaws.com"; "lambda:InvokeFunction"; $src.websocket)
         else false end);
     [.Statement // [] | if type == "array" then .[] else . end
-      | {sid: (.Sid // "(no ID)" | tostring), ok: as_set($f; $src)}]'
+      | {sid: (.Sid // "(no ID)" | tostring), ok: as_set($f; $src),
+         leftover: ($f == "api" and $src.api_locked
+           and (.Sid == "FunctionURLAllowPublicAccess" or .Sid == "FunctionURLAllowInvokeAction"))}]'
   checked=0
   for f in api bot ws notify; do
     policy="" status=0
@@ -321,15 +328,22 @@ policies)
     fi
     good=$(jq -r '[.[] | select(.ok) | .sid] | sort | join(", ")' <<<"$results")
     echo "${f}: ${good:-no statements}"
-    while read -r sid; do
+    while IFS=$'\t' read -r leftover sid; do
       [[ -n $sid ]] || continue
-      echo "::error::The ${f} function's resource policy has a statement the app stack doesn't set, or not as it sets it: ${sid}"
-      tampered=1
-    done <<<"$(jq -r '.[] | select(.ok | not) | .sid' <<<"$results")"
+      if [[ $leftover == true ]]; then
+        echo "::error::The ${f} function's URL answers CloudFront alone, but its resource policy still lets anyone call it: ${sid}, which the AWS provider added while the URL needed no auth. Remove it as an admin: aws lambda remove-permission --function-name ${prefix}-${f} --statement-id ${sid} (docs/deployment.md, CloudFront in front of the API)"
+        leftovers=1
+      else
+        echo "::error::The ${f} function's resource policy has a statement the app stack doesn't set, or not as it sets it: ${sid}"
+        tampered=1
+      fi
+    done <<<"$(jq -r '.[] | select(.ok | not) | "\(.leftover)\t\(.sid)"' <<<"$results")"
     checked=$((checked + 1))
   done
   if ((${tampered:-0})); then
     echo "::error::Someone added to who may invoke the functions. Find out who (CloudTrail, lambda AddPermission), then remove it as an admin: aws lambda remove-permission --function-name <function> --statement-id <ID>."
+  fi
+  if ((${tampered:-0} || ${leftovers:-0})); then
     exit 1
   fi
   finish "Checked ${checked} functions' resource policies"

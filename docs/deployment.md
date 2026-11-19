@@ -52,9 +52,12 @@ them is done by hand:
    (`fix` → patch, `feat` → minor, `!` → major) and `CHANGELOG.md`. The
    current version is kept in `.release-please-manifest.json` and the tags.
    After every push to `main`, the release job also brings that pull
-   request up to date with `main`, so it can always be merged.
+   request up to date with `main`, so it can always be merged. The release
+   job runs only once dev has deployed the same commit: after a failed dev
+   deploy, nothing is tagged until it is re-run and passes.
 2. Merging that pull request is the decision to release. release-please then
-   tags the merge commit and publishes a GitHub Release with the changelog.
+   tags the merge commit (after dev has deployed it) and publishes a GitHub
+   Release with the changelog.
 3. The published release runs CI on the tag: everything is built and tested
    again from the tag, and the production deploy waits for a required
    reviewer's approval in GitHub. It checks that the tag points at the
@@ -94,6 +97,13 @@ secrets and variables it computed (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`,
 `LAMBDA_CODE_SIGNING_CONFIG`, `AWS_REGION`). Then it asks IAM's policy
 simulator whether the deploy role is denied what it should be
 ([below](#what-the-deploy-role-may-do)), and stops if not.
+
+A rerun keeps the environment's required reviewers (unless `REVIEWERS`
+names others) and its other protection settings: whether whoever started a
+deploy may approve it, whether admins may skip the rules, and the wait
+timer. It stops without changing anything if it can't read them (any error
+but a 404, which means a new environment), and refuses to remove every
+required reviewer unless `ALLOW_NO_REVIEWERS=1` is set.
 
 The functions' execution roles (`<prefix>-fn-api`, `-bot`, `-ws` and
 `-notify`, trusted by Lambda alone) belong to the bootstrap stack, so the
@@ -314,10 +324,12 @@ plan would show are closed. What IAM can't close is listed below, and in
   distribution invoke `api`, or another account's API invoke `ws`. So each
   deploy, after applying, reads every function's resource policy and fails
   on any statement the app stack doesn't set, as it sets it, with
-  CloudFront and API Gateway limited to this stack's distribution and API
-  (`scripts/check-function-roles.sh policies`). Such a statement lasts until
-  the next deploy finds it; remove it as an admin with
-  `aws lambda remove-permission`.
+  CloudFront and API Gateway limited to this stack's distribution and API,
+  and anyone limited to `bot`, and to `api` while its URL needs no auth
+  (`scripts/check-function-roles.sh policies`; see also
+  [what the AWS provider leaves](#cloudfront-in-front-of-the-api)). Such a
+  statement lasts until the next deploy finds it; remove it as an admin
+  with `aws lambda remove-permission`.
 - **Roles**: it may only write the four functions' roles' own policies,
   which the permissions boundary caps, and pass those roles to Lambda. It
   can't create a role, user or access key, change whom a role trusts, or
@@ -805,6 +817,24 @@ step at a time:
 3. `cloudfront-only`: the function URL requires AWS's signature, which only
    CloudFront adds, and refuses everyone else without running the function.
    The deploy checks that it does.
+
+The AWS provider adds two statements of its own to the `api` function's
+resource policy when it makes the URL with no auth (`direct`, the default):
+`FunctionURLAllowPublicAccess` and `FunctionURLAllowInvokeAction`, which let
+anyone call the function through its URL. It never removes them, and
+Terraform doesn't track them, so no plan shows them. The switch to
+`cloudfront-only` (the URL going from no auth to AWS's signature) leaves
+them behind. They let no one in by themselves while the URL needs a
+signature, but the deploy's check of who may invoke the functions refuses
+them on a locked `api`. Remove them once as an admin, before the deploy
+that switches (Terraform's own `FunctionUrlPublic` and `FunctionUrlInvoke`
+keep the URL public until then) or after it, and re-run that deploy if the
+check stopped it:
+
+```shell
+aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowPublicAccess
+aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowInvokeAction
+```
 
 The distribution answers over IPv4 only. The firewall counts each IPv6
 address on its own, and one server can have a /64 of them (2^64 addresses),

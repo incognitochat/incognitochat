@@ -306,11 +306,13 @@ jobs:
           -backend-config="region=${AWS_REGION}"
 
       # Workflow logs are public. Hide the endpoints of earlier deploys before
-      # Terraform prints anything (there are none on the first deploy).
+      # Terraform prints anything (there are none on the first deploy): the
+      # function URL and CloudFront's too, which a plan prints when the
+      # distribution's origin changes, whichever one api_url names.
       - name: Mask endpoints
         working-directory: infra
         run: |
-          for name in api_url ws_url webhook_url media_origin; do
+          for name in api_url api_function_url api_cloudfront_url ws_url webhook_url media_origin; do
             value=$(terraform output -raw "$name" 2>/dev/null || true)
             if [ -n "$value" ]; then
               echo "::add-mask::${value}"
@@ -392,7 +394,9 @@ jobs:
           terraform apply -no-color tfplan | sed -E 's/\[id=[^]]*\]/[id=***]/'
 
       # Fetches the code each function runs from Lambda and checks it is the
-      # attested build plus AWS Signer's signature; prints both hashes.
+      # attested build plus AWS Signer's signature, run as the app stack sets
+      # it (a .zip, no layers, provided.al2023 on arm64, handler bootstrap);
+      # prints both hashes.
       - name: Check the deployed code
         run: python3 scripts/check-lambda-deploy.py backend/dist "incognitochat-${ENVIRONMENT}"
 
