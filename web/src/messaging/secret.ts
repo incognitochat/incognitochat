@@ -1,5 +1,5 @@
-// The account secret (design §6, §9, §11): 32 random bytes shared by an
-// account's devices and nobody else. It derives:
+// The account secret (docs/protocol.md, Inner message): 32 random bytes shared
+// by an account's devices and nobody else. It derives:
 //   - sender tags: HMAC(secret, Message("incognitochat/v2/sender-tag", link fp)),
 //     the same for every conversation an account starts through one link, so
 //     the link's owner can block the person and not just a conversation;

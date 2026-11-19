@@ -134,7 +134,7 @@ type inboxItem struct {
 // spare, take one when they need it and top the pool up at random moments,
 // so creating one happens right before an anonymous send only rarely: when
 // more chats start in one burst than the pool holds, or a top-up failed
-// (design §9).
+// (docs/architecture.md, Conversations and mailboxes).
 func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
 	const route = "POST /mailboxes"
 	var in struct {

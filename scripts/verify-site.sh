@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks that a live site is exactly what a reviewed copy of the hosting
 # workflow built from this repository's main branch, and optionally that
-# rebuilding the same commit gives the same bytes (design §16).
+# rebuilding the same commit gives the same bytes (docs/verifying.md).
 #
 #   scripts/verify-site.sh <site URL> <hosting repository> [--rebuild] [--code-repo <owner>/<repo>]
 #   scripts/verify-site.sh https://<org>.github.io <org>/<org>.github.io --rebuild

@@ -1,4 +1,4 @@
-// The envelope: all the server sees of a message (design §10, docs/protocol.md).
+// The envelope: all the server sees of a message (docs/protocol.md, Envelope).
 //
 //   envelope = suite (1) ‖ wrap count (1) ‖ wraps ‖ body
 //   wrap     = key ID (8) ‖ HPKE enc (65) ‖ wrapped content key (48)

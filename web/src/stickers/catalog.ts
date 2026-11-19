@@ -1,9 +1,9 @@
-// The app's own sticker packs (phase 5.6). The images are part of the build
-// (public/stickers, copied as they are, so they're as verifiable as the
-// code), and sending one is just its name: nothing is uploaded, and nothing
-// outside the app is asked for it (no Telegram packs: a Mini App can't reach
-// them, and fetching them through the bot would show who uses which). The
-// images are Microsoft's Fluent Emoji (3D), MIT licensed
+// The app's own sticker packs (docs/protocol.md, Stickers). The images are
+// part of the build (public/stickers, copied as they are, so they're as
+// verifiable as the code), and sending one is just its name: nothing is
+// uploaded, and nothing outside the app is asked for it (no Telegram packs: a
+// Mini App can't reach them, and fetching them through the bot would show who
+// uses which). The images are Microsoft's Fluent Emoji (3D), MIT licensed
 // (public/stickers/NOTICE.md, ART_LICENSE); make-art.sh remakes them from the
 // source.
 //

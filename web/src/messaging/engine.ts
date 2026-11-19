@@ -1,5 +1,4 @@
-// Messaging (design §9, §10, §12): starting conversations through links,
-// writing, and receiving.
+// Messaging: starting conversations through links, writing, and receiving.
 //
 // Who writes with which key (docs/protocol.md): a first message comes from a
 // fresh conversation key of the sender and is written for the link's current
@@ -175,7 +174,7 @@ const META_BLOCKED = 'blocked-tags';
 const META_MAILBOXES_CHECKED = 'mailboxes-checked';
 /** The most mailbox IDs one check sends: well within a request's size limit. */
 const CHECK_CHUNK = 1000;
-/** Our conversation keys are replaced every 6 to 9 days (design D11), each conversation on its own schedule. */
+/** Our conversation keys are replaced every 6 to 9 days (docs/protocol.md, Key rotation), each conversation on its own schedule. */
 const ROTATE_MIN = 6 * DAY;
 const ROTATE_SPREAD = 3 * DAY;
 /** How long a sender not answered yet trusts the link key it has before fetching the current one. */
@@ -971,10 +970,10 @@ export function createMessaging(deps: MessagingDeps) {
       let c = await getConversation(db, conv);
       if (!c) throw new Error('unknown conversation');
       if (c.myKey === null || (c.lastReceived !== null && now() >= (c.rotateAt ?? 0))) {
-        // A first key, or time for a new one (design D11). The new key goes
-        // out with this message: nothing is sent just to rotate. Not before
-        // they've written to us, since until then they know us by this key
-        // alone. The old key stays until they've used the new one (receive).
+        // A first key, or time for a new one. The new key goes out with this
+        // message: nothing is sent just to rotate. Not before they've written
+        // to us, since until then they know us by this key alone. The old key
+        // stays until they've used the new one (receive).
         const key = await createConversationKey(db, c.id);
         c = { ...c, myKey: toBase64Url(key.publicKey), rotateAt: nextRotation() };
         await putConversation(db, c);
@@ -1103,11 +1102,11 @@ export function createMessaging(deps: MessagingDeps) {
 
   /**
    * Opening a conversation: tells the other side, at once, which of their
-   * messages we have now read (design D12), and clears the unread count.
-   * In one receipt, however many there are: it names the newest (MAX_SEEN),
-   * and if there are more, says the earlier ones were read too (`earlier`).
-   * So a chat flooded with thousands costs one send, not one per MAX_SEEN.
-   * Versions without `earlier` mark only those it names.
+   * messages we have now read, and clears the unread count. In one receipt,
+   * however many there are: it names the newest (MAX_SEEN), and if there are
+   * more, says the earlier ones were read too (`earlier`). So a chat flooded
+   * with thousands costs one send, not one per MAX_SEEN. Versions without
+   * `earlier` mark only those it names.
    *
    * One at a time per conversation, here and across copies of the app
    * (`seen:<id>`), so calls that overlap (the chat opening as messages
@@ -1151,11 +1150,10 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
-   * Blocks a conversation, silently (design §11): our mailbox for it is
-   * discarded, so their sends go nowhere, and for someone who wrote to our
-   * link their sender tag is remembered, so new conversations they start
-   * through that link are dropped too. Nobody is told. The keys stay, so it
-   * can be undone (unblock).
+   * Blocks a conversation, silently: our mailbox for it is discarded, so their
+   * sends go nowhere, and for someone who wrote to our link their sender tag
+   * is remembered, so new conversations they start through that link are
+   * dropped too. Nobody is told. The keys stay, so it can be undone (unblock).
    */
   async function block(conv: string): Promise<void> {
     const c = await getConversation(db, conv);

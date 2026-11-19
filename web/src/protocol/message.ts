@@ -1,5 +1,5 @@
 // The inner message: what only the two people in a conversation can read
-// (design §10, docs/protocol.md).
+// (docs/protocol.md, Inner message).
 //
 //   inner = tag (32) ‖ UTF-8 JSON
 //

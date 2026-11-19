@@ -1,4 +1,5 @@
-// Links (design §8), byte-compatible with the backend (backend/internal/links).
+// Links (docs/protocol.md, Links), byte-compatible with the backend
+// (backend/internal/links).
 //
 // A link is t.me/<bot>/<app>?startapp=<payload>, where
 //   payload = "1" ‖ link ID (8 bytes, 11 base64url characters)

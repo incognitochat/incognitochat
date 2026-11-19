@@ -1,9 +1,9 @@
-// The push socket (design §12). Only a content-free hint ever comes down it
-// ({"t":"sync"}: something arrived), and the app then fetches its inbox over
-// HTTPS, so a dropped socket loses nothing. The session token goes as the
-// second subprotocol, never in the URL. The socket is kept only while the
-// app is visible: a hidden app has none, so the server sends a Telegram
-// notice instead.
+// The push socket (docs/protocol.md, Delivery). Only a content-free hint ever
+// comes down it ({"t":"sync"}: something arrived), and the app then fetches
+// its inbox over HTTPS, so a dropped socket loses nothing. The session token
+// goes as the second subprotocol, never in the URL. The socket is kept only
+// while the app is visible: a hidden app has none, so the server sends a
+// Telegram notice instead.
 
 /** API Gateway closes sockets idle for 10 minutes. */
 export const HEARTBEAT_MS = 5 * 60_000;

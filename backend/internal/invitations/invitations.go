@@ -1,5 +1,5 @@
 // Package invitations holds the rules of invite-only access, carried over
-// from v1 (design D5).
+// from v1.
 //
 // While invite-only, owning a link needs an invitation; anyone can still
 // create an account and write to links they were given. People invited by an

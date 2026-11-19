@@ -1,10 +1,10 @@
 // The account on this device: setting it up, registering it, logging in.
 //
-// Setup happens in two launches (design §7). The first creates the keys and
-// asks Telegram to reopen the app with "reg" + the account key's fingerprint
-// as its start parameter. Only Telegram sets that parameter, so the second
-// launch's signed launch data proves the Telegram user chose this account
-// key, and that launch registers it.
+// Setup happens in two launches (docs/protocol.md, Registration and sessions).
+// The first creates the keys and asks Telegram to reopen the app with "reg" +
+// the account key's fingerprint as its start parameter. Only Telegram sets
+// that parameter, so the second launch's signed launch data proves the
+// Telegram user chose this account key, and that launch registers it.
 //
 // Keys on this device:
 // - account key: copyable (sealed in the vault for linking devices later),

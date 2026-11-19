@@ -1,10 +1,10 @@
-// Command notify sends Telegram "New message" notices (design §12). The api
-// function invokes it to seal a chat ID (only notify holds the key), and
-// the ws function, without waiting, after a delivery that no open app took
-// and that isn't quiet. It can read the bot token and the chat key, and the
-// notice fields of accounts (infra/functions.tf: no other attribute, and
-// nothing outside account partitions); nothing about messages, and no
-// socket records.
+// Command notify sends Telegram "New message" notices (docs/protocol.md,
+// Notices). The api function invokes it to seal a chat ID (only notify holds
+// the key), and the ws function, without waiting, after a delivery that no
+// open app took and that isn't quiet. It can read the bot token and the chat
+// key, and the notice fields of accounts (infra/functions.tf: no other
+// attribute, and nothing outside account partitions); nothing about messages,
+// and no socket records.
 package main
 
 import (

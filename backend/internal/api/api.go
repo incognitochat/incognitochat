@@ -154,7 +154,7 @@ type Server struct {
 	Log       *slog.Logger
 	Now       func() time.Time
 
-	// InviteOnly limits owning links to members and admins (design D5).
+	// InviteOnly limits owning links to members and admins.
 	InviteOnly bool
 	// Admins holds the Telegram hashes (directory.TelegramHash) of admins.
 	Admins map[string]bool

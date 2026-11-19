@@ -1,8 +1,9 @@
 # Protocol
 
 The formats clients and the backend agree on. Each has test vectors that both
-sides check (listed at the end). The design and its reasons are in the design
-notes; this file is only the exact encoding.
+sides check (listed at the end). How the parts fit together is in
+[architecture.md](architecture.md), and what they protect in
+[security.md](security.md); this file is only the exact encoding.
 
 Suite `0x01` throughout: P-256, SHA-256, HKDF-SHA256, AES-256-GCM. Every key,
 signature and envelope is tied to it, so a later suite can never be confused

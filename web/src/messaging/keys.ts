@@ -1,4 +1,4 @@
-// Which of our keys can open an envelope (design §6, §10). Incoming
+// Which of our keys can open an envelope (docs/protocol.md, Keys). Incoming
 // envelopes name a recipient key ID; this index maps key IDs to our private
 // keys: link encryption keys (first messages) and conversation keys. Private
 // keys stay sealed in the vault and are unsealed into non-extractable working
@@ -30,9 +30,9 @@ export interface KeyEntry {
   /** For a conversation key: the conversation's ID on this device (not the one on the wire). */
   conv?: string;
   /**
-   * Unix ms after which the private key is deleted (design D11): set once
-   * nothing can still be written to it, plus the 30 days envelopes can wait
-   * in the inbox, plus margin.
+   * Unix ms after which the private key is deleted (docs/protocol.md, Key
+   * rotation): set once nothing can still be written to it, plus the 30 days
+   * envelopes can wait in the inbox, plus margin.
    */
   deleteAfter?: number;
 }

@@ -1,11 +1,11 @@
-// Voice messages (phase 5.4) and round video messages (5.5), recorded with
-// MediaRecorder. Voice: AAC in MP4 where the browser can, so iPhone and
-// Android play each other's, else Opus in WebM or Ogg; the waveform comes
-// from the microphone's level while recording, so nothing has to decode the
-// result. Video: the camera's picture is cropped to a square on a canvas
-// (mirrored for the front camera, as the person saw it) and that canvas is
-// recorded with the microphone, as H.264 in MP4 where the browser can.
-// A recording carries no metadata about the device or place.
+// Voice messages and round video messages, recorded with MediaRecorder. Voice:
+// AAC in MP4 where the browser can, so iPhone and Android play each other's,
+// else Opus in WebM or Ogg; the waveform comes from the microphone's level
+// while recording, so nothing has to decode the result. Video: the camera's
+// picture is cropped to a square on a canvas (mirrored for the front camera,
+// as the person saw it) and that canvas is recorded with the microphone, as
+// H.264 in MP4 where the browser can. A recording carries no metadata about
+// the device or place.
 
 import { stripVideoMetadata } from './mp4';
 import { preview } from './prepare';

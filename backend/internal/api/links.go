@@ -65,7 +65,7 @@ type accountResponse struct {
 }
 
 // mayOwnLinks says whether an account may create links: while invite-only,
-// only members (who joined through an invitation) and admins can (design D5).
+// only members (who joined through an invitation) and admins can.
 func (s *Server) mayOwnLinks(d directory.Device) bool {
 	return !s.InviteOnly || d.Member || s.isAdmin(d)
 }

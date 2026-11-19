@@ -1,4 +1,4 @@
-// Package links checks link bundles (design §8).
+// Package links checks link bundles (docs/protocol.md, Links).
 //
 // A link is t.me/<bot>/<app>?startapp=1<link ID><fingerprint>. Its bundle,
 // which anyone with the link ID can fetch, holds the link signing key (whose

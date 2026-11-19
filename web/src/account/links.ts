@@ -1,8 +1,8 @@
-// This account's link (design §8). An account has one link at a time, which
-// it can replace: the new link has a new address (ID) and new encryption
-// keys, but the same signing key, whose fingerprint is in the link. Senders'
-// tags are made from that fingerprint, so after a replacement the same
-// people get the same labels, and blocked people stay blocked. Keys are
+// This account's link (docs/protocol.md, Links). An account has one link at a
+// time, which it can replace: the new link has a new address (ID) and new
+// encryption keys, but the same signing key, whose fingerprint is in the link.
+// Senders' tags are made from that fingerprint, so after a replacement the
+// same people get the same labels, and blocked people stay blocked. Keys are
 // generated here and sealed in the vault (crypto/vault.ts).
 //
 // The server gives a signing key to one account for good, so no two
@@ -74,7 +74,7 @@ export interface LinkRecord extends LinkRef {
 /** What a rotation did: nothing, a new key, or a new link with a new signing key in place of one that couldn't get new keys. */
 export type Rotation = boolean | 'new-link';
 
-/** Link encryption keys are replaced every 6 to 9 days (design D11). */
+/** Link encryption keys are replaced every 6 to 9 days (docs/protocol.md, Key rotation). */
 const ROTATE_MIN = 6 * 24 * 3600;
 const ROTATE_SPREAD = 3 * 24 * 3600;
 const nextRotation = (now: number) => now + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
@@ -339,12 +339,12 @@ function mailboxOf(created: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Gives the link a new encryption key when its turn comes (design D11). The
- * bundle then lists only the new key, so new first messages go to it; the
- * old key is kept until anything written to it has expired from the inbox.
- * Senders not answered yet fetch the current key before writing again. Run
- * at upkeep, after settleLinkChange; not while a change is still unsettled.
- * `now` in Unix seconds. Returns whether it rotated.
+ * Gives the link a new encryption key when its turn comes. The bundle then
+ * lists only the new key, so new first messages go to it; the old key is kept
+ * until anything written to it has expired from the inbox. Senders not
+ * answered yet fetch the current key before writing again. Run at upkeep,
+ * after settleLinkChange; not while a change is still unsettled. `now` in Unix
+ * seconds. Returns whether it rotated.
  *
  * A link that can't get new keys any more (another account has its signing
  * key, or the key is gone from this device) is replaced instead, by a link

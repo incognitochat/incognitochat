@@ -362,7 +362,7 @@ export interface Deps {
   stepPauseMs?: number;
 }
 
-/** How often an open app checks its inbox (until sockets arrive in phase 3). */
+/** How often an open app checks its inbox while it has no push socket. */
 const POLL_MS = 20_000;
 /** While a push socket is open, poll only every this many POLL_MS. */
 const SOCKET_POLL_EVERY = 6;
@@ -378,7 +378,7 @@ export interface LinkView extends LinkRecord {
   url: string;
 }
 
-/** How long the old copy waits before closing, so Telegram handles the link first (tested in phase 0). */
+/** How long the old copy waits before closing, so Telegram handles the link first (found by testing). */
 const CLOSE_DELAY_MS = 400;
 /**
  * After the server says downloads are paused, attachments aren't fetched by
@@ -467,9 +467,10 @@ export function createApp(deps: Deps) {
     });
   }
 
-  // Telegram notices (design §12) are set up with this launch's signed data,
-  // and only from a plain or registration launch: never one that names a
-  // link or an invitation, which would tell the server whose link this is.
+  // Telegram notices (docs/protocol.md, Notices) are set up with this launch's
+  // signed data, and only from a plain or registration launch: never one that
+  // names a link or an invitation, which would tell the server whose link this
+  // is.
   const signedStart = new URLSearchParams(deps.launch.initData).get('start_param') ?? '';
   const noticeLaunch = deps.launch.initData !== '' && (signedStart === '' || isRegistrationLaunch(signedStart));
   let writeAllowed = deps.launch.allowsWriteToPm;
@@ -977,8 +978,8 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Tells the other side, at once, what we've just read (design D12). In the
-   * background: the screen doesn't wait, and a failure is retried next time.
+   * Tells the other side, at once, what we've just read. In the background:
+   * the screen doesn't wait, and a failure is retried next time.
    */
   function seen(id: string): void {
     // Redrawn whether or not it all went: a call that joined one under way
