@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { concat, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
+import { fixedKeys, seedCrypto } from '../testing/crypto';
 import { Random } from '../testing/random';
 import { EnvelopeError, keyId, MAX_INNER, openEnvelope, sealEnvelope, sendTokensFor } from './envelope';
 import {
@@ -374,6 +375,10 @@ describe('what messages cost', () => {
 });
 
 describe('messages, on random input', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const LETTERS = [...'abc xyz 019 .,!?\n"\\', ...'سلام دنیا', '\u200c', 'é', '👋', '👨‍👩‍👧', '\ud83d'];
   const words = (r: Random, max = 200) => Array.from({ length: 1 + r.int(max) }, () => r.pick(LETTERS)).join('');
   const id = (r: Random) => toBase64Url(r.bytes(16));
@@ -559,15 +564,17 @@ describe('messages, on random input', () => {
   });
 
   it('open to exactly what was sealed, and never once anything is changed', async () => {
+    // Fixed keys and seeded randomness: a failing round fails the same way every run.
     const r = new Random(0x6d736704);
-    const sender = await conversationKey();
-    const recipient = await conversationKey();
+    const [sender, other, , ephemeral] = await fixedKeys();
+    const recipient = { ...other!, id: await keyId(other!.publicKey) };
     const find = finder(recipient);
+    seedCrypto(r, ephemeral!.pair);
     for (let round = 0; round < 150; round++) {
       const draft = randomDraft(r);
-      const envelope = await sealMessage(draft, sender, recipient.publicKey);
+      const envelope = await sealMessage(draft, sender!, recipient.publicKey);
       const { message } = await openMessage(envelope, find);
-      expect(message, `round ${round}`).toEqual({ v: 1, ...draft, from: toBase64Url(sender.publicKey), to: toBase64Url(recipient.id) });
+      expect(message, `round ${round}`).toEqual({ v: 1, ...draft, from: toBase64Url(sender!.publicKey), to: toBase64Url(recipient.id) });
       // The envelope changed; the inner message (tag and JSON) changed and sealed again; or made-up JSON with a made-up tag.
       let changed: Uint8Array;
       const way = r.int(3);

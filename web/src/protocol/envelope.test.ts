@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { concat, utf8 } from '../crypto/encoding';
 import { generateCopyableAgreementKey, exportPublicKey, SUITE } from '../crypto/keys';
+import { fixedKeys, seedCrypto } from '../testing/crypto';
 import { Random } from '../testing/random';
 import {
   EnvelopeError,
@@ -127,6 +128,10 @@ describe('send tokens', () => {
 });
 
 describe('envelopes, on random input', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 
   it('pad and unpad any inner message, to the smallest size that fits', () => {
@@ -178,9 +183,12 @@ describe('envelopes, on random input', () => {
   });
 
   it('open to exactly what was sealed, and never to anything else once changed', async () => {
+    // Fixed keys and seeded randomness: a failing round fails the same way every run.
     const r = new Random(0x656e7604);
-    const keys = [await recipient(), await recipient(), await recipient()];
+    const [a, b, c, ephemeral] = await fixedKeys();
+    const keys = await Promise.all([a!, b!, c!].map(async (k) => ({ ...k, id: await keyId(k.publicKey) })));
     const find = finder(...keys);
+    seedCrypto(r, ephemeral!.pair);
     for (let round = 0; round < 100; round++) {
       const inner = r.bytes(r.oneIn(2) ? r.pick([0, 1, 508, 509, MAX_INNER]) : r.int(3000));
       const to = keys.slice(0, 1 + r.int(keys.length));
