@@ -60,7 +60,7 @@ func TestInvocationFailsWithConstantText(t *testing.T) {
 	}
 	logged := buf.String()
 	if strings.Contains(logged, "SECRET") || !strings.Contains(logged, `"msg":"setup failed"`) ||
-		!strings.Contains(logged, `"method":"setWebhook","status":401,"error_code":401`) {
+		!strings.Contains(logged, `"method":"setWebhook","tg_status":401,"error_code":401`) {
 		t.Fatalf("logged %s", logged)
 	}
 	ok := func(context.Context, string) error { return nil }

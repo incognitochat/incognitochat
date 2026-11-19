@@ -149,7 +149,7 @@ func (detailed) Error() string { return "sendMessage to chat 4242 failed" }
 func (detailed) LogAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.String(KeyMethod, "sendMessage"),
-		slog.Int(KeyStatus, 429),
+		slog.Int(KeyTelegramStatus, 429),
 		slog.Int(KeyErrorCode, 429),
 		slog.Int("chat_id", 4242),
 	}
@@ -164,7 +164,7 @@ func TestErrorKindDetails(t *testing.T) {
 	log.Warn("notify failed", ErrorKind(errors.New("table")))
 	got := lines(t, &buf)
 	for key, want := range map[string]any{
-		"error_kind": "*errors.joinError", "method": "sendMessage", "status": float64(429), "error_code": float64(429),
+		"error_kind": "*errors.joinError", "method": "sendMessage", "tg_status": float64(429), "error_code": float64(429),
 	} {
 		if got[0][key] != want {
 			t.Errorf("%s = %v, want %v", key, got[0][key], want)

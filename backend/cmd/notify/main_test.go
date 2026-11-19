@@ -88,7 +88,7 @@ func TestInvocationFailsWithConstantText(t *testing.T) {
 	}
 	logged := buf.String()
 	if strings.Contains(logged, account) || strings.Contains(logged, "Provisioned") || !strings.Contains(logged, `"msg":"notify failed"`) ||
-		!strings.Contains(logged, `"method":"sendMessage","status":400,"error_code":400`) {
+		!strings.Contains(logged, `"method":"sendMessage","tg_status":400,"error_code":400`) {
 		t.Fatalf("logged %s", logged)
 	}
 	if _, err := h.Invoke(context.Background(), []byte(`{"seal":{"chat":0}}`)); err != awsconf.ErrFailed {

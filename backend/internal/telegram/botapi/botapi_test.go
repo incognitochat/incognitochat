@@ -91,7 +91,7 @@ func TestErrorLogged(t *testing.T) {
 		lines = append(lines, m)
 	}
 	want := []map[string]any{
-		{"fn": "notify", "msg": "notify failed", "error_kind": "*botapi.Error", "method": "sendMessage", "status": float64(403), "error_code": float64(403)},
+		{"fn": "notify", "msg": "notify failed", "error_kind": "*botapi.Error", "method": "sendMessage", "tg_status": float64(403), "error_code": float64(403)},
 		{"fn": "notify", "msg": "notify failed", "error_kind": "*botapi.Error", "method": "getMe"},
 	}
 	for i, line := range lines {

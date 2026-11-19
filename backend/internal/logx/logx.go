@@ -17,21 +17,22 @@ import (
 // Allowed attribute keys. Values must never identify a person, device,
 // account, link, mailbox or request.
 const (
-	KeyFunction  = "fn"          // which Lambda function
-	KeyRoute     = "route"       // route pattern, e.g. "POST /session"
-	KeyStatus    = "status"      // HTTP status of an answer (the api's, or Telegram's)
-	KeyErrorKind = "error_kind"  // Go type of an error, never its message
-	KeyDuration  = "duration_ms" // how long something took
-	KeyCount     = "count"       // how many items were involved
-	KeyMethod    = "method"      // Bot API method called, e.g. "sendMessage"
-	KeyErrorCode = "error_code"  // Telegram's error_code for a failed Bot API call
-	KeyPanicAt   = "panic_at"    // where a recovered panic happened: function and line
+	KeyFunction       = "fn"          // which Lambda function
+	KeyRoute          = "route"       // route pattern, e.g. "POST /session"
+	KeyStatus         = "status"      // HTTP status returned
+	KeyErrorKind      = "error_kind"  // Go type of an error, never its message
+	KeyDuration       = "duration_ms" // how long something took
+	KeyCount          = "count"       // how many items were involved
+	KeyMethod         = "method"      // Bot API method called, e.g. "sendMessage"
+	KeyTelegramStatus = "tg_status"   // HTTP status of Telegram's answer to a failed Bot API call
+	KeyErrorCode      = "error_code"  // Telegram's error_code for a failed Bot API call
+	KeyPanicAt        = "panic_at"    // where a recovered panic happened: function and line
 )
 
 var allowed = map[string]bool{
 	KeyFunction: true, KeyRoute: true, KeyStatus: true,
 	KeyErrorKind: true, KeyDuration: true, KeyCount: true,
-	KeyMethod: true, KeyErrorCode: true, KeyPanicAt: true,
+	KeyMethod: true, KeyTelegramStatus: true, KeyErrorCode: true, KeyPanicAt: true,
 }
 
 // Allowed groups, of counts only (internal/tally writes them). Each member

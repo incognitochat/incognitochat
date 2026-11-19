@@ -48,7 +48,7 @@ func (e *Error) Error() string {
 func (e *Error) LogAttrs() []slog.Attr {
 	attrs := []slog.Attr{slog.String(logx.KeyMethod, e.Method)}
 	if e.Status != 0 {
-		attrs = append(attrs, slog.Int(logx.KeyStatus, e.Status))
+		attrs = append(attrs, slog.Int(logx.KeyTelegramStatus, e.Status))
 	}
 	if e.Code != 0 {
 		attrs = append(attrs, slog.Int(logx.KeyErrorCode, e.Code))
