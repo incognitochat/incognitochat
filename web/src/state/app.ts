@@ -39,7 +39,7 @@ import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
-import { createMessaging, isPaused, NoMailboxes, NoTokens, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
+import { createMessaging, isPaused, MailboxLimit, NoMailboxes, NoTokens, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
 import {
   attachmentsOf,
   clearMedia,
@@ -188,12 +188,24 @@ export interface StorageUsage {
 export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
 
 /**
- * Why a message couldn't be sent. media-paused: the operator has paused
- * attachments for now (also said when a tapped download is refused for it).
- * outdated: the server no longer holds the issuer key this build names (it
- * was replaced), so the app must be opened again.
+ * Why a message couldn't be sent. mailbox-limit: the account has as many
+ * chats as it may (4,000), so no new one can be started or answered.
+ * media-paused: the operator has paused attachments for now (also said
+ * when a tapped download is refused for it). outdated: the server no longer
+ * holds the issuer key this build names (it was replaced), so the app must
+ * be opened again.
  */
-export type SendError = 'no-tokens' | 'no-mailboxes' | 'rate-limited' | 'media-paused' | 'outdated' | 'network' | 'too-big' | 'unreadable' | 'generic';
+export type SendError =
+  | 'no-tokens'
+  | 'no-mailboxes'
+  | 'mailbox-limit'
+  | 'rate-limited'
+  | 'media-paused'
+  | 'outdated'
+  | 'network'
+  | 'too-big'
+  | 'unreadable'
+  | 'generic';
 
 /** A conversation in the list. */
 export interface ConversationView {
@@ -987,7 +999,7 @@ export function createApp(deps: Deps) {
       await messaging.block(current.id);
     } catch (err) {
       if (handleGone(err)) return;
-      screen.value = { ...current, busy: false, error: sendError(err) };
+      showErrorIn(current.id, sendError(err));
       return;
     }
     deps.broadcast({ type: 'data-changed' });
@@ -1421,20 +1433,31 @@ export function createApp(deps: Deps) {
       await messaging.unblock(id);
     } catch (err) {
       if (handleGone(err)) return;
-      if (current.kind === 'conversation') {
-        screen.value = { ...current, busy: false, error: sendError(err) };
-        return;
-      }
-      return showBlocked(err instanceof NetworkError ? 'network' : 'generic');
+      if (current.kind === 'conversation') return showErrorIn(current.id, sendError(err));
+      // Only if the user is still on the Blocked list.
+      if (currentScreen().kind === 'blocked') return showBlocked(err instanceof NetworkError ? 'network' : 'generic');
+      return;
     }
     deps.broadcast({ type: 'data-changed' });
     if (current.kind === 'conversation') return openConversation(id, tapped);
     return showBlocked('unblocked');
   }
 
+  /**
+   * Shows why an action in a conversation failed, once it has: only if that
+   * conversation is still open (an error that comes late mustn't take the
+   * user back from where they've gone since), and as it is now (refreshed
+   * meanwhile, say), no longer busy.
+   */
+  function showErrorIn(id: string, error: SendError): void {
+    const now = currentScreen();
+    if (now.kind === 'conversation' && now.id === id) screen.value = { ...now, busy: false, error };
+  }
+
   function sendError(err: unknown): SendError {
     if (err instanceof NoTokens) return 'no-tokens';
     if (err instanceof NoMailboxes) return 'no-mailboxes';
+    if (err instanceof MailboxLimit) return 'mailbox-limit';
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
     if (isPaused(err)) return 'media-paused';
     // The server no longer holds the issuer key this build names (it was
@@ -1490,13 +1513,14 @@ export function createApp(deps: Deps) {
   /** Writes the first message to the link just checked, starting a conversation. */
   async function writeToLink(text: string): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'link' || current.status !== 'verified' || current.busy || !messaging || !openedLink || text.trim() === '') return;
+    const link = openedLink;
+    if (current.kind !== 'link' || current.status !== 'verified' || current.busy || !messaging || !link || text.trim() === '') return;
     screen.value = { ...current, busy: true, error: null };
     let opened: string | null = null;
     const tapped = hides;
     try {
       // The conversation opens as soon as the message is stored, shown as sending.
-      await messaging.startConversation(openedLink.ref, openedLink.bundle, text.trim(), async (id) => {
+      await messaging.startConversation(link.ref, link.bundle, text.trim(), async (id) => {
         opened = id;
         await openConversation(id, tapped);
       });
@@ -1506,10 +1530,12 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       const error = sendError(err);
       const now = currentScreen();
+      // Shown where the user is still: in the conversation it opened, or on
+      // this link's screen. Nowhere if they've gone elsewhere since.
       if (opened && now.kind === 'conversation' && now.id === opened) {
         await showChat(opened, { error });
-      } else {
-        screen.value = { ...current, busy: false, error };
+      } else if (now.kind === 'link' && now.status === 'verified' && openedLink === link) {
+        screen.value = { ...now, busy: false, error };
       }
     }
   }

@@ -31,10 +31,19 @@ export class WrongSize extends Error {
  */
 export const DOWNLOAD_IDLE_MS = 30_000;
 
+/**
+ * The same for an upload: given up when no more of it goes, or no answer
+ * comes after the last of it, for this long. Longer than a download's
+ * wait, since bytes count as sent when they leave the app, and on a slow
+ * uplink the last of them may still take a while to arrive.
+ */
+export const UPLOAD_IDLE_MS = 60_000;
+
 export interface Transfer {
   /**
    * PUTs the bytes to a presigned upload URL. Rejects with a TransferError;
-   * 412 means the upload is already there (an earlier try wrote it).
+   * 412 means the upload is already there (an earlier try wrote it). Gives
+   * up (TransferError, status 0) when no more bytes go for UPLOAD_IDLE_MS.
    */
   put(url: string, body: Uint8Array<ArrayBuffer>, onProgress?: (fraction: number) => void): Promise<void>;
   /**
@@ -66,21 +75,45 @@ export function createTransfer(
   fetchImpl: Fetch = (input, init) => fetch(input, init),
   newXhr: () => XMLHttpRequest = () => new XMLHttpRequest(),
   idleMs = DOWNLOAD_IDLE_MS,
+  uploadIdleMs = UPLOAD_IDLE_MS,
 ): Transfer {
   return {
     put: (url, body, onProgress) =>
       new Promise((resolve, reject) => {
         const xhr = newXhr();
+        // An XHR has no idle timeout (xhr.timeout limits the whole upload,
+        // and a large one on a slow link may need minutes): it's stopped
+        // when no progress comes for UPLOAD_IDLE_MS, so a dead connection
+        // fails, and is tried again, instead of hanging.
+        let watchdog: ReturnType<typeof setTimeout> | undefined;
+        const watch = () => {
+          clearTimeout(watchdog);
+          watchdog = setTimeout(() => {
+            reject(new TransferError(0, 'media PUT stalled'));
+            xhr.abort();
+          }, uploadIdleMs);
+        };
         xhr.open('PUT', url);
         // Both are part of the URL's signature. If-None-Match: * has S3
         // write the upload only if it isn't there yet.
         xhr.setRequestHeader('Content-Type', 'application/octet-stream');
         xhr.setRequestHeader('If-None-Match', '*');
-        xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
-        xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new TransferError(xhr.status, `media PUT failed (${xhr.status})`)));
-        xhr.onerror = () => reject(new TransferError(0, 'media PUT failed'));
+        xhr.upload.onprogress = (e) => {
+          watch();
+          if (e.lengthComputable) onProgress?.(e.loaded / e.total);
+        };
+        xhr.onload = () => {
+          clearTimeout(watchdog);
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new TransferError(xhr.status, `media PUT failed (${xhr.status})`));
+        };
+        xhr.onerror = () => {
+          clearTimeout(watchdog);
+          reject(new TransferError(0, 'media PUT failed'));
+        };
         xhr.ontimeout = xhr.onerror;
         xhr.onabort = xhr.onerror;
+        watch();
         xhr.send(body);
       }),
 

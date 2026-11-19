@@ -481,6 +481,28 @@ async function moveEdits(tx: IDBPTransaction<unknown, string[], 'versionchange'>
   if (ledger.length > 0) await meta.put(ledger, EDITS_LEDGER);
 }
 
+/** Where the time of the last reload after a lost connection is kept (per tab: sessionStorage). */
+const RELOADED_AT = 'incognitochat:db-reloaded-at';
+/** At most one such reload in this long, so a database that keeps failing doesn't reload the page over and over. */
+export const RELOAD_GAP_MS = 60_000;
+
+/**
+ * Reloads the page after the browser dropped the database connection,
+ * unless it did so less than RELOAD_GAP_MS ago (or can't tell: then the
+ * user reopens the app).
+ */
+function reloadAfterLoss(): void {
+  try {
+    const last = Number(sessionStorage.getItem(RELOADED_AT) ?? -Infinity);
+    const now = Date.now();
+    if (now >= last && now - last < RELOAD_GAP_MS) return;
+    sessionStorage.setItem(RELOADED_AT, String(now));
+  } catch {
+    return;
+  }
+  location.reload();
+}
+
 /**
  * Opens (and if needed creates or upgrades) the app's database. If that
  * fails, it rejects with a StorageError and the database is as it was.
@@ -520,6 +542,12 @@ export async function openDatabase(name = DB_NAME, { onBlocked }: { onBlocked?: 
       blocking(_current, _blocked, event) {
         (event.target as IDBDatabase).close();
         location.reload();
+      },
+      // The browser closed the connection itself (WebKit can, after the app
+      // sat in the background; or the site's data was cleared): every read
+      // and write would fail from now on. Reloading opens it again.
+      terminated() {
+        reloadAfterLoss();
       },
     });
   } catch (err) {

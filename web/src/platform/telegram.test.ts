@@ -8,14 +8,16 @@ function fakeWindow(kind: 'proxy' | 'iframe' | 'none') {
   const parentPosts: { message: unknown; origin: string }[] = [];
   const listeners: Listener[] = [];
   const parent = { postMessage: (message: unknown, origin: string) => parentPosts.push({ message, origin }) };
+  const reloads = { count: 0 };
   const win: Record<string, unknown> & { addEventListener(t: 'message', l: Listener): void } = {
     addEventListener: (_t, l) => listeners.push(l),
+    location: { reload: () => reloads.count++ },
   };
   win.parent = kind === 'iframe' ? parent : win;
   if (kind === 'proxy') win.TelegramWebviewProxy = { postEvent: (type: string, data?: string) => posted.push({ type, data }) };
   const dispatch = (data: unknown, origin = TELEGRAM_WEB_ORIGIN, source: unknown = parent) =>
     listeners.forEach((l) => l({ data, origin, source } as MessageEvent));
-  return { win, posted, parentPosts, dispatch };
+  return { win, posted, parentPosts, dispatch, reloads };
 }
 
 describe('connectTelegram', () => {
@@ -72,6 +74,20 @@ describe('connectTelegram', () => {
     dispatch(JSON.stringify({ eventType: 'theme_changed', eventData: { theme_params: { bg_color: '#bad111' } } }), TELEGRAM_WEB_ORIGIN, {});
     dispatch('not json');
     expect(themes).toEqual([{ bg_color: '#000000' }]);
+  });
+
+  it("in Telegram Web, reloads on its \"Reload page\", saying so first", () => {
+    const { win, parentPosts, dispatch, reloads } = fakeWindow('iframe');
+    connectTelegram(true, win as never);
+    // From anywhere else, nothing.
+    dispatch(JSON.stringify({ eventType: 'reload_iframe' }), 'https://evil.example');
+    expect(reloads.count).toBe(0);
+    dispatch(JSON.stringify({ eventType: 'reload_iframe' }));
+    expect(parentPosts.map((p) => p.message)).toEqual([
+      '{"eventType":"iframe_ready","eventData":{"reload_supported":true}}',
+      '{"eventType":"iframe_will_reload"}',
+    ]);
+    expect(reloads.count).toBe(1);
   });
 });
 

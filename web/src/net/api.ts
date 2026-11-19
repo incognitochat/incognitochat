@@ -124,7 +124,10 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
     async request(method, path, init, check) {
       let response: Response;
       try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json', ...init.headers };
+        // Content-Type only with a body: without one (and without a login),
+        // a GET is a simple request, which the browser sends with no CORS
+        // preflight first (GET /links/{id}, GET /media/{id}).
+        const headers: Record<string, string> = { ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...init.headers };
         // CloudFront, in front of the API, signs each request to the backend,
         // and the signature must cover the body: its hash travels with it.
         if (init.body !== undefined) headers['X-Amz-Content-Sha256'] = await sha256Hex(init.body);

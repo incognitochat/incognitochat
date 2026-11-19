@@ -29,10 +29,15 @@ describe('api', () => {
     expect((seen.init?.headers as Record<string, string>)['X-Amz-Content-Sha256']).toBe(
       '015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862',
     );
-    // A request without a body carries no hash.
-    await api.request('GET', '/account', {}, checkTokenResponse);
-    expect(Object.keys(seen.init?.headers as Record<string, string>)).not.toContain('X-Amz-Content-Sha256');
     expect(new Headers(seen.init!.headers).get('content-type')).toBe('application/json');
+    // A request without a body carries no hash, and no Content-Type: a GET
+    // without a login is then a simple request, with no CORS preflight.
+    await api.request('GET', '/links/x', {}, checkTokenResponse);
+    expect(seen.init).not.toHaveProperty('body');
+    expect(seen.init?.headers).toEqual({});
+    // A login's header still goes, alone.
+    await api.request('GET', '/account', { headers: { 'X-Session': 's' } }, checkTokenResponse);
+    expect(seen.init?.headers).toEqual({ 'X-Session': 's' });
   });
 
   it('turns error responses into ApiError with a known code', async () => {

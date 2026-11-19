@@ -400,6 +400,19 @@ describe('attachments and their messages', () => {
     expect(await putMedia(db, 'c', 'm1', file, { ifMessage: true })).toBe(false);
     expect(await db.getAllKeys('media')).toEqual([]);
   });
+
+  it("keeps only a view's own bytes, not the rest of its buffer (a decrypted file, its padding cut off)", async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await addMessage(db, { id: 'm1', conv: 'c', at: 1, out: false, status: 'received', file: 'remote' }, { text: '', media: photo });
+    const padded = new Uint8Array(64 * 1024).fill(9);
+    const file = padded.subarray(0, 3);
+    expect(await putMedia(db, 'c', 'm1', file, { ifMessage: true })).toBe(true);
+    // Sealed: its nonce, the 3 bytes and the tag.
+    const stored = (await db.get('media', ['c', 'm1']))!;
+    expect(stored.buffer.byteLength).toBe(12 + 3 + 16);
+    expect(await getMedia(db, 'c', 'm1')).toEqual(new Uint8Array([9, 9, 9]));
+  });
 });
 
 describe('the upkeep sweep', () => {

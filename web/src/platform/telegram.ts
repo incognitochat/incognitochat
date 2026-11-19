@@ -21,11 +21,15 @@ export interface IncomingEvents {
   fullscreen_changed: { is_fullscreen: boolean };
   visibility_changed: { is_visible: boolean };
   popup_closed: { button_id?: string };
+  /** Telegram Web's "Reload page": the app reloads itself (it said so in iframe_ready). */
+  reload_iframe: Record<string, never>;
 }
 
 /** Events we send. */
 export interface OutgoingEvents {
   iframe_ready: { reload_supported: boolean };
+  /** Answers reload_iframe, just before the app reloads. */
+  iframe_will_reload: undefined;
   web_app_ready: undefined;
   web_app_expand: undefined;
   web_app_close: undefined;
@@ -68,6 +72,7 @@ interface TelegramWindow {
   TelegramGameProxy?: { receiveEvent(type: string, data: unknown): void };
   TelegramGameProxy_receiveEvent?: (type: string, data: unknown) => void;
   addEventListener(type: 'message', listener: (e: MessageEvent) => void): void;
+  location: { reload(): void };
 }
 
 /**
@@ -139,7 +144,15 @@ export function connectTelegram(inTelegram: boolean, win: TelegramWindow = windo
     },
   };
 
-  if (inIframe) bridge.post('iframe_ready', { reload_supported: true });
+  if (inIframe) {
+    // Telegram Web hands its "Reload page" to an app that says it can
+    // reload itself, as this one does.
+    bridge.on('reload_iframe', () => {
+      bridge.post('iframe_will_reload');
+      win.location.reload();
+    });
+    bridge.post('iframe_ready', { reload_supported: true });
+  }
   return bridge;
 }
 
