@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 const (
@@ -22,6 +24,10 @@ const (
 	// RegistrationsPerDay limits new accounts and replacements per Telegram
 	// user per UTC day.
 	RegistrationsPerDay = 3
+	// RegisterAttemptsPerDay limits, per Telegram user and UTC day, the
+	// registrations that get as far as reading the directory: retries,
+	// refusals and replays of one launch (valid for minutes) included.
+	RegisterAttemptsPerDay = 20
 
 	maxInitData = 8 << 10
 	// A first device list may be issued this far from the server's clock.
@@ -86,7 +92,15 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 	}
 
 	list, err := devicelist.Verify(in.DeviceList, in.DeviceListSig, accountKey)
-	if err != nil || !isFirstList(list, in.Device, in.DeviceKey, now) {
+	if err != nil || !isFirstList(list, in.Device, in.DeviceKey) {
+		return httpapi.Error(http.StatusBadRequest, "invalid_device_list")
+	}
+	// Issued by the device's clock: one that is off learns the server's and
+	// signs again.
+	if list.Issued.Before(now.Add(-listIssuedBefore)) || list.Issued.After(now.Add(listIssuedAfter)) {
+		return clockSkew(now)
+	}
+	if !list.Expires.After(now) {
 		return httpapi.Error(http.StatusBadRequest, "invalid_device_list")
 	}
 
@@ -102,7 +116,15 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		DeviceListSeq: list.Seq,
 	}
 
-	existing, err := s.Directory.ByTelegram(ctx, telegramHash)
+	// Counted before anything is read, whatever comes of it. Then only the
+	// items it needs are read: the Telegram user's account, its account
+	// item and this device's, never the whole partition (thousands of
+	// mailboxes). A replacement, once counted, reads only the old account's
+	// devices and links, and its first cleanup step only what it deletes.
+	if resp, ok := s.allowPerDay(ctx, route, "regtry", telegramHash, RegisterAttemptsPerDay); !ok {
+		return resp
+	}
+	existing, err := s.Directory.ByTelegram(ctx, telegramHash, in.Device)
 	switch {
 	case errors.Is(err, directory.ErrNotFound):
 		if resp, ok := s.allowRegistration(ctx, route, telegramHash); !ok {
@@ -115,19 +137,33 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		}
 	case err != nil:
 		return s.internal(route, err)
-	case bytes.Equal(existing.Key, in.AccountKey) && bytes.Equal(existing.Devices[in.Device], in.DeviceKey):
+	case bytes.Equal(existing.Key, in.AccountKey) && bytes.Equal(existing.DeviceKey, in.DeviceKey):
 		// A retry of a registration that already succeeded, e.g. after its
 		// response was lost.
 		return s.issue(route, existing.ID, in.Device, now)
-	case !in.Replace:
+	case !in.Replace && !existing.Deleting:
 		return httpapi.Error(http.StatusConflict, "account_exists")
 	default:
+		// Replacing asks the user first (replace), unless the account is
+		// being deleted: only its own signed DELETE /account marks it, and
+		// nothing unmarks it, so it isn't in use, and the user may have
+		// deleted it from their device (the server couldn't finish).
+		// POST /accounts/lookup doesn't count it either.
 		if resp, ok := s.allowRegistration(ctx, route, telegramHash); !ok {
 			return resp
 		}
 		err = s.Directory.Replace(ctx, existing, account, now)
 		if errors.Is(err, directory.ErrConflict) {
 			return httpapi.Error(http.StatusConflict, "conflict")
+		}
+		if err == nil {
+			// The old account ended with the swap, in a few writes. What is
+			// left of it goes in steps: the first here, the rest as the app
+			// asks (POST /account/cleanup). One that fails only leaves more
+			// for those, so the registration stands.
+			if _, err := s.leasedCleanUp(ctx, route, account.ID, append([]string{existing.ID}, existing.Leftovers...)); err != nil {
+				s.Log.Warn("cleanup step failed", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
+			}
 		}
 	}
 	if err != nil {
@@ -137,7 +173,11 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 }
 
 func (s *Server) allowRegistration(ctx context.Context, route, telegramHash string) (httpapi.Response, bool) {
-	ok, err := s.Limits.Allow(ctx, "reg#"+telegramHash, RegistrationsPerDay, 24*time.Hour)
+	return s.allowPerDay(ctx, route, "reg", telegramHash, RegistrationsPerDay)
+}
+
+func (s *Server) allowPerDay(ctx context.Context, route, kind, who string, limit int) (httpapi.Response, bool) {
+	ok, err := s.allow(ctx, kind, limit, 24*time.Hour, who)
 	if err != nil {
 		return s.internal(route, err), false
 	}
@@ -147,17 +187,14 @@ func (s *Server) allowRegistration(ctx context.Context, route, telegramHash stri
 	return httpapi.Response{}, true
 }
 
-// isFirstList reports whether list is a new account's first device list: the
-// first in its chain, current, and naming only the registering device.
-func isFirstList(list devicelist.List, deviceID string, deviceKey []byte, now time.Time) bool {
+// isFirstList reports whether list is shaped as a new account's first device
+// list: the first in its chain, naming only the registering device. Whether
+// it is current is checked apart, since a wrong clock on the device is
+// answered differently.
+func isFirstList(list devicelist.List, deviceID string, deviceKey []byte) bool {
 	if list.Seq != 1 || list.Prev != [32]byte{} || len(list.Entries) != 1 {
 		return false
 	}
 	entry := list.Entries[0]
-	if entry.DeviceID != deviceID || !bytes.Equal(entry.Key, deviceKey) {
-		return false
-	}
-	return !list.Issued.Before(now.Add(-listIssuedBefore)) &&
-		!list.Issued.After(now.Add(listIssuedAfter)) &&
-		list.Expires.After(now)
+	return entry.DeviceID == deviceID && bytes.Equal(entry.Key, deviceKey)
 }

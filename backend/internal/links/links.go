@@ -9,8 +9,15 @@
 //
 // An encryption key's signature covers devicesig.Message(LabelLinkKey,
 // suite, key, from, until), with times as 8-byte big-endian Unix seconds on a
-// whole hour. Signing keys are never reused between links, so the link ID
-// needn't be signed.
+// whole hour. It doesn't name the link: anyone can copy a bundle's signed
+// keys. So creating, replacing or rotating a link also takes an owner proof
+// (CheckOwner), a signature by the signing key over
+// devicesig.Message(LabelLinkOwner, suite, link ID, account ID), which only
+// whoever holds the private key can make for their own account and link ID.
+// With it the server gives each signing key to one account for good
+// (directory.ErrKeyTaken), so a sender's tag, made from the key's
+// fingerprint, doesn't match across accounts' links (for links made before
+// the server checked this, from their next rotation or replacement).
 package links
 
 import (
@@ -61,6 +68,21 @@ func KeyParts(k Key) [][]byte {
 		binary.BigEndian.AppendUint64(nil, uint64(k.From.Unix())),
 		binary.BigEndian.AppendUint64(nil, uint64(k.Until.Unix())),
 	}
+}
+
+// OwnerParts are the signed parts of an owner proof: the suite, then the
+// link ID and the account ID as their UTF-8 (base64url) strings.
+func OwnerParts(linkID, accountID string) [][]byte {
+	return [][]byte{{devicesig.Suite}, []byte(linkID), []byte(accountID)}
+}
+
+// CheckOwner verifies an owner proof: that whoever asks for link linkID for
+// account accountID holds the link's private signing key.
+func CheckOwner(signingKey *ecdsa.PublicKey, proof []byte, linkID, accountID string) error {
+	if devicesig.Verify(signingKey, proof, devicesig.LabelLinkOwner, OwnerParts(linkID, accountID)...) != nil {
+		return ErrInvalid
+	}
+	return nil
 }
 
 // Check verifies a bundle's encryption keys against its signing key: one to

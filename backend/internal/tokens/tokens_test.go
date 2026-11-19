@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -19,7 +20,9 @@ import (
 
 var now = time.Unix(1_800_000_000, 0)
 
-// The RFC 9474 vector the web client checks too (web/src/crypto/blindrsa-vectors.json).
+// The RFC 9474 vector the web client checks too (web/src/crypto/blindrsa-vectors.json):
+// the signer gives the vector's blind signature, which the client's
+// unblinding turns into the vector's signature (web/src/crypto/blindrsa.test.ts).
 func TestRFC9474Vector(t *testing.T) {
 	raw, err := os.ReadFile("testdata/rfc9474-pss-deterministic.json")
 	if err != nil {
@@ -52,12 +55,26 @@ func TestRFC9474Vector(t *testing.T) {
 		Primes:    []*big.Int{num(v["p"]), num(v["q"])},
 	}
 	key.Precompute()
-	sig, err := blindrsa.NewSigner(key).BlindSign(hx(v["blinded_msg"]))
+	s, err := newSigner(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := s.sign(hx(v["blinded_msg"]))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if hex.EncodeToString(sig) != v["blind_sig"] {
 		t.Fatalf("blind signature = %x\nwant %s", sig, v["blind_sig"])
+	}
+	circlSig, err := blindrsa.NewSigner(key).BlindSign(hx(v["blinded_msg"]))
+	if err != nil || !bytes.Equal(circlSig, sig) {
+		t.Fatalf("circl's blind signature = %x, %v", circlSig, err)
+	}
+	// What the client does with it: multiply by r⁻¹ (the vector's inv).
+	unblinded := new(big.Int).Mul(new(big.Int).SetBytes(sig), num(v["inv"]))
+	unblinded.Mod(unblinded, key.N)
+	if got := hex.EncodeToString(unblinded.FillBytes(make([]byte, key.Size()))); got != v["sig"] {
+		t.Fatalf("unblinded = %s\nwant %s", got, v["sig"])
 	}
 	verifier, _ := blindrsa.NewVerifier(blindrsa.SHA384PSSDeterministic, &key.PublicKey)
 	if err := verifier.Verify(hx(v["input_msg"]), hx(v["sig"])); err != nil {
@@ -82,6 +99,13 @@ func newIssuer(t *testing.T) (*Issuer, *rsa.PublicKey) {
 // mint does what a client does: blind a token input, have it signed, unblind.
 func mint(t *testing.T, issuer *Issuer, pub *rsa.PublicKey, epoch uint64, keyID [32]byte) []byte {
 	t.Helper()
+	return mintWith(t, issuer.Sign, pub, epoch, keyID)
+}
+
+// mintWith mints a token signed by sign, for the key pub (finalizing fails
+// for a signature by another key).
+func mintWith(t *testing.T, sign func([]byte) ([]byte, error), pub *rsa.PublicKey, epoch uint64, keyID [32]byte) []byte {
+	t.Helper()
 	input := binary.BigEndian.AppendUint16(nil, Type)
 	nonce := make([]byte, 32)
 	_, _ = rand.Read(nonce)
@@ -95,7 +119,7 @@ func mint(t *testing.T, issuer *Issuer, pub *rsa.PublicKey, epoch uint64, keyID 
 	if err != nil {
 		t.Fatal(err)
 	}
-	blindSig, err := issuer.Sign(blinded)
+	blindSig, err := sign(blinded)
 	if err != nil {
 		t.Fatal(err)
 	}

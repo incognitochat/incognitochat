@@ -4,17 +4,32 @@
 //
 //	N#<nonce>  N              a used login nonce
 //	S#<nonce>  S              a spent send token's nonce
-//	Q#<key>    Q              a quiet period (e.g. after a notice)
+//	Q#<key>    Q              a quiet period (e.g. after a notice), with a random token (t)
 //	R#<key>    <window start> a rate counter (c)
-//	C#, K#                    open sockets (sockets.go)
+//	C#<name>   <connection>   a socket (sockets.go)
+//	U#<id>     U              an upload (uploads.go)
 //
-// Only socket records hold an account ID, while the app is open.
+// No key holds a mailbox, link, account or device ID, or the hash of a
+// Telegram ID the directory keeps: rows about one are named by a keyed
+// hash instead (internal/keyed), under a key only the functions that use
+// them hold, so a copy of the table can't be matched with the directory.
+// Rate counters (api's, named by api.Server.rateName under the Telegram-ID
+// pepper) change name with every window, and expire when it ends; socket
+// records (ws and api, SocketKey) and notice quiet periods (notify,
+// notices.QuietKey) keep one name per account, which says nothing without
+// the key. None holds an exact time. A socket's record lasts from a connect until a push finds the socket
+// closed, a later connect needs the place, the account is deleted, or a
+// connect or push finds it expired (40 minutes after the minute it opened,
+// rounded up to the minute; TTL itself can take days, and an expired
+// record is never used).
 package ephemeral
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -45,8 +60,11 @@ func (n *Nonces) Use(ctx context.Context, nonce string, expires time.Time) (bool
 	return once(ctx, n.DB, n.Table, "N#"+nonce, "N", expires, n.Now())
 }
 
-// Spent records spent send tokens. Tokens say nothing about who spent them,
-// and neither does this.
+// Spent records spent send and media tokens. Tokens say nothing about who
+// spent them, and neither does this:
+//
+//	S#<nonce>  S  until it expires (e); given back (u), and whether it
+//	              has been given back before (r)
 //
 // It also remembers, in memory, the tokens it has seen spent, so replaying
 // one token over and over costs the table nothing after the first time.
@@ -59,42 +77,111 @@ type Spent struct {
 	seen map[string]int64 // spent nonce -> when its record expires (Unix seconds)
 }
 
+// TokenNonce is a token to spend: its nonce, and when the token stops being
+// accepted anyway.
+type TokenNonce struct {
+	Nonce       []byte
+	ForgetAfter time.Time
+}
+
 // maxSeen bounds the in-memory record of spent tokens; it starts over when full.
 const maxSeen = 8192
 
-// Spend records a token's nonce until forgetAfter (when the token stops
-// being accepted anyway). It reports false if the token was spent already.
-func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
-	key := base64.RawURLEncoding.EncodeToString(nonce)
-	now := sp.Now()
+// known reports whether this instance has seen the token spent.
+func (sp *Spent) known(key string, now time.Time) bool {
 	sp.mu.Lock()
-	until, known := sp.seen[key]
-	sp.mu.Unlock()
-	if known && now.Unix() < until {
-		return false, nil
-	}
-	fresh, err := once(ctx, sp.DB, sp.Table, "S#"+key, "S", forgetAfter, now)
-	if err != nil {
-		return false, err
-	}
-	// Spent either way: just now, or before.
+	defer sp.mu.Unlock()
+	until, ok := sp.seen[key]
+	return ok && now.Unix() < until
+}
+
+// remember records, in memory, that a token is spent.
+func (sp *Spent) remember(key string, forgetAfter time.Time) {
 	sp.mu.Lock()
+	defer sp.mu.Unlock()
 	if sp.seen == nil || len(sp.seen) >= maxSeen {
 		sp.seen = map[string]int64{}
 	}
 	sp.seen[key] = expiry(forgetAfter)
-	sp.mu.Unlock()
+}
+
+// Spend records a token's nonce until forgetAfter (when the token stops
+// being accepted anyway). It reports false if the token was spent already,
+// and not given back since.
+func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
+	key := base64.RawURLEncoding.EncodeToString(nonce)
+	now := sp.Now()
+	if sp.known(key, now) {
+		return false, nil
+	}
+	// An update, not a put, so a token given back keeps r when spent again.
+	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &sp.Table,
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		UpdateExpression:          aws.String("SET e = :e REMOVE u"),
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())},
+	})
+	fresh := err == nil
+	if conditionFailed(err) {
+		err = nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// Spent either way: just now, or before.
+	sp.remember(key, forgetAfter)
 	return fresh, nil
 }
 
+// SpendAll spends several tokens, one at a time in the order given, as
+// Spend does, and stops at the first that was spent already (and not given
+// back since): it reports false then, and the tokens before that one stay
+// spent. So a list with a spent token in it can't keep its others for
+// another try, and a refusal costs the table one write unit, plus one for
+// each token it burned. A list with a token this instance has seen spent,
+// or with one token twice, is refused before anything is written.
+//
+// Not a transaction: DynamoDB charges a cancelled one two write units a
+// token, and spends nothing, so a list with one spent token in it would
+// cost the table that much on every try.
+func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error) {
+	now := sp.Now()
+	keys := make([]string, len(tokens))
+	for i, t := range tokens {
+		keys[i] = base64.RawURLEncoding.EncodeToString(t.Nonce)
+		if sp.known(keys[i], now) || slices.Contains(keys[:i], keys[i]) {
+			return false, nil
+		}
+	}
+	if len(tokens) == 0 {
+		return false, nil
+	}
+	for _, t := range tokens {
+		if fresh, err := sp.Spend(ctx, t.Nonce, t.ForgetAfter); err != nil || !fresh {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 // Unspend gives back a token that Spend just took, when what it paid for
-// didn't happen.
+// didn't happen. A token is given back once at most: spent again and
+// refused again, it stays spent. Otherwise one token could be replayed
+// against a refusal without end, each time at the table's cost.
 func (sp *Spent) Unspend(ctx context.Context, nonce []byte) error {
 	key := base64.RawURLEncoding.EncodeToString(nonce)
-	if _, err := sp.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: &sp.Table,
-		Key:       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
-	}); err != nil {
+	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &sp.Table,
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		UpdateExpression:          aws.String("SET u = :one, r = :one"),
+		ConditionExpression:       aws.String("attribute_exists(pk) AND attribute_not_exists(r)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":one": num(1)},
+	})
+	if conditionFailed(err) {
+		return nil // given back before: it stays spent
+	}
+	if err != nil {
 		return err
 	}
 	sp.mu.Lock()
@@ -110,10 +197,61 @@ type Quiet struct {
 	Now   func() time.Time
 }
 
-// Start begins a quiet period for key until until. It reports false if one
-// is already running.
-func (q *Quiet) Start(ctx context.Context, key string, until time.Time) (bool, error) {
-	return once(ctx, q.DB, q.Table, "Q#"+key, "Q", until, q.Now())
+// Start begins a quiet period for key until until, unless one is already
+// running, atomically: of two at once, one starts. It returns the period's
+// token, for Move, or "" if one was running. The token is random: it says
+// nothing but which start this is.
+func (q *Quiet) Start(ctx context.Context, key string, until time.Time) (string, error) {
+	token := rand.Text()
+	_, err := q.DB.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &q.Table,
+		Item: map[string]types.AttributeValue{
+			"pk": s("Q#" + key),
+			"sk": s("Q"),
+			"e":  num(expiry(until)),
+			"t":  s(token),
+		},
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":now": num(q.Now().Unix())},
+	})
+	if conditionFailed(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// Move moves the end of the quiet period Start began with token, to until.
+// An until that has passed ends it: it is stored as the minute that has
+// begun, since no row holds an exact time. Any other period (none, or one
+// started since, even within the same minute) is left alone, so a Move
+// tried again late can't end a newer period.
+//
+// So whoever starts a short period while it acts can keep it for longer
+// once the action worked, or end it if it didn't, without moving a period
+// someone else started.
+func (q *Quiet) Move(ctx context.Context, key, token string, until time.Time) error {
+	e := expiry(until)
+	if now := q.Now(); !until.After(now) {
+		e = now.Truncate(time.Minute).Unix()
+	}
+	_, err := q.DB.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: &q.Table,
+		Item: map[string]types.AttributeValue{
+			"pk": s("Q#" + key),
+			"sk": s("Q"),
+			"e":  num(e),
+			"t":  s(token),
+		},
+		ConditionExpression:       aws.String("t = :t"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":t": s(token)},
+	})
+	if conditionFailed(err) {
+		return nil
+	}
+	return err
 }
 
 // once writes an item unless a live one exists, and reports whether it did.
@@ -134,52 +272,329 @@ func once(ctx context.Context, db DB, table, pk, sk string, expires, now time.Ti
 	return err == nil, err
 }
 
-// Limiter counts uses of a key in fixed windows.
+// Limiter counts uses of a key in fixed windows. Windows are aligned to
+// multiples of their length since the Unix epoch (so a day is a UTC day).
+//
+// It also remembers, in memory, the count the table last returned for each
+// window, so a key known to be used up is refused without writing to the
+// table. A refused conditional write is charged like any other, so a
+// client hammering a limit it has reached would otherwise cost the table as
+// much as one within it. Only counts the table returned ever refuse: a call
+// that fails counts nothing here, so an outage can't use up a limit.
+//
+// The At methods take the time whose window counts, so a request that
+// names its counters by their window (as the inbox's do) counts in that
+// window from start to end, even when it ends in the next.
+//
+// Each call to the table has Timeout (a second if zero) and is tried at
+// most twice, so a limit can't hold up a request for long when the table
+// is struggling.
 type Limiter struct {
-	DB    DB
-	Table string
-	Now   func() time.Time
+	DB      DB
+	Table   string
+	Now     func() time.Time
+	Timeout time.Duration
+
+	mu      sync.Mutex
+	known   map[string]counted // key and window start -> the count the table last returned
+	tallies map[string]tally   // key and window start -> uses not yet written (Tally)
+	local   map[string]int     // key and window start -> uses counted here only (LocalAt)
+}
+
+type counted struct {
+	uses    int
+	until   int64 // when its window ends, Unix seconds
+	learned int64 // when the table told it, Unix seconds
+}
+
+type tally struct {
+	pending int
+	wrote   bool // whether this instance has written any yet
+}
+
+const (
+	// maxKnown bounds each in-memory map: ended windows go first, and it
+	// starts over when still full.
+	maxKnown = 16384
+	// checkFresh is how long CheckAt trusts a count below the limit, for
+	// windows longer than a minute: other instances count too, so it asks
+	// again at least this often.
+	checkFresh = 60 // seconds
+	// tallyBatch is how many uses a Tally gathers before writing them.
+	tallyBatch = 50
+)
+
+// fewerRetries tries a call to the table at most twice.
+func fewerRetries(o *dynamodb.Options) { o.RetryMaxAttempts = 2 }
+
+func (l *Limiter) deadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if l.Timeout > 0 {
+		return context.WithTimeout(ctx, l.Timeout)
+	}
+	return context.WithTimeout(ctx, time.Second)
 }
 
 // Allow counts one use of key in the current window and reports whether it
-// is within limit. Windows are aligned to multiples of window since the Unix
-// epoch (so a day is a UTC day).
+// is within limit.
 func (l *Limiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
 }
 
 // AllowN counts n uses at once, allowing them only if all fit in the limit.
 func (l *Limiter) AllowN(ctx context.Context, key string, n, limit int, window time.Duration) (bool, error) {
+	return l.AllowNAt(ctx, key, n, limit, window, l.Now())
+}
+
+// AllowNAt is AllowN in the window that holds at.
+func (l *Limiter) AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error) {
 	if n < 1 || n > limit {
 		return false, nil
 	}
-	now := l.Now()
-	start := now.Truncate(window)
-	// Kept an hour past the window; rounded up to the hour.
-	expires := start.Add(window + 2*time.Hour - time.Nanosecond).Truncate(time.Hour)
-	_, err := l.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	start := at.Truncate(window)
+	if l.counted(key, start)+n > limit {
+		return false, nil
+	}
+	out, err := l.add(ctx, key, n, start, window, limit-n)
+	if conditionFailed(err) {
+		// More than limit-n were counted already.
+		l.learn(key, start, window, max(l.counted(key, start), limit-n+1))
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	l.learn(key, start, window, countOf(out))
+	return true, nil
+}
+
+// RefundAt takes back n uses of key in the window that holds at: what a
+// request reserved (AllowNAt) and didn't use. If the table can't be
+// reached, the reservation stands.
+func (l *Limiter) RefundAt(ctx context.Context, key string, n int, window time.Duration, at time.Time) error {
+	if n < 1 {
+		return nil
+	}
+	start := at.Truncate(window)
+	out, err := l.add(ctx, key, -n, start, window, -1)
+	if err != nil {
+		return err
+	}
+	l.learn(key, start, window, countOf(out))
+	return nil
+}
+
+// Full reports whether key's current window is known to have reached
+// limit, without asking the table, so what it limits can be refused for
+// free.
+func (l *Limiter) Full(key string, limit int, window time.Duration) bool {
+	return l.FullAt(key, limit, window, l.Now())
+}
+
+// FullAt is Full in the window that holds at.
+func (l *Limiter) FullAt(key string, limit int, window time.Duration, at time.Time) bool {
+	return l.counted(key, at.Truncate(window)) >= limit
+}
+
+// CheckAt reports whether key's window that holds at is below limit. A
+// refusal the table told stands for the window. A count below the limit
+// it trusts for a window of a minute or less, and otherwise for checkFresh;
+// else it reads the count (an eventually consistent read, half a read
+// unit). So an instance doesn't serve a window that others have used up,
+// at least not for long. If the table can't be read, it answers from what
+// the table last told, and returns the error too.
+func (l *Limiter) CheckAt(ctx context.Context, key string, limit int, window time.Duration, at time.Time) (bool, error) {
+	start := at.Truncate(window)
+	if c, ok := l.memo(key, start); ok {
+		if c.uses >= limit {
+			return false, nil
+		}
+		if window <= time.Minute || l.Now().Unix()-c.learned <= checkFresh {
+			return true, nil
+		}
+	}
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
+	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: &l.Table,
 		Key: map[string]types.AttributeValue{
 			"pk": s("R#" + key),
 			"sk": s(strconv.FormatInt(start.Unix(), 10)),
 		},
-		UpdateExpression:    aws.String("ADD c :n SET e = :e"),
-		ConditionExpression: aws.String("attribute_not_exists(c) OR c <= :most"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":n":    num(int64(n)),
-			":e":    num(expires.Unix()),
-			":most": num(int64(limit - n)),
-		},
-	})
-	if conditionFailed(err) {
-		return false, nil
+		ProjectionExpression: aws.String("c"),
+	}, fewerRetries)
+	if err != nil {
+		return l.counted(key, start) < limit, err
 	}
-	return err == nil, err
+	uses := 0
+	if c, ok := out.Item["c"].(*types.AttributeValueMemberN); ok {
+		uses, _ = strconv.Atoi(c.Value)
+	}
+	l.learn(key, start, window, uses)
+	return uses < limit, nil
+}
+
+// Tally counts n uses of key in the window that holds at, in batches: it
+// gathers them here and adds them to the table's count on this instance's
+// first use in the window (so it learns the count), once there are
+// tallyBatch, and once the count may have reached limit. So counting often
+// costs the table little: a write per batch. It reports whether the window
+// is below limit, as the table last said: a count only gathered here never
+// refuses. Uses an instance gathered and never wrote (it stopped) are
+// fewer than a batch. If the table can't be reached, the uses stay
+// gathered for the next time.
+func (l *Limiter) Tally(ctx context.Context, key string, n, limit int, window time.Duration, at time.Time) (bool, error) {
+	start := at.Truncate(window)
+	k := knownKey(key, start)
+	l.mu.Lock()
+	t, ok := l.tallies[k]
+	if !ok && (l.tallies == nil || len(l.tallies) >= maxKnown) {
+		l.tallies = map[string]tally{}
+	}
+	t.pending += max(n, 0)
+	due := !t.wrote || t.pending >= tallyBatch || l.known[k].uses+t.pending >= limit
+	write := 0
+	if due && t.pending > 0 {
+		write, t.pending = t.pending, 0
+	}
+	l.tallies[k] = t
+	l.mu.Unlock()
+	if write == 0 {
+		return l.counted(key, start) < limit, nil
+	}
+	out, err := l.add(ctx, key, write, start, window, -1)
+	if err != nil {
+		l.mu.Lock()
+		t := l.tallies[k]
+		t.pending += write
+		l.tallies[k] = t
+		l.mu.Unlock()
+		return l.counted(key, start) < limit, err
+	}
+	l.mu.Lock()
+	t = l.tallies[k]
+	t.wrote = true
+	l.tallies[k] = t
+	l.mu.Unlock()
+	c := countOf(out)
+	l.learn(key, start, window, c)
+	return c < limit, nil
+}
+
+// Counted is the count the table last returned for key's current window
+// on this instance (0 if none), such as just now to AllowN.
+func (l *Limiter) Counted(key string, window time.Duration) int {
+	return l.CountedAt(key, window, l.Now())
+}
+
+// CountedAt is Counted in the window that holds at.
+func (l *Limiter) CountedAt(key string, window time.Duration, at time.Time) int {
+	return l.counted(key, at.Truncate(window))
+}
+
+// LocalAt counts n uses of key in this instance's memory only, in the
+// window that holds at, and reports whether they fit in limit there. It is
+// for when the table can't be reached, with a limit smaller than the
+// table's: nothing else reads these counts.
+func (l *Limiter) LocalAt(key string, n, limit int, window time.Duration, at time.Time) bool {
+	k := knownKey(key, at.Truncate(window))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.local == nil || len(l.local) >= maxKnown {
+		l.local = map[string]int{}
+	}
+	if l.local[k]+n > limit {
+		return false
+	}
+	l.local[k] += n
+	return true
+}
+
+// add adds n to key's count for the window that starts at start, if at
+// most uses were counted before (any number if most is negative), and
+// returns the new count.
+func (l *Limiter) add(ctx context.Context, key string, n int, start time.Time, window time.Duration, most int) (*dynamodb.UpdateItemOutput, error) {
+	// A count is kept only to the end of its window: past it, it limits
+	// nothing, and nothing reads it. Windows are aligned, so the expiry
+	// says no more than the window does.
+	expires := start.Add(window)
+	in := &dynamodb.UpdateItemInput{
+		TableName: &l.Table,
+		Key: map[string]types.AttributeValue{
+			"pk": s("R#" + key),
+			"sk": s(strconv.FormatInt(start.Unix(), 10)),
+		},
+		UpdateExpression: aws.String("ADD c :n SET e = :e"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":n": num(int64(n)),
+			":e": num(expires.Unix()),
+		},
+		ReturnValues: types.ReturnValueUpdatedNew,
+	}
+	if most >= 0 {
+		in.ConditionExpression = aws.String("attribute_not_exists(c) OR c <= :most")
+		in.ExpressionAttributeValues[":most"] = num(int64(most))
+	}
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
+	return l.DB.UpdateItem(ctx, in, fewerRetries)
+}
+
+func countOf(out *dynamodb.UpdateItemOutput) int {
+	c, ok := out.Attributes["c"].(*types.AttributeValueMemberN)
+	if !ok {
+		return 0
+	}
+	n, _ := strconv.Atoi(c.Value)
+	return n
+}
+
+func knownKey(key string, start time.Time) string {
+	return key + "@" + strconv.FormatInt(start.Unix(), 10)
+}
+
+// counted is the count the table last returned for the window of key that
+// starts at start (0 if none).
+func (l *Limiter) counted(key string, start time.Time) int {
+	c, _ := l.memo(key, start)
+	return c.uses
+}
+
+func (l *Limiter) memo(key string, start time.Time) (counted, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.known[knownKey(key, start)]
+	return c, ok
+}
+
+// learn records the count the table just told.
+func (l *Limiter) learn(key string, start time.Time, window time.Duration, uses int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	k := knownKey(key, start)
+	if _, ok := l.known[k]; !ok && len(l.known) >= maxKnown {
+		now := l.Now().Unix()
+		for k, c := range l.known {
+			if c.until <= now {
+				delete(l.known, k)
+			}
+		}
+	}
+	if l.known == nil || len(l.known) >= maxKnown {
+		l.known = map[string]counted{}
+	}
+	l.known[k] = counted{uses: uses, until: start.Add(window).Unix(), learned: l.Now().Unix()}
 }
 
 // Used reports how many uses of key the current window has counted.
 func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (int, error) {
-	start := l.Now().Truncate(window)
+	return l.UsedAt(ctx, key, window, l.Now())
+}
+
+// UsedAt is Used in the window that holds at.
+func (l *Limiter) UsedAt(ctx context.Context, key string, window time.Duration, at time.Time) (int, error) {
+	start := at.Truncate(window)
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
 	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: &l.Table,
 		Key: map[string]types.AttributeValue{
@@ -188,7 +603,7 @@ func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (i
 		},
 		ProjectionExpression: aws.String("c"),
 		ConsistentRead:       aws.Bool(true),
-	})
+	}, fewerRetries)
 	if err != nil {
 		return 0, err
 	}

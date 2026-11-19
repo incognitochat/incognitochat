@@ -6,10 +6,11 @@ import { useEffect } from 'preact/hooks';
 import { config } from './config';
 import { locale, t, type Language } from './i18n';
 import { fetchForSaving, Gone, type SaveTicket } from './media/save';
-import { createApi } from './net/api';
-import { xhrTransfer } from './net/transfer';
+import { ApiError, createApi } from './net/api';
+import { httpTransfer } from './net/transfer';
 
-type State = 'fetching' | 'ready' | 'done' | 'gone' | 'failed' | 'broken';
+/** paused: the operator has paused downloads for now. */
+type State = 'fetching' | 'ready' | 'done' | 'gone' | 'paused' | 'failed' | 'broken';
 
 export function SavePage({ ticket, language }: { ticket: SaveTicket | null; language: Language }) {
   const tr = (key: Parameters<typeof t>[1]) => t(language, key);
@@ -22,11 +23,11 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
     if (!ticket || !api) return;
     state.value = 'fetching';
     try {
-      const f = await fetchForSaving(api, xhrTransfer, ticket, (p) => (progress.value = p));
+      const f = await fetchForSaving(api, httpTransfer, ticket, (p) => (progress.value = p));
       file.value = { file: f, url: URL.createObjectURL(f) };
       state.value = 'ready';
     } catch (err) {
-      state.value = err instanceof Gone ? 'gone' : 'failed';
+      state.value = err instanceof Gone ? 'gone' : err instanceof ApiError && err.code === 'downloads_paused' ? 'paused' : 'failed';
     }
   };
   useEffect(() => {
@@ -41,6 +42,7 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
         maximumFractionDigits: 1,
       }).format(ticket.s < 1024 * 1024 ? Math.max(1, Math.round(ticket.s / 1024)) : ticket.s / 1024 / 1024)
     : '';
+  // Raster images only: fetchForSaving gives no other image type.
   const image = file.value && file.value.file.type.startsWith('image/');
   return (
     <main class="page">
@@ -82,10 +84,10 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
       )}
       {state.value === 'gone' && <p class="notice">{tr('saveGone')}</p>}
       {state.value === 'broken' && <p class="notice">{tr('saveBroken')}</p>}
-      {state.value === 'failed' && (
+      {(state.value === 'failed' || state.value === 'paused') && (
         <>
           <p class="notice" role="alert">
-            {tr('errorNetwork')}
+            {tr(state.value === 'paused' ? 'errorMediaPaused' : 'errorNetwork')}
           </p>
           <button type="button" class="button secondary" onClick={() => void load()}>
             {tr('tryAgain')}

@@ -1,38 +1,50 @@
 # Four functions, one per trust boundary. Each has its own role, limited to
 # its own tables, parameters and log group, inside the permissions boundary
-# from infra/init. Only bot and notify can read the bot token; only api can
-# push to sockets and invoke notify.
+# from infra/init. Only bot and notify can read the bot token. After a send,
+# api invokes ws without waiting; only ws pushes to sockets, and invokes
+# notify for a notice if no open app took the push. api invokes notify only
+# to seal chat IDs.
 locals {
   ws_endpoint = "https://${aws_apigatewayv2_api.ws.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_apigatewayv2_stage.ws.name}"
-  notify_arn  = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-notify"
+  # Built from names, not the functions' attributes, which would make the
+  # functions depend on themselves.
+  ws_arn     = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-ws"
+  notify_arn = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.prefix}-notify"
 
   functions = {
     # HTTPS API for the client.
     api = {
       timeout = 10
       # Measured on dev at 128 MB: most calls take ~20 ms waiting on DynamoDB,
-      # but a batch of 20 send tokens (RSA signing, pure CPU) took ~4.5 s.
-      # 256 MB doubles the CPU share; slow requests are logged with their
-      # route and duration (internal/api) to size this from data.
+      # but a batch of 20 send tokens (RSA signing, pure CPU) took ~4.5 s,
+      # and ~2.2 s at 256 MB. That was before signing used CRT, about 1.9
+      # times less CPU on arm64 (internal/tokens): measure again before
+      # resizing. 256 MB doubles the CPU share; slow requests are logged
+      # with their route and duration (internal/api) to size this from data.
       memory = 256
       # About 30 ms a request: room for roughly 3,000 requests a second.
       concurrency = 100
       tables      = ["directory", "messages", "ephemeral"]
-      parameters  = ["bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key"]
+      parameters = [
+        "bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key",
+        "previous-issuer-key", "previous-media-issuer-key",
+      ]
       environment = {
-        TABLE_DIRECTORY          = aws_dynamodb_table.table["directory"].name
-        TABLE_MESSAGES           = aws_dynamodb_table.table["messages"].name
-        TABLE_EPHEMERAL          = aws_dynamodb_table.table["ephemeral"].name
-        PARAM_BOT_ID             = aws_ssm_parameter.parameter["bot-id"].name
-        PARAM_SESSION_KEY        = aws_ssm_parameter.parameter["session-key"].name
-        PARAM_TELEGRAM_ID_PEPPER = aws_ssm_parameter.parameter["telegram-id-pepper"].name
-        PARAM_ISSUER_KEY         = aws_ssm_parameter.parameter["issuer-key"].name
-        PARAM_MEDIA_ISSUER_KEY   = aws_ssm_parameter.parameter["media-issuer-key"].name
-        NOTIFY_FUNCTION          = "${local.prefix}-notify"
-        MEDIA_BUCKET             = aws_s3_bucket.media.id
-        WS_ENDPOINT              = local.ws_endpoint
-        INVITE_ONLY              = tostring(var.invite_only)
-        ADMIN_TELEGRAM_IDS       = var.admin_telegram_ids
+        TABLE_DIRECTORY                 = aws_dynamodb_table.table["directory"].name
+        TABLE_MESSAGES                  = aws_dynamodb_table.table["messages"].name
+        TABLE_EPHEMERAL                 = aws_dynamodb_table.table["ephemeral"].name
+        PARAM_BOT_ID                    = aws_ssm_parameter.parameter["bot-id"].name
+        PARAM_SESSION_KEY               = aws_ssm_parameter.parameter["session-key"].name
+        PARAM_TELEGRAM_ID_PEPPER        = aws_ssm_parameter.parameter["telegram-id-pepper"].name
+        PARAM_ISSUER_KEY                = aws_ssm_parameter.parameter["issuer-key"].name
+        PARAM_MEDIA_ISSUER_KEY          = aws_ssm_parameter.parameter["media-issuer-key"].name
+        PARAM_PREVIOUS_ISSUER_KEY       = aws_ssm_parameter.parameter["previous-issuer-key"].name
+        PARAM_PREVIOUS_MEDIA_ISSUER_KEY = aws_ssm_parameter.parameter["previous-media-issuer-key"].name
+        NOTIFY_FUNCTION                 = "${local.prefix}-notify"
+        WS_FUNCTION                     = "${local.prefix}-ws"
+        MEDIA_BUCKET                    = aws_s3_bucket.media.id
+        INVITE_ONLY                     = tostring(var.invite_only)
+        ADMIN_TELEGRAM_IDS              = var.admin_telegram_ids
       }
     }
     # Telegram webhook: opens the app, cleans up service messages. The deploy
@@ -49,25 +61,40 @@ locals {
         APP_URL = "${var.client_origins[0]}/"
       }
     }
-    # WebSocket $connect / $disconnect.
-    # The WebSocket stage's throttle bounds how often it runs.
+    # WebSocket $connect and the heartbeat ($disconnect isn't routed), and
+    # the push after each send, which api asks for without waiting. The
+    # WebSocket stage's throttle bounds how often connects run; sends are
+    # bounded by their tokens and caps. Twice notify's share: every send
+    # comes here, and only those no open app took go on to notify. Connects
+    # and pushes share it, so a flood of sends can hold up connects (refused
+    # ones are tried again by the app, which polls meanwhile), and pushes
+    # that wait over a minute are dropped (below). Its socket records in the
+    # ephemeral table get their own, narrower statement below.
     ws = {
       timeout     = 5
-      concurrency = 10
-      tables      = ["ephemeral"]
+      concurrency = 20
+      tables      = []
       parameters  = ["session-key"]
       environment = {
         TABLE_EPHEMERAL   = aws_dynamodb_table.table["ephemeral"].name
         PARAM_SESSION_KEY = aws_ssm_parameter.parameter["session-key"].name
+        NOTIFY_FUNCTION   = "${local.prefix}-notify"
+        WS_ENDPOINT       = local.ws_endpoint
       }
     }
     # Generic "New message" notices through the bot. api invokes it to seal
-    # chat IDs, and without waiting after each delivery. Its quiet periods in
-    # the ephemeral table get their own, narrower statement below.
+    # chat IDs (POST /notices waits for that, sharing this concurrency with
+    # notices), and ws without waiting after a delivery no open app took.
+    # In the directory it reaches only account partitions, and in the
+    # ephemeral table only its quiet periods: both get their own, narrower
+    # statements below, and no table-wide one. The timeout must stay below
+    # notices.Lease (30 s), the quiet period held while a notice is sent
+    # (infra/tests checks it); it leaves room for one wait of up to 3 s when
+    # Telegram's flood control asks for it.
     notify = {
       timeout     = 10
-      concurrency = 20
-      tables      = ["directory"]
+      concurrency = 10
+      tables      = []
       parameters  = ["bot-token", "chat-key"]
       environment = {
         TABLE_DIRECTORY = aws_dynamodb_table.table["directory"].name
@@ -87,24 +114,24 @@ resource "aws_cloudwatch_log_group" "fn" {
   retention_in_days = var.log_retention_days
 }
 
-data "aws_iam_policy_document" "lambda_trust" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "fn" {
+# Each function's role is created by infra/init (function_roles.tf),
+# trusted by Lambda alone and capped by the permissions boundary, so the
+# deploy role can't create roles or change whom they trust. This stack
+# writes their policies. A new function needs its role there first.
+data "aws_iam_role" "fn" {
   for_each = local.functions
 
-  name                 = "${local.prefix}-fn-${each.key}"
-  description          = "Execution role of the ${each.key} function"
-  assume_role_policy   = data.aws_iam_policy_document.lambda_trust.json
-  permissions_boundary = local.lambda_boundary_arn
+  name = "${local.prefix}-fn-${each.key}"
+}
+
+# The roles were created here before they moved to infra/init, which
+# imports them: forget them without deleting them.
+removed {
+  from = aws_iam_role.fn
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 data "aws_iam_policy_document" "fn" {
@@ -140,15 +167,107 @@ data "aws_iam_policy_document" "fn" {
     resources = [for p in each.value.parameters : aws_ssm_parameter.parameter[p].arn]
   }
 
+  # Only ws pushes, so whether the recipient's app is open never holds up
+  # api's answer to a send. It only posts hints; it closes no connection.
   dynamic "statement" {
-    for_each = each.key == "api" ? [1] : []
+    for_each = each.key == "ws" ? [1] : []
     content {
-      sid     = "PushToSockets"
-      actions = ["execute-api:ManageConnections"]
-      resources = [
-        "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/*",
-        "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/DELETE/@connections/*",
-      ]
+      sid       = "PushToSockets"
+      actions   = ["execute-api:ManageConnections"]
+      resources = ["${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/*"]
+    }
+  }
+
+  # Socket records only (backend/internal/ephemeral, "C#" keys): ws records
+  # them on connect, reads them to push and forgets closed ones. It can't
+  # read rate counters, tokens or uploads.
+  dynamic "statement" {
+    for_each = each.key == "ws" ? [1] : []
+    content {
+      sid       = "SocketRecords"
+      actions   = ["dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"]
+      resources = [aws_dynamodb_table.table["ephemeral"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["C#*"]
+      }
+    }
+  }
+
+  # notify reads an account's notice settings (backend/internal/directory,
+  # Notices): only in account partitions ("A#"; Null keeps out a request
+  # without a partition key, such as a Scan), and only the key and the
+  # sealed chat ID (cid), language (lg), last notice (nm) and "notices off"
+  # (no). A read that names no attributes would return the whole item, so
+  # it must name them (Select). IAM can't limit sort keys, nor an update's
+  # ReturnValuesOnConditionCheckFailure, so this doesn't confine it to
+  # account items or their notice fields: docs/security.md says what's left.
+  # See
+  # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/specifying-conditions.html
+  # and https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html
+  # (which condition keys each action has).
+  dynamic "statement" {
+    for_each = each.key == "notify" ? [1] : []
+    content {
+      sid       = "ReadNoticeSettings"
+      actions   = ["dynamodb:GetItem"]
+      resources = [aws_dynamodb_table.table["directory"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["A#*"]
+      }
+      condition {
+        test     = "Null"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["false"]
+      }
+      condition {
+        test     = "ForAllValues:StringEquals"
+        variable = "dynamodb:Attributes"
+        values   = ["pk", "sk", "cid", "lg", "nm", "no"]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "dynamodb:Select"
+        values   = ["SPECIFIC_ATTRIBUTES"]
+      }
+    }
+  }
+
+  # It writes the last notice (nm) and "notices off" (no) on account items,
+  # with conditions on the key alone, and gets nothing back (NoticeSent,
+  # NoticesOff). No PutItem or DeleteItem: they replace or remove whole
+  # items. An update creates the item it names if it isn't there, so this
+  # still lets it create items, holding only these fields, under any sort
+  # key in an account partition.
+  dynamic "statement" {
+    for_each = each.key == "notify" ? [1] : []
+    content {
+      sid       = "RecordNotices"
+      actions   = ["dynamodb:UpdateItem"]
+      resources = [aws_dynamodb_table.table["directory"].arn]
+      condition {
+        test     = "ForAllValues:StringLike"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["A#*"]
+      }
+      condition {
+        test     = "Null"
+        variable = "dynamodb:LeadingKeys"
+        values   = ["false"]
+      }
+      condition {
+        test     = "ForAllValues:StringEquals"
+        variable = "dynamodb:Attributes"
+        values   = ["pk", "sk", "nm", "no"]
+      }
+      condition {
+        test     = "StringEquals"
+        variable = "dynamodb:ReturnValues"
+        values   = ["NONE"]
+      }
     }
   }
 
@@ -176,8 +295,31 @@ data "aws_iam_policy_document" "fn" {
     }
   }
 
+  # api hands every send to ws, without waiting.
   dynamic "statement" {
     for_each = each.key == "api" ? [1] : []
+    content {
+      sid       = "InvokeWs"
+      actions   = ["lambda:InvokeFunction"]
+      resources = [local.ws_arn]
+    }
+  }
+
+  # api asks notify to seal a chat ID (POST /notices), which only notify
+  # holds the key for; it no longer asks for notices.
+  dynamic "statement" {
+    for_each = each.key == "api" ? [1] : []
+    content {
+      sid       = "SealChatIds"
+      actions   = ["lambda:InvokeFunction"]
+      resources = [local.notify_arn]
+    }
+  }
+
+  # ws asks notify for a notice, without waiting, when no open app took a
+  # push. notify has no access to sockets or their records.
+  dynamic "statement" {
+    for_each = each.key == "ws" ? [1] : []
     content {
       sid       = "InvokeNotify"
       actions   = ["lambda:InvokeFunction"]
@@ -190,7 +332,7 @@ resource "aws_iam_role_policy" "fn" {
   for_each = local.functions
 
   name   = "runtime"
-  role   = aws_iam_role.fn[each.key].id
+  role   = data.aws_iam_role.fn[each.key].name
   policy = data.aws_iam_policy_document.fn[each.key].json
 }
 
@@ -233,7 +375,7 @@ resource "aws_lambda_function" "fn" {
 
   function_name           = "${local.prefix}-${each.key}"
   description             = "Incognito Chat ${each.key} (${var.environment})"
-  role                    = aws_iam_role.fn[each.key].arn
+  role                    = data.aws_iam_role.fn[each.key].arn
   runtime                 = "provided.al2023"
   handler                 = "bootstrap"
   architectures           = ["arm64"]
@@ -275,10 +417,26 @@ resource "aws_lambda_function" "fn" {
   depends_on = [aws_iam_role_policy.fn, aws_ssm_parameter.parameter]
 }
 
-# Notices are sent at once or not at all: a retry would come after the quiet
-# period started and send nothing, and a late notice is no use.
+# Notices are sent at once or not at all: a late notice is little use, and
+# a retry after Telegram's flood control refused one would only add to the
+# flood. Instead (backend/internal/notices), a notice refused outright
+# ends its quiet period, so the next message can notify; one refused by
+# flood control keeps the account quiet for as long as Telegram asked (at
+# least a minute), and the instance sends none until then.
 resource "aws_lambda_function_event_invoke_config" "notify" {
   function_name                = aws_lambda_function.fn["notify"].function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
+}
+
+# The push after a send, too: tried once, or not at all if it waited a
+# minute for room to run (an open app also polls, every two minutes). A
+# retry would only push the hint again, and ask for the notice again (which
+# notify's quiet period would mostly drop). The hint carries nothing, so
+# the rare event Lambda delivers twice is harmless. The function logs its
+# failures rather than returning them.
+resource "aws_lambda_function_event_invoke_config" "ws" {
+  function_name                = aws_lambda_function.fn["ws"].function_name
   maximum_retry_attempts       = 0
   maximum_event_age_in_seconds = 60
 }
@@ -298,7 +456,11 @@ resource "aws_lambda_function_url" "api" {
     # for apps built before it); x-amz-content-sha256 is the body's hash,
     # which Lambda needs once CloudFront signs requests to this URL.
     allow_headers = ["authorization", "content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
-    max_age       = 3600
+    # So the app can read how long to wait after 503 unavailable or
+    # daily_limit; a browser hides other headers from a page on another
+    # origin.
+    expose_headers = ["retry-after"]
+    max_age        = 3600
   }
 }
 

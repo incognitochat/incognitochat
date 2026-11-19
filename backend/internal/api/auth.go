@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
@@ -43,6 +44,24 @@ func (c caller) person() string {
 
 type callerHandler func(ctx context.Context, req httpapi.Request, c caller) httpapi.Response
 
+// whileDeleting are the only routes an account being deleted is answered
+// on: the app learns it is being deleted (GET /account) and carries on
+// with that (DELETE /account). Everything else is refused, account_deleting,
+// before anything is read or written for it.
+var whileDeleting = map[string]bool{"GET /account": true, "DELETE /account": true}
+
+// refused is a device's account's state that refuses the request, if any:
+// replaced, or being deleted (other than on whileDeleting's routes).
+func refused(route string, c caller) (httpapi.Response, bool) {
+	switch {
+	case c.device.Replaced:
+		return httpapi.Error(http.StatusGone, "account_replaced"), true
+	case c.device.Deleting && !whileDeleting[route]:
+		return httpapi.Error(http.StatusConflict, "account_deleting"), true
+	}
+	return httpapi.Response{}, false
+}
+
 // withDevice requires a session token and reads the device and its account,
 // so a replaced account or a removed device is refused at once rather than
 // when its token expires.
@@ -52,8 +71,8 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 		if !ok {
 			return resp
 		}
-		if c.device.Replaced {
-			return httpapi.Error(http.StatusGone, "account_replaced")
+		if resp, no := refused(route, c); no {
+			return resp
 		}
 		return h(ctx, req, c)
 	}
@@ -63,12 +82,19 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 // for sensitive actions: a stolen session token alone can't make them.
 func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFunc {
 	return func(ctx context.Context, req httpapi.Request) httpapi.Response {
+		// One reading of the clock for both checks of the timestamp, so one
+		// at the edge of the window can't pass this and fail the other.
+		now := s.Now()
+		signed, signedOK := parseSignature(httpapi.Header(req, SignatureHeader))
+		// Before the device is read, as for a login.
+		if signedOK && session.CheckTime(signed.Timestamp, now) != nil {
+			return clockSkew(now)
+		}
 		c, resp, ok := s.authenticate(ctx, route, req)
 		if !ok {
 			return resp
 		}
-		signed, ok := parseSignature(httpapi.Header(req, SignatureHeader))
-		if !ok {
+		if !signedOK {
 			return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 		}
 		body, err := httpapi.Body(req)
@@ -85,15 +111,15 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 		if err != nil {
 			return s.internal(route, err)
 		}
-		err = session.CheckRequest(ctx, signed, key, s.Nonces, s.Now())
+		err = session.CheckRequest(ctx, signed, key, s.Nonces, now)
 		if errors.Is(err, session.ErrLogin) {
 			return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 		}
 		if err != nil {
 			return s.internal(route, err)
 		}
-		if c.device.Replaced {
-			return httpapi.Error(http.StatusGone, "account_replaced")
+		if resp, no := refused(route, c); no {
+			return resp
 		}
 		return h(ctx, req, c)
 	}
@@ -120,6 +146,14 @@ func (s *Server) authenticate(ctx context.Context, route string, req httpapi.Req
 		return caller{}, s.internal(route, err), false
 	}
 	return caller{Claims: claims, device: device}, httpapi.Response{}, true
+}
+
+// clockSkew answers a login, signed request or new device list whose time is
+// too far from the server's: the device's clock is off. It carries the
+// server's clock (Unix seconds), so the app can correct its own and ask
+// again. Nothing about the device has been read.
+func clockSkew(now time.Time) httpapi.Response {
+	return httpapi.JSON(http.StatusUnauthorized, map[string]any{"error": "clock_skew", "now": now.Unix()})
 }
 
 // parseSignature reads "<timestamp>.<nonce>.<signature>".

@@ -27,6 +27,32 @@ func TestClientEnvelopes(t *testing.T) {
 	}
 }
 
+// What envelopes cost in send tokens: the app's ordinary ones (one wrap,
+// an inner message padded to 512 or 2048 bytes) one, larger ones by size.
+// The same table is in web/src/protocol/envelope.test.ts.
+func TestTokensFor(t *testing.T) {
+	size := func(wraps, padded int) int { return 2 + wraps*WrapLen + nonceLen + padded + tagLen }
+	for _, c := range []struct{ size, want int }{
+		{size(1, 512), 1},
+		{size(1, 2048), 1},
+		{size(2, 2048), 1},
+		{size(1, 8192), 4},
+		{size(1, 16384), 7},
+		{size(MaxWraps, 512), 1},
+		{size(MaxWraps, 2048), 2},
+		{MaxLen, 8},
+		{TokenBytes, 1},
+		{TokenBytes + 1, 2},
+	} {
+		if got := TokensFor(c.size); got != c.want {
+			t.Errorf("TokensFor(%d) = %d, want %d", c.size, got, c.want)
+		}
+	}
+	if MaxTokens != 8 {
+		t.Fatalf("MaxTokens = %d", MaxTokens)
+	}
+}
+
 func TestCheckRejects(t *testing.T) {
 	valid := func(wraps, padded int) []byte {
 		env := []byte{Suite, byte(wraps)}

@@ -33,6 +33,26 @@ func issuer(t *testing.T, keys map[byte][]byte, current byte) *Issuer {
 	return i
 }
 
+// The web app learns the server's clock from a token's expiry less 15
+// minutes, in whole seconds (web/src/net/clock.ts, TOKEN_TTL_MS): with
+// another TTL, or an expiry not rounded down to the second, it would believe
+// a clock that's off, or (more than a minute off) fall back to dating
+// messages by the device's clock, which links a sender's conversations.
+// Change both together.
+func TestExpiryTellsTheWebAppTheServerClock(t *testing.T) {
+	if TTL != 15*time.Minute {
+		t.Fatalf("TTL = %v: web/src/net/clock.ts TOKEN_TTL_MS must match", TTL)
+	}
+	i := issuer(t, map[byte][]byte{1: keyA}, 1)
+	_, expires, err := i.Issue(account, device, now.Add(999*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expires.Equal(now.Add(15 * time.Minute)) {
+		t.Fatalf("expires = %v, want the issue time plus 15 minutes, rounded down to the second", expires)
+	}
+}
+
 func TestIssueVerify(t *testing.T) {
 	i := issuer(t, map[byte][]byte{1: keyA}, 1)
 	token, expires, err := i.Issue(account, device, now)
@@ -141,6 +161,45 @@ func signLogin(t *testing.T, key *ecdsa.PrivateKey, login Login) Login {
 	return login
 }
 
+// Precheck refuses what no key could make valid, without a key or nonces.
+func TestPrecheck(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-0123456789abc"})
+	if err := Precheck(login, now); err != nil {
+		t.Fatalf("valid login: %v", err)
+	}
+	// A wrong signature of the right shape is for Check to find.
+	forged := login
+	forged.Signature = make([]byte, devicesig.SignatureLen)
+	if err := Precheck(forged, now); err != nil {
+		t.Fatalf("well-formed signature: %v", err)
+	}
+	for name, change := range map[string]func(*Login){
+		"stale":           func(l *Login) { l.Timestamp = now.Add(-MaxSkew - time.Second).Unix() },
+		"future":          func(l *Login) { l.Timestamp = now.Add(MaxSkew + time.Second).Unix() },
+		"short nonce":     func(l *Login) { l.Nonce = "short" },
+		"nonce charset":   func(l *Login) { l.Nonce = "nonce with spaces!!" },
+		"short signature": func(l *Login) { l.Signature = l.Signature[:10] },
+		"bad account ID":  func(l *Login) { l.AccountID = "x" },
+		"bad device ID":   func(l *Login) { l.DeviceID = "x" },
+	} {
+		bad := login
+		change(&bad)
+		err := Precheck(bad, now)
+		// The clock first, told apart; the rest is a plain refusal.
+		clock := name == "stale" || name == "future"
+		if !errors.Is(err, ErrLogin) || errors.Is(err, ErrClockSkew) != clock {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	// Both wrong: the clock is what it says.
+	both := login
+	both.Timestamp, both.Nonce = now.Add(-time.Hour).Unix(), "short"
+	if err := Precheck(both, now); !errors.Is(err, ErrClockSkew) {
+		t.Errorf("stale and a bad nonce: err = %v", err)
+	}
+}
+
 func TestCheck(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -158,11 +217,17 @@ func TestCheck(t *testing.T) {
 	}
 
 	later := func(d time.Duration) *MemoryNonces { return NewMemoryNonces(func() time.Time { return now.Add(d) }) }
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrLogin) {
-		t.Fatal("accepted a stale timestamp")
+	// A timestamp outside the window is told apart (the device's clock is
+	// off), and is still a refused login for callers that don't.
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrClockSkew) || !errors.Is(err, ErrLogin) {
+		t.Fatalf("stale timestamp: err = %v", err)
 	}
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second)); !errors.Is(err, ErrLogin) {
-		t.Fatal("accepted a timestamp from the future")
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second)); !errors.Is(err, ErrClockSkew) {
+		t.Fatalf("timestamp from the future: err = %v", err)
+	}
+	// Other refusals aren't clock skew.
+	if err := Check(ctx, login, &key.PublicKey, nonces, now); errors.Is(err, ErrClockSkew) {
+		t.Fatal("a replayed login was taken for clock skew")
 	}
 
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -186,6 +251,26 @@ func TestCheck(t *testing.T) {
 	} {
 		if err := Check(ctx, bad, &key.PublicKey, NewMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
+func TestCheckTime(t *testing.T) {
+	for _, tt := range []struct {
+		offset time.Duration
+		ok     bool
+	}{
+		{0, true},
+		{MaxSkew, true},
+		{-MaxSkew, true},
+		{MaxSkew + time.Second, false},
+		{-MaxSkew - time.Second, false},
+		{5 * time.Minute, false},
+		{-3*time.Hour - 30*time.Minute, false},
+	} {
+		err := CheckTime(now.Add(tt.offset).Unix(), now)
+		if (err == nil) != tt.ok || (err != nil && !errors.Is(err, ErrClockSkew)) {
+			t.Errorf("offset %v: err = %v", tt.offset, err)
 		}
 	}
 }

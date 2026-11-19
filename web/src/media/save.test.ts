@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { encryptFile, newFileKey } from '../crypto/media';
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
 import { ApiError, type Api } from '../net/api';
-import type { Media } from '../protocol/message';
+import { MAX_FILE_BYTES, type Media } from '../protocol/message';
 import { fetchForSaving, Gone, readTicket, saveUrl, SAVE_PREFIX } from './save';
 
 const key = newFileKey();
@@ -27,6 +27,10 @@ describe('save tickets', () => {
   it('refuse broken ones', () => {
     expect(readTicket('#save=nonsense')).toBeNull();
     expect(readTicket('#other')).toBeNull();
+    // No bigger than a message allows, since the page reads that much.
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: MAX_FILE_BYTES })).hash)).not.toBeNull();
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: MAX_FILE_BYTES + 1 })).hash)).toBeNull();
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, s: Number.MAX_SAFE_INTEGER })).hash)).toBeNull();
     const bad = saveUrl('https://x/', { ...media, k: 'AAAA' });
     expect(readTicket(new URL(bad).hash)).toBeNull();
   });
@@ -53,9 +57,26 @@ describe('save tickets', () => {
     const ticket = readTicket(new URL(saveUrl('https://x/', media)).hash)!;
     const file = await fetchForSaving(api, transfer, ticket);
     expect(file.name).toBe('notes ✓.txt');
-    expect(file.type).toBe('text/plain');
+    // Only images, audio and video keep the sender's type.
+    expect(file.type).toBe('application/octet-stream');
     expect(new TextDecoder().decode(await file.arrayBuffer())).toBe('hello');
     expect(calls).toEqual([`GET /media/${media.id}`]);
     await expect(fetchForSaving(api, transfer, { ...ticket, id: 'CCCCCCCCCCCCCCCCCCCCCA' })).rejects.toBeInstanceOf(Gone);
+  });
+
+  it("never hands the browser an active type the sender claims: it's plain bytes", async () => {
+    const upload = await encryptFile(new TextEncoder().encode('hello'), key);
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      request: async (_method, _path, _init, check) => check({ url: 'https://bucket.example/m/x' }),
+    };
+    const transfer = { put: async () => {}, get: async () => upload };
+    const typeOf = async (m: string) => (await fetchForSaving(api, transfer, { id: media.id, k: media.k, s: 5, m })).type;
+    expect(await typeOf('image/svg+xml')).toBe('application/octet-stream');
+    expect(await typeOf('text/html')).toBe('application/octet-stream');
+    expect(await typeOf('application/xhtml+xml')).toBe('application/octet-stream');
+    expect(await typeOf('image/jpeg')).toBe('image/jpeg');
+    expect(await typeOf('video/mp4')).toBe('video/mp4');
+    expect(await typeOf('audio/ogg')).toBe('audio/ogg');
   });
 });

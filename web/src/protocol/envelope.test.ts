@@ -6,11 +6,14 @@ import {
   keyId,
   MAX_ENVELOPE,
   MAX_INNER,
+  MAX_WRAPS,
   openEnvelope,
   pad,
   PADDED_SIZES,
   parseEnvelope,
   sealEnvelope,
+  sendTokensFor,
+  TOKEN_BYTES,
   unpad,
   WRAP_LENGTH,
   type RecipientKey,
@@ -98,5 +101,25 @@ describe('envelope', () => {
     const k = await recipient();
     expect(k.id).toHaveLength(8);
     expect(await keyId(k.publicKey)).toEqual(k.id);
+  });
+});
+
+describe('send tokens', () => {
+  // The same table is in backend/internal/envelope/envelope_test.go.
+  it('cost one per started 2.5 KiB of envelope', () => {
+    const size = (wraps: number, padded: number) => 2 + wraps * WRAP_LENGTH + 12 + padded + 16;
+    const cases: [number, number][] = [
+      [size(1, 512), 1],
+      [size(1, 2048), 1],
+      [size(2, 2048), 1],
+      [size(1, 8192), 4],
+      [size(1, 16384), 7],
+      [size(MAX_WRAPS, 512), 1],
+      [size(MAX_WRAPS, 2048), 2],
+      [MAX_ENVELOPE, 8],
+      [TOKEN_BYTES, 1],
+      [TOKEN_BYTES + 1, 2],
+    ];
+    for (const [length, tokens] of cases) expect([length, sendTokensFor(length)]).toEqual([length, tokens]);
   });
 });

@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,10 @@ import (
 )
 
 const (
-	// TTL is how long a session token is valid.
+	// TTL is how long a session token is valid. The web app learns the
+	// server's clock from a token's expiry less TTL (web/src/net/clock.ts,
+	// TOKEN_TTL_MS, which must stay equal to it;
+	// TestExpiryTellsTheWebAppTheServerClock).
 	TTL = 15 * time.Minute
 	// MaxSkew is how far a login timestamp may be from the server's clock.
 	MaxSkew = 60 * time.Second
@@ -43,6 +47,9 @@ var (
 	ErrToken = errors.New("session: invalid token")
 	// ErrLogin is returned for a login that must be refused.
 	ErrLogin = errors.New("session: login refused")
+	// ErrClockSkew is returned for a timestamp more than MaxSkew from the
+	// server's clock: the device's clock is off. It is an ErrLogin too.
+	ErrClockSkew = fmt.Errorf("%w: timestamp outside the window", ErrLogin)
 	// ErrKeys is returned for an unusable key configuration.
 	ErrKeys = errors.New("session: invalid keys")
 )
@@ -162,6 +169,22 @@ func Check(ctx context.Context, login Login, pub *ecdsa.PublicKey, nonces NonceS
 	return checkFresh(ctx, pub, login.Signature, devicesig.LabelSession, LoginParts(login), login.Timestamp, login.Nonce, nonces, now)
 }
 
+// Precheck refuses a login that can't be valid whatever the device's key,
+// without the database, so the server checks it before reading the device:
+// first a timestamp too far from the server's clock (CheckTime's
+// ErrClockSkew), then malformed IDs, nonce or signature (ErrLogin). Check
+// repeats it.
+func Precheck(login Login, now time.Time) error {
+	if err := CheckTime(login.Timestamp, now); err != nil {
+		return err
+	}
+	if !ids.Valid(login.AccountID) || !ids.Valid(login.DeviceID) || !validNonce(login.Nonce) ||
+		len(login.Signature) != devicesig.SignatureLen {
+		return ErrLogin
+	}
+	return nil
+}
+
 // SignedRequest is a device's signature on one API request, required on top
 // of a session token for sensitive actions: a stolen token alone can't make
 // them.
@@ -198,13 +221,24 @@ func CheckRequest(ctx context.Context, r SignedRequest, pub *ecdsa.PublicKey, no
 	return checkFresh(ctx, pub, r.Signature, devicesig.LabelRequest, RequestParts(r), r.Timestamp, r.Nonce, nonces, now)
 }
 
+// CheckTime returns ErrClockSkew if a login's or signed request's timestamp
+// (Unix seconds) is more than MaxSkew from now. It needs nothing but the
+// timestamp, so callers check it before reading anything about the device:
+// the answer then says nothing about whether it exists.
+func CheckTime(timestamp int64, now time.Time) error {
+	at := time.Unix(timestamp, 0)
+	if at.Before(now.Add(-MaxSkew)) || at.After(now.Add(MaxSkew)) {
+		return ErrClockSkew
+	}
+	return nil
+}
+
 func checkFresh(ctx context.Context, pub *ecdsa.PublicKey, signature []byte, label string, parts [][]byte, timestamp int64, nonce string, nonces NonceStore, now time.Time) error {
 	if !validNonce(nonce) {
 		return ErrLogin
 	}
-	at := time.Unix(timestamp, 0)
-	if at.Before(now.Add(-MaxSkew)) || at.After(now.Add(MaxSkew)) {
-		return ErrLogin
+	if err := CheckTime(timestamp, now); err != nil {
+		return err
 	}
 	if devicesig.Verify(pub, signature, label, parts...) != nil {
 		return ErrLogin

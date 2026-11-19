@@ -13,12 +13,15 @@ export type ErrorCode =
   | 'account_exists'
   | 'conflict'
   | 'rate_limited'
+  | 'daily_limit'
   | 'login_refused'
+  | 'clock_skew'
   | 'account_replaced'
   | 'session_expired'
   | 'invitation_required'
   | 'invalid_link'
   | 'link_limit'
+  | 'signing_key_taken'
   | 'no_invitations_left'
   | 'invalid_invitation'
   | 'already_member'
@@ -28,7 +31,13 @@ export type ErrorCode =
   | 'invalid_envelope'
   | 'mailbox_limit'
   | 'invalid_token'
+  | 'tokens_needed'
+  | 'unknown_issuer_key'
+  | 'uploads_paused'
+  | 'downloads_paused'
   | 'in_progress'
+  | 'unavailable'
+  | 'account_deleting'
   | 'internal'
   | 'not_found'
   | 'method_not_allowed';
@@ -42,12 +51,15 @@ const CODES = new Set<string>([
   'account_exists',
   'conflict',
   'rate_limited',
+  'daily_limit',
   'login_refused',
+  'clock_skew',
   'account_replaced',
   'session_expired',
   'invitation_required',
   'invalid_link',
   'link_limit',
+  'signing_key_taken',
   'no_invitations_left',
   'invalid_invitation',
   'already_member',
@@ -57,7 +69,13 @@ const CODES = new Set<string>([
   'invalid_envelope',
   'mailbox_limit',
   'invalid_token',
+  'tokens_needed',
+  'unknown_issuer_key',
+  'uploads_paused',
+  'downloads_paused',
   'in_progress',
+  'unavailable',
+  'account_deleting',
   'internal',
   'not_found',
   'method_not_allowed',
@@ -68,6 +86,12 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: ErrorCode | 'unknown',
+    /** With clock_skew: the server's clock, in Unix seconds. */
+    readonly serverTime?: number,
+    /** With tokens_needed: how many send tokens the envelope costs. */
+    readonly needed?: number,
+    /** How many seconds the server asked to wait (Retry-After), if it said. */
+    readonly retryAfter?: number,
   ) {
     super(`API error ${status} ${code}`);
     this.name = 'ApiError';
@@ -125,8 +149,18 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
         throw new NetworkError(`unreadable response (${response.status})`);
       }
       if (!response.ok) {
-        const code = value && typeof value === 'object' ? (value as { error?: unknown }).error : undefined;
-        throw new ApiError(response.status, typeof code === 'string' && CODES.has(code) ? (code as ErrorCode) : 'unknown');
+        const { error: code, now, needed } = value && typeof value === 'object' ? (value as { error?: unknown; now?: unknown; needed?: unknown }) : {};
+        const known = typeof code === 'string' && CODES.has(code) ? (code as ErrorCode) : 'unknown';
+        // A time outside the window: the server's clock comes with it.
+        if (known === 'clock_skew') {
+          const serverTime = typeof now === 'number' && Number.isSafeInteger(now) && now > 0 ? now : undefined;
+          throw new ApiError(response.status, known, serverTime);
+        }
+        // Too few send tokens for the envelope: how many it costs.
+        if (known === 'tokens_needed') {
+          throw new ApiError(response.status, known, undefined, typeof needed === 'number' && Number.isSafeInteger(needed) && needed > 0 ? needed : undefined);
+        }
+        throw new ApiError(response.status, known, undefined, undefined, retryAfter(response.headers.get('Retry-After')));
       }
       try {
         return check(value);
@@ -136,6 +170,12 @@ export function createApi(baseUrl: string, fetchImpl: Fetch = (input, init) => f
     },
   };
   return api;
+}
+
+/** Retry-After in seconds (its other form, a date, the server doesn't send), at most a day. */
+function retryAfter(value: string | null): number | undefined {
+  if (value === null || !/^\d{1,9}$/.test(value.trim())) return undefined;
+  return Math.min(Number(value.trim()), 86_400);
 }
 
 async function sha256Hex(text: string): Promise<string> {

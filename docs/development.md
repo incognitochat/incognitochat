@@ -7,13 +7,13 @@ dependencies. Deploying is in [deployment.md](deployment.md).
 
 | Path | What |
 |---|---|
-| `backend/` | Go, one module. `cmd/` has one Lambda entry point per trust boundary: `api` (HTTPS API), `bot` (Telegram webhook), `ws` (WebSocket connections), `notify` (Telegram notices). `internal/` holds the packages: `api` (routes and handlers), `telegram` (launch data and the Bot API), `session` and `devicesig` (logins and signed requests), `envelope`, `inbox`, `links`, `invitations`, `tokens` (blind-signed send tokens), `media`, `notices`, `push`, and the DynamoDB stores `directory` and `ephemeral`. |
+| `backend/` | Go, one module. `cmd/` has one Lambda entry point per trust boundary: `api` (HTTPS API), `bot` (Telegram webhook), `ws` (WebSocket connections and pushes), `notify` (Telegram notices). `internal/` holds the packages: `api` (routes and handlers), `telegram` (launch data and the Bot API), `session` and `devicesig` (logins and signed requests), `envelope`, `inbox`, `links`, `invitations`, `tokens` (blind-signed send tokens), `media`, `notices`, `push`, `keyed` (keyed-hash names for short-lived rows), `awsconf` (how AWS calls are retried and cut off), and the DynamoDB stores `directory` and `ephemeral`. |
 | `web/` | The app: TypeScript, Vite, Preact with signals. `src/crypto` (WebCrypto only: keys, HPKE, signatures, blind RSA), `src/protocol` (envelopes, messages, links), `src/messaging` (the engine: sending, syncing, rotation, the history store), `src/media` (preparing, recording, saving attachments), `src/emoji` (the emoji panel's list), `src/stickers`, `src/storage` (IndexedDB), `src/platform` (the Telegram bridge, launch data, theme), `src/net` (API and socket), `src/state` (screens and actions), `src/i18n` (English and Persian), `app.tsx` (the screens). |
 | `web/public/` | Files copied into the build as they are: the sticker images and their license. |
 | `infra/` | App Terraform for one environment: tables, the media bucket, SSM parameters, the four functions with function URLs, the WebSocket API. Applied by CI. |
-| `infra/init/` | Bootstrap Terraform, applied once per AWS account by an admin: state bucket, GitHub OIDC provider, deploy role, Lambda permissions boundary, code signing. CI can't change its own permissions. |
+| `infra/init/` | Bootstrap Terraform, applied once per AWS account by an admin: state bucket, GitHub OIDC provider, deploy role, the functions' roles and their permissions boundary, code signing. CI can't change its own permissions. |
 | `hosting/` | The reviewed copy of the hosting repository's workflow ([verifying.md](verifying.md)). |
-| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `verify-site.sh`. |
+| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `check-function-roles.sh` (checks the functions may call each other, permissions boundary included, what the deploy role is denied, and whom the functions' resource policies let invoke them), `verify-site.sh`. |
 | `docs/` | This documentation. |
 
 ## Checks
@@ -58,6 +58,8 @@ for dir in infra infra/init; do
   terraform -chdir="$dir" init -backend=false -lockfile=readonly
   terraform -chdir="$dir" validate
 done
+terraform -chdir=infra test        # renders function role policies; no AWS calls
+terraform -chdir=infra/init test   # renders the deploy role's policies; no AWS calls
 ```
 
 ## Reproducible builds
@@ -86,6 +88,11 @@ and CI builds everything twice and compares. Keep it that way:
   cooldown.
 - The app loads no third-party code at runtime. Its only runtime dependencies
   are Preact, its signals, and `idb`.
+- The backend's are the AWS SDK and Lambda runtime, Cloudflare's `circl`
+  (checking blind-RSA tokens), and
+  `filippo.io/bigmod` (constant-time arithmetic for signing tokens, the code
+  Go's `crypto/rsa` uses). bigmod compiles in `golang.org/x/sys/cpu` (the
+  Go team's, BSD-licensed), to pick its assembly for the CPU.
 
 ## Conventions
 

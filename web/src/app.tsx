@@ -4,6 +4,7 @@ import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { locale, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import type { MessageView } from './messaging/store';
+import { canResend } from './messaging/engine';
 import type { KeepMedia, MediaSettings } from './messaging/settings';
 import { fromBase64Url } from './crypto/encoding';
 import { showableAs } from './media/prepare';
@@ -20,12 +21,13 @@ import {
   type RoundRecorder,
   type RoundRecording,
 } from './media/record';
-import { EDIT_WINDOW_MS, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
+import { editable, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
 import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, type StickerInfo } from './stickers/catalog';
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import {
   confirmationMatches,
+  messageKey,
   type AdminNotice,
   type App as AppState,
   type ErrorKind,
@@ -42,7 +44,7 @@ const ERROR_TEXT: Record<ErrorKind, Key> = {
   network: 'errorNetwork',
   expired: 'errorExpired',
   'rate-limited': 'errorRateLimited',
-  'logged-out': 'errorLoggedOut',
+  clock: 'errorClock',
   generic: 'errorGeneric',
 };
 
@@ -50,6 +52,7 @@ const LINK_TEXT: Record<LinkStatus, Key> = {
   checking: 'linkChecking',
   verified: 'linkVerified',
   own: 'linkOwn',
+  existing: 'linkExisting',
   'not-found': 'linkNotFound',
   mismatch: 'linkMismatch',
   network: 'errorNetwork',
@@ -69,6 +72,7 @@ const NOTICE_TEXT: Record<HomeNotice, Key> = {
   'already-member': 'noticeAlreadyMember',
   'own-invitation': 'noticeOwnInvitation',
   'rate-limited': 'noticeRateLimited',
+  'new-signing-key': 'noticeNewSigningKey',
   network: 'errorNetwork',
   generic: 'errorGeneric',
 };
@@ -84,6 +88,8 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
   'no-tokens': 'errorNoTokens',
   'no-mailboxes': 'errorNoMailboxes',
   'rate-limited': 'errorTooFast',
+  'media-paused': 'errorMediaPaused',
+  outdated: 'errorOutdated',
   network: 'errorNetwork',
   'too-big': 'errorTooBig',
   unreadable: 'errorUnreadable',
@@ -93,6 +99,7 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
 const ADMIN_NOTICE_TEXT: Record<AdminNotice, Key> = {
   saved: 'noticeSaved',
   granted: 'noticeGranted',
+  switched: 'noticeSwitched',
   'not-member': 'noticeNotMember',
   'not-found': 'noticeLinkUnknown',
   'bad-link': 'noticeLinkUnknown',
@@ -147,6 +154,11 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               {tr('accountDeleted')}
             </p>
           )}
+          {screen.deletedHere && (
+            <p class="notice" role="status">
+              {tr('accountDeletedHere')}
+            </p>
+          )}
           {screen.mismatch && <p class="notice">{tr('setupMismatch')}</p>}
           <Button onClick={app.setUp}>{tr('setUp')}</Button>
         </Page>
@@ -175,6 +187,31 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
       return <ConfirmReplace app={app} language={language} busy={screen.busy} />;
     case 'confirm-delete':
       return <ConfirmDelete app={app} language={language} busy={screen.busy} error={screen.error} />;
+    case 'deleting':
+      // Confirmed already: nothing to cancel, only to carry on.
+      return (
+        <Page title={tr('deletingTitle')} busy={!screen.error}>
+          <p class="muted" role="status">
+            {tr('deletingAccount')}
+          </p>
+          {screen.error && (
+            <>
+              <p class="notice" role="alert">
+                {tr(ERROR_TEXT[screen.error])}
+              </p>
+              <Button onClick={app.continueDeletion}>{tr('tryAgain')}</Button>
+              <Button kind="secondary" onClick={app.readDuringDeletion}>
+                {tr('readChats')}
+              </Button>
+              {/* Already confirmed by the typed phrase: the server's part waits for the next setup. */}
+              <p class="muted">{tr('deleteHereOnlyNote')}</p>
+              <button type="button" class="link-button delete-account" onClick={() => void confirmDeleteHereOnly(app, language)}>
+                {tr('deleteHereOnly')}
+              </button>
+            </>
+          )}
+        </Page>
+      );
     case 'blocked':
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
@@ -204,6 +241,12 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               <Composer language={language} busy={screen.busy} onSend={app.writeToLink} />
             </>
           )}
+          {screen.status === 'existing' && (
+            <>
+              <p class="muted">{tr('linkExistingHint')}</p>
+              <Button onClick={() => app.openConversation(screen.chat)}>{tr('openChat')}</Button>
+            </>
+          )}
           {screen.status === 'network' && <Button onClick={app.retry}>{tr('tryAgain')}</Button>}
           {screen.status !== 'checking' && (
             <Button kind="secondary" onClick={app.home}>
@@ -212,26 +255,62 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
           )}
         </Page>
       );
-    case 'conversation':
-      return <Conversation app={app} language={language} screen={screen} />;
-    case 'replaced':
+    case 'invitation':
       return (
-        <Page title={tr('replacedTitle')}>
-          <p class="warning" role="alert">
-            {tr('replacedBody')}
-          </p>
-          <Button kind="secondary" onClick={app.setUpAgain}>
-            {tr('setUpAgain')}
+        <Page title={tr('joinTitle')} body={tr('joinBody')} busy={screen.busy}>
+          {screen.error && (
+            <p class="notice" role="alert">
+              {tr(NOTICE_TEXT[screen.error])}
+            </p>
+          )}
+          <Button disabled={screen.busy} onClick={() => app.redeem(screen.code)}>
+            {tr('join')}
+          </Button>
+          <Button kind="secondary" disabled={screen.busy} onClick={app.home}>
+            {tr('notNow')}
           </Button>
         </Page>
       );
+    case 'conversation':
+      return <Conversation app={app} language={language} screen={screen} />;
+    case 'signed-out': {
+      // The server's word, never checked: the chats stay, and nothing is deleted without a typed confirmation.
+      const replaced = screen.reason === 'replaced';
+      const deleting = screen.reason === 'deleting';
+      return (
+        <Page title={tr(replaced ? 'replacedTitle' : deleting ? 'deletingElsewhereTitle' : 'signedOutTitle')} busy={screen.busy}>
+          <p class={replaced ? 'warning' : 'notice'} role="alert">
+            {tr(replaced ? 'replacedBody' : deleting ? 'deletingElsewhereBody' : 'signedOutBody')}
+          </p>
+          <p>{tr('signedOutKept')}</p>
+          {screen.offline && <p class="notice">{tr('offline')}</p>}
+          <Button disabled={screen.busy} onClick={app.recheck}>
+            {tr('tryAgain')}
+          </Button>
+          <Button kind="secondary" disabled={screen.busy} onClick={app.readChats}>
+            {tr('readChats')}
+          </Button>
+          {/* Finishing a deletion, like setting up again, takes a typed confirmation. */}
+          <button
+            type="button"
+            class="link-button delete-account"
+            disabled={screen.busy}
+            onClick={deleting ? app.askDeleteAccount : app.askReset}
+          >
+            {tr(deleting ? 'finishDeleting' : 'setUpAgain')}
+          </button>
+        </Page>
+      );
+    }
+    case 'confirm-reset':
+      return <ConfirmReset app={app} language={language} />;
     case 'error':
       return (
         <Page title={tr('appName')}>
           <p class="notice" role="alert">
             {tr(ERROR_TEXT[screen.error])}
           </p>
-          <Button onClick={app.retry}>{screen.error === 'expired' || screen.error === 'logged-out' ? tr('continue') : tr('tryAgain')}</Button>
+          <Button onClick={app.retry}>{screen.error === 'expired' ? tr('continue') : tr('tryAgain')}</Button>
         </Page>
       );
   }
@@ -247,6 +326,25 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
+  // Signed out, the chats are read-only; Try again asks the server again.
+  // A deletion that couldn't finish: read-only too; Try again carries on with it.
+  const status = screen.deletionPaused ? (
+    <div class="card" role="status">
+      <p>{tr('deletionPausedNotice')}</p>
+      <button type="button" class="button secondary" onClick={() => void app.continueDeletion()}>
+        {tr('tryAgain')}
+      </button>
+    </div>
+  ) : screen.signedOut ? (
+    <div class="card" role="status">
+      <p>{tr('readOnlyNotice')}</p>
+      <button type="button" class="button secondary" onClick={() => void app.recheck()}>
+        {tr('tryAgain')}
+      </button>
+    </div>
+  ) : (
+    offline && <p class="notice">{tr('offline')}</p>
+  );
   const tabs = (
     <div class="tabs" role="tablist">
       {(['chats', 'links'] as const).map((tabName) => (
@@ -267,7 +365,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
     return (
       <main class="page">
         {tabs}
-        {offline && <p class="notice">{tr('offline')}</p>}
+        {status}
         {notice && (
           <p class="notice" role="status">
             {tr(NOTICE_TEXT[notice])}
@@ -292,7 +390,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
                 language={language}
                 chat={c}
                 revealed={revealed.value === c.id}
-                onReveal={(id) => (revealed.value = id)}
+                onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
               />
             ))}
           </ul>
@@ -308,7 +406,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   return (
     <Page title={tr('homeTitle')} body={tr('homeIntro')}>
       {tabs}
-      {offline && <p class="notice">{tr('offline')}</p>}
+      {status}
       {notice && (
         <p class="notice" role="status">
           {tr(NOTICE_TEXT[notice])}
@@ -358,6 +456,8 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
 
 /** How close to the end of a chat still counts as being at the end, in px. */
 const AT_END = 80;
+/** How close to the top of a chat loads older messages, in px. */
+const NEAR_TOP = 400;
 const isAtEnd = () => window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - AT_END;
 const scrollToEnd = (behavior: ScrollBehavior = 'auto') => window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
 const visible = () => document.visibilityState === 'visible';
@@ -366,11 +466,27 @@ const visible = () => document.visibilityState === 'visible';
  * Keeps a chat where Telegram would: it opens at the newest message, and
  * jumps there when you send. New messages scroll into view only if you were
  * already at the end; otherwise you stay where you are and a button shows
- * how many came in. Messages count as seen only once they're in view.
+ * how many came in. Messages count as seen only once they're in view, and
+ * after the app was hidden or minimised, only once it's touched again.
+ * Scrolling near the top loads older messages (more), which appear above
+ * without moving what's in view.
  */
-function useChatScroll(app: AppState, id: string, messages: { id: string; out: boolean }[]) {
+function useChatScroll(app: AppState, id: string, messages: { id: string; out: boolean }[], more: boolean) {
   const atEnd = useRef(true);
-  const shown = useRef<{ conv: string; last: string | null } | null>(null);
+  const shown = useRef<{ conv: string; first: string | null; last: string | null } | null>(null);
+  // How far from the bottom the view was when older messages were asked for: kept there once they show.
+  const anchor = useRef<number | null>(null);
+  const hasMore = useRef(more);
+  hasMore.current = more;
+  const older = () => {
+    if (anchor.current !== null) return;
+    anchor.current = document.documentElement.scrollHeight - window.scrollY;
+    // Once they show, the layout effect below keeps the view there; if none came, the next scroll asks again.
+    void app.loadOlder().then(
+      (loaded) => !loaded && (anchor.current = null),
+      () => (anchor.current = null),
+    );
+  };
   // Scrolled away from the end, and how many new messages came in since.
   const away = useSignal(false);
   const fresh = useSignal(0);
@@ -388,31 +504,43 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
       if (now && !atEnd.current) arrived();
       atEnd.current = now;
       away.value = !now;
+      if (hasMore.current && window.scrollY < NEAR_TOP) older();
     };
     // The keyboard opening shrinks the view: stay at the end if we were.
     const onResize = () => atEnd.current && scrollToEnd();
-    const onVisible = () => visible() && atEnd.current && app.markSeen();
+    // Coming back into view isn't enough (it can be someone else's doing);
+    // the first touch after it marks what's in view. Clicks count too: a
+    // screen reader or switch control may send only those.
+    const onTouch = (e: Event) => e.isTrusted && app.attend() && visible() && atEnd.current && app.markSeen();
+    const touches = ['pointerdown', 'keydown', 'wheel', 'click'] as const;
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onResize);
-    document.addEventListener('visibilitychange', onVisible);
+    for (const type of touches) window.addEventListener(type, onTouch, { capture: true, passive: true });
     return () => {
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);
-      document.removeEventListener('visibilitychange', onVisible);
+      for (const type of touches) window.removeEventListener(type, onTouch, { capture: true });
     };
   }, []);
 
   useLayoutEffect(() => {
+    const first = messages[0]?.id ?? null;
     const last = messages[messages.length - 1]?.id ?? null;
     const before = shown.current;
-    shown.current = { conv: id, last };
+    shown.current = { conv: id, first, last };
     if (before?.conv !== id) {
       // Just opened: start at the newest message.
+      anchor.current = null;
       scrollToEnd();
       atEnd.current = true;
       away.value = false;
       fresh.value = 0;
       return;
+    }
+    if (first !== before.first && anchor.current !== null) {
+      // Older ones came in above: what was in view stays put.
+      window.scrollTo({ top: document.documentElement.scrollHeight - anchor.current });
+      anchor.current = null;
     }
     if (last === before.last) return;
     const added = messages.slice(messages.findIndex((m) => m.id === before.last) + 1);
@@ -424,14 +552,14 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
     }
   }, [id, messages]);
 
-  return { away: away.value, fresh: fresh.value, toEnd: () => scrollToEnd('smooth') };
+  return { away: away.value, fresh: fresh.value, toEnd: () => scrollToEnd('smooth'), older };
 }
 
 function Conversation({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'conversation' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const confirmingBlock = useSignal(false);
   useBackCloses(confirmingBlock.value, () => (confirmingBlock.value = false));
-  const scroll = useChatScroll(app, screen.id, screen.messages);
+  const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
   const sending = app.preparing.value.filter((p) => p.conv === screen.id).length;
   useEffect(() => {
     if (sending > 0) window.scrollTo({ top: document.documentElement.scrollHeight });
@@ -444,18 +572,32 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const menu = useSignal<MessageView | null>(null);
   useBackCloses(!!menu.value, () => (menu.value = null));
   const highlight = useSignal<string | null>(null);
-  const byId = new Map(screen.messages.map((m) => [m.id, m]));
+  const byId = new Map([...screen.quoted, ...screen.messages].map((m) => [m.id, m]));
   useEffect(() => {
     replying.value = null;
     menu.value = null;
   }, [screen.id]);
+  // A quote's message older than those shown: loaded, then jumped to.
+  const jumping = useRef<string | null>(null);
   const jumpTo = (id: string) => {
     const el = document.getElementById(`m-${id}`);
-    if (!el) return;
+    if (!el) {
+      if (!screen.more) return;
+      jumping.current = id;
+      void app.loadOlder(id);
+      return;
+    }
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     highlight.value = id;
     setTimeout(() => highlight.value === id && (highlight.value = null), 1500);
   };
+  useLayoutEffect(() => {
+    const id = jumping.current;
+    if (id && document.getElementById(`m-${id}`)) {
+      jumping.current = null;
+      jumpTo(id);
+    }
+  }, [screen.messages]);
   const time = new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' });
   useEffect(() => {
     const timer = setTimeout(loadStickerArt, 300);
@@ -471,7 +613,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           </bdi>
         </span>
         <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
-        {screen.blocked ? null : confirmingBlock.value ? (
+        {screen.blocked || screen.readOnly ? null : confirmingBlock.value ? (
           <div class="row">
             <p class="warning">{tr(screen.role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender')}</p>
             <Button kind="danger" disabled={screen.busy} onClick={app.block}>
@@ -493,6 +635,13 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         )}
       </header>
       <ol class="messages">
+        {screen.more && (
+          <li class="earlier">
+            <button type="button" class="link-button muted-link" onClick={scroll.older}>
+              {tr('earlierMessages')}
+            </button>
+          </li>
+        )}
         {screen.messages.map((m) => (
           <Bubble
             key={m.id}
@@ -503,7 +652,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             language={language}
             time={time}
             highlighted={highlight.value === m.id}
-            canReply={!screen.blocked && !screen.ended}
+            canReply={!screen.blocked && !screen.ended && !screen.readOnly}
             canReact={canReact(screen, m)}
             onReact={(e) => void app.react(m.id, e)}
             onDoubleTap={() => {
@@ -558,11 +707,13 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         <MessageMenu
           message={menu.value}
           language={language}
-          canReply={!screen.blocked && !screen.ended}
+          canReply={!screen.blocked && !screen.ended && !screen.readOnly}
           canReact={canReact(screen, menu.value)}
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
-          canEdit={canEdit(screen, menu.value)}
+          canEdit={canEdit(screen, menu.value, app.messageNow())}
+          canRetry={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value)}
+          onRetry={(m) => void app.resendMedia(m.id)}
           onEdit={(m) => {
             replying.value = null;
             editing.value = m;
@@ -590,7 +741,9 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             {scroll.fresh > 0 && <span class="badge">{t(language, 'unreadCount', { count: scroll.fresh })}</span>}
           </button>
         )}
-        {screen.blocked ? (
+        {screen.readOnly ? (
+          <p class="notice">{tr('readOnlyConversation')}</p>
+        ) : screen.blocked ? (
           <>
             <p class="notice">{tr('blockedConversation')}</p>
             {screen.error && (
@@ -930,6 +1083,37 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
   );
 }
 
+/** Asks, in Telegram's own popup, before pausing or resuming uploads or downloads for everyone. */
+async function confirmSwitch(app: AppState, language: Language, which: 'uploads' | 'downloads', paused: boolean): Promise<void> {
+  const message = paused
+    ? which === 'uploads'
+      ? 'confirmPauseUploads'
+      : 'confirmPauseDownloads'
+    : which === 'uploads'
+      ? 'confirmResumeUploads'
+      : 'confirmResumeDownloads';
+  const choice = await app.popup({
+    message: t(language, message),
+    buttons: [
+      paused ? { id: 'switch', type: 'destructive', text: t(language, 'pause') } : { id: 'switch', type: 'default', text: t(language, 'resume') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'switch') await app.setSwitch(which, paused);
+}
+
+/** Deleting from this device only wipes everything here at once: asked once more, in a popup. */
+async function confirmDeleteHereOnly(app: AppState, language: Language): Promise<void> {
+  const choice = await app.popup({
+    message: t(language, 'deleteHereOnlyConfirm'),
+    buttons: [
+      { id: 'delete', type: 'destructive', text: t(language, 'deleteHereOnly') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'delete') await app.deleteHereOnly();
+}
+
 /** Asks, in Telegram's own popup, before swapping the link for a new one. */
 async function confirmReplace(app: AppState, language: Language): Promise<void> {
   const choice = await app.popup({
@@ -1118,7 +1302,7 @@ function ChatRow({
             </bdi>
           </span>
           <span class="muted chat-time">
-            {c.last?.out && <Ticks status={c.last.status} language={language} />}
+            {c.last?.out && c.last.status && <Ticks status={c.last.status} language={language} />}
             {relativeTime(language, new Date(c.lastAt))}
           </span>
         </span>
@@ -1987,7 +2171,7 @@ function AttachDialog({
 }
 
 /** A message in a line: its text, with "📷 Photo", "📹 Video", "📎 name" and so on before a caption, or "😉 Sticker". For chat previews, quotes and the reply bar. */
-function contentLine(language: Language, { text, media, sticker }: { text: string; media?: { t: string; n?: string } | undefined; sticker?: Sticker | undefined }): string {
+function contentLine(language: Language, { text, media, sticker }: { text: string; media?: { t: string; n?: string; m?: string } | undefined; sticker?: Sticker | undefined }): string {
   if (sticker) return `${findSticker(sticker.id)?.e ?? sticker.e ?? ''} ${t(language, 'sticker')}`.trim();
   if (!media) return text;
   const label = {
@@ -2054,24 +2238,33 @@ function useMediaUrl(app: AppState, m: MessageView) {
   const url = useSignal<string | null>(null);
   useEffect(() => {
     let alive = true;
-    if (m.file === 'local') void app.mediaUrl(m.id, m.media!.m).then((u) => alive && (url.value = u));
+    if (m.file === 'local') void app.mediaUrl(m, m.media!.m).then((u) => alive && (url.value = u));
     return () => {
       alive = false;
     };
-  }, [m.id, m.file]);
+  }, [m.conv, m.id, m.file]);
   return url;
 }
 
-/** Whether an attachment waits for a tap to download: one received, or one cleared from this device. */
-const fetchable = (m: MessageView) => (m.file === 'remote' && !m.out) || m.file === 'cleared';
+/**
+ * Whether an attachment waits for a tap to download: one received, one
+ * cleared from this device, or one that was broken (a tap tries again).
+ */
+const fetchable = (app: AppState, m: MessageView) => !app.readOnly.value && ((m.file === 'remote' && !m.out) || m.file === 'cleared' || m.file === 'broken');
+
+/** "No longer available" or "Couldn't be opened", for an attachment that's gone or broken. */
+function fileNote(language: Language, m: MessageView): string | null {
+  return m.file === 'gone' ? t(language, 'mediaGone') : m.file === 'broken' ? t(language, 'mediaBroken') : null;
+}
 
 /** The tiny preview carried in the message, as an image URL. */
 function tinyPreview(p: string | undefined): string | null {
   return p ? `data:image/jpeg;base64,${p.replace(/-/g, '+').replace(/_/g, '/')}` : null;
 }
 
-/** Progress, a download button, or "no longer available", over a photo or video. */
+/** Progress, a download button, and "no longer available" or "couldn't be opened", over a photo or video. */
 function MediaState({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
+  const note = progress === undefined && fileNote(language, m);
   return (
     <>
       {progress !== undefined && (
@@ -2079,28 +2272,36 @@ function MediaState({ app, message: m, language, progress }: { app: AppState; me
           <Ring fraction={progress} />
         </span>
       )}
-      {fetchable(m) && progress === undefined && (
-        <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
+      {fetchable(app, m) && progress === undefined && (
+        <button type="button" class="media-progress" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m)}>
           ↓
         </button>
       )}
-      {m.file === 'gone' && <span class="media-gone">{t(language, 'mediaGone')}</span>}
+      {note && <span class="media-gone">{note}</span>}
     </>
   );
 }
 
-/** A photo or GIF: the tiny preview until it's here, then the image (a GIF plays); tap for full screen. */
+/** A photo or GIF: the tiny preview and its size until it's here, then the image (a GIF plays); tap for full screen. */
 function PhotoView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const url = useMediaUrl(app, m);
   const open = useSignal(false);
-  const { w = 4, h = 3, p } = m.media!;
+  const { w = 4, h = 3, p, s } = m.media!;
   const gif = m.media!.t === 'gif';
   const tiny = tinyPreview(p);
   const alt = t(language, gif ? 'gif' : 'photo');
+  // Its size, until it's here: one over the automatic limit waits for a tap.
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   return (
     <div class="photo" style={{ aspectRatio: `${w} / ${h}` }}>
       {url.value ? <img src={url.value} alt={alt} onClick={() => (open.value = true)} /> : tiny && <img class="tiny" src={tiny} alt="" />}
-      {gif && <span class="media-badge">{t(language, 'gif')}</span>}
+      {(gif || size) && (
+        <span class="media-badge">
+          {gif && t(language, 'gif')}
+          {gif && size && ' · '}
+          {size}
+        </span>
+      )}
       <MediaState app={app} message={m} language={language} progress={progress} />
       {open.value && url.value && (
         <Viewer language={language} onClose={() => (open.value = false)} onSave={() => void save(app, m, language)}>
@@ -2121,7 +2322,7 @@ function VideoView({ app, message: m, language, progress }: { app: AppState; mes
   const { w = 16, h = 9, p, l, s } = m.media!;
   const tiny = tinyPreview(p);
   const length = l !== undefined ? formatLength(language, l) : null;
-  const size = fetchable(m) ? formatSize(language, s) : null;
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   return (
     <div class="photo" style={{ aspectRatio: `${w} / ${h}` }}>
       {tiny && <img class="tiny" src={tiny} alt="" />}
@@ -2234,9 +2435,9 @@ function PlayButton({ app, message: m, language, progress, playing, onPlay }: { 
       </span>
     );
   }
-  if (fetchable(m)) {
+  if (fetchable(app, m)) {
     return (
-      <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m.id)}>
+      <button type="button" class="play" aria-label={t(language, 'download')} onClick={() => void app.fetchMedia(m)}>
         ↓
       </button>
     );
@@ -2283,7 +2484,7 @@ function VoiceView({ app, message: m, language, progress }: { app: AppState; mes
         </div>
         <span class="media-meta">
           <bdi dir="ltr">{formatLength(language, Math.round(shown))}</bdi>
-          {m.file === 'gone' && <span>{t(language, 'mediaGone')}</span>}
+          {fileNote(language, m) && <span>{fileNote(language, m)}</span>}
           {player.failed && <span>{t(language, 'audioUnplayable')}</span>}
           {url.value && !player.failed && (
             <button type="button" class="rate" aria-label={t(language, 'playbackSpeed')} onPointerDown={keepPress} onClick={player.nextRate}>
@@ -2331,7 +2532,7 @@ function AudioView({ app, message: m, language, progress }: { app: AppState; mes
           ) : (
             <>
               {total && <bdi dir="ltr">{total}</bdi>}
-              <span>{m.file === 'gone' ? t(language, 'mediaGone') : formatSize(language, s)}</span>
+              <span>{fileNote(language, m) ?? formatSize(language, s)}</span>
             </>
           )}
           {player.failed && <span>{t(language, 'audioUnplayable')}</span>}
@@ -2502,17 +2703,17 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
   const busy = progress !== undefined;
   const onClick = () => {
     if (busy) return;
-    if (fetchable(m)) void app.fetchMedia(m.id);
+    if (fetchable(app, m)) void app.fetchMedia(m);
     else if (m.file === 'local') void save(app, m, language);
   };
   return (
     <button type="button" class="file" onClick={onClick} disabled={m.file === 'gone'}>
-      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(m) ? '↓' : extension(media.n) || '📄'}</span>
+      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(app, m) ? '↓' : extension(media.n) || '📄'}</span>
       <span class="file-info">
         <span class="file-name" dir="auto">
           {media.n ?? t(language, 'file')}
         </span>
-        <span class="file-size">{m.file === 'gone' ? t(language, 'mediaGone') : formatSize(language, media.s)}</span>
+        <span class="file-size">{fileNote(language, m) ?? formatSize(language, media.s)}</span>
       </span>
     </button>
   );
@@ -2717,7 +2918,7 @@ function Bubble({
           ) : (
             <Quote name={tr('deletedMessage')} text="" />
           ))}
-        {m.media && <Attachment app={app} message={m} language={language} progress={app.transfers.value[m.id]} />}
+        {m.media && <Attachment app={app} message={m} language={language} progress={app.transfers.value[messageKey(m)]} />}
         {m.sticker && <StickerView sticker={m.sticker} language={language} />}
         {m.text && (
           <span class="text" dir="auto">
@@ -2747,12 +2948,17 @@ const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥
 
 /** Whether one can react to a message: in an open conversation, and not to one of ours still on its way. */
 function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
-  return !screen.blocked && !screen.ended && !(m.out && (m.status === 'sending' || m.status === 'failed'));
+  return !screen.blocked && !screen.ended && !screen.readOnly && !(m.out && (m.status === 'sending' || m.status === 'failed'));
 }
 
-/** Whether one of ours can be edited: sent, in an open conversation, with text or a caption to edit (not a sticker, voice or video message). */
-function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
-  if (!canReact(screen, m) || !m.out || m.sticker || Date.now() - m.at > EDIT_WINDOW_MS) return false;
+/**
+ * Whether one of ours can be edited: sent, in an open conversation, with
+ * text or a caption to edit (not a sticker, voice or video message), and
+ * not more than a day ago, as the engine counts it (now: the clock messages
+ * are dated by).
+ */
+function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView, now: number): boolean {
+  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.at, now)) return false;
   return m.text !== '' || (!!m.media && !['voice', 'round'].includes(shownAs(m.media)));
 }
 
@@ -2797,6 +3003,8 @@ function MessageMenu({
   peer,
   canDeleteForBoth,
   canEdit,
+  canRetry,
+  onRetry,
   onEdit,
   onClose,
   onReact,
@@ -2812,6 +3020,9 @@ function MessageMenu({
   /** One of ours, sent, in an open conversation: it can be deleted on their side too. */
   canDeleteForBoth: boolean;
   canEdit: boolean;
+  /** One of our attachments that wasn't sent (never uploaded): it can be sent again. */
+  canRetry: boolean;
+  onRetry: (m: MessageView) => void;
   onEdit: (m: MessageView) => void;
   onClose: () => void;
   onReact: (m: MessageView, emoji: string) => void;
@@ -2872,8 +3083,13 @@ function MessageMenu({
                 </button>
               </div>
             )}
+            {canRetry && (
+              <button type="button" class="menu-item" ref={first} onClick={act(() => onRetry(message))}>
+                {tr('tryAgain')}
+              </button>
+            )}
             {canReply && (
-              <button type="button" class="menu-item" ref={first} onClick={act(() => onReply(message))}>
+              <button type="button" class="menu-item" {...(canRetry ? {} : { ref: first })} onClick={act(() => onReply(message))}>
                 {tr('reply')}
               </button>
             )}
@@ -2881,7 +3097,7 @@ function MessageMenu({
               <button
                 type="button"
                 class="menu-item"
-                {...(canReply ? {} : { ref: first })}
+                {...(canReply || canRetry ? {} : { ref: first })}
                 onClick={act(() => void navigator.clipboard?.writeText(message.text).catch(() => {}))}
               >
                 {tr('copy')}
@@ -2892,7 +3108,7 @@ function MessageMenu({
                 {tr('edit')}
               </button>
             )}
-            <button type="button" class="menu-item danger" {...(!canReply && !message.text ? { ref: first } : {})} onClick={() => (confirming.value = true)}>
+            <button type="button" class="menu-item danger" {...(!canReply && !canRetry && !message.text ? { ref: first } : {})} onClick={() => (confirming.value = true)}>
               {tr(canDeleteForBoth ? 'delete' : 'deleteForMe')}
             </button>
           </>
@@ -2992,7 +3208,7 @@ function Invitations({ app, language, screen }: { app: AppState; language: Langu
 
 function Admin({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'admin' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
-  const { levels, busy, notice } = screen;
+  const { levels, switches, busy, notice } = screen;
   const level = useSignal('1');
   const allowance = useSignal('');
   const link = useSignal('');
@@ -3035,6 +3251,34 @@ function Admin({ app, language, screen }: { app: AppState; language: Language; s
           {tr('save')}
         </Button>
       </div>
+      <h2>{tr('adminSwitches')}</h2>
+      <p class="muted">{tr('adminSwitchesHelp')}</p>
+      {switches ? (
+        <div class="card">
+          <div class="row spread">
+            <span>{tr(switches.uploadsPaused ? 'uploadsStopped' : 'uploadsOn')}</span>
+            <Button
+              kind={switches.uploadsPaused ? 'primary' : 'danger'}
+              disabled={busy}
+              onClick={() => void confirmSwitch(app, language, 'uploads', !switches.uploadsPaused)}
+            >
+              {tr(switches.uploadsPaused ? 'resume' : 'pause')}
+            </Button>
+          </div>
+          <div class="row spread">
+            <span>{tr(switches.downloadsPaused ? 'downloadsStopped' : 'downloadsOn')}</span>
+            <Button
+              kind={switches.downloadsPaused ? 'primary' : 'danger'}
+              disabled={busy}
+              onClick={() => void confirmSwitch(app, language, 'downloads', !switches.downloadsPaused)}
+            >
+              {tr(switches.downloadsPaused ? 'resume' : 'pause')}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <p class="notice">{tr('switchesUnknown')}</p>
+      )}
       <h2>{tr('adminGrant')}</h2>
       <div class="card">
         <label class="field">
@@ -3149,6 +3393,39 @@ function ConfirmReplace({ app, language, busy }: { app: AppState; language: Lang
         {t(language, 'replaceConfirm')}
       </Button>
       <Button kind="secondary" disabled={busy} onClick={app.cancelReplace}>
+        {t(language, 'cancel')}
+      </Button>
+    </Page>
+  );
+}
+
+/**
+ * Setting up again while signed out: it deletes everything on this device,
+ * so a typed phrase first. The server's answer alone never leads here.
+ */
+function ConfirmReset({ app, language }: { app: AppState; language: Language }) {
+  const typed = useSignal('');
+  const phrase = t(language, 'resetPhrase');
+  const ok = confirmationMatches(typed.value, phrase);
+  return (
+    <Page title={t(language, 'resetTitle')} body={t(language, 'resetBody')}>
+      <p class="warning">{t(language, 'resetWarning')}</p>
+      <label class="field">
+        <span>{t(language, 'replaceType', { phrase: '⁨' + phrase + '⁩' })}</span>
+        <input
+          type="text"
+          dir="auto"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck={false}
+          value={typed.value}
+          onInput={(e) => (typed.value = e.currentTarget.value)}
+        />
+      </label>
+      <Button kind="danger" disabled={!ok} onClick={app.confirmReset}>
+        {t(language, 'resetConfirm')}
+      </Button>
+      <Button kind="secondary" onClick={app.cancelReset}>
         {t(language, 'cancel')}
       </Button>
     </Page>

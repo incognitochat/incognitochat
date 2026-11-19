@@ -1,7 +1,9 @@
 # WebSocket API, used only for pushes from the server to open apps. Every
 # action goes through the HTTPS API, so a dropped socket loses nothing. The
-# ws function authenticates each connection on $connect; no access or
-# execution logs are kept (they would record IP addresses and connection IDs).
+# ws function authenticates each connection on $connect, and is the only
+# one that posts to connections (after each send, which api hands it
+# without waiting); no access or execution logs are kept (they would record
+# IP addresses and connection IDs).
 resource "aws_apigatewayv2_api" "ws" {
   name                       = "${local.prefix}-ws"
   description                = "Incognito Chat pushes (${var.environment})"
@@ -17,9 +19,12 @@ resource "aws_apigatewayv2_integration" "ws" {
 }
 
 # $default answers the app's heartbeat, so open sockets aren't closed as idle
-# (API Gateway closes them after 10 minutes without traffic).
+# (API Gateway closes them after 10 minutes without traffic). There is no
+# $disconnect route: a closed socket's record goes when a push finds it gone,
+# when a connect needs its place, when a connect or push finds it expired,
+# or with the account, so closing a socket costs nothing.
 resource "aws_apigatewayv2_route" "ws" {
-  for_each = toset(["$connect", "$disconnect", "$default"])
+  for_each = toset(["$connect", "$default"])
 
   api_id    = aws_apigatewayv2_api.ws.id
   route_key = each.key

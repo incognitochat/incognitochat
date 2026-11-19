@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
@@ -36,14 +37,15 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("delete: %v %v", done, err)
 	}
 
-	// Nothing of it is left: the table holds only the other account's items.
+	// Nothing of it is left: the table holds only the other account's items,
+	// and its link signing key's tombstone, which names nobody.
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range out.Items {
 		pk, _ := str(it, "pk")
-		if pk != accountPK(other.ID) && pk != "T#"+other.TelegramHash {
+		if pk != accountPK(other.ID) && pk != "T#"+other.TelegramHash && !tombstone(it) {
 			sk, _ := str(it, "sk")
 			t.Errorf("left behind: %s %s", pk, sk)
 		}
@@ -123,7 +125,9 @@ func TestDeleteInSteps(t *testing.T) {
 	for _, it := range out.Items {
 		pk, _ := str(it, "pk")
 		sk, _ := str(it, "sk")
-		t.Errorf("left behind: %s %s", pk, sk)
+		if !tombstone(it) {
+			t.Errorf("left behind: %s %s", pk, sk)
+		}
 	}
 	for _, id := range append(pool, l.Mailbox) {
 		if _, err := s.Mailbox(ctx, id); !errors.Is(err, ErrNotFound) {
@@ -136,7 +140,7 @@ func TestDeleteReplacedAccount(t *testing.T) {
 	s, _ := store(t)
 	ctx := context.Background()
 	first := registered(t, s)
-	old, _ := s.ByTelegram(ctx, first.TelegramHash)
+	old, _ := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
 	second := newAccount(t, first.TelegramHash)
 	if err := s.Replace(ctx, old, second, now); err != nil {
 		t.Fatal(err)
@@ -145,7 +149,56 @@ func TestDeleteReplacedAccount(t *testing.T) {
 	if _, err := s.Delete(ctx, first.ID, first.TelegramHash, 100); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete a replaced account: %v", err)
 	}
-	if got, err := s.ByTelegram(ctx, first.TelegramHash); err != nil || got.ID != second.ID {
+	if got, err := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID); err != nil || got.ID != second.ID {
 		t.Fatalf("successor = %+v, %v", got, err)
+	}
+}
+
+// conflictDB cancels the first transaction that deletes an account item, as
+// DynamoDB does when another write to it (a mailbox, a notice) is in flight.
+// DynamoDB Local runs transactions one at a time, so it can't race them.
+type conflictDB struct {
+	*dynamodb.Client
+	fired bool
+}
+
+func (c *conflictDB) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	if first := in.TransactItems[0].Delete; !c.fired && first != nil {
+		if sk, _ := str(first.Key, "sk"); sk == skAccount {
+			c.fired = true
+			reasons := make([]types.CancellationReason, len(in.TransactItems))
+			for i := range reasons {
+				reasons[i] = types.CancellationReason{Code: aws.String("None")}
+			}
+			reasons[0].Code = aws.String("TransactionConflict")
+			return nil, &types.TransactionCanceledException{Message: aws.String("conflict"), CancellationReasons: reasons}
+		}
+	}
+	return c.Client.TransactWriteItems(ctx, in, opts...)
+}
+
+func TestDeleteAfterAConflictIsNotDone(t *testing.T) {
+	plain, client := store(t)
+	ctx := context.Background()
+	n := registered(t, plain)
+	s := &Store{DB: &conflictDB{Client: client}, Table: plain.Table}
+
+	// The last step is cancelled by another write: not done, and not "gone".
+	done, err := s.Delete(ctx, n.ID, n.TelegramHash, 100)
+	if err != nil || done {
+		t.Fatalf("delete with a conflict: %v %v", done, err)
+	}
+	if _, err := s.Device(ctx, n.ID, n.DeviceID, now); err != nil {
+		t.Fatalf("the account went anyway: %v", err)
+	}
+	// Asking again finishes it.
+	if done, err := s.Delete(ctx, n.ID, n.TelegramHash, 100); err != nil || !done {
+		t.Fatalf("delete again: %v %v", done, err)
+	}
+	if _, err := s.Device(ctx, n.ID, n.DeviceID, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("device after delete: %v", err)
+	}
+	if _, err := s.AccountOf(ctx, n.TelegramHash); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("telegram item after delete: %v", err)
 	}
 }

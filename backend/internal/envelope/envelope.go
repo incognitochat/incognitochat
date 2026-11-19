@@ -28,6 +28,31 @@ var PaddedSizes = []int{512, 2048, 8192, 16384}
 // MaxLen is the largest valid envelope.
 var MaxLen = 2 + MaxWraps*WrapLen + nonceLen + PaddedSizes[len(PaddedSizes)-1] + tagLen
 
+// TokenBytes is how much envelope one send token pays for: an envelope
+// costs a token per started 2.5 KiB. Storing it costs the messages table a
+// write unit per started KiB, as much again to delete, and reading it a
+// read unit per 8 KiB, so a token buys at most three write units however
+// the envelope is made up. The app's envelopes (one wrap) cost:
+//
+//	inner padded to   envelope   write units   tokens
+//	512               663        1             1
+//	2048              2,199      3             1
+//	8192              8,343      9             4
+//	16384             16,535     17            7
+//
+// Every receipt, reaction, delete, key update and short edit is in the
+// first size, and so is a short text; the second holds texts up to about
+// 1,700 bytes (about 850 Persian letters) and every attachment, so all
+// these cost one token. Only longer texts cost more. The largest envelope
+// there can be (MaxLen, 19 write units) costs 8.
+const TokenBytes = 2560
+
+// TokensFor is how many send tokens an envelope of size bytes costs.
+func TokensFor(size int) int { return max((size+TokenBytes-1)/TokenBytes, 1) }
+
+// MaxTokens is what the largest envelope costs: no send needs more.
+var MaxTokens = TokensFor(MaxLen)
+
 // ErrInvalid is returned for an envelope that can't be valid.
 var ErrInvalid = errors.New("envelope: invalid")
 

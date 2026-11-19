@@ -31,8 +31,9 @@ flowchart LR
   app -- "HTTPS" --> api
   ws -- "sync hint" --> app
   app -- "upload, download" --> s3
-  api -- "push" --> ws
-  api -- "invoke" --> notify
+  api -- "each send,<br/>without waiting" --> ws
+  api -- "seal a chat ID" --> notify
+  ws -- "no app took it" --> notify
   api --- db
   api --- ssm
   tg -- "webhook" --> bot
@@ -68,17 +69,46 @@ flowchart LR
   on another device replaces the account, after a typed confirmation: the old
   account's links and mailboxes end at once, and the old device says so, and
   that it may mean tampering. A second device that finds an account elsewhere
-  says "your account is on another device" instead of offering setup.
-- **Deleting an account** (in the app, after a typed confirmation) removes
-  everything the server holds for it at once, keeping no marker, and then
-  everything on the device. Nobody is told; messages to its old link and
-  mailboxes go nowhere.
+  says "your account is on another device" instead of offering setup. The
+  one exception is an account being deleted (its own signed request started
+  that): it isn't in use, so setting up again replaces it without asking,
+  and its device is refused as after a deletion, not told it was replaced.
+- **Accounts end in a few writes, and are taken apart in steps.** Replacing
+  or deleting an account changes only its account item and its link (and,
+  for a replacement, its device list), however much it owns: a delivery
+  reads the owner's account item with its devices, in the one query it made
+  anyway, so every mailbox of an ended account stops at once, and so do its
+  invitation codes; nothing new joins it. The rest goes in steps of about
+  50 writes that read only what they delete, delete a shared item only if
+  the account owns it, and can be repeated or cut short safely; one step
+  at a time runs per account (a short lease on its item). The app asks for
+  them (a deletion's, or the new device's after a replacement) and carries
+  on at its next launch, so a big account never outlasts a request or takes
+  the table's write capacity, and is never left half deleted and in use.
+- **Nothing is deleted on the server's word.** A device the server says was
+  replaced, no longer accepts, or is being deleted (when this device didn't
+  start that), keeps its chats, readable (nothing can be sent), and asks
+  again at every launch and on Try again; if the server lets it in, it
+  carries on. Setting up again there, or finishing a deletion, deletes
+  everything on the device, so it takes a typed confirmation too.
+- **Deleting an account** (in the app, after a typed confirmation) ends it at
+  once and then removes everything the server holds for it, keeping no
+  marker, and then everything on the device; an app closed halfway carries
+  on at its next launch, for that account only. Nobody is told; messages to
+  its old link and mailboxes go nowhere.
 - **Several Telegram accounts in one Telegram app** share one storage area, so
   each gets its own local profile on the device, named after a hash of its
   Telegram user ID.
 - **Sessions:** the device signs a login with its device key and gets a
   15-minute token. Sensitive actions (links, invitations, admin) also carry a
-  fresh signature.
+  fresh signature. Both are timed by the server's clock: if the device's own
+  is off, the server says so with its time, and the app corrects for it and
+  asks again, without the user seeing an error. Only within two days, though:
+  further off, the app asks the user to set the device's date and time. Each
+  request reads the device and its account once, so a replaced or deleted
+  account is refused at once; logins and registrations check what they can
+  before reading anything, and registrations count every attempt that gets
+  past the signature checks, per Telegram user.
 
 ## Links
 
@@ -89,10 +119,17 @@ key (signed by it), and the link's intro mailbox.
 
 - Opening a link, the app fetches the bundle without logging in and checks
   the fingerprint and signatures before encrypting anything. A server that
-  swaps keys is caught.
+  swaps keys is caught. It does so for every link, your own and ones you
+  already write to included, so the server can't tell them apart.
+- A link opened from Telegram never acts by itself, since anyone can send
+  one. If you already write to that person, the app says so and opens the
+  chat only when you tap Open. An invitation link asks first and joins only
+  when you tap Join.
 - An account has one link at a time, and can replace it: the old link stops
   working at once, the new one keeps the same fingerprint, so blocks and labels
-  carry over.
+  carry over. The server gives a signing key to one account for good, to the
+  first that proves it holds it, so a sender's tag, made from the
+  fingerprint, differs between accounts' links.
 - While the service is invite-only, owning a link needs an invitation.
   Anyone with Telegram can set up an account to write to a link.
 
@@ -114,6 +151,17 @@ never who writes to it. Mailbox IDs only travel inside encrypted messages.
    deleting it takes no mailbox, so a flood of first messages can't use up
    the owner's.
 
+An envelope counts only through the mailbox it belongs to: one written for
+the link's key through the link's intro mailbox; one written for a
+conversation key through that conversation's own mailbox. The link's intro
+mailbox counts for the conversation too until 31 days after the sender first
+writes through the owner's mailbox, and so does a mailbox the conversation
+moved on from (a new one after unblocking, say), until 31 days after they
+first write through the new one. Anything else is dropped as if it couldn't
+be opened, so someone who knows a key can't leave envelopes in suspects'
+mailboxes and watch whose app answers. The server says which mailbox an
+envelope came through.
+
 Each side only ever sees the other as that conversation's key. Two people the
 same sender wrote to see unrelated keys and mailboxes, so they can't compare
 notes. If the owner also writes to the sender's own link, that's a separate
@@ -134,7 +182,12 @@ secret: one person keeps the same label through the same link.
 - **Padding:** inner messages are padded to a few fixed sizes.
 - **Replies, reactions, edits, "seen", deletes and blocks** are encrypted
   messages too. "Seen"
-  is sent the moment a message is read. A reaction is one emoji per side per
+  is sent the moment a message is read: in a chat opened with a tap in the
+  app, while it's in view. After the app was hidden or minimised, "seen"
+  waits for the next touch, since bringing it back can be someone else's
+  doing (a link). One receipt covers everything read, however much: it
+  names the newest 50 and says the earlier ones were read too. A reaction
+  is one emoji per side per
   message, from a quick row in the long-press menu or the full emoji picker;
   a double-tap reacts with ❤️, as in Telegram.
   Deleting one of your own messages deletes it on both sides by default (the
@@ -143,31 +196,83 @@ secret: one person keeps the same label through the same link.
   Your own messages' text and captions can be edited; they show as edited. Blocks are silent: the blocked side's sends
   still look accepted, and new conversations from the same person through the
   same link are dropped by their sender tag.
+- **Repeats and order:** envelopes arrive in any order, and the same one can
+  come more than once (an out-of-date inbox read, two copies of the app, a
+  server that delivers it again). Each conversation remembers, as keyed
+  hashes with only the day, which envelopes it took in and which messages
+  were deleted, for the 31 days an envelope can still be taken in, so
+  nothing that comes again or late undoes what came after it. Even without
+  that record each kind is harmless the second time: edits and reactions
+  keep the newest, receipts only mark. Only the newest envelope (by the
+  sender's clock) changes the key and mailbox used to write back. Deleting
+  a whole conversation for both sides takes only what was written before
+  it, comparing each side's messages with that side's own clock
+  ([protocol.md](protocol.md#inner-message), Replays and order).
 - **Key rotation:** conversation and link encryption keys are replaced every
   6 to 9 days, each on its own random schedule, and old private keys are
   deleted 35 days later.
+- **Link changes whose answer is lost:** a new link or link key is kept on
+  the device (sealed, indexed, and noted) before it's sent. Without an
+  answer, the app learns from the link's bundle whether the server made the
+  change, and takes that. The bundle read is eventually consistent, so "not
+  there" counts only 10 minutes after the change was last sent. A new
+  link's key is deleted when the server refuses the request, when that
+  time is up and the bundle still doesn't show it, when the ID turns out
+  to be someone else's, or when the key was never sealed (so the request
+  never went). A link key that wasn't taken is kept 35 days, like a
+  replaced one. When the user creates or replaces again meanwhile, the new
+  link is sent again with the same ID, which the server can't make twice
+  ([protocol.md](protocol.md#links), A lost answer).
 
 ## Sending, delivery and notices
 
-- **Send tokens:** every send spends one anonymous token, without logging in.
-  Tokens are RSA blind signatures (RFC 9474, in Privacy Pass's shape): the
-  app fetches a batch while logged in (at most 1,000 a day), and the server
-  can't link a spent token to the account it signed it for. The issuer's
-  public key is published in [`web/issuer-keys.json`](../web/issuer-keys.json),
-  and the app accepts no other, so the server can't tell users apart by key.
+- **Send tokens:** every send spends anonymous tokens, without logging in:
+  one per started 2.5 KiB of envelope, so one for anything but a long text
+  ([protocol.md](protocol.md#send-tokens-and-media-tokens)). The daily
+  budget then bounds what a person's sends cost the database (each token
+  buys at most three write units), not just how many there are. Tokens are
+  RSA blind signatures (RFC 9474, in Privacy Pass's shape): the app fetches
+  a batch while logged in (at most 1,000 a day), and the server can't link
+  a spent token to the account it signed it for. A token the server has
+  seen with one send is never used for another, even if the send failed,
+  so no token ties two sends together. The issuer's public key is
+  published in [`web/issuer-keys.json`](../web/issuer-keys.json), and the
+  app accepts no other, so the server can't tell users apart by key.
 - **Media tokens** pay for uploads the same way, one per started MiB, from a
   budget of their own (at most 500 a day, so 500 MiB), signed by a second
   issuer key.
 - **Caps:** at most 30 messages a minute to one mailbox, and 60 first messages
-  an hour through one link.
+  an hour through one link. Their counters, like every rate counter, are
+  named by a keyed hash of the mailbox (or link) and the minute (or hour),
+  so the database keeps no log of which mailboxes got messages when.
 - **Delivery:** the server stores each envelope for the mailbox owner's device
   until it confirms it, at most 30 days. Unknown, ended and blocked mailboxes
-  get the same answer, and nothing is stored.
+  go through the same steps, for an account that doesn't exist, and get the
+  same answer; nothing is stored. The device fetches a page at a
+  time, capped by size, and confirms by IDs the server signed for it, which
+  stay good for one to two hours. What its fetches read is limited per
+  minute and per person and day, and confirming messages that are already
+  gone per person and day, so no one account can use up the capacity
+  everyone shares.
 - **Push:** an open app keeps a WebSocket while it's visible. After a delivery,
-  the server sends it a content-free "sync" hint, and the app fetches.
-- **Notices:** if no app took the push, the bot sends a generic "New message"
-  in the user's language: no names, no counts, at most one every 3 minutes,
-  replacing the previous one. "Seen" receipts and reactions never trigger one.
+  `api` hands the send to the `ws` function and answers without waiting; `ws`
+  sends the app a content-free "sync" hint, and the app fetches. So a send
+  takes as long whether or not the recipient's app is open.
+- **Notices:** if no app took the push, `ws` asks `notify`, and the bot sends
+  a generic "New message" in the user's language: no names, no counts, at
+  most one every 3 minutes, replacing the previous one. "Seen" receipts and
+  reactions never trigger one. The new notice goes out first, and only then
+  is the previous one deleted (if it's under 48 hours old: Telegram lets
+  bots delete their messages no later) and the 3 minutes started; while it
+  is being sent, a short hold keeps a second delivery from sending another.
+  If it can't go out, the previous one stays: refused outright, the next
+  message can try; with no clear answer (a timeout), the hold runs out
+  first, as it may have gone out. When Telegram's flood control (about 30
+  messages a second per bot) asks for a wait of up to 3 seconds, `notify`
+  waits and tries once more; for a longer one it gives up, the account
+  waits as long as Telegram asked (at least a minute), and that function
+  instance tries no notices until then. There is no queue: under a
+  sustained flood, notices are dropped, not delayed.
 
 ## Attachments
 
@@ -178,14 +283,49 @@ part of its signature. The upload is paid with media tokens (one per started
 MiB, files up to 50 MB), not a login. The message carries the file's key;
 the server never sees a key, name or type.
 
+- **Cost guards.** S3 bills every request, and these go past the API. The
+  server accepts only the padded sizes the app makes (16 KiB at least). An
+  upload URL must start its upload within a minute and writes only once, so
+  it can't be replayed for long or overwrite an upload; the bucket refuses
+  any PUT that could overwrite, and any presigned request signed over two
+  minutes before. A failed upload is tried again (four tries in all, over
+  about 40 seconds) without new tokens: each try asks the server, with the
+  upload's delete secret, for a fresh URL, which it gives only while nothing
+  is stored, three times at most and only in the first three hours after
+  payment; once the upload is stored it says so. The app runs two uploads at
+  a time and asks for a URL only when one can start. Request metrics on the
+  bucket feed alarms on uploads, downloads and the data downloaded.
+- **Emergency switches.** If those costs run away, the operator can pause
+  uploads or downloads for everyone, with the AWS CLI or from the app's
+  admin screen, and no release. They are one settings item in the directory
+  table, which each `api` instance reads at most every 30 seconds (keeping
+  the last value if a read fails, and counting both as paused until its
+  first read). While paused, the API gives out no new upload or download
+  URLs, answering before any token is spent or download counted; messages
+  keep working. The app says attachments are paused,
+  keeps an unsent one to send again, and stops fetching by itself for two
+  minutes at a time ([deployment.md](deployment.md#emergency-switches)).
+- **Downloads.** A download URL also starts within a minute, and S3 answers
+  it uncompressed whatever the upload claimed. The app reads only the padded
+  size the message says and stops at once otherwise, so an upload can't
+  unpack into something huge on the recipient's device. S3 also answers it
+  with `Cache-Control: no-store`, and the app asks not to cache it either, so
+  the web view keeps no copy of the ciphertext in its cache. The app gives
+  up after 30 seconds without a byte. A download that doesn't match its
+  message (size or key), or that the bucket refuses (403 or 404), marks the
+  attachment broken: fetched again, with a fresh URL, only on a tap.
 - Photos are redrawn on the device (up to 1280 px), which drops their
   metadata; videos keep their pictures but lose location and time metadata;
   voice and video messages are recorded in the app and carry none. Files are
   sent untouched.
 - The recipient fetches the upload by its unguessable ID, decrypts it and
-  keeps it on the device, encrypted under the device's storage key. Photos,
-  voice and video messages and GIFs up to 10 MB download as soon as their
-  conversation is open (each kind can be turned off); the rest on a tap.
+  keeps it on the device, encrypted under the device's storage key. Photos
+  up to 5 MB, and voice and video messages and GIFs up to 10 MB (by the size
+  the message gives), download as soon as their conversation is open (each
+  kind can be turned off); the rest on a tap. Only JPEG, PNG, WebP and GIF
+  images show in the chat; any other "photo" (an SVG, say) is a file.
+- Deleting one of our messages while it's still sending (or its chat)
+  cancels it: it isn't sent, and an upload already made is deleted.
 - **Data and storage** shows the space attachments take, and clears them from
   the device after a month or a week, or on request, keeping their messages.
   A cleared attachment downloads again on a tap while its upload exists.
@@ -219,10 +359,28 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - **Storage:** IndexedDB only. Private keys are non-extractable WebCrypto keys
   where possible; keys that must stay copyable are sealed under a
   non-extractable vault key. History and attachments are encrypted under a
-  non-extractable storage key.
+  non-extractable storage key. Non-extractable only stops code from reading a
+  key out: the keys live in the web view's storage, next to the data, and on
+  Android, Windows and Linux the web view writes them to disk as they are. So
+  an image of the device's app storage clones the account. Deleting the
+  account or setting up again clears the storage, but some engines
+  (Chromium's) keep cleared data in their files until they compact them
+  ([data.md](data.md#on-the-device)).
 - **Several copies at once** (a reopened app, several windows) share storage,
   so they coordinate with Web Locks and announce changes over a
-  BroadcastChannel.
+  BroadcastChannel. A copy of an older version still running closes (and
+  reloads) when a newer one changes how storage is laid out.
+- **Floods.** Anyone with a link can write, so what one person sends can't
+  make the app slow or fill the device without bound. The chat list reads
+  one small sealed preview per chat, not its messages; a chat opens at its
+  newest 50 messages and loads older ones as it's scrolled up. Only a
+  message starts a chat: an edit, reaction or delete that overtakes it
+  waits in a small store of its own (31 days at most; edits and reactions
+  50 and 64 KB, deletes 50 and 32 KB apart from them), and a chat keeps at
+  most 20 edits (64 KB) for messages still on their way, chats not
+  answered 64 KB of them together. An empty chat through the link that was
+  never opened or answered goes 31 days after the last thing came for it.
+  How many messages one chat keeps isn't limited yet.
 - **Lockdown:** a strict Content Security Policy (only the app's own scripts;
   connections only to the API, the socket and the bucket), Trusted Types, one
   deterministic JavaScript file, and no code or settings loaded from the
@@ -234,23 +392,45 @@ The panel under the message box has emoji and stickers, as in Telegram.
 
 | Function | Entry | Can read |
 |---|---|---|
-| `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token |
-| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket |
-| `ws` | WebSocket connect and disconnect | the session key; socket records only |
-| `notify` | invoked by `api` | the bot token and the key that opens chat IDs |
+| `bot` | Telegram webhook (function URL, checked with a random webhook secret) | the bot token and the webhook secret |
+| `api` | all HTTPS routes (function URL, optionally behind CloudFront and a firewall; see [deployment.md](deployment.md#cloudfront-in-front-of-the-api)) | the session key, the Telegram-ID pepper, the send-token and media-token issuer keys; the tables; the bucket. Invokes `ws` (each send, without waiting) and `notify` (to seal a chat ID); posts to no socket |
+| `ws` | WebSocket connect (one record each, about 5 a minute per account; closing isn't routed); the push after each send, from `api` | the session key; socket records only. Posts hints to sockets; invokes `notify` (a notice, without waiting) when no open app took one |
+| `notify` | invoked by `ws` (a notice) and `api` (sealing a chat ID) | the bot token and the chat key, which seals and opens chat IDs; of the directory, only account partitions, for its reads of the notice fields (sealed chat ID, language, last notice, "notices off") and updates of the last two (IAM can't limit sort keys, so not only account items: see [security.md](security.md#other-limits), What `notify` can reach); its quiet periods. No listing, deleting or other table; no sockets or socket records |
 
 | Table | Holds | Expires |
 |---|---|---|
-| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations | mailboxes expire |
+| `directory` | accounts (keyed Telegram-ID hash, sealed chat ID, public keys, invitation level), links and bundles, mailbox owners, invitations; the operator's settings (allowance per invitation level, the emergency switches) | a replaced account's marker and device keys, after 90 days |
 | `messages` | one item per undelivered envelope: the device, the mailbox, the ciphertext. No sender, no account | 30 days |
-| `ephemeral` | socket connections, rate counters, login nonces, spent send and media tokens, upload records (size and the hash of a delete secret) | minutes to 30 days |
+| `ephemeral` | socket records, rate counters, notice quiet periods (each named by a keyed hash, not a mailbox, link or account ID), login nonces, spent send and media tokens, upload records (size, the hash of a delete secret, and how many fresh upload URLs it was given) | minutes to 30 days |
 
-- No precise timestamps: keys are random IDs, and times are rounded.
+- No precise timestamps: keys are random IDs or keyed hashes, and times are
+  rounded.
+- Nothing in the ephemeral table can be matched with the directory: rows
+  about a mailbox, link or account are named by a keyed hash, under a key
+  only the functions that use them hold (rate counters: `api`, from the
+  Telegram-ID pepper, a new name every window; socket records: `api` and
+  `ws`, derived from the session key; quiet periods: `notify`, derived from
+  the chat key).
 - Point-in-time recovery stays off, so deleted data can't be restored.
+- Limits: each table takes at most 400 read and 200 write units a second
+  in production (200 and 100 elsewhere) and refuses the rest, which caps
+  the bill (about $51 a day in production with all three at their caps).
+  In production a firewall in front of the API's CloudFront limits
+  requests per IP address: 2,000 in 5 minutes, and 500 on the routes that
+  need no login (logins, registrations, sends, and lookups of accounts,
+  links and attachments). Lookups of links and attachments by ID, which
+  anyone can make with random IDs, are also limited for everyone together
+  (12,000 a minute, at most half what a table can serve); logins and sends
+  never are, so a flood of lookups can't stop them. The API answers over
+  IPv4 only, since the firewall would count each IPv6 address on its own
+  ([deployment.md](deployment.md#the-firewall)).
 - Secrets live in SSM, written through Terraform's write-only arguments, so they
   never land in Terraform state. Each function's role reads only its own.
 - Logs: warnings and errors only, kept 7 days. IDs, IP addresses, user agents
-  and bodies are never logged, and there are no API access logs.
+  and bodies are never logged, and there are no API access logs. Each `api`
+  instance logs one line a minute of request counts by route, status and
+  error code, counts only, for the alarms
+  ([deployment.md](deployment.md#request-counts)).
 - Code signing: the functions run only code signed by CI's AWS Signer
   profile, and each deploy checks that the running code is the attested build
   ([verifying.md](verifying.md#the-backend)).

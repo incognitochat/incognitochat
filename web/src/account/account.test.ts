@@ -4,6 +4,7 @@ import { fromBase64Url, fromHex, toHex } from '../crypto/encoding';
 import { importSigningPublicKey } from '../crypto/keys';
 import { LABEL_REGISTER, LABEL_REQUEST, LABEL_SESSION, message, verify } from '../crypto/signing';
 import { ApiError, type Api } from '../net/api';
+import { createClock } from '../net/clock';
 import { getKeyPair, getMeta, getSealed, openDatabase, putMeta, putSealed } from '../storage/db';
 import { listConversations, putConversation } from '../messaging/store';
 import {
@@ -36,10 +37,21 @@ let n = 0;
 const fresh = () => openDatabase(`account-test-${n++}`);
 const NOW = 1_800_000_000;
 const ACCOUNT_ID = 'BBBBBBBBBBBBBBBBBBBBBB';
+/** A device whose clock agrees with the fake server's. */
+const atNow = () => createClock(() => NOW * 1000);
 
-/** A fake server that checks requests the way the backend does. */
-function fakeServer(options: { exists?: boolean; replaced?: boolean } = {}) {
+/** The issued time (Unix seconds) of an encoded device list. */
+function listIssued(list: Uint8Array): number {
+  const view = new DataView(list.buffer, list.byteOffset, list.byteLength);
+  // Label, then suite (1), sequence (8) and previous hash (32), each after a 4-byte length.
+  const offset = 2 + view.getUint16(0) + (4 + 1) + (4 + 8) + (4 + 32) + 4;
+  return Number(view.getBigUint64(offset));
+}
+
+/** A fake server that checks requests the way the backend does, by its clock (Unix seconds). */
+function fakeServer(options: { exists?: boolean; replaced?: boolean; refused?: boolean; now?: number } = {}) {
   const calls: { path: string; body: Record<string, unknown> }[] = [];
+  const serverNow = options.now ?? NOW;
   let deviceKey: Uint8Array<ArrayBuffer> | undefined;
   const api: Api = {
     request: (_method, path, init, check) => api.post(path, JSON.parse(init.body ?? '{}'), check),
@@ -47,6 +59,8 @@ function fakeServer(options: { exists?: boolean; replaced?: boolean } = {}) {
       const b = body as Record<string, string>;
       calls.push({ path, body: b });
       if (path === '/register') {
+        const issued = listIssued(fromBase64Url(b.deviceList!));
+        if (issued < serverNow - 2 * 3600 || issued > serverNow + 3600) throw new ApiError(401, 'clock_skew', serverNow);
         const ak = await importSigningPublicKey(fromBase64Url(b.accountKey!));
         const dk = await importSigningPublicKey(fromBase64Url(b.deviceKey!));
         const parts = await registerParts(b.initData!, fromBase64Url(b.accountKey!), b.device!, fromBase64Url(b.deviceKey!));
@@ -60,9 +74,12 @@ function fakeServer(options: { exists?: boolean; replaced?: boolean } = {}) {
         return check({ account: ACCOUNT_ID, token: 'v1.payload.mac', expires: NOW + 900 });
       }
       if (path === '/session') {
+        // Before anything about the device, as the backend does.
+        if (Math.abs(Number(b.timestamp) - serverNow) > 60) throw new ApiError(401, 'clock_skew', serverNow);
         const dk = await importSigningPublicKey(deviceKey!);
         const parts = loginParts(b.account!, b.device!, Number(b.timestamp), b.nonce!);
         if (!(await verify(dk, fromBase64Url(b.signature!), LABEL_SESSION, ...parts))) throw new ApiError(401, 'login_refused');
+        if (options.refused) throw new ApiError(401, 'login_refused');
         if (options.replaced) throw new ApiError(410, 'account_replaced');
         return check({ account: b.account, token: 'v1.payload.mac', expires: NOW + 900 });
       }
@@ -114,6 +131,7 @@ describe('setup', () => {
     await putSealed(db, 'link-signing', new Uint8Array([1, 2, 3]));
     await putConversation(db, {
       id: 'G'.repeat(22),
+      wire: 'I'.repeat(22),
       role: 'sender',
       link: { id: 'E'.repeat(11), fingerprint: 'F'.repeat(43) },
       label: 'x',
@@ -130,7 +148,10 @@ describe('setup', () => {
     await rememberLink(db, '1' + 'E'.repeat(11) + 'F'.repeat(43));
     await putMeta(db, META_START_OVER, true);
 
-    const code = await prepareSetup(db);
+    // Only when asked to start over (after the typed confirmation): the server saying so isn't enough.
+    await expect(prepareSetup(db)).rejects.toThrow();
+    expect(await listConversations(db)).toHaveLength(1);
+    const code = await prepareSetup(db, { restart: true });
     expect(await readAccount(db)).toMatchObject({ state: 'pending', fingerprint: code.slice(3) });
     expect(await listConversations(db)).toEqual([]);
     expect(await getMeta(db, 'mailbox-pool')).toBeUndefined();
@@ -158,14 +179,40 @@ describe('register', () => {
     const db = await fresh();
     const code = await prepareSetup(db);
     const { api, calls } = fakeServer();
-    const result = await register(db, api, { initData: 'signed-launch-data', startParam: code }, { replace: false, now: () => NOW });
+    const result = await register(db, api, { initData: 'signed-launch-data', startParam: code }, { replace: false, clock: atNow() });
     expect(result.account).toBe(ACCOUNT_ID);
     expect(calls[0]!.body.initData).toBe('signed-launch-data');
     expect(calls[0]!.body.replace).toBe(false);
     expect(await readAccount(db)).toMatchObject({ state: 'registered', accountId: ACCOUNT_ID });
 
-    await logIn(db, api, () => NOW);
+    await logIn(db, api, atNow());
     expect(calls[1]!.path).toBe('/session');
+  });
+
+  it('dates the device list by the server, if this device is hours off', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api, calls } = fakeServer();
+    // The clock reads the right local time in the wrong time zone: 3.5 hours off.
+    const clock = createClock(() => (NOW + 3.5 * 3600) * 1000);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock });
+    expect(calls.map((c) => c.path)).toEqual(['/register', '/register']);
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+    // Learnt for what follows: the login goes through at once.
+    await logIn(db, api, clock);
+    expect(calls.map((c) => c.path)).toEqual(['/register', '/register', '/session']);
+  });
+
+  it("doesn't sign by a server clock that's days away, and doesn't register", async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api, calls } = fakeServer();
+    const clock = createClock(() => (NOW + 3 * 86_400) * 1000);
+    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'clock_skew' });
+    expect(clock.tooFar(err)).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(await readAccount(db)).toMatchObject({ state: 'pending' });
   });
 
   it("refuses a launch that isn't for this setup, without calling the server", async () => {
@@ -184,28 +231,118 @@ describe('register', () => {
     const db = await fresh();
     const code = await prepareSetup(db);
     const { api } = fakeServer({ exists: true });
-    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false }).catch((e: unknown) => e);
+    const err = await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() }).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'account_exists' });
     expect(await readAccount(db)).toMatchObject({ state: 'pending' });
-    await register(db, api, { initData: 'd', startParam: code }, { replace: true });
+    await register(db, api, { initData: 'd', startParam: code }, { replace: true, clock: atNow() });
     expect(await readAccount(db)).toMatchObject({ state: 'registered' });
   });
 });
 
+describe('logging in', () => {
+  it("learns from the token the server's clock that messages are dated by, as registering does", async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api } = fakeServer();
+    // 40 seconds fast: logins still go through on the device's own time.
+    const clock = createClock(() => (NOW + 40) * 1000);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock });
+    expect(Math.abs(clock.messageNow() - NOW * 1000)).toBeLessThanOrEqual(1000);
+    const again = createClock(() => (NOW + 40) * 1000);
+    expect(again.messageNow()).toBe((NOW + 40) * 1000);
+    await logIn(db, api, again);
+    expect(Math.abs(again.messageNow() - NOW * 1000)).toBeLessThanOrEqual(1000);
+    expect(again.now()).toBe((NOW + 40) * 1000);
+  });
+
+  it('signs again by the server clock when this device is 5 minutes fast', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api, calls } = fakeServer();
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
+
+    const clock = createClock(() => (NOW + 300) * 1000);
+    await logIn(db, api, clock);
+    const logins = calls.filter((c) => c.path === '/session').map((c) => Number(c.body.timestamp));
+    expect(logins).toHaveLength(2);
+    expect(logins[0]).toBe(NOW + 300);
+    expect(Math.abs(logins[1]! - NOW)).toBeLessThanOrEqual(1);
+    expect(Math.abs(clock.offset() + 300_000)).toBeLessThanOrEqual(1000);
+    // A new nonce for the second try.
+    expect(calls.at(-1)!.body.nonce).not.toBe(calls.at(-2)!.body.nonce);
+  });
+
+  it('tries once only, so a server that keeps saying so is an error', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const { api } = fakeServer();
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
+    let tries = 0;
+    const lying: Api = {
+      ...api,
+      post: () => {
+        tries++;
+        return Promise.reject(new ApiError(401, 'clock_skew', NOW + 7200 * tries));
+      },
+    };
+    await expect(logIn(db, lying, atNow())).rejects.toMatchObject({ code: 'clock_skew' });
+    expect(tries).toBe(2);
+  });
+});
+
 describe('replaced accounts', () => {
-  it('records the replacement and sets up with new keys afterwards', async () => {
+  it('records the replacement, and sets up with new keys only when asked to start over', async () => {
     const db = await fresh();
     const code = await prepareSetup(db);
     const { api } = fakeServer({ replaced: true });
-    await register(db, api, { initData: 'd', startParam: code }, { replace: false });
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
 
-    const err = await logIn(db, api).catch((e: unknown) => e);
+    const err = await logIn(db, api, atNow()).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'account_replaced' });
     expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
 
-    const next = await prepareSetup(db);
+    await expect(prepareSetup(db)).rejects.toThrow();
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+    const next = await prepareSetup(db, { restart: true });
     expect(next).not.toBe(code);
     expect(await readAccount(db)).toMatchObject({ state: 'pending' });
+  });
+
+  it('asks again, and takes it back when the server lets the device in', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const server = { replaced: true };
+    const { api } = fakeServer(server);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'account_replaced' });
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+
+    server.replaced = false;
+    await logIn(db, api, atNow());
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
+  });
+
+  it('records a refused login, keeps a replacement over it, and clears both when let in', async () => {
+    const db = await fresh();
+    const code = await prepareSetup(db);
+    const server: { replaced?: boolean; refused?: boolean } = { refused: true };
+    const { api } = fakeServer(server);
+    await register(db, api, { initData: 'd', startParam: code }, { replace: false, clock: atNow() });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'login_refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'refused' });
+    // Setting up again over it still takes the typed confirmation (restart).
+    await expect(prepareSetup(db)).rejects.toThrow();
+
+    // Replaced: that's recorded; a later refusal (the server forgot the replacement) doesn't undo it.
+    Object.assign(server, { refused: false, replaced: true });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'account_replaced' });
+    Object.assign(server, { refused: true, replaced: false });
+    await expect(logIn(db, api, atNow())).rejects.toMatchObject({ code: 'login_refused' });
+    expect(await readAccount(db)).toMatchObject({ state: 'replaced' });
+
+    server.refused = false;
+    await logIn(db, api, atNow());
+    expect(await readAccount(db)).toMatchObject({ state: 'registered' });
   });
 });
 

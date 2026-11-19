@@ -1,15 +1,18 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readAccount } from '../account/account';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
-import { ApiError, type Api } from '../net/api';
+import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
-import { listConversations } from '../messaging/store';
+import { canResend } from '../messaging/engine';
+import { listConversations, listMessages, PAGE } from '../messaging/store';
+import { countTokens } from '../account/wallet';
+import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
-import { createApp, type Screen } from './app';
+import { createApp, MAX_SHOWN, type Screen } from './app';
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -36,7 +39,12 @@ async function backend() {
   const owners = new Map<string, string>(); // mailbox -> account
   const inboxes = new Map<string, { id: string; mailbox: string; envelope: string }[]>();
   const bundles = new Map<string, Record<string, unknown>>();
-  const state = { tokensLeft: Infinity };
+  // uploadsPaused: the operator has paused uploads; mediaSigned: media
+  // tokens signed; keyRetired: the issuer keys the apps' build names are
+  // replaced, and no longer held.
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false };
+  /** Requests to the media routes. */
+  const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
@@ -87,17 +95,28 @@ async function backend() {
         return check({ mailboxes: ids });
       }
       if (path === '/tokens' || path === '/tokens/media') {
+        // Signed with the key the request names, the only one held here
+        // until it is retired.
+        if (state.keyRetired || body.keyId !== toBase64Url(issuer.keyId)) throw new ApiError(409, 'unknown_issuer_key');
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
+        if (path === '/tokens/media') state.mediaSigned += blinded.length;
         return check({ signatures: blinded.map((b) => toBase64Url(i2osp(modPow(os2ip(fromBase64Url(b)), d, key.n), 256))) });
       }
       if (path === '/send') {
         if (auth) throw new Error('sends must not carry a login');
+        // The tokens of a retired key, told apart from bad ones.
+        if (state.keyRetired) throw new ApiError(401, 'unknown_issuer_key');
         sends.push(body);
         const owner = owners.get(body.mailbox as string);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: body.mailbox as string, envelope: body.envelope as string });
         return check({});
+      }
+      if (path.startsWith('/media')) {
+        mediaCalls.push(`${method} ${path}`);
+        if (state.uploadsPaused && method === 'POST' && path === '/media') throw new ApiError(503, 'uploads_paused');
+        throw new ApiError(404, 'not_found');
       }
       if (path === '/inbox') return check({ items: [...inboxes.get(account)!], more: false });
       if (path === '/ack') {
@@ -108,10 +127,25 @@ async function backend() {
       throw new ApiError(404, 'not_found');
     },
   };
-  return { api, issuer, state, noticeSetups, sends };
+  return { api, issuer, state, noticeSetups, sends, mediaCalls };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
+
+/** A Telegram bridge whose events a test plays with fire(). */
+function telegram() {
+  const handlers = new Map<string, Set<(data: unknown) => void>>();
+  const tg = {
+    transport: 'webview-proxy',
+    post: () => {},
+    on: (type: string, handler: (data: unknown) => void) => {
+      if (!handlers.has(type)) handlers.set(type, new Set());
+      handlers.get(type)!.add(handler);
+      return () => handlers.get(type)!.delete(handler);
+    },
+  } as unknown as Bridge;
+  return { bridge: tg, fire: (type: string, data: unknown) => handlers.get(type)?.forEach((h) => h(data)) };
+}
 
 function launchWith(startParam: string, allowsWrite = true): Launch {
   const initData = `auth_date=1&start_param=${startParam}&user=${encodeURIComponent(`{"id":1,"allows_write_to_pm":${allowsWrite}}`)}`;
@@ -119,9 +153,9 @@ function launchWith(startParam: string, allowsWrite = true): Launch {
 }
 
 /** Sets up an account (two launches) and returns the app of the registration launch. */
-async function person(b: Awaited<ReturnType<typeof backend>>, startParam = ''): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
+async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', tg: Bridge = bridge()): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
   const db = await openDatabase(`conv-test-${n++}`);
-  const deps = { config, api: b.api, db, bridge: bridge(), broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -139,6 +173,13 @@ async function person(b: Awaited<ReturnType<typeof backend>>, startParam = ''): 
 function screenOf<K extends Screen['kind']>(screen: Screen, kind: K): Extract<Screen, { kind: K }> {
   if (screen.kind !== kind) throw new Error(`expected ${kind}, got ${screen.kind}`);
   return screen as Extract<Screen, { kind: K }>;
+}
+
+/** The chat a link screen offers to open (a link of someone we already write to). */
+function existingChat(screen: Screen): string {
+  const link = screenOf(screen, 'link');
+  if (link.status !== 'existing') throw new Error(`expected existing, got ${link.status}`);
+  return link.chat;
 }
 
 describe('conversations in the app', () => {
@@ -199,9 +240,9 @@ describe('conversations in the app', () => {
       [false, 'hi! who is this?'],
     ]);
 
-    // Opening the link again continues the conversation instead of starting another.
+    // Opening the link again offers that conversation instead of starting another.
     const reopened = await sender.reopen(payload);
-    expect(screenOf(reopened.screen.value, 'conversation').id).toBe(conv.id);
+    expect(screenOf(reopened.screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv.id });
     expect(await listConversations(sender.db)).toHaveLength(1);
   });
 
@@ -326,7 +367,7 @@ describe('conversations in the app', () => {
     expect(screenOf(stranger.screen.value, 'link').status).toBe('not-found');
     // The sender, already answered, opens the new link: the same conversation.
     const conv = (await listConversations(sender.db))[0]!.id;
-    expect(screenOf((await sender.reopen(newPayload)).screen.value, 'conversation').id).toBe(conv);
+    expect(screenOf((await sender.reopen(newPayload)).screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv });
   });
 
   it("updates the writer's open chat when the other side reads it", async () => {
@@ -344,6 +385,179 @@ describe('conversations in the app', () => {
     for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
     await sender.sync();
     expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.status)).toEqual(['seen']);
+  });
+
+  it('never opens a chat or sends "seen" because a link was opened, only on a tap', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.home();
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    // The owner answers while the sender is away (their "seen" for hello goes first)...
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+    await owner.sendMessage('is it you?');
+    const before = quiet();
+    const replies = async () => {
+      await owner.sync();
+      return screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status);
+    };
+
+    // ...then sends a suspect their link. Opening it only says there's a chat already.
+    const launched = await sender.reopen(payload);
+    expect(screenOf(launched.screen.value, 'link')).toMatchObject({ status: 'existing', chat: conv });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(before);
+    expect(await replies()).toEqual(['sent']);
+
+    // A tap on Open opens it, and "seen" goes out as for any chat opened in the app.
+    await launched.openConversation(existingChat(launched.screen.value));
+    expect(screenOf(launched.screen.value, 'conversation').id).toBe(conv);
+    await settle(before + 1);
+    expect(await replies()).toEqual(['seen']);
+  });
+
+  it('after the app was minimised, sends "seen" only once it is touched again', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+
+    // The sender's chat is open in a minimised app; the reply shows once it's back.
+    tg.fire('visibility_changed', { is_visible: false });
+    await owner.sendMessage('still there?');
+    tg.fire('visibility_changed', { is_visible: true });
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'still there?']);
+    // In view, but coming back may not have been their doing: nothing yet.
+    sender.markSeen();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(1);
+
+    // Their first touch marks it seen.
+    expect(sender.attend()).toBe(true);
+    expect(sender.attend()).toBe(false);
+    sender.markSeen();
+    await settle(2);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status)).toEqual(['seen']);
+  });
+
+  it("doesn't count a tap when the app was hidden before the chat finished opening", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.home();
+    const quiet = () => b.sends.filter((s) => s.quiet === true).length;
+    const settle = async (count: number) => {
+      for (let i = 0; i < 100 && quiet() < count; i++) await new Promise((r) => setTimeout(r, 50));
+    };
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    await settle(1);
+    await owner.sendMessage('one');
+    await sender.sync();
+
+    // A tap opens the chat, and the app is hidden while it opens.
+    const opening = sender.openConversation(conv);
+    tg.fire('visibility_changed', { is_visible: false });
+    await opening;
+    tg.fire('visibility_changed', { is_visible: true });
+    await owner.sendMessage('two');
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'one', 'two']);
+    sender.markSeen();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(quiet()).toBe(1);
+
+    // Only a touch after it marks both seen.
+    expect(sender.attend()).toBe(true);
+    sender.markSeen();
+    await settle(2);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.filter((m) => m.out).map((m) => m.status)).toEqual(['seen', 'seen']);
+  });
+
+  it("doesn't count an Unblock tap when the app was hidden while it was sent", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const tg = telegram();
+    const sender = await person(b, payload, tg.bridge);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    await sender.block();
+    await sender.openConversation(conv);
+    expect(screenOf(sender.screen.value, 'conversation').blocked).toBe(true);
+
+    const unblocking = sender.unblock(conv);
+    tg.fire('visibility_changed', { is_visible: false });
+    await unblocking;
+    tg.fire('visibility_changed', { is_visible: true });
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ id: conv, blocked: false });
+    // Not in use until touched: "seen" waits.
+    expect(sender.attend()).toBe(true);
+  });
+
+  it('checks the link on every launch, also of a chat that exists already', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const other = await person(b);
+    await other.createLink();
+    const otherPayload = new URL(screenOf(other.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    const fetched: string[] = [];
+    let swap = false;
+    const request = b.api.request.bind(b.api);
+    b.api.request = ((method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/')) {
+        fetched.push(path);
+        if (swap) path = `/links/${parsePayload(otherPayload)!.id}`;
+      }
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const linkPath = `/links/${parsePayload(payload)!.id}`;
+
+    // The server sees the same request as for a new link: from the writer...
+    expect(existingChat((await sender.reopen(payload)).screen.value)).toBe(conv);
+    expect(fetched).toEqual([linkPath]);
+    // ...and from the link's owner.
+    expect(screenOf((await owner.reopen(payload)).screen.value, 'link').status).toBe('own');
+    expect(fetched).toEqual([linkPath, linkPath]);
+    // Keys swapped by the server are caught here too.
+    swap = true;
+    expect(screenOf((await sender.reopen(payload)).screen.value, 'link').status).toBe('mismatch');
   });
 
   it('lists blocked conversations, opens them read-only, and unblocks from either place', async () => {
@@ -391,6 +605,112 @@ describe('conversations in the app', () => {
     expect(screenOf(owner.screen.value, 'home').blockedCount).toBe(0);
   });
 
+  it('opens a long chat at its newest messages, loads older ones on the way up, quotes ones not shown, and reads it all in one receipt', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    // Each in a millisecond of its own, so their order is theirs.
+    const tick = () => new Promise((r) => setTimeout(r, 2));
+    await sender.writeToLink('first question');
+    for (let i = 0; i < 60; i++) {
+      await tick();
+      await sender.sendMessage(`m${i}`);
+    }
+    await owner.showTab('chats');
+    await owner.sync();
+    const home = screenOf(owner.screen.value, 'home');
+    expect(home.conversations[0]).toMatchObject({ unread: 61, last: { text: 'm59', out: false } });
+    const sends = b.sends.length;
+    await owner.openConversation(home.conversations[0]!.id);
+    let chat = screenOf(owner.screen.value, 'conversation');
+    expect(chat.messages.map((m) => m.text)).toEqual(Array.from({ length: PAGE }, (_, i) => `m${i + 10}`));
+    expect(chat.more).toBe(true);
+    // All 61 read, in one receipt, in the background.
+    for (let i = 0; i < 100 && b.sends.length < sends + 1; i++) await new Promise((r) => setTimeout(r, 50));
+    expect(b.sends.slice(sends).map((s) => s.quiet)).toEqual([true]);
+    await sender.sync();
+    expect(screenOf(sender.screen.value, 'conversation').messages.filter((m) => m.status !== 'seen')).toEqual([]);
+
+    // Answering the first question, which isn't shown: its quote is.
+    const question = (await listMessages(owner.db, chat.id))[0]!;
+    await tick();
+    await owner.sendMessage('the answer', question.id);
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect(chat.messages.at(-1)).toMatchObject({ text: 'the answer', replyTo: question.id });
+    expect(chat.quoted.map((m) => m.text)).toEqual(['first question']);
+    // The list shows it last, from its preview.
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations[0]!.last).toMatchObject({ text: 'the answer', out: true });
+
+    // Scrolling up: PAGE more (here, the rest).
+    await owner.openConversation(chat.id);
+    expect(await owner.loadOlder()).toBe(true);
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect([chat.messages[0]!.text, chat.messages.length, chat.more, chat.quoted]).toEqual(['first question', 62, false, []]);
+    expect(await owner.loadOlder()).toBe(false);
+    // Jumping to a quote not shown: all from it on.
+    await owner.openConversation(chat.id);
+    expect(screenOf(owner.screen.value, 'conversation').messages).toHaveLength(PAGE);
+    expect(await owner.loadOlder(question.id)).toBe(true);
+    expect(screenOf(owner.screen.value, 'conversation').messages[0]!.id).toBe(question.id);
+    // New ones as they come are added, and what's shown stays.
+    await tick();
+    await sender.sendMessage('one more');
+    await owner.sync();
+    chat = screenOf(owner.screen.value, 'conversation');
+    expect([chat.messages[0]!.id, chat.messages.at(-1)!.text]).toEqual([question.id, 'one more']);
+  });
+
+  it('keeps a failed message of ours shown through a flood, reading only what it shows', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    // Ours fails: the server can't be reached.
+    const post = b.api.post;
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') throw new NetworkError('unreachable');
+      return post(path, body, check);
+    };
+    await owner.sendMessage('mine');
+    b.api.post = post;
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => [m.text, m.status])).toEqual([
+      ['hello', 'read'],
+      ['mine', 'failed'],
+    ]);
+    // A flood comes in while it's open.
+    for (let i = 0; i < MAX_SHOWN + 10; i++) await sender.sendMessage(`flood ${i}`);
+    await owner.sync();
+    // Message texts opened while it's drawn again for one more (message IDs are what they're bound to).
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt');
+    const opened = () =>
+      decrypt.mock.calls.filter(([algorithm]) => {
+        const aad = (algorithm as AesGcmParams).additionalData;
+        return aad !== undefined && /^[A-Za-z0-9_-]{22}$/.test(new TextDecoder().decode(aad as Uint8Array));
+      }).length;
+    for (let round = 0; round < 3; round++) {
+      await sender.sendMessage(`one more ${round}`);
+      // Only the owner's app counts (the sender's redraws its own chat).
+      decrypt.mockClear();
+      await owner.sync();
+      const chat = screenOf(owner.screen.value, 'conversation');
+      // The newest 200, and ours failed first, however old: no more each time.
+      expect(chat.messages).toHaveLength(MAX_SHOWN + 1);
+      expect([chat.messages[0]!.text, chat.messages[0]!.status, chat.messages.at(-1)!.text, chat.more]).toEqual(['mine', 'failed', `one more ${round}`, true]);
+      // What it shows, and the new one as it's taken in: not the flood behind them.
+      expect(opened()).toBeLessThanOrEqual(MAX_SHOWN + 1 + 5);
+    }
+    decrypt.mockRestore();
+  }, 60_000);
+
   it('sends replies that quote a message, and deletes one message on this device', async () => {
     const b = await backend();
     const owner = await person(b);
@@ -418,6 +738,43 @@ describe('conversations in the app', () => {
     // The other side still has it.
     await sender.sync();
     expect(screenOf(sender.screen.value, 'conversation').messages).toHaveLength(2);
+    // Delivered again (a server that kept it), it stays deleted here.
+    await b.api.post('/send', b.sends[0]!, (v) => v);
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['the answer']);
+  });
+
+  it('says when attachments are paused, keeps the message and its tokens, and offers to send it again', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    b.state.uploadsPaused = true;
+    const voice = { file: crypto.getRandomValues(new Uint8Array(3000)), type: 'audio/mp4', length: 2, waveform: new Uint8Array([1, 2, 3]) };
+    await sender.sendVoice(voice);
+
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('media-paused');
+    const failed = conv.messages.at(-1)!;
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'voice' } });
+    expect(canResend(failed)).toBe(true);
+    expect(sender.preparing.value).toEqual([]);
+    // Asked once, and every media token fetched is still in the wallet.
+    expect(b.mediaCalls).toEqual(['POST /media']);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
+
+    // Try again while still paused: the same notice, one more request, nothing lost.
+    await sender.resendMedia(failed.id);
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: 'media-paused' });
+    expect((await listMessages(sender.db, conv.id)).at(-1)).toMatchObject({ id: failed.id, status: 'failed' });
+    expect(b.mediaCalls).toEqual(['POST /media', 'POST /media']);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
+    // Text messages go on.
+    await sender.sendMessage('still here');
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: null });
+    expect(screenOf(sender.screen.value, 'conversation').messages.at(-1)).toMatchObject({ text: 'still here', status: 'sent' });
   });
 
   it("says when the day's tokens are used up", async () => {
@@ -432,5 +789,42 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it("says to reopen the app once the server no longer holds its build's issuer key", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    b.state.keyRetired = true;
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('outdated');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it('says so too when the tokens it holds are of the retired key, at once', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    expect(screenOf(sender.screen.value, 'conversation').messages.at(-1)).toMatchObject({ text: 'hello', status: 'sent' });
+    // Retired while the app is open: the server refuses its tokens as
+    // those of a key it no longer holds, and nothing else is tried.
+    b.state.keyRetired = true;
+    let tries = 0;
+    const post = b.api.post;
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') tries++;
+      return post(path, body, check);
+    };
+    await sender.sendMessage('again');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('outdated');
+    expect(conv.messages.at(-1)).toMatchObject({ text: 'again', status: 'failed' });
+    expect(tries).toBe(1);
   });
 });

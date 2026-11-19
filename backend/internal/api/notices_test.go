@@ -15,9 +15,7 @@ import (
 )
 
 type memNotices struct {
-	mu       sync.Mutex
-	notified []string
-	fail     error
+	fail error
 }
 
 func (m *memNotices) Seal(_ context.Context, chat int64) ([]byte, error) {
@@ -25,13 +23,6 @@ func (m *memNotices) Seal(_ context.Context, chat int64) ([]byte, error) {
 		return nil, m.fail
 	}
 	return []byte("sealed:" + strconv.FormatInt(chat, 10)), nil
-}
-
-func (m *memNotices) Notify(_ context.Context, account string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.notified = append(m.notified, account)
-	return m.fail
 }
 
 // launchIn signs launch data with a language, as Telegram does.
@@ -112,91 +103,73 @@ func TestSetNoticesRejects(t *testing.T) {
 	wantError(t, status, out, http.StatusNotFound, "not_found")
 }
 
-func TestSendNotifies(t *testing.T) {
-	h := newHarness(t)
-	h.server.InviteOnly = false
-	n := &memNotices{}
-	h.server.Notices = n
-	owner := h.account(t, userID)
-	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
-	mailbox := out["mailboxes"].([]any)[0].(string)
-	env := clientEnvelope(t)
-	send := func(mb string, quiet bool) {
-		t.Helper()
-		if status, out := h.post(t, "/send", map[string]any{"mailbox": mb, "envelope": env, "token": mintToken(t, h.now), "quiet": quiet}); status != http.StatusOK {
-			t.Fatalf("send: %d %v", status, out)
-		}
-	}
-
-	send(mailbox, false)
-	if len(n.notified) != 1 || !ids.Valid(n.notified[0]) {
-		t.Fatalf("notified = %v", n.notified)
-	}
-	// Seen receipts are quiet.
-	send(mailbox, true)
-	if len(n.notified) != 1 {
-		t.Fatalf("a quiet send notified: %v", n.notified)
-	}
-	// Unknown mailboxes make the same request, for nobody.
-	send(ids.New(), false)
-	if len(n.notified) != 2 || n.notified[1] != "" {
-		t.Fatalf("unknown mailbox: %v", n.notified)
-	}
-	// A failing notice doesn't fail the send, and is logged without details.
-	n.fail = errors.New("boom 7357135791")
-	send(mailbox, false)
-	if !strings.Contains(h.logs.String(), "notice request failed") || strings.Contains(h.logs.String(), "7357135791") {
-		t.Fatalf("logs: %s", h.logs.String())
-	}
+type pushed struct {
+	account string
+	quiet   bool
 }
 
 type memPush struct {
-	online map[string]bool
-	pushed []string
+	mu     sync.Mutex
+	pushed []pushed
+	fail   error
 }
 
-func (m *memPush) Push(_ context.Context, account string) (bool, error) {
-	m.pushed = append(m.pushed, account)
-	return m.online[account], nil
+func (m *memPush) Push(_ context.Context, account string, quiet bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pushed = append(m.pushed, pushed{account, quiet})
+	return m.fail
 }
 
-func TestSendPushesToOpenApps(t *testing.T) {
+func (m *memPush) last() pushed {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pushed[len(m.pushed)-1]
+}
+
+// Every send is handed to ws once, quiet or not, for the owner, and for
+// nobody when the mailbox doesn't exist: ws pushes, and asks for the notice.
+func TestSendHandsPushToWs(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false
-	n := &memNotices{}
-	p := &memPush{online: map[string]bool{}}
-	h.server.Notices, h.server.Push = n, p
+	p := &memPush{}
+	h.server.Push = p
 	owner := h.account(t, userID)
-	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	_, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false)
 	mailbox := out["mailboxes"].([]any)[0].(string)
+	discarded := out["mailboxes"].([]any)[1].(string)
+	h.as(t, owner, http.MethodPost, "/mailboxes/"+discarded+"/discard", nil, false)
 	env := clientEnvelope(t)
-	send := func(mb string, quiet bool) {
+	send := func(mb string, quiet bool) pushed {
 		t.Helper()
+		before := len(p.pushed)
 		if status, out := h.post(t, "/send", map[string]any{"mailbox": mb, "envelope": env, "token": mintToken(t, h.now), "quiet": quiet}); status != http.StatusOK {
 			t.Fatalf("send: %d %v", status, out)
 		}
+		if len(p.pushed) != before+1 {
+			t.Fatalf("handed to ws %d times", len(p.pushed)-before)
+		}
+		return p.last()
 	}
 
-	// The app is closed: pushed to nobody, so a notice.
+	if got := send(mailbox, false); !ids.Valid(got.account) || got.quiet {
+		t.Fatalf("a message: %+v", got)
+	}
+	account := p.last().account
+	// Receipts are pushed too, and marked quiet: ws never asks for a notice.
+	if got := send(mailbox, true); got != (pushed{account, true}) {
+		t.Fatalf("a receipt: %+v", got)
+	}
+	// Mailboxes that don't exist, or ended, make the same request, for nobody.
+	for _, mb := range []string{ids.New(), discarded} {
+		if got := send(mb, false); got != (pushed{}) {
+			t.Fatalf("no mailbox: %+v", got)
+		}
+	}
+	// A failing request doesn't fail the send, and is logged without details.
+	p.fail = errors.New("boom " + account)
 	send(mailbox, false)
-	account := p.pushed[0]
-	if !ids.Valid(account) || len(n.notified) != 1 || n.notified[0] != account {
-		t.Fatalf("closed app: pushed %v, notified %v", p.pushed, n.notified)
-	}
-	// Open: the push is enough; the notice request is the no-op one.
-	p.online[account] = true
-	send(mailbox, false)
-	if p.pushed[1] != account || n.notified[1] != "" {
-		t.Fatalf("open app: pushed %v, notified %v", p.pushed, n.notified)
-	}
-	// Receipts are pushed, never noticed.
-	send(mailbox, true)
-	if p.pushed[2] != account || len(n.notified) != 2 {
-		t.Fatalf("receipt: pushed %v, notified %v", p.pushed, n.notified)
-	}
-	// Unknown mailboxes make the same requests, for nobody.
-	send(ids.New(), false)
-	if p.pushed[3] != "" || n.notified[2] != "" {
-		t.Fatalf("unknown mailbox: pushed %v, notified %v", p.pushed, n.notified)
+	if !strings.Contains(h.logs.String(), "push request failed") || strings.Contains(h.logs.String(), account) {
+		t.Fatalf("logs: %s", h.logs.String())
 	}
 }

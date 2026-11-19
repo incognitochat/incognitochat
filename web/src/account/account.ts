@@ -9,14 +9,19 @@
 // Keys on this device:
 // - account key: copyable (sealed in the vault for linking devices later),
 //   used through a non-extractable working copy;
-// - device signing key: non-extractable, never leaves this device;
+// - device signing key: non-extractable, never sent anywhere;
 // - vault key: non-extractable, seals the copyable keys.
+// Non-extractable only stops code from reading a key out. All of them are
+// kept in the app's storage, which the web view writes to disk (on Android,
+// Windows and Linux with the keys as they are): a copy of that storage
+// clones the account (docs/data.md).
 
 import { randomBytes, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, fingerprint, generateCopyableSigningKey, generateSigningKey, SIGNING_IMPORT } from '../crypto/keys';
 import { LABEL_REGISTER, LABEL_REQUEST, LABEL_SESSION, sign, signEncoded } from '../crypto/signing';
 import { generateVaultKey, seal, unseal } from '../crypto/vault';
-import { ApiError, checkTokenResponse, type Api, type TokenResponse } from '../net/api';
+import { ApiError, checkTokenResponse, NetworkError, type Api, type TokenResponse } from '../net/api';
+import { createClock, withServerTime, type Clock } from '../net/clock';
 import { encodeDeviceList, firstList } from '../protocol/device-list';
 import { deleteMeta, getKeyPair, getMeta, putKey, putMeta, putSealed, type Database, type StoredKeyPair, wipe } from '../storage/db';
 import { withLock } from '../sync/locks';
@@ -32,6 +37,8 @@ const KEY_ACCOUNT = 'account-key';
 const KEY_DEVICE = 'device-signing-key';
 const KEY_VAULT = 'vault-key';
 const LOCK = 'account';
+/** How long logIn waits before trying a login refused right after a setup again. */
+export const REFUSED_RETRY_MS = 1_000;
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
@@ -40,9 +47,26 @@ const LINK_PARAM = /^[A-Za-z0-9_-]{1,64}$/;
 export type AccountRecord =
   /** Keys exist; waiting for the registration launch. */
   | { state: 'pending'; deviceId: string; fingerprint: string }
-  | { state: 'registered'; deviceId: string; fingerprint: string; accountId: string }
-  /** The account was replaced by a registration elsewhere. */
-  | { state: 'replaced'; deviceId: string; fingerprint: string; accountId: string };
+  /**
+   * deleting (only with refused): the server said the account is being
+   * deleted, by a deletion this device didn't start (it deletes nothing
+   * here). Stored as refused plus this flag, so an older build of the app
+   * still open in another window reads a refused account, never "no
+   * account" (whose setup wouldn't ask for the typed confirmation).
+   */
+  | { state: SetUpState; deviceId: string; fingerprint: string; accountId: string; deleting?: true };
+
+/**
+ * A device with an account: registered; or, as the server last said (never
+ * checked, so asked again at every launch), replaced by a registration
+ * elsewhere, or refused (its login was refused: the device or account is
+ * gone; or, with deleting, the account is being deleted). A replaced account
+ * stays replaced when the server later only refuses it, so its warning isn't
+ * lost when the server forgets the replacement.
+ */
+export type SetUpState = 'registered' | 'replaced' | 'refused';
+
+const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused'] satisfies SetUpState[];
 
 /** This launch's start parameter isn't the registration this device prepared. */
 export class SetupMismatch extends Error {
@@ -56,25 +80,37 @@ export class SetupMismatch extends Error {
 export async function readAccount(db: Database): Promise<AccountRecord | undefined> {
   const value = await getMeta<Record<string, unknown>>(db, META_ACCOUNT);
   if (!value || typeof value !== 'object') return undefined;
-  const { state, deviceId, fingerprint: fp, accountId } = value;
+  const { state, deviceId, fingerprint: fp, accountId, deleting } = value;
   if (typeof deviceId !== 'string' || !ID.test(deviceId) || typeof fp !== 'string' || !FINGERPRINT.test(fp)) return undefined;
   if (state === 'pending') return { state, deviceId, fingerprint: fp };
-  if ((state === 'registered' || state === 'replaced') && typeof accountId === 'string' && ID.test(accountId)) {
-    return { state, deviceId, fingerprint: fp, accountId };
+  if (typeof accountId !== 'string' || !ID.test(accountId)) return undefined;
+  // Written as a state of its own by builds before refused + deleting:
+  // still an account, so setting up again asks for the typed confirmation.
+  if (state === 'deleting') return { state: 'refused', deviceId, fingerprint: fp, accountId, deleting: true };
+  if (SET_UP.includes(state)) {
+    return { state: state as SetUpState, deviceId, fingerprint: fp, accountId, ...(state === 'refused' && deleting === true ? { deleting } : {}) };
   }
   return undefined;
+}
+
+/** Whether the record is of a device with an account (registered, replaced or refused, which includes being deleted elsewhere). */
+export function isSetUp(record: AccountRecord | undefined): record is Extract<AccountRecord, { accountId: string }> {
+  return record !== undefined && record.state !== 'pending';
 }
 
 /**
  * Prepares a setup and returns the start parameter the registration launch
  * must carry. A pending setup is reused, so asking again reopens with the same
- * code; otherwise (no account, a replaced one, or with restart a registered
- * one the server no longer knows) new keys are created.
+ * code; otherwise new keys are created, and everything of an account before
+ * is deleted from this device. Over a device with an account (registered,
+ * replaced or refused, which includes being deleted elsewhere) that takes
+ * restart, which only the typed confirmation gives: no answer from the
+ * server alone ever deletes a device's chats.
  */
 export function prepareSetup(db: Database, options: { restart?: boolean } = {}): Promise<string> {
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
-    if (current?.state === 'registered' && !options.restart) throw new Error('already registered');
+    if (isSetUp(current) && !options.restart) throw new Error('already set up');
     if (current?.state === 'pending' && (await getKeyPair(db, KEY_ACCOUNT)) && (await getKeyPair(db, KEY_DEVICE))) {
       return REGISTRATION_PREFIX + current.fingerprint;
     }
@@ -113,15 +149,17 @@ export function isRegistrationLaunch(startParam: string): boolean {
 /**
  * Registers the pending setup with this launch's initData. Throws
  * SetupMismatch if the launch isn't for this setup, and ApiError for the
- * server's refusals (account_exists means replace is needed).
+ * server's refusals (account_exists means replace is needed). The device
+ * list is dated by the server's clock (clock): one this device's clock put
+ * too far off is signed again with the server's.
  */
 export function register(
   db: Database,
   api: Api,
   launch: { initData: string; startParam: string },
-  options: { replace: boolean; now?: () => number },
+  options: { replace: boolean; clock?: Clock },
 ): Promise<TokenResponse> {
-  const now = options.now ?? (() => Math.floor(Date.now() / 1000));
+  const clock = options.clock ?? createClock();
   return withLock(LOCK, async () => {
     const current = await readAccount(db);
     if (current?.state !== 'pending' || launch.startParam !== REGISTRATION_PREFIX + current.fingerprint) {
@@ -132,20 +170,25 @@ export function register(
     const accountKey = await exportPublicKey(account.publicKey);
     const deviceKey = await exportPublicKey(device.publicKey);
 
-    const list = encodeDeviceList(firstList(current.deviceId, deviceKey, now()));
     const parts = await registerParts(launch.initData, accountKey, current.deviceId, deviceKey);
-    const body = {
-      initData: launch.initData,
-      accountKey: toBase64Url(accountKey),
-      device: current.deviceId,
-      deviceKey: toBase64Url(deviceKey),
-      deviceList: toBase64Url(list),
-      deviceListSig: toBase64Url(await signEncoded(account.privateKey, list)),
-      accountSig: toBase64Url(await sign(account.privateKey, LABEL_REGISTER, ...parts)),
-      deviceSig: toBase64Url(await sign(device.privateKey, LABEL_REGISTER, ...parts)),
-      replace: options.replace,
-    };
-    const result = await api.post('/register', body, checkTokenResponse);
+    const accountSig = toBase64Url(await sign(account.privateKey, LABEL_REGISTER, ...parts));
+    const deviceSig = toBase64Url(await sign(device.privateKey, LABEL_REGISTER, ...parts));
+    const result = await withServerTime(clock, async () => {
+      const list = encodeDeviceList(firstList(current.deviceId, deviceKey, clock.seconds()));
+      const body = {
+        initData: launch.initData,
+        accountKey: toBase64Url(accountKey),
+        device: current.deviceId,
+        deviceKey: toBase64Url(deviceKey),
+        deviceList: toBase64Url(list),
+        deviceListSig: toBase64Url(await signEncoded(account.privateKey, list)),
+        accountSig,
+        deviceSig,
+        replace: options.replace,
+      };
+      // The token also tells the server's clock (clock.timed).
+      return clock.timed(() => api.post('/register', body, checkTokenResponse));
+    });
     await putMeta(db, META_ACCOUNT, {
       state: 'registered',
       deviceId: current.deviceId,
@@ -173,34 +216,95 @@ export function loginParts(accountId: string, deviceId: string, timestamp: numbe
 }
 
 /**
- * Logs this device in. If the account was replaced, records that and
- * rethrows the ApiError (code account_replaced).
+ * Logs this device in, timed by the server's clock (clock): if this device's
+ * own is off, the server says so and the login is signed again once. A
+ * replaced account or a refused login is recorded (see SetUpState) and the
+ * ApiError rethrown. An account recorded as either is asked about again: the
+ * server's word isn't checked, so a login it accepts takes it back.
+ *
+ * justSetUp: the account was set up a moment ago, here or in another copy of
+ * the app. The server's login read can miss a device for about a second, so
+ * a refusal then is tried once more, a second later, before it's recorded.
+ *
+ * expected, if set, is the only account it may log in: if the device holds
+ * another now, it throws AccountChanged.
  */
-export async function logIn(db: Database, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<TokenResponse> {
+export async function logIn(db: Database, api: Api, clock: Clock = createClock(), justSetUp = false, expected?: string): Promise<TokenResponse> {
   const current = await readAccount(db);
-  if (current?.state !== 'registered') throw new Error('not registered');
+  if (!isSetUp(current)) throw new Error('not registered');
+  if (expected !== undefined && current.accountId !== expected) throw new AccountChanged();
   const device = await requirePair(db, KEY_DEVICE);
-  const timestamp = now();
-  const nonce = toBase64Url(randomBytes(16));
-  const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
+  const attempt = () =>
+    withServerTime(clock, async () => {
+      const timestamp = clock.seconds();
+      const nonce = toBase64Url(randomBytes(16));
+      const signature = await sign(device.privateKey, LABEL_SESSION, ...loginParts(current.accountId, current.deviceId, timestamp, nonce));
+      // The token also tells the server's clock (clock.timed).
+      return clock.timed(() =>
+        api.post('/session', { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) }, checkTokenResponse),
+      );
+    });
   try {
-    return await api.post(
-      '/session',
-      { account: current.accountId, device: current.deviceId, timestamp, nonce, signature: toBase64Url(signature) },
-      checkTokenResponse,
-    );
+    let result: TokenResponse;
+    try {
+      result = await attempt();
+    } catch (err) {
+      if (!(justSetUp && err instanceof ApiError && err.code === 'login_refused')) throw err;
+      await new Promise((resolve) => setTimeout(resolve, REFUSED_RETRY_MS));
+      result = await attempt();
+    }
+    // A token for another account than the one that logged in is an answer
+    // that can't be right: taken like one that never came (NetworkError),
+    // which the session waits out before logging in again.
+    if (result.account !== current.accountId) throw new NetworkError('login answered for another account');
+    await setState(db, current.accountId, ['replaced', 'refused'], 'registered');
+    return result;
   } catch (err) {
-    if (err instanceof ApiError && err.code === 'account_replaced') await markReplaced(db, current.accountId);
+    await recordRefusal(db, current.accountId, err);
     throw err;
   }
 }
 
-/** Records that the server says this account was replaced. */
+/** The device holds another account now than the one a request was for (another copy of the app set one up, say). */
+export class AccountChanged extends Error {
+  constructor() {
+    super("the device's account changed");
+    this.name = 'AccountChanged';
+  }
+}
+
+/**
+ * Records what the server said about this account, if err says it was
+ * replaced or refused (it's asked again at the next launch).
+ */
+export async function recordRefusal(db: Database, accountId: string, err: unknown): Promise<void> {
+  if (!(err instanceof ApiError)) return;
+  if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused'], 'replaced');
+  // A replaced account stays replaced: its warning matters more. A refused
+  // one said to be being deleted is now only refused.
+  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'refused'], 'refused');
+}
+
+/** Records that the server says this account was replaced (it's asked again at the next launch). */
 export function markReplaced(db: Database, accountId: string): Promise<void> {
+  return setState(db, accountId, ['registered', 'refused'], 'replaced');
+}
+
+/**
+ * Records that the server says this account is being deleted, when this
+ * device didn't start that (it's asked again at the next launch; nothing is
+ * deleted for it): refused, with deleting.
+ */
+export function markDeletingElsewhere(db: Database, accountId: string): Promise<void> {
+  return setState(db, accountId, ['registered', 'refused'], 'refused', true);
+}
+
+function setState(db: Database, accountId: string, from: SetUpState[], to: SetUpState, deleting = false): Promise<void> {
   return withLock(LOCK, async () => {
     const latest = await readAccount(db);
-    if (latest?.state === 'registered' && latest.accountId === accountId) {
-      await putMeta(db, META_ACCOUNT, { ...latest, state: 'replaced' } satisfies AccountRecord);
+    if (isSetUp(latest) && from.includes(latest.state) && latest.accountId === accountId) {
+      const { deleting: _, ...rest } = latest;
+      await putMeta(db, META_ACCOUNT, { ...rest, state: to, ...(deleting ? { deleting: true as const } : {}) } satisfies AccountRecord);
     }
   });
 }
@@ -221,7 +325,10 @@ export async function requestParts(
 
 /**
  * The X-Device-Signature header for a sensitive request: this device signs
- * the method, path, time, a fresh nonce and the exact body text.
+ * the method, path, time, a fresh nonce and the exact body text. Like a
+ * login, also for an account the server last called replaced or refused, so
+ * the server's answer says which. expected, if set, is the only account it
+ * may sign for: if the device holds another now, it throws AccountChanged.
  */
 export async function signRequest(
   db: Database,
@@ -229,9 +336,11 @@ export async function signRequest(
   path: string,
   body: string,
   now: () => number = () => Math.floor(Date.now() / 1000),
+  expected?: string,
 ): Promise<string> {
   const current = await readAccount(db);
-  if (current?.state !== 'registered') throw new Error('not registered');
+  if (!isSetUp(current)) throw new Error('not registered');
+  if (expected !== undefined && current.accountId !== expected) throw new AccountChanged();
   const device = await requirePair(db, KEY_DEVICE);
   const timestamp = now();
   const nonce = toBase64Url(randomBytes(16));

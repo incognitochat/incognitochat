@@ -5,7 +5,7 @@
 // copies when needed.
 
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
-import { AGREEMENT_IMPORT, exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
+import { AGREEMENT_IMPORT, exportPublicKey, generateAgreementKey, generateCopyableAgreementKey, importAgreementPublicKey } from '../crypto/keys';
 import { seal, unseal } from '../crypto/vault';
 import { keyId, type RecipientKey } from '../protocol/envelope';
 import type { ConversationKey } from '../protocol/message';
@@ -20,9 +20,14 @@ export interface KeyEntry {
   name: string;
   /** Public key, base64url. */
   pub: string;
-  /** For a link encryption key: the link's ID and fingerprint. */
-  link?: { id: string; fingerprint: string };
-  /** For a conversation key: the conversation's ID. */
+  /**
+   * For a link encryption key: the link's ID, fingerprint and intro mailbox,
+   * the only one an envelope written for this key counts through. The
+   * mailbox stays with the key after the link is replaced; it's missing for
+   * keys indexed before it was kept, until the link's bundle says.
+   */
+  link?: { id: string; fingerprint: string; mailbox?: string };
+  /** For a conversation key: the conversation's ID on this device (not the one on the wire). */
   conv?: string;
   /**
    * Unix ms after which the private key is deleted (design D11): set once
@@ -49,11 +54,12 @@ export function indexKey(db: Database, pub: Uint8Array, entry: Omit<KeyEntry, 'p
   });
 }
 
-/** Removes keys from the index (their sealed copies are deleted separately). */
-export function unindexKeys(db: Database, drop: (entry: KeyEntry) => boolean): Promise<void> {
+/** Removes keys from the index (their sealed copies are deleted separately), and returns them. */
+export function unindexKeys(db: Database, drop: (entry: KeyEntry) => boolean): Promise<KeyEntry[]> {
   return withLock(META_INDEX, async () => {
-    const kept = Object.entries(await index(db)).filter(([, e]) => !drop(e));
-    await putMeta(db, META_INDEX, Object.fromEntries(kept));
+    const entries = Object.entries(await index(db));
+    await putMeta(db, META_INDEX, Object.fromEntries(entries.filter(([, e]) => !drop(e))));
+    return entries.filter(([, e]) => drop(e)).map(([, e]) => e);
   });
 }
 
@@ -85,6 +91,47 @@ export function deleteExpiredKeys(db: Database, nowMs: number): Promise<number> 
 /** Whether we still have the private key for this public key (base64url). */
 export async function hasKey(db: Database, pub: string): Promise<boolean> {
   return (await index(db))[toBase64Url(await keyId(fromBase64Url(pub)))] !== undefined;
+}
+
+/** The vault names of the indexed keys. */
+export async function indexedNames(db: Database): Promise<Set<string>> {
+  return new Set(Object.values(await index(db)).map((e) => e.name));
+}
+
+/**
+ * Whether the private key sealed under `name` is the private half of `pub`:
+ * both agree on a secret with a throwaway key only if it is.
+ */
+export async function sealedMatches(db: Database, name: string, pub: Uint8Array<ArrayBuffer>): Promise<boolean> {
+  try {
+    const mine = await unsealKey(db, name);
+    const theirs = await importAgreementPublicKey(pub);
+    const probe = await generateAgreementKey();
+    const a = await crypto.subtle.deriveBits({ name: 'ECDH', public: probe.publicKey }, mine, 256);
+    const b = await crypto.subtle.deriveBits({ name: 'ECDH', public: theirs }, probe.privateKey, 256);
+    return toBase64Url(new Uint8Array(a)) === toBase64Url(new Uint8Array(b));
+  } catch {
+    // Not sealed here, or not a key on the curve.
+    return false;
+  }
+}
+
+/** Records a link's intro mailbox on its keys (indexed before it was kept). */
+export function setLinkKeysMailbox(db: Database, linkId: string, mailbox: string): Promise<void> {
+  return withLock(META_INDEX, async () => {
+    const entries = Object.entries(await index(db));
+    if (!entries.some(([, e]) => e.link?.id === linkId && e.link.mailbox !== mailbox)) return;
+    await putMeta(
+      db,
+      META_INDEX,
+      Object.fromEntries(entries.map(([id, e]) => [id, e.link?.id === linkId ? { ...e, link: { ...e.link, mailbox } } : e])),
+    );
+  });
+}
+
+/** A link's intro mailbox, as its keys know it: also for a replaced link, while they're kept. */
+export async function linkKeysMailbox(db: Database, linkId: string): Promise<string | undefined> {
+  return Object.values(await index(db)).find((e) => e.link?.id === linkId && e.link.mailbox)?.link!.mailbox;
 }
 
 /** Whether any key of a link is indexed. */

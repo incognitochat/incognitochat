@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/devicelist"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/inbox"
@@ -57,6 +59,8 @@ type memAccount struct {
 	links     int
 	chat      []byte // sealed chat ID for notices
 	language  string
+	deleting  bool
+	leftovers []string // accounts it replaced, still to clean up
 }
 
 type memCode struct {
@@ -75,10 +79,21 @@ type memDirectory struct {
 	telegram map[string]string
 	accounts map[string]*memAccount
 	links    map[string]*memLink
-	codes    map[string]*memCode
-	levels   map[int]int
-	boxes    map[string]directory.Mailbox
-	fail     error
+	// keys gives each link signing key (by fingerprint) to the account
+	// that first used it, for good: "" once that account ended (a
+	// tombstone), as the store does.
+	keys   map[string]string
+	codes  map[string]*memCode
+	levels map[int]int
+	boxes  map[string]directory.Mailbox
+	fail   error
+	// deviceReads counts reads of a device and its account.
+	deviceReads int
+	// goneOnDelete makes the next Delete find the account gone, as when
+	// another request finished it meanwhile.
+	goneOnDelete bool
+	// leased are the accounts a step holds (Lease).
+	leased map[string]bool
 }
 
 func newMemDirectory() *memDirectory {
@@ -86,6 +101,7 @@ func newMemDirectory() *memDirectory {
 		telegram: map[string]string{},
 		accounts: map[string]*memAccount{},
 		links:    map[string]*memLink{},
+		keys:     map[string]string{},
 		codes:    map[string]*memCode{},
 		levels:   map[int]int{},
 		boxes:    map[string]directory.Mailbox{},
@@ -159,7 +175,7 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[account]
-	if !ok || a.replaced {
+	if !ok {
 		return nil, nil
 	}
 	var out []string
@@ -169,28 +185,124 @@ func (m *memDirectory) Devices(_ context.Context, account string, _ time.Time) (
 	return out, nil
 }
 
+func (m *memDirectory) Recipients(ctx context.Context, account string, now time.Time) ([]string, error) {
+	m.mu.Lock()
+	a, ok := m.accounts[account]
+	ended := !ok || a.replaced || a.deleting
+	m.mu.Unlock()
+	if ended {
+		return nil, nil
+	}
+	return m.Devices(ctx, account, now)
+}
+
+func (m *memDirectory) NoRecipients(context.Context, time.Time) error { return nil }
+
+func (m *memDirectory) MarkDeleting(_ context.Context, account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[account]
+	if !ok || a.replaced {
+		return directory.ErrNotFound
+	}
+	a.deleting = true
+	m.burnKeys(account)
+	// Its link goes with the mark, as in the store.
+	for id, l := range m.links {
+		if l.owner == account {
+			delete(m.links, id)
+			delete(m.boxes, l.link.Mailbox)
+		}
+	}
+	return nil
+}
+
+// Lease holds an account for one step, as the store does (no expiry: the
+// tests release every lease, or set held).
+func (m *memDirectory) Lease(_ context.Context, account string, _ time.Time) (func(context.Context, time.Time, bool) error, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.leased == nil {
+		m.leased = map[string]bool{}
+	}
+	if m.leased[account] {
+		return nil, false, nil
+	}
+	m.leased[account] = true
+	return func(context.Context, time.Time, bool) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.leased, account)
+		return nil
+	}, true, nil
+}
+
+// CleanUp deletes up to max/2 of what old owns (two items each, as the
+// store does), then forgets it.
+func (m *memDirectory) CleanUp(_ context.Context, account, old string, max int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	left := max / 2
+	for id, b := range m.boxes {
+		if b.Owner == old && left > 0 {
+			delete(m.boxes, id)
+			left--
+		}
+	}
+	for code, c := range m.codes {
+		if c.owner == old && left > 0 {
+			delete(m.codes, code)
+			left--
+		}
+	}
+	if left == 0 {
+		return false, nil
+	}
+	if a, ok := m.accounts[account]; ok {
+		a.leftovers = slices.DeleteFunc(a.leftovers, func(id string) bool { return id == old })
+	}
+	return true, nil
+}
+
 type memInbox struct {
 	mu    sync.Mutex
 	items map[string][]inbox.Item // "<account>#<device>" -> items
+	// failing are item IDs whose delete fails (Ack reports them).
+	failing map[string]bool
 }
 
 func (m *memInbox) Deliver(_ context.Context, account string, devices []string, mailbox string, env []byte, _ time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, d := range devices {
-		m.items[account+"#"+d] = append(m.items[account+"#"+d], inbox.Item{ID: ids.New(), Mailbox: mailbox, Envelope: env})
+		m.items[account+"#"+d] = append(m.items[account+"#"+d], inbox.Item{ID: ids.New(), Mailbox: mailbox, Envelope: env, Size: len(env) + 100})
 	}
 	return nil
 }
 
-func (m *memInbox) List(_ context.Context, account, device string, limit int, _ time.Time) ([]inbox.Item, bool, error) {
+// List reads like inbox.Store.List: a first read of two, then more is
+// called if there are more; each item read costs a tenth of a read unit.
+func (m *memInbox) List(_ context.Context, account, device, after string, limits inbox.PageLimits, _ time.Time, more func() error) (inbox.Page, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	items := m.items[account+"#"+device]
-	if len(items) > limit {
-		return append([]inbox.Item(nil), items[:limit]...), true, nil
+	if after != "" {
+		i := 0
+		for i < len(items) && items[i].ID != after {
+			i++
+		}
+		items = items[min(i+1, len(items)):]
 	}
-	return append([]inbox.Item(nil), items...), false, nil
+	items = append([]inbox.Item(nil), items...)
+	m.mu.Unlock()
+	if len(items) > 2 && more != nil {
+		if err := more(); err != nil {
+			return inbox.Page{Items: items[:2], Read: 2, Units: 0.2}, err
+		}
+	}
+	if len(items) > limits.Items {
+		return inbox.Page{Items: items[:limits.Items], After: items[limits.Items-1].ID, Read: limits.Items, Units: float64(limits.Items) / 10}, nil
+	}
+	return inbox.Page{Items: items, Read: len(items), Units: float64(len(items)) / 10}, nil
 }
 
 func (m *memInbox) Clear(_ context.Context, account, device string, max int) (int, bool, error) {
@@ -202,21 +314,27 @@ func (m *memInbox) Clear(_ context.Context, account, device string, max int) (in
 	return n, len(m.items[key]) > 0, nil
 }
 
-func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string) error {
+func (m *memInbox) Ack(_ context.Context, account, device string, ackIDs []string, _ int) (missing int, failed []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	drop := map[string]bool{}
 	for _, id := range ackIDs {
-		drop[id] = true
+		if m.failing[id] {
+			failed = append(failed, id)
+		} else {
+			drop[id] = true
+		}
 	}
 	var kept []inbox.Item
 	for _, it := range m.items[account+"#"+device] {
-		if !drop[it.ID] {
+		if drop[it.ID] {
+			delete(drop, it.ID)
+		} else {
 			kept = append(kept, it)
 		}
 	}
 	m.items[account+"#"+device] = kept
-	return nil
+	return len(drop), failed
 }
 
 func (m *memDirectory) Levels(context.Context) (map[int]int, error) {
@@ -299,9 +417,28 @@ func (m *memDirectory) Grant(_ context.Context, linkID string, n int) error {
 	return nil
 }
 
+// keyTaken reports whether another account has (or had) a signing key
+// (directory.ErrKeyTaken), which the store checks first.
+func (m *memDirectory) keyTaken(account string, signingKey []byte) bool {
+	owner, ok := m.keys[devicesig.Fingerprint(signingKey)]
+	return ok && owner != account
+}
+
+// burnKeys leaves the keys of an account that ended to nobody.
+func (m *memDirectory) burnKeys(account string) {
+	for fingerprint, owner := range m.keys {
+		if owner == account {
+			m.keys[fingerprint] = ""
+		}
+	}
+}
+
 func (m *memDirectory) CreateLink(_ context.Context, account string, l directory.Link, max int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
+	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
 	}
@@ -309,6 +446,7 @@ func (m *memDirectory) CreateLink(_ context.Context, account string, l directory
 	if !ok || a.links >= max {
 		return directory.ErrLimit
 	}
+	m.keys[devicesig.Fingerprint(l.SigningKey)] = account
 	a.links++
 	m.links[l.ID] = &memLink{owner: account, link: l}
 	m.boxes[l.Mailbox] = directory.Mailbox{ID: l.Mailbox, Owner: account, Link: l.ID}
@@ -322,14 +460,22 @@ func (m *memDirectory) ReplaceLink(_ context.Context, account, oldID string, l d
 	if !ok || old.owner != account {
 		return directory.ErrNotFound
 	}
+	if m.keyTaken(account, l.SigningKey) {
+		return directory.ErrKeyTaken
+	}
 	if _, taken := m.links[l.ID]; taken {
 		return directory.ErrConflict
 	}
+	m.keys[devicesig.Fingerprint(l.SigningKey)] = account
 	delete(m.links, oldID)
 	delete(m.boxes, old.link.Mailbox)
 	m.links[l.ID] = &memLink{owner: account, link: l}
 	m.boxes[l.Mailbox] = directory.Mailbox{ID: l.Mailbox, Owner: account, Link: l.ID}
 	return nil
+}
+
+func (m *memDirectory) Bundle(ctx context.Context, id string) (directory.Link, error) {
+	return m.Link(ctx, id)
 }
 
 func (m *memDirectory) Link(_ context.Context, id string) (directory.Link, error) {
@@ -349,6 +495,10 @@ func (m *memDirectory) SetLinkKeys(_ context.Context, account, id string, keys [
 	if !ok || l.owner != account {
 		return directory.ErrNotFound
 	}
+	if m.keyTaken(account, l.link.SigningKey) {
+		return directory.ErrKeyTaken
+	}
+	m.keys[devicesig.Fingerprint(l.link.SigningKey)] = account
 	l.link.Keys = keys
 	return nil
 }
@@ -366,29 +516,50 @@ func (m *memDirectory) DeleteLink(_ context.Context, account, id string) error {
 	return nil
 }
 
-func (m *memDirectory) ByTelegram(_ context.Context, th string) (directory.Account, error) {
+func (m *memDirectory) AccountOf(_ context.Context, th string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fail != nil {
-		return directory.Account{}, m.fail
+		return "", m.fail
 	}
 	id, ok := m.telegram[th]
 	if !ok {
-		return directory.Account{}, directory.ErrNotFound
+		return "", directory.ErrNotFound
 	}
+	return id, nil
+}
+
+func (m *memDirectory) ByTelegram(ctx context.Context, th, device string) (directory.Account, error) {
+	id, err := m.AccountOf(ctx, th)
+	if err != nil {
+		return directory.Account{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	a := m.accounts[id]
-	devices := map[string][]byte{}
-	for k, v := range a.devices {
-		devices[k] = v
+	return directory.Account{ID: id, Key: a.key, DeviceKey: a.devices[device], Leftovers: slices.Clone(a.leftovers), Deleting: a.deleting}, nil
+}
+
+func (m *memDirectory) AccountExists(ctx context.Context, th string) (bool, error) {
+	id, err := m.AccountOf(ctx, th)
+	if errors.Is(err, directory.ErrNotFound) {
+		return false, nil
 	}
-	return directory.Account{ID: id, Key: a.key, Devices: devices}, nil
+	if err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[id]
+	return ok && !a.deleting, nil
 }
 
 func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[account]
-	if !ok || a.replaced {
+	if !ok || a.replaced || m.goneOnDelete {
+		m.goneOnDelete = false
 		return false, directory.ErrNotFound
 	}
 	// Two items each, links first, as the store does.
@@ -442,25 +613,34 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	if m.telegram[n.TelegramHash] != old.ID {
 		return directory.ErrConflict
 	}
-	m.accounts[old.ID].replaced = true
-	m.accounts[old.ID].th = ""
+	// As the store does: the links go with the swap; the mailboxes and
+	// codes stay, dead, until the cleanup.
+	prev := m.accounts[old.ID]
+	prev.replaced, prev.deleting, prev.th = true, false, ""
+	m.burnKeys(old.ID)
 	for id, l := range m.links {
 		if l.owner == old.ID {
 			delete(m.links, id)
 		}
 	}
-	for id, b := range m.boxes {
-		if b.Owner == old.ID {
-			delete(m.boxes, id)
-		}
-	}
 	m.put(n)
+	m.accounts[n.ID].leftovers = append([]string{old.ID}, prev.leftovers...)
+	prev.leftovers = nil
+	// One being deleted keeps no marker: its item and devices go.
+	if old.Deleting {
+		delete(m.accounts, old.ID)
+	}
 	return nil
+}
+
+func (m *memDirectory) LoginDevice(ctx context.Context, account, device string, now time.Time) (directory.Device, error) {
+	return m.Device(ctx, account, device, now)
 }
 
 func (m *memDirectory) Device(_ context.Context, account, device string, _ time.Time) (directory.Device, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.deviceReads++
 	a, ok := m.accounts[account]
 	if !ok || a.devices[device] == nil {
 		return directory.Device{}, directory.ErrNotFound
@@ -468,7 +648,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 	return directory.Device{
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
-		Notices: a.chat != nil,
+		Notices: a.chat != nil, Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
 	}, nil
 }
 
@@ -486,10 +666,17 @@ func (m *memDirectory) SetNotices(_ context.Context, account string, sealed []by
 type memLimiter struct {
 	mu     sync.Mutex
 	counts map[string]int
+	local  map[string]int // LocalAt's
 }
 
 func (l *memLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	return l.AllowN(ctx, key, 1, limit, window)
+}
+
+func (l *memLimiter) Counted(key string, _ time.Duration) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key]
 }
 
 func (l *memLimiter) Used(_ context.Context, key string, _ time.Duration) (int, error) {
@@ -508,19 +695,96 @@ func (l *memLimiter) AllowN(_ context.Context, key string, n, limit int, _ time.
 	return true, nil
 }
 
+func (l *memLimiter) Full(key string, limit int, _ time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.counts[key] >= limit
+}
+
+// The At methods ignore the time: the inbox's keys name their window.
+
+func (l *memLimiter) AllowNAt(ctx context.Context, key string, n, limit int, window time.Duration, _ time.Time) (bool, error) {
+	return l.AllowN(ctx, key, n, limit, window)
+}
+
+func (l *memLimiter) Tally(_ context.Context, key string, n, limit int, _ time.Duration, _ time.Time) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts[key] += max(n, 0)
+	return l.counts[key] < limit, nil
+}
+
+func (l *memLimiter) LocalAt(key string, n, limit int, _ time.Duration, _ time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.local == nil {
+		l.local = map[string]int{}
+	}
+	if l.local[key]+n > limit {
+		return false
+	}
+	l.local[key] += n
+	return true
+}
+
+func (l *memLimiter) RefundAt(_ context.Context, key string, n int, _ time.Duration, _ time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.counts[key] -= max(n, 0)
+	return nil
+}
+
+func (l *memLimiter) FullAt(key string, limit int, window time.Duration, _ time.Time) bool {
+	return l.Full(key, limit, window)
+}
+
+func (l *memLimiter) CheckAt(_ context.Context, key string, limit int, window time.Duration, _ time.Time) (bool, error) {
+	return !l.Full(key, limit, window), nil
+}
+
+func (l *memLimiter) UsedAt(ctx context.Context, key string, window time.Duration, _ time.Time) (int, error) {
+	return l.Used(ctx, key, window)
+}
+
+func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) int {
+	return l.Counted(key, window)
+}
+
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool
+	// calls counts Spend calls, refused ones too: each costs the table a
+	// write.
+	calls int
 }
 
 func (m *memSpent) Spend(_ context.Context, nonce []byte, _ time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.calls++
 	if m.spent[string(nonce)] {
 		return false, nil
 	}
 	m.spent[string(nonce)] = true
 	return true, nil
+}
+
+// SpendAll spends in order up to the first spent already, as
+// ephemeral.Spent does; each token tried counts as a call.
+func (m *memSpent) SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) (bool, error) {
+	for i, t := range tokens {
+		for _, prev := range tokens[:i] {
+			if bytes.Equal(prev.Nonce, t.Nonce) {
+				return false, nil
+			}
+		}
+	}
+	for _, t := range tokens {
+		if fresh, _ := m.Spend(ctx, t.Nonce, t.ForgetAfter); !fresh {
+			return false, nil
+		}
+	}
+	return len(tokens) > 0, nil
 }
 
 func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
@@ -530,12 +794,40 @@ func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
 	return nil
 }
 
+// count is how many of tokens are spent.
+func (m *memSpent) count(t *testing.T, tokens []string) int {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, token := range tokens {
+		raw, err := base64.RawURLEncoding.DecodeString(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.spent[string(raw[2:34])] {
+			n++
+		}
+	}
+	return n
+}
+
 // testIssuer and testMediaIssuer are one issuer key of each kind for the
 // whole test binary (RSA keys are slow to make).
 var (
 	testIssuer      = sync.OnceValue(func() *tokens.Issuer { return newTestIssuer(tokens.LabelSend) })
 	testMediaIssuer = sync.OnceValue(func() *tokens.Issuer { return newTestIssuer(tokens.LabelMedia) })
 )
+
+// keyring holds current and, unless nil, previous, as the api function
+// does: the previous key only while a rotation lasts.
+func keyring(current, previous *tokens.Issuer) *tokens.Keyring {
+	ring, err := tokens.NewKeyring(current, previous)
+	if err != nil {
+		panic(err)
+	}
+	return ring
+}
 
 func newTestIssuer(label string) *tokens.Issuer {
 	key, err := rsa.GenerateKey(rand.Reader, tokens.ModulusBits)
@@ -555,6 +847,16 @@ func newTestIssuer(label string) *tokens.Issuer {
 func mintToken(t *testing.T, now time.Time) string {
 	t.Helper()
 	return mint(t, testIssuer(), tokens.LabelSend, now)
+}
+
+// mintTokens makes n send tokens.
+func mintTokens(t *testing.T, now time.Time, n int) []string {
+	t.Helper()
+	out := make([]string, n)
+	for i := range out {
+		out[i] = mintToken(t, now)
+	}
+	return out
 }
 
 // mintMediaToken makes a media token, which pays for uploads.
@@ -616,8 +918,8 @@ func newHarness(t *testing.T) *harness {
 		Log:         logx.New(h.logs, "api"),
 		Now:         func() time.Time { return h.now },
 		Inbox:       h.inbox,
-		Issuer:      testIssuer(),
-		MediaIssuer: testMediaIssuer(),
+		Issuer:      keyring(testIssuer(), nil),
+		MediaIssuer: keyring(testMediaIssuer(), nil),
 		Spent:       &memSpent{spent: map[string]bool{}},
 	}
 	h.router = httpapi.NewRouter()
@@ -922,8 +1224,15 @@ func TestRegisterRejects(t *testing.T) {
 		{"list with a second device", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
 			list.Entries = append(list.Entries, devicelist.Entry{DeviceID: ids.New(), Key: raw(t, other), Added: list.Issued})
 		}, http.StatusBadRequest, "invalid_device_list"},
-		{"stale list", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+		{"stale list (the device's clock is off)", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
 			*list = d.firstList(t, start.Add(-3*time.Hour))
+		}, http.StatusUnauthorized, "clock_skew"},
+		{"list from the future", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+			*list = d.firstList(t, start.Add(3*time.Hour+30*time.Minute))
+		}, http.StatusUnauthorized, "clock_skew"},
+		{"list that has expired", func(t *testing.T, d *device, _ map[string]any, list *devicelist.List, _ *string) {
+			*list = d.firstList(t, start.Add(-2*time.Hour))
+			list.Expires = list.Issued.Add(time.Hour)
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"list signed by the device key", func(t *testing.T, d *device, r map[string]any, list *devicelist.List, _ *string) {
 			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelist.Encode(*list)))
@@ -970,7 +1279,7 @@ func TestSessionRejects(t *testing.T) {
 
 	stale := d.login(t, h.now.Add(-2*time.Minute))
 	status, out = h.post(t, "/session", stale)
-	wantError(t, status, out, http.StatusUnauthorized, "login_refused")
+	wantError(t, status, out, http.StatusUnauthorized, "clock_skew")
 
 	unknown := newDevice(t)
 	unknown.account = d.account

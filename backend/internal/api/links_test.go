@@ -7,13 +7,17 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"maps"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
@@ -96,6 +100,19 @@ func TestReplacedAccountIsCutOffAtOnce(t *testing.T) {
 // call sends a request as a logged-in device; sign adds a device signature.
 func (h *harness) call(t *testing.T, d *device, token, method, path string, body any, sign bool) (int, map[string]any) {
 	t.Helper()
+	var at time.Time
+	if sign {
+		at = h.now
+	}
+	return h.callAt(t, d, token, method, path, body, at)
+}
+
+// callAt is call with a device signature made at signedAt by the device's
+// clock (none if zero).
+func (h *harness) callAt(t *testing.T, d *device, token, method, path string, body any, signedAt time.Time) (int, map[string]any) {
+	t.Helper()
+	sign := !signedAt.IsZero()
+	body = signProof(t, body, d, path)
 	var raw []byte
 	if body != nil {
 		var err error
@@ -104,7 +121,13 @@ func (h *harness) call(t *testing.T, d *device, token, method, path string, body
 		}
 	}
 	var req httpapi.Request
-	req.RawPath = path
+	req.RawPath, req.RawQueryString, _ = strings.Cut(path, "?")
+	if query, err := url.ParseQuery(req.RawQueryString); err == nil && len(query) > 0 {
+		req.QueryStringParameters = map[string]string{}
+		for k := range query {
+			req.QueryStringParameters[k] = query.Get(k)
+		}
+	}
 	req.RequestContext.HTTP.Method = method
 	req.Headers = map[string]string{"content-type": "application/json"}
 	if token != "" {
@@ -113,8 +136,8 @@ func (h *harness) call(t *testing.T, d *device, token, method, path string, body
 	req.Body = string(raw)
 	if sign {
 		signed := session.SignedRequest{
-			AccountID: d.account, DeviceID: d.id, Method: method, Path: path, Body: raw,
-			Timestamp: h.now.Unix(), Nonce: b64(randomBytes(t, 16)),
+			AccountID: d.account, DeviceID: d.id, Method: method, Path: req.RawPath, Body: raw,
+			Timestamp: signedAt.Unix(), Nonce: b64(randomBytes(t, 16)),
 		}
 		sig := signP1363(t, d.dsk, devicesig.Message(devicesig.LabelRequest, session.RequestParts(signed)...))
 		req.Headers["x-device-signature"] = strconv.FormatInt(signed.Timestamp, 10) + "." + signed.Nonce + "." + b64(sig)
@@ -172,7 +195,43 @@ func (l linkKeys) encryptionKey(t *testing.T, at time.Time) map[string]any {
 }
 
 func (l linkKeys) create(t *testing.T, at time.Time) map[string]any {
-	return map[string]any{"id": l.id, "signingKey": b64(raw(t, l.lsk)), "keys": []any{l.encryptionKey(t, at)}}
+	return map[string]any{"id": l.id, "signingKey": b64(raw(t, l.lsk)), "keys": []any{l.encryptionKey(t, at)}, "proof": l.proof()}
+}
+
+// ownerProof stands for a link request's owner proof in a test body:
+// callAt signs it for the calling account and the link the body (or, for
+// PUT /links/{id}/keys, the path) names.
+type ownerProof struct{ lsk *ecdsa.PrivateKey }
+
+func (l linkKeys) proof() ownerProof { return ownerProof{l.lsk} }
+
+// proofFor is an owner proof by a link signing key for a link and account.
+func proofFor(t *testing.T, lsk *ecdsa.PrivateKey, linkID, accountID string) string {
+	return b64(signP1363(t, lsk, devicesig.Message(devicesig.LabelLinkOwner, links.OwnerParts(linkID, accountID)...)))
+}
+
+// signProof returns body with any ownerProof in it signed for the calling
+// device's account, as a copy.
+func signProof(t *testing.T, body any, d *device, path string) any {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return body
+	}
+	p, ok := m["proof"].(ownerProof)
+	if !ok {
+		return body
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		id = strings.TrimSuffix(strings.TrimPrefix(path, "/links/"), "/keys")
+	}
+	account := ""
+	if d != nil {
+		account = d.account
+	}
+	out := maps.Clone(m)
+	out["proof"] = proofFor(t, p.lsk, id, account)
+	return out
 }
 
 func (h *harness) makeAdmin(user int64) {
@@ -232,7 +291,7 @@ func TestLinkLifecycle(t *testing.T) {
 
 	// Rotation.
 	next := l.encryptionKey(t, h.now)
-	if status, out := h.call(t, d, token, http.MethodPut, "/links/"+l.id+"/keys", map[string]any{"keys": []any{next}}, true); status != http.StatusOK {
+	if status, out := h.call(t, d, token, http.MethodPut, "/links/"+l.id+"/keys", map[string]any{"keys": []any{next}, "proof": l.proof()}, true); status != http.StatusOK {
 		t.Fatalf("rotate: %d %v", status, out)
 	}
 	_, out = h.call(t, nil, "", http.MethodGet, "/links/"+l.id, nil, false)
@@ -240,7 +299,7 @@ func TestLinkLifecycle(t *testing.T) {
 		t.Fatal("keys not rotated")
 	}
 	forged := newLinkKeys(t).encryptionKey(t, h.now) // signed by another link's key
-	status, out = h.call(t, d, token, http.MethodPut, "/links/"+l.id+"/keys", map[string]any{"keys": []any{forged}}, true)
+	status, out = h.call(t, d, token, http.MethodPut, "/links/"+l.id+"/keys", map[string]any{"keys": []any{forged}, "proof": l.proof()}, true)
 	wantError(t, status, out, http.StatusBadRequest, "invalid_link")
 
 	// Revocation: afterwards the link looks like it never existed.
@@ -281,7 +340,7 @@ func TestLinkLimitAndOwnership(t *testing.T) {
 	status, out = h.call(t, other, otherToken, http.MethodDelete, "/links/"+first.id, nil, true)
 	wantError(t, status, out, http.StatusNotFound, "not_found")
 	status, out = h.call(t, other, otherToken, http.MethodPut, "/links/"+first.id+"/keys",
-		map[string]any{"keys": []any{first.encryptionKey(t, h.now)}}, true)
+		map[string]any{"keys": []any{first.encryptionKey(t, h.now)}, "proof": first.proof()}, true)
 	wantError(t, status, out, http.StatusNotFound, "not_found")
 	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+first.id, nil, false); status != http.StatusOK {
 		t.Fatal("the link was changed by another account")
@@ -364,5 +423,166 @@ func TestLinkChangesPerDay(t *testing.T) {
 	// The link is untouched.
 	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+current.id, nil, false); status != http.StatusOK {
 		t.Fatalf("link after the limit: %d", status)
+	}
+}
+
+// Creating, replacing or rotating a link needs an owner proof: a signature
+// by the link signing key over the link ID and the caller's account ID. A
+// copied bundle, whose signed keys anyone can read, doesn't make one; nor
+// does a proof made for another account or another link, checked before
+// anything else.
+func TestLinksNeedAnOwnerProof(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	owner, other := h.account(t, userID), h.account(t, userID+1)
+	l := newLinkKeys(t)
+	body := l.create(t, h.now)
+	refused := func(what string, status int, out map[string]any) {
+		t.Helper()
+		if status != http.StatusBadRequest || out["error"] != "invalid_link" {
+			t.Fatalf("%s: %d %v", what, status, out)
+		}
+	}
+	bad := map[string]any{
+		"none":                  nil,
+		"another key":           proofFor(t, newLinkKeys(t).lsk, l.id, owner.d.account),
+		"another account":       proofFor(t, l.lsk, l.id, other.d.account),
+		"another link":          proofFor(t, l.lsk, newLinkKeys(t).id, owner.d.account),
+		"an encryption key's":   body["keys"].([]any)[0].(map[string]any)["signature"],
+		"garbage of the length": b64(randomBytes(t, 64)),
+	}
+	for name, proof := range bad {
+		b := maps.Clone(body)
+		if proof == nil {
+			delete(b, "proof")
+		} else {
+			b["proof"] = proof
+		}
+		status, out := h.as(t, owner, http.MethodPost, "/links", b, true)
+		refused("create, "+name, status, out)
+	}
+	if status, out := h.as(t, owner, http.MethodPost, "/links", body, true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+
+	// Replacing.
+	next := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	replace := next.create(t, h.now)
+	replace["replaces"] = l.id
+	delete(replace, "proof")
+	status, out := h.as(t, owner, http.MethodPost, "/links", replace, true)
+	refused("replace without a proof", status, out)
+	replace["proof"] = proofFor(t, l.lsk, l.id, owner.d.account) // the old link's
+	status, out = h.as(t, owner, http.MethodPost, "/links", replace, true)
+	refused("replace with the old link's proof", status, out)
+
+	// Rotating: the new keys' signatures alone don't do, since a copy of a
+	// bundle has keys signed by the same key.
+	rotate := map[string]any{"keys": []any{l.encryptionKey(t, h.now)}}
+	status, out = h.as(t, owner, http.MethodPut, "/links/"+l.id+"/keys", rotate, true)
+	refused("rotate without a proof", status, out)
+	rotate["proof"] = proofFor(t, l.lsk, l.id, other.d.account)
+	status, out = h.as(t, owner, http.MethodPut, "/links/"+l.id+"/keys", rotate, true)
+	refused("rotate with another account's proof", status, out)
+	rotate["proof"] = l.proof()
+	if status, out := h.as(t, owner, http.MethodPut, "/links/"+l.id+"/keys", rotate, true); status != http.StatusOK {
+		t.Fatalf("rotate: %d %v", status, out)
+	}
+}
+
+// Another account holding the signing key (shared on purpose) and proving
+// it still can't use it: signing_key_taken, so a sender's tag never matches
+// across accounts. The owner keeps it when it replaces its link.
+func TestSigningKeyIsOneAccounts(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	owner, other := h.account(t, userID), h.account(t, userID+1)
+	l := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	shared := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	status, out := h.as(t, other, http.MethodPost, "/links", shared.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	own := newLinkKeys(t)
+	if status, out := h.as(t, other, http.MethodPost, "/links", own.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("other's own link: %d %v", status, out)
+	}
+	body := shared.create(t, h.now)
+	body["replaces"] = own.id
+	status, out = h.as(t, other, http.MethodPost, "/links", body, true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+	if status, _ := h.call(t, nil, "", http.MethodGet, "/links/"+own.id, nil, false); status != http.StatusOK {
+		t.Fatalf("other's link after a refused replacement: %d", status)
+	}
+
+	next := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	body = next.create(t, h.now)
+	body["replaces"] = l.id
+	if status, out := h.as(t, owner, http.MethodPost, "/links", body, true); status != http.StatusCreated {
+		t.Fatalf("replace keeping the key: %d %v", status, out)
+	}
+
+	// Nor once the owner revoked its link: the key stays the owner's.
+	if status, out := h.as(t, owner, http.MethodDelete, "/links/"+next.id, nil, true); status != http.StatusOK {
+		t.Fatalf("revoke: %d %v", status, out)
+	}
+	status, out = h.as(t, other, http.MethodPost, "/links", linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+
+	// A link from before keys were claimed, whose key another account
+	// claimed first, can't be rotated.
+	early := newLinkKeys(t)
+	h.dir.links[early.id] = &memLink{owner: other.d.account, link: directory.Link{ID: early.id, SigningKey: raw(t, l.lsk), Mailbox: ids.New()}}
+	status, out = h.as(t, other, http.MethodPut, "/links/"+early.id+"/keys", map[string]any{"keys": []any{l.encryptionKey(t, h.now)}, "proof": l.proof()}, true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+}
+
+// Through the DynamoDB directory: a copy of a revoked link's bundle can't be
+// put back up by another account (it can't prove it holds the key), the
+// owner makes its next link with its key, and the key stays the owner's
+// for good: no other account, even one holding the private key, gets it,
+// while the owner has it or after its account ended.
+func TestSigningKeyStaysWithItsAccount(t *testing.T) {
+	client := dynamotest.Client(t)
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Directory = &directory.Store{DB: client, Table: dynamotest.Table(t, client)}
+	h.router = httpapi.NewRouter()
+	h.server.Routes(h.router)
+	owner, attacker, colluder := h.account(t, userID), h.account(t, userID+1), h.account(t, userID+2)
+	l := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	_, bundle := h.call(t, nil, "", http.MethodGet, "/links/"+l.id, nil, false)
+	if status, out := h.as(t, owner, http.MethodDelete, "/links/"+l.id, nil, true); status != http.StatusOK {
+		t.Fatalf("revoke: %d %v", status, out)
+	}
+	copied := map[string]any{"id": b64(randomBytes(t, 8)), "signingKey": bundle["signingKey"], "keys": bundle["keys"]}
+	status, out := h.as(t, attacker, http.MethodPost, "/links", copied, true)
+	wantError(t, status, out, http.StatusBadRequest, "invalid_link")
+	copied["proof"] = proofFor(t, l.lsk, l.id, owner.d.account) // the most it could have seen
+	status, out = h.as(t, attacker, http.MethodPost, "/links", copied, true)
+	wantError(t, status, out, http.StatusBadRequest, "invalid_link")
+
+	// The owner's next link, with the key it kept.
+	again := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	if status, out := h.as(t, owner, http.MethodPost, "/links", again.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("the owner's key after a revocation: %d %v", status, out)
+	}
+	shared := linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}
+	status, out = h.as(t, colluder, http.MethodPost, "/links", shared.create(t, h.now), true)
+	wantError(t, status, out, http.StatusConflict, "signing_key_taken")
+
+	// The owner sets up again: its old account ends, and its key with it.
+	successor := newDevice(t)
+	successor.user = userID
+	next := member{d: successor, token: h.loggedIn(t, successor, true)}
+	for who, m := range map[string]member{"another account": colluder, "the owner's new account": next} {
+		status, out := h.as(t, m, http.MethodPost, "/links", linkKeys{id: b64(randomBytes(t, 8)), lsk: l.lsk}.create(t, h.now), true)
+		if status != http.StatusConflict || out["error"] != "signing_key_taken" {
+			t.Fatalf("%s, after the owner's account ended: %d %v", who, status, out)
+		}
 	}
 }

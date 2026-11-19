@@ -24,18 +24,55 @@ describe('send tokens', () => {
   });
 
   it('publish only keys whose ID matches them', async () => {
-    const seen = new Set<string>();
-    for (const [name, entry] of Object.entries(issuerKeys)) {
-      if (name === '_comment' || typeof entry === 'string') continue;
-      // Each environment publishes a send key and a media key, all different.
+    const entries = Object.entries(issuerKeys).filter(([name, entry]) => name !== '_comment' && typeof entry !== 'string');
+    for (const [, entry] of entries) {
+      if (typeof entry === 'string') continue;
       for (const published of [entry, entry.media]) {
         const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(published.spki)));
         expect(digest).toEqual(fromHex(published.keyId));
         const key = await crypto.subtle.importKey('spki', fromBase64Url(published.spki), { name: 'RSA-PSS', hash: 'SHA-384' }, true, ['verify']);
         expect((key.algorithm as RsaHashedKeyAlgorithm).modulusLength).toBe(2048);
-        expect(seen.has(published.keyId)).toBe(false);
-        seen.add(published.keyId);
       }
     }
+    expect(keyClashes(entries.map(([name, entry]) => typeof entry === 'string' ? { name } : { name, send: entry.keyId, media: entry.media.keyId }))).toEqual([]);
+  });
+
+  it('may share a key between entries, of the same kind only', () => {
+    // A rotation of one kind: the new entry keeps the other kind's key.
+    expect(keyClashes([{ name: 'p-2026-11', send: 's1', media: 'm1' }, { name: 'p-2027-01', send: 's2', media: 'm1' }])).toEqual([]);
+    expect(keyClashes([{ name: 'a', send: 's1', media: 's1' }])).toEqual(['a: one key for both kinds']);
+    expect(keyClashes([{ name: 'p-2026-11', send: 's1', media: 'm1' }, { name: 'p-2027-01', send: 'm1', media: 'm2' }])).toEqual(['m1: a send key and a media key']);
+    // Environments never share a key: one's tokens would pay in the other.
+    expect(keyClashes([{ name: 'dev-2026-11', send: 's1', media: 'm1' }, { name: 'dev-2027-01', send: 's2', media: 'm1' }])).toEqual([]);
+    expect(keyClashes([{ name: 'dev-2026-11', send: 's1', media: 'm1' }, { name: 'production-2026-11', send: 's2', media: 'm1' }])).toEqual([
+      'm1: in dev and production',
+    ]);
   });
 });
+
+/**
+ * What's wrong with how the published entries share keys: an entry names
+ * one key of each kind, two different keys, and no key is ever both a send
+ * key and a media key (a blind signer can't tell them apart, so the two
+ * kinds would share one budget). The same key of the same kind may appear
+ * in several entries of one environment (named <environment>-<year>-<month>):
+ * a rotation of one kind keeps the other kind's key.
+ */
+function keyClashes(entries: { name: string; send?: string; media?: string }[]): string[] {
+  const clashes: string[] = [];
+  const send = new Set(entries.map((e) => e.send));
+  const environment = new Map<string, string>();
+  for (const e of entries) {
+    if (!e.send || !e.media) clashes.push(`${e.name}: a key missing`);
+    else if (e.send === e.media) clashes.push(`${e.name}: one key for both kinds`);
+    else if (send.has(e.media)) clashes.push(`${e.media}: a send key and a media key`);
+    const env = e.name.replace(/-\d{4}-\d{2}$/, '');
+    for (const key of [e.send, e.media]) {
+      if (!key) continue;
+      const other = environment.get(key);
+      if (other !== undefined && other !== env) clashes.push(`${key}: in ${other} and ${env}`);
+      environment.set(key, env);
+    }
+  }
+  return clashes;
+}

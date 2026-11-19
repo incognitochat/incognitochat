@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { fromHex, toBase64Url, toHex } from '../crypto/encoding';
 import { exportPublicKey, fingerprint, generateCopyableAgreementKey, generateSigningKey } from '../crypto/keys';
-import { LABEL_LINK_KEY, message, sign } from '../crypto/signing';
-import { BundleMismatch, encodePayload, keyParts, linkUrl, newLinkId, parsePayload, PAYLOAD_LENGTH, verifyBundle, type Bundle } from './link';
+import { LABEL_LINK_KEY, LABEL_LINK_OWNER, message, sign } from '../crypto/signing';
+import { BundleMismatch, encodePayload, keyParts, linkUrl, newLinkId, ownerParts, parsePayload, PAYLOAD_LENGTH, verifyBundle, type Bundle } from './link';
 
 // The same vector as backend/internal/links/links_test.go.
 const KEY = '043e4cd596e64fe0d4dac5cce1479f58b981e24664c49c89e823be92673cd970d130b3038618a2156d3db3edccde5a6f271cb346dd868dc771d0ba2812a1197cb1';
 const KEY_MESSAGE =
   '0019696e636f676e69746f636861742f76322f6c696e6b2d6b6579000000010100000041043e4cd596e64fe0d4dac5cce1479f58b981e24664c49c89e823be92673cd970d130b3038618a2156d3db3edccde5a6f271cb346dd868dc771d0ba2812a1197cb100000008000000006b49d20000000008000000006b6ebc00';
+const OWNER_MESSAGE =
+  '001b696e636f676e69746f636861742f76322f6c696e6b2d6f776e657200000001010000000b41414141414141414141410000001641414141414141414141414141414141414141414141';
 const NOW = 1_800_000_000;
 const FP = 'IVVfe8yQuoQPEcsZWUQBwjazebJkrBLkm1Q7ec-It2M';
 
@@ -40,6 +42,10 @@ describe('link payloads', () => {
 describe('link keys', () => {
   it('sign the same message as the backend', () => {
     expect(toHex(message(LABEL_LINK_KEY, ...keyParts(fromHex(KEY), NOW, NOW + 28 * 24 * 3600)))).toBe(KEY_MESSAGE);
+  });
+
+  it('prove their owner with the same message as the backend', () => {
+    expect(toHex(message(LABEL_LINK_OWNER, ...ownerParts('AAAAAAAAAAA', 'AAAAAAAAAAAAAAAAAAAAAA')))).toBe(OWNER_MESSAGE);
   });
 });
 

@@ -8,11 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/bot"
 	"github.com/incognitochat/incognitochat/backend/internal/config"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
@@ -34,14 +35,18 @@ func main() {
 		log.Error("startup failed", logx.ErrorKind(err))
 		os.Exit(1)
 	}
-	lambda.Start(func(ctx context.Context, raw json.RawMessage) (any, error) {
+	lambda.Start(awsconf.WithDeadline(requestDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		out, err := handle(ctx, raw, b, setup.Run)
 		if err != nil {
 			log.Error("setup failed", logx.ErrorKind(err))
 		}
 		return out, err
-	})
+	}))
 }
+
+// requestDeadline bounds an invocation's calls, half the function's timeout
+// (10 s, infra/functions.tf). Only the setup makes any (to Telegram, four).
+const requestDeadline = 5 * time.Second
 
 // handle routes an event: the deploy's setup call, or a webhook request.
 func handle(ctx context.Context, raw json.RawMessage, b *bot.Bot, setup func(context.Context, string) error) (any, error) {
@@ -63,7 +68,7 @@ func load(ctx context.Context) (*bot.Bot, bot.Setup, error) {
 	if err != nil {
 		return nil, bot.Setup{}, err
 	}
-	aws, err := awsconfig.LoadDefaultConfig(ctx)
+	aws, err := awsconf.Load(ctx)
 	if err != nil {
 		return nil, bot.Setup{}, err
 	}

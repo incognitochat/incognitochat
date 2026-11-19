@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { concat, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
-import { keyId, sealEnvelope } from './envelope';
-import { checkMessage, fileName, MAX_TEXT_BYTES, MessageError, newId, openMessage, sealMessage, shownAs, type ConversationKey, type Draft } from './message';
+import { keyId, sealEnvelope, sendTokensFor } from './envelope';
+import { checkMessage, fileName, MAX_TEXT_BYTES, MessageError, newId, openMessage, passiveType, sealMessage, shownAs, type ConversationKey, type Draft } from './message';
 
 async function conversationKey(): Promise<ConversationKey & { id: Uint8Array }> {
   const pair = await generateCopyableAgreementKey();
@@ -55,6 +55,9 @@ describe('messages', () => {
     const receipt: Draft = { kind: 'seen', conv: newId(), id: newId(), at: 1, seen };
     const { message } = await openMessage(await sealMessage(receipt, a, b.publicKey), finder(b));
     expect(message.seen).toEqual(seen);
+    // One that says the earlier ones were read too.
+    const all = await openMessage(await sealMessage({ ...receipt, earlier: true }, a, b.publicKey), finder(b));
+    expect(all.message).toMatchObject({ seen, earlier: true });
     const update = await sealMessage({ kind: 'key_update', conv: newId(), id: newId(), at: 1 }, a, b.publicKey);
     expect((await openMessage(update, finder(b))).message.kind).toBe('key_update');
   });
@@ -118,6 +121,8 @@ describe('checkMessage', () => {
     ['media preview', { media: { ...media, p: 'x'.repeat(3001) } }],
     ['media on seen', { kind: 'seen', text: undefined, seen: ['AAAAAAAAAAAAAAAAAAAAAA'], media }],
     ['media on end', { kind: 'end', text: undefined, media }],
+    ['earlier on a message', { earlier: true }],
+    ['earlier as anything but true', { kind: 'seen', text: undefined, seen: ['AAAAAAAAAAAAAAAAAAAAAA'], earlier: 1 }],
   ])('rejects bad %s', (_, change) => {
     expect(() => checkMessage({ ...valid, ...change })).toThrow(MessageError);
   });
@@ -215,7 +220,26 @@ describe('checkMessage', () => {
   it('accepts kinds from newer versions and shows them as files', () => {
     const voice = checkMessage({ ...valid, media: { ...media, t: 'voice_note' } }).media!;
     expect(shownAs(voice)).toBe('file');
-    expect(shownAs({ t: 'gif' })).toBe('gif');
+    expect(shownAs({ t: 'gif', m: 'image/gif' })).toBe('gif');
+  });
+
+  it('shows only raster images in the chat: anything else called a photo or GIF is a file', () => {
+    for (const m of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+      expect(shownAs({ t: 'photo', m })).toBe('photo');
+      expect(shownAs({ t: 'gif', m })).toBe('gif');
+    }
+    for (const m of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'image/bmp', undefined]) {
+      expect(shownAs({ t: 'photo', ...(m ? { m } : {}) })).toBe('file');
+      expect(shownAs({ t: 'gif', ...(m ? { m } : {}) })).toBe('file');
+    }
+    // Checked as a received message would be.
+    expect(shownAs(checkMessage({ ...valid, media: { ...media, t: 'photo', m: 'image/svg+xml' } }).media!)).toBe('file');
+  });
+
+  it('hands the browser only passive types: images, audio and video', () => {
+    expect(passiveType(undefined)).toBeUndefined();
+    for (const m of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/quicktime', 'audio/ogg', 'audio/mp4']) expect(passiveType(m)).toBe(m);
+    for (const m of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/pdf', 'text/plain']) expect(passiveType(m)).toBe('application/octet-stream');
   });
 
   it('names attachments for saving', () => {
@@ -227,5 +251,50 @@ describe('checkMessage', () => {
     expect(fileName({ t: 'voice', m: 'audio/mp4' })).toBe('voice.m4a');
     expect(fileName({ t: 'round', m: 'video/mp4' })).toBe('video.mp4');
     expect(fileName({ t: 'audio', n: 'song.mp3', m: 'audio/mpeg' })).toBe('song.mp3');
+  });
+});
+
+describe('what messages cost', () => {
+  // As the app sends them: with a reply mailbox, the last envelope taken
+  // in, and (from the side that wrote through a link) a sender tag.
+  const sent = (extra: Partial<Draft>): Draft => ({
+    kind: 'message',
+    conv: newId(),
+    id: newId(),
+    at: 1_800_000_000_000,
+    reply: newId(),
+    last: newId(),
+    tag: toBase64Url(crypto.getRandomValues(new Uint8Array(32))),
+    ...extra,
+  });
+  const ids = (n: number) => Array.from({ length: n }, newId);
+  const rand = (n: number) => toBase64Url(crypto.getRandomValues(new Uint8Array(n)));
+  const photo = { t: 'photo', id: newId(), k: rand(32), d: rand(16), s: 245_123, m: 'image/jpeg', w: 1280, h: 960, p: 'A'.repeat(1300) };
+
+  it('is one send token for every quiet kind and ordinary message', async () => {
+    const sender = await conversationKey();
+    const recipient = await conversationKey();
+    const tokens = async (d: Draft) => sendTokensFor((await sealMessage(d, sender, recipient.publicKey)).length);
+    const one: [string, Draft][] = [
+      ['short text', sent({ text: 'hi' })],
+      ['reply, 1,600 Latin letters', sent({ text: 'a'.repeat(1600), replyTo: newId() })],
+      ['reply, 800 Persian letters', sent({ text: 'س'.repeat(800), replyTo: newId() })],
+      ['sticker', sent({ sticker: { id: 'fluent/grinning_face', e: '😀' } })],
+      ['photo with a preview and a caption', sent({ text: 'c'.repeat(100), replyTo: newId(), media: photo })],
+      ['voice message', sent({ media: { t: 'voice', id: newId(), k: rand(32), d: rand(16), s: 145_123, m: 'audio/mp4', l: 33, v: rand(100) } })],
+      ['receipt for 50', sent({ kind: 'seen', seen: ids(50) })],
+      ['receipt for 50 and the earlier ones', sent({ kind: 'seen', seen: ids(50), earlier: true })],
+      ['reaction', sent({ kind: 'reaction', reaction: { to: newId(), e: '👩🏽‍❤️‍💋‍👨🏻' } })],
+      ['delete', sent({ kind: 'delete', delete: [newId()] })],
+      ['delete all', sent({ kind: 'delete', all: true })],
+      ['short edit', sent({ kind: 'edit', edit: { to: newId(), text: 'fixed a typo' } })],
+      ['key update', sent({ kind: 'key_update' })],
+      ['end', sent({ kind: 'end' })],
+    ];
+    for (const [what, d] of one) expect([what, await tokens(d)]).toEqual([what, 1]);
+    // Only long texts cost more.
+    expect(await tokens(sent({ text: 'a'.repeat(5000) }))).toBe(4);
+    expect(await tokens(sent({ text: 'a'.repeat(MAX_TEXT_BYTES) }))).toBe(7);
+    expect(await tokens(sent({ kind: 'edit', edit: { to: newId(), text: 'س'.repeat(MAX_TEXT_BYTES / 2) } }))).toBe(7);
   });
 });

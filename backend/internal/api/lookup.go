@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -41,16 +40,18 @@ func (s *Server) lookupAccount(ctx context.Context, req httpapi.Request) httpapi
 		return httpapi.Error(http.StatusUnauthorized, "init_data_rejected")
 	}
 	telegramHash := directory.TelegramHash(s.Pepper, launch.UserID)
-	ok, err := s.Limits.Allow(ctx, "look#"+telegramHash, LookupsPerDay, 24*time.Hour)
+	ok, err := s.allow(ctx, "look", LookupsPerDay, 24*time.Hour, telegramHash)
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if !ok {
 		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
 	}
-	_, err = s.Directory.ByTelegram(ctx, telegramHash)
-	if err != nil && !errors.Is(err, directory.ErrNotFound) {
+	// An account being deleted doesn't count: setting up again replaces it
+	// without asking (register).
+	exists, err := s.Directory.AccountExists(ctx, telegramHash)
+	if err != nil {
 		return s.internal(route, err)
 	}
-	return httpapi.JSON(http.StatusOK, lookupResponse{Exists: err == nil})
+	return httpapi.JSON(http.StatusOK, lookupResponse{Exists: exists})
 }

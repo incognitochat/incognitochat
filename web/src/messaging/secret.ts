@@ -4,14 +4,18 @@
 //     the same for every conversation an account starts through one link, so
 //     the link's owner can block the person and not just a conversation;
 //   - labels: short names like "🦊 K3F9" for the people one talks to, computed
-//     on the device. The same person through the same link keeps their label.
+//     on the device. The same person through the same link keeps their label;
+//   - ID tags: keyed hashes of message IDs, so the device can remember which
+//     envelopes it took in and which messages it deleted without keeping
+//     their IDs. Never sent.
 //
 // Kept as an HMAC key: sealed in the vault (copied to new devices later), used
-// through a non-extractable working copy.
+// through a non-extractable working copy. Both are in the app's storage, so a
+// copy of it holds the secret (crypto/vault.ts).
 
 import { getKey, getSealed, putKey, putSealed, type Database } from '../storage/db';
 import { message } from '../crypto/signing';
-import { utf8 } from '../crypto/encoding';
+import { toBase64Url, utf8 } from '../crypto/encoding';
 import { seal, unseal } from '../crypto/vault';
 import { withLock } from '../sync/locks';
 
@@ -21,6 +25,8 @@ const HMAC: HmacImportParams = { name: 'HMAC', hash: 'SHA-256' };
 
 export const LABEL_SENDER_TAG = 'incognitochat/v2/sender-tag';
 export const LABEL_LABEL = 'incognitochat/v2/label';
+/** Local only: ID tags are never sent. */
+export const LABEL_ID_TAG = 'incognitochat/v2/local-id-tag';
 
 // Frozen with v1's labels: changing or reordering either changes everyone's labels.
 const EMOJI = [
@@ -58,6 +64,17 @@ async function hmac(secret: CryptoKey, label: string, ...parts: Uint8Array[]): P
 /** Our sender tag for a link: 32 bytes. */
 export function senderTag(secret: CryptoKey, linkFingerprint: string): Promise<Uint8Array<ArrayBuffer>> {
   return hmac(secret, LABEL_SENDER_TAG, utf8(linkFingerprint));
+}
+
+/**
+ * An ID tag: a keyed hash of a message ID in one conversation (by this
+ * device's ID for it), 9 bytes as 12 base64url characters. The same ID gives
+ * different tags in different conversations, and without the account secret
+ * a tag can't be matched to an ID (the other side's device, say, which has
+ * the ID).
+ */
+export async function idTag(secret: CryptoKey, conv: string, id: string): Promise<string> {
+  return toBase64Url((await hmac(secret, LABEL_ID_TAG, utf8(conv), utf8(id))).slice(0, 9));
 }
 
 /**

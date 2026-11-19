@@ -23,8 +23,8 @@ func (s *Server) usage(ctx context.Context, _ httpapi.Request, c caller) httpapi
 	const route = "GET /usage"
 	const day = 24 * time.Hour
 	now := s.Now()
-	daily := func(key string, limit int) (usageItem, error) {
-		used, err := s.Limits.Used(ctx, key+"#"+c.person(), day)
+	daily := func(kind string, limit int) (usageItem, error) {
+		used, err := s.Limits.UsedAt(ctx, s.rateName(kind, now, day, c.person()), day, now)
 		return usageItem{Used: min(used, limit), Limit: limit}, err
 	}
 	var out struct {

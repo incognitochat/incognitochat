@@ -136,7 +136,7 @@ func TestReplaceEndsCodes(t *testing.T) {
 	if err := s.CreateInvitation(ctx, first.ID, "abcd-efgh", 1, 0, -1); err != nil {
 		t.Fatal(err)
 	}
-	old, _ := s.ByTelegram(ctx, first.TelegramHash)
+	old, _ := s.ByTelegram(ctx, first.TelegramHash, first.DeviceID)
 	if err := s.Replace(ctx, old, newAccount(t, first.TelegramHash), now); err != nil {
 		t.Fatal(err)
 	}

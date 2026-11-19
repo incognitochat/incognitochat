@@ -29,6 +29,15 @@ export const MAX_DELETE = 100;
 export const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Receivers allow an edit this much later still: arrival times and clocks differ a little. */
 export const EDIT_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Whether one of our messages, sent at `at`, can still be edited at `now`
+ * (the clock messages are dated by, Unix ms), counted in whole seconds as
+ * `at` is: the app's menu and the sending engine both ask this.
+ */
+export function editable(at: number, now: number): boolean {
+  return Math.floor(now / 1000) * 1000 - at <= EDIT_WINDOW_MS;
+}
 /** The longest reaction, in UTF-16 units: one emoji, joined sequences included. */
 const MAX_REACTION = 32;
 
@@ -106,7 +115,11 @@ export interface Message {
   conv: string;
   /** Message ID, 16 random bytes. */
   id: string;
-  /** Sent time, Unix milliseconds, from the sender's clock. */
+  /**
+   * Sent time, Unix milliseconds: by the server's clock as the sender knows
+   * it, rounded down to the whole second (net/clock.ts). Older versions sent
+   * their own device's clock, to the millisecond.
+   */
   at: number;
   /** The sender's conversation public key (65 bytes); a new one means the sender rotated. */
   from: string;
@@ -123,6 +136,12 @@ export interface Message {
   replyTo?: string;
   /** For kind "seen": the IDs of messages read. */
   seen?: string[];
+  /**
+   * For kind "seen": the recipient's messages written up to the oldest of
+   * those named (that second too) were read too. A chat with more unread than one receipt
+   * names says so in one, naming the newest, not one for every 50.
+   */
+  earlier?: true;
   /** An attachment (kind "message"). */
   media?: Media;
   /** A sticker (kind "message"), on its own: no text or attachment with it. */
@@ -253,6 +272,7 @@ export function checkMessage(value: unknown): Message {
   }
   if (m.kind !== 'delete' && m.delete !== undefined) throw new MessageError(`bad ${m.kind}`);
   if (m.all !== undefined && (m.all !== true || m.kind !== 'delete')) throw new MessageError(`bad ${m.kind}`);
+  if (m.earlier !== undefined && (m.earlier !== true || m.kind !== 'seen')) throw new MessageError(`bad ${m.kind}`);
   if (m.edit !== undefined) {
     const e = m.edit as Record<string, unknown> | null;
     if (!e || typeof e !== 'object' || Array.isArray(e)) throw new MessageError('bad edit');
@@ -331,9 +351,32 @@ function checkSticker(value: unknown): void {
   if (a.e !== undefined && (typeof a.e !== 'string' || a.e.length === 0 || a.e.length > 16)) throw new MessageError('bad sticker emoji');
 }
 
-/** How an attachment is shown: its kind, or as a file if this version doesn't know the kind. */
-export function shownAs(media: { t: string }): MediaKind {
-  return MEDIA_KINDS.includes(media.t as MediaKind) ? (media.t as MediaKind) : 'file';
+/**
+ * Image types shown in the chat: raster formats only. Anything else a
+ * sender calls a photo or GIF (an SVG, which can carry script and links, or
+ * no type at all) is shown as a file.
+ */
+const INLINE_IMAGES: readonly string[] = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+/**
+ * How an attachment is shown: its kind; or as a file if this version doesn't
+ * know the kind, or if it's a photo or GIF that isn't a raster image type.
+ */
+export function shownAs(media: { t: string; m?: string | undefined }): MediaKind {
+  if (!MEDIA_KINDS.includes(media.t as MediaKind)) return 'file';
+  if ((media.t === 'photo' || media.t === 'gif') && !INLINE_IMAGES.includes(media.m ?? '')) return 'file';
+  return media.t as MediaKind;
+}
+
+/**
+ * A type the browser may be given for an attachment's decrypted bytes:
+ * raster images, audio and video, which play or show and never run
+ * anything. Any other (HTML, SVG, XML) is plain bytes, whatever the sender
+ * says, so the file can't act as a page of this site if it's ever opened.
+ */
+export function passiveType(type: string | undefined): string | undefined {
+  if (!type) return undefined;
+  return INLINE_IMAGES.includes(type) || /^(audio|video)\/[\w.+-]+$/.test(type) ? type : 'application/octet-stream';
 }
 
 const EXTENSIONS: Record<string, string> = {

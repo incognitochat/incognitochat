@@ -8,6 +8,11 @@
 # can check the live site against the attestations, and rebuild the same
 # commit with the same settings to get the same bytes (scripts/verify-site.sh).
 #
+# It builds nothing but what was asked for: a tag is checked out by its full
+# name and must exist as that tag, the commit must be on RELEASE_BRANCH's own
+# (first-parent) history, and the checkout must be exactly the commit the
+# request names (CI sends the one it deployed the backend from).
+#
 # Repository variables:
 #   CODE_REPOSITORY  e.g. incognitochat/incognitochat
 #   REFS             "commits" (dev: commit SHAs on RELEASE_BRANCH) or "tags" (vX.Y.Z)
@@ -23,6 +28,10 @@ on:
     inputs:
       ref:
         description: Commit SHA or release tag of the code repository to build
+        required: true
+        type: string
+      commit:
+        description: The full commit SHA the ref must resolve to
         required: true
         type: string
 
@@ -42,31 +51,71 @@ jobs:
       id-token: write # Sigstore signing for the attestations
       attestations: write
     steps:
+      # A tag is checked out as refs/tags/vX.Y.Z: given a bare name,
+      # actions/checkout takes a branch of that name over the tag.
       - name: Check the requested ref
+        id: request
         env:
           REF: ${{ inputs.ref }}
+          COMMIT: ${{ inputs.commit }}
           REFS: ${{ vars.REFS }}
         run: |
           case "$REFS" in
-            commits) [[ "$REF" =~ ^[0-9a-f]{40}$ ]] ;;
-            tags) [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ;;
+            commits) [[ "$REF" =~ ^[0-9a-f]{40}$ ]] && checkout=$REF ;;
+            tags) [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && checkout=refs/tags/$REF ;;
             *) false ;;
           esac || { echo "::error::This site only builds ${REFS:-nothing}; got an unexpected ref"; exit 1; }
+          if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The expected commit isn't a full commit SHA"
+            exit 1
+          fi
+          echo "checkout=${checkout}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ vars.CODE_REPOSITORY }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ steps.request.outputs.checkout }}
           fetch-depth: 0
           persist-credentials: false
 
+      # Before any of the checked-out code runs.
       - name: Check the commit is released
         env:
+          REF: ${{ inputs.ref }}
+          COMMIT: ${{ inputs.commit }}
           REFS: ${{ vars.REFS }}
           RELEASE_BRANCH: ${{ vars.RELEASE_BRANCH }}
         run: |
-          if [ "$REFS" = commits ] && ! git merge-base --is-ancestor HEAD "origin/${RELEASE_BRANCH}"; then
-            echo "::error::The commit is not on ${RELEASE_BRANCH}"
+          # A commit or a tag leaves HEAD detached. Without the tag, git would
+          # check out a branch made from anything else named refs/tags/vX.Y.Z.
+          if git symbolic-ref -q HEAD >/dev/null; then
+            echo "::error::The checkout is a branch, not ${REF}"
+            exit 1
+          fi
+          head=$(git rev-parse HEAD)
+          case "$REFS" in
+            commits) want=$REF ;;
+            tags)
+              git show-ref --verify --quiet "refs/tags/${REF}" \
+                || { echo "::error::There is no tag ${REF}"; exit 1; }
+              want=$(git rev-parse --verify "refs/tags/${REF}^{commit}") ;;
+            *) want= ;;
+          esac
+          if [ "$head" != "$want" ]; then
+            echo "::error::The checkout (${head}) isn't ${REF}"
+            exit 1
+          fi
+          if [ "$head" != "$COMMIT" ]; then
+            echo "::error::The checkout (${head}) isn't the requested commit ${COMMIT}"
+            exit 1
+          fi
+          # On the release branch itself, among its first parents (checkout
+          # fetched the full history): a commit that only came in through a
+          # merge doesn't count. Fetched and named in full, since
+          # "origin/main" would resolve to a tag called that first.
+          git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          if ! grep -qxF -- "$head" <(git rev-list --first-parent "refs/remotes/origin/${RELEASE_BRANCH}"); then
+            echo "::error::${head} is not on ${RELEASE_BRANCH}"
             exit 1
           fi
 

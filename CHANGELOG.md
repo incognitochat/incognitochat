@@ -1,5 +1,70 @@
 # Changelog
 
+## [2.4.0](https://github.com/incognitochat/incognitochat/compare/v2.3.0...v2.4.0) (2026-11-18)
+
+
+### Features
+
+* **api:** count limit hits and abuse signals, without identifiers ([#162](https://github.com/incognitochat/incognitochat/issues/162)) ([0f7013e](https://github.com/incognitochat/incognitochat/commit/0f7013e2017701b7dd112aa4fe417b911152e6aa))
+* rotate token issuer keys without breaking open apps ([#164](https://github.com/incognitochat/incognitochat/issues/164)) ([b0a0fbf](https://github.com/incognitochat/incognitochat/commit/b0a0fbf311cfcef1b3f8201b1e4809d1aa0d45bf))
+
+
+### Bug Fixes
+
+* **api:** end replaced and deleted accounts at once, then clean up in steps ([#150](https://github.com/incognitochat/incognitochat/issues/150)) ([7b83a06](https://github.com/incognitochat/incognitochat/commit/7b83a0630e4678cd71008000d7bcebc9abe9d930))
+* **api:** one account per link signing key ([#159](https://github.com/incognitochat/incognitochat/issues/159)) ([b222af6](https://github.com/incognitochat/incognitochat/commit/b222af6fe111e365db6fa5bb9f4ddf7a30120c19))
+* **api:** sign tokens with CRT and fail fast under throttling ([#151](https://github.com/incognitochat/incognitochat/issues/151)) ([68c1c1f](https://github.com/incognitochat/incognitochat/commit/68c1c1fab5de5cc7bcd5a361db33af243321e0e3))
+* **infra:** rotate each generated secret on its own ([#155](https://github.com/incognitochat/incognitochat/issues/155)) ([cc0ee01](https://github.com/incognitochat/incognitochat/commit/cc0ee014c619448422d4a68ee6c2a89e69c4121b))
+* **init:** deny the deploy role data reads and lasting access ([#163](https://github.com/incognitochat/incognitochat/issues/163)) ([15f78aa](https://github.com/incognitochat/incognitochat/commit/15f78aac595f3ba193b193064ef38f9f81c6ca9b))
+* **init:** let functions only post to sockets ([#154](https://github.com/incognitochat/incognitochat/issues/154)) ([4df3177](https://github.com/incognitochat/incognitochat/commit/4df31775a538d73d6071413f37b5cdee83824813))
+* **web:** bound what a flooding sender can store, and open big chats quickly ([#160](https://github.com/incognitochat/incognitochat/issues/160)) ([1ddaaef](https://github.com/incognitochat/incognitochat/commit/1ddaaef34ce40e0dbb1f4f7df0e07953948fd26b))
+* **web:** cap automatic downloads, and cancel deleted sends ([#157](https://github.com/incognitochat/incognitochat/issues/157)) ([432028f](https://github.com/incognitochat/incognitochat/commit/432028f1a61b96df5b497e617cda2b8469e4c5c2))
+* **web:** keep attachments out of the cache, and say plainly what a wipe leaves ([#156](https://github.com/incognitochat/incognitochat/issues/156)) ([bdeb636](https://github.com/incognitochat/incognitochat/commit/bdeb63659f040462633d16a0ba421bb53123c2b3))
+* **web:** keep link keys after a lost answer, and never reuse a shown token ([#149](https://github.com/incognitochat/incognitochat/issues/149)) ([e9156fd](https://github.com/incognitochat/incognitochat/commit/e9156fdeceaeb60963d7040b3ca22e1071051d38))
+* **web:** send message times in server seconds ([#161](https://github.com/incognitochat/incognitochat/issues/161)) ([d63ccd0](https://github.com/incognitochat/incognitochat/commit/d63ccd0ee58e59610c1a1e5c8093ca6e66c849eb))
+* **web:** show new messages in an open chat, in order, when clocks differ ([#165](https://github.com/incognitochat/incognitochat/issues/165)) ([6b7ab4b](https://github.com/incognitochat/incognitochat/commit/6b7ab4b641caac6880b3252ca849bb05198fede7))
+
+## [2.3.0](https://github.com/incognitochat/incognitochat/compare/v2.2.0...v2.3.0) (2026-11-18)
+
+
+### Features
+
+* 500 MB of uploads a day, 4,000 chats in all, clearer Usage screen ([#128](https://github.com/incognitochat/incognitochat/issues/128)) ([348a100](https://github.com/incognitochat/incognitochat/commit/348a1006f9657902ef524d4f9dc2ab7000c753cc))
+* a Usage screen and a low-balance notice ([#127](https://github.com/incognitochat/incognitochat/issues/127)) ([a869390](https://github.com/incognitochat/incognitochat/commit/a869390a6f90c5a2ab417223f3b6f0636eea68be))
+* **api:** 1,000 send tokens a day, 5 notice setups ([#117](https://github.com/incognitochat/incognitochat/issues/117)) ([bbeef16](https://github.com/incognitochat/incognitochat/commit/bbeef16d26e4220c46a731610bfa6de77bb6f245))
+* **api:** count daily limits per Telegram user ([#126](https://github.com/incognitochat/incognitochat/issues/126)) ([8ef45ad](https://github.com/incognitochat/incognitochat/commit/8ef45adb78373fdc93e52575e0fd473f35a68ebe))
+* **api:** create or replace a link at most 5 times a day ([#118](https://github.com/incognitochat/incognitochat/issues/118)) ([715ea07](https://github.com/incognitochat/incognitochat/commit/715ea07971cb2708565b12517a0bec711ca08eb9))
+* delete accounts in steps, and allow 2,000 mailboxes ([#121](https://github.com/incognitochat/incognitochat/issues/121)) ([9bded73](https://github.com/incognitochat/incognitochat/commit/9bded73ff4fc38f357aa8d2060bf196aac94d2e0))
+* files up to 50 MB ([#123](https://github.com/incognitochat/incognitochat/issues/123)) ([4b42803](https://github.com/incognitochat/incognitochat/commit/4b4280313a7a41b414fda60158a8aad15456e512))
+* media tokens pay for uploads, from their own daily budget ([#116](https://github.com/incognitochat/incognitochat/issues/116)) ([5d5689c](https://github.com/incognitochat/incognitochat/commit/5d5689c515d02c9e59a532834b0b6e96ed756aab))
+* **media:** emergency switches to pause uploads or downloads without a release ([#141](https://github.com/incognitochat/incognitochat/issues/141)) ([718cd6f](https://github.com/incognitochat/incognitochat/commit/718cd6f4531d02cdfc065b12b374336cf169d081))
+* tighter limits: 3 setups a day, 5 downloads per file, 30-day uploads, 2,000 requests per IP ([#122](https://github.com/incognitochat/incognitochat/issues/122)) ([d6f36de](https://github.com/incognitochat/incognitochat/commit/d6f36de2887e9440b5deb494284e34a809afa4c4))
+* **web:** a chat started through your link takes a mailbox only when you reply ([#120](https://github.com/incognitochat/incognitochat/issues/120)) ([8bba023](https://github.com/incognitochat/incognitochat/commit/8bba0237fcc0e1de37972f1178283c1ed7932366))
+* **web:** edit a message only within 24 hours of sending ([#124](https://github.com/incognitochat/incognitochat/issues/124)) ([a8efa4c](https://github.com/incognitochat/incognitochat/commit/a8efa4c3aa6c457631d08f481b49177eca031e79))
+* **web:** show who started each chat ([#119](https://github.com/incognitochat/incognitochat/issues/119)) ([5cf1162](https://github.com/incognitochat/incognitochat/commit/5cf1162f355907c3c5dc9844c257bd9a745f0cc5))
+
+
+### Bug Fixes
+
+* **api:** answer sends without waiting for the push; key short-lived rows by HMAC ([#145](https://github.com/incognitochat/incognitochat/issues/145)) ([1e881f7](https://github.com/incognitochat/incognitochat/commit/1e881f7a94fd1772b590825a3b49fd473adf666e))
+* **api:** charge send tokens by envelope size ([#144](https://github.com/incognitochat/incognitochat/issues/144)) ([f9aa0da](https://github.com/incognitochat/incognitochat/commit/f9aa0dacc850714010f169d8237aca698941cfc6))
+* **api:** count new mailboxes, not requests: 100 a day ([#125](https://github.com/incognitochat/incognitochat/issues/125)) ([f57adfe](https://github.com/incognitochat/incognitochat/commit/f57adfe81758689f5c8ec8ae04fd901b44df3264))
+* **api:** make inbox fetches and confirmations cheap and limited ([#133](https://github.com/incognitochat/incognitochat/issues/133)) ([0c32f67](https://github.com/incognitochat/incognitochat/commit/0c32f67c7ad97d5962ed6abd25d0891bb29ab73b))
+* **api:** read less from the directory before limits and on every request ([#135](https://github.com/incognitochat/incognitochat/issues/135)) ([2719659](https://github.com/incognitochat/incognitochat/commit/27196591cd9dd26c98f417e37f8434d14d91ef58))
+* **ci:** the site builds the release tag, never a branch of the same name ([#138](https://github.com/incognitochat/incognitochat/issues/138)) ([0aae82a](https://github.com/incognitochat/incognitochat/commit/0aae82aca9fcf0fe54cdd14db77911f415f0cccc))
+* handle wrong device clocks and never wipe on the server's word ([#136](https://github.com/incognitochat/incognitochat/issues/136)) ([2fd813c](https://github.com/incognitochat/incognitochat/commit/2fd813cac64f176e5f7316a336befd9816c50abd))
+* **infra:** rate-limit the routes that need no login and raise production's table caps ([#143](https://github.com/incognitochat/incognitochat/issues/143)) ([98f2c93](https://github.com/incognitochat/incognitochat/commit/98f2c932b3ad76dfc7f341d22cb16a2f7374589d))
+* **media:** download links last one minute ([#114](https://github.com/incognitochat/incognitochat/issues/114)) ([6f8f000](https://github.com/incognitochat/incognitochat/commit/6f8f0005e8684f5f1019eb73a1e7009cf14c9c1b))
+* **media:** upload links write once and start within a minute ([#139](https://github.com/incognitochat/incognitochat/issues/139)) ([d9640fb](https://github.com/incognitochat/incognitochat/commit/d9640fbdf1cd8e18c10500e4640ff25bfebcd3ae))
+* **notices:** send before deleting, honour retry_after, narrow notify's access ([#148](https://github.com/incognitochat/incognitochat/issues/148)) ([fdbef9f](https://github.com/incognitochat/incognitochat/commit/fdbef9f2cb205ad6b5c32e1b594af23cf7c78f80))
+* **verify:** check the site's manifest, repository, commit and signing workflow ([#147](https://github.com/incognitochat/incognitochat/issues/147)) ([784f01e](https://github.com/incognitochat/incognitochat/commit/784f01e1aa3ab7e029dd561076695c7261c5a71c))
+* **web:** a link opened from Telegram waits for a tap ([#132](https://github.com/incognitochat/incognitochat/issues/132)) ([e3c474e](https://github.com/incognitochat/incognitochat/commit/e3c474e6a478a2ad72a92d2d92da805583d62c1e))
+* **web:** accept envelopes only through the mailbox they belong to ([#140](https://github.com/incognitochat/incognitochat/issues/140)) ([914c440](https://github.com/incognitochat/incognitochat/commit/914c4406aae8c2b3ccde60815aafae196d1afbd0))
+* **web:** envelopes that come again or late undo nothing ([#142](https://github.com/incognitochat/incognitochat/issues/142)) ([7d6023c](https://github.com/incognitochat/incognitochat/commit/7d6023c8ac63650781410db6f70ec00d10e7de2e))
+* **web:** keep message and conversation IDs within their conversation ([#134](https://github.com/incognitochat/incognitochat/issues/134)) ([0d9f746](https://github.com/incognitochat/incognitochat/commit/0d9f746b5373d274c5ea2632c2376ef3bab1010e))
+* **web:** plain links are grey, only destructive ones red ([#129](https://github.com/incognitochat/incognitochat/issues/129)) ([2a3b24b](https://github.com/incognitochat/incognitochat/commit/2a3b24bd75be30c21c0b8ab0dc8f4f8b0b6dcbf2))
+* **ws:** one write per socket connect, bounded records, no disconnect route ([#137](https://github.com/incognitochat/incognitochat/issues/137)) ([16a0b28](https://github.com/incognitochat/incognitochat/commit/16a0b2836f87d974add7d5d0a3c24834b8fb6b68))
+
 ## [2.2.0](https://github.com/incognitochat/incognitochat/compare/v2.1.0...v2.2.0) (2026-11-14)
 
 

@@ -40,9 +40,63 @@ describe('api', () => {
     const err = await api.post('/session', {}, checkTokenResponse).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ status: 410, code: 'account_replaced' });
+    // Another account's link has the link signing key (POST /links).
+    const taken = createApi('https://api.example', fake(409, '{"error":"signing_key_taken"}'));
+    expect(await taken.post('/links', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'signing_key_taken' });
 
     const odd = createApi('https://api.example', fake(400, '{"error":"<script>"}'));
     expect(await odd.post('/x', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ code: 'unknown' });
+  });
+
+  it("reads the server's clock from a clock_skew answer, and nothing odd", async () => {
+    const skew = createApi('https://api.example', fake(401, '{"error":"clock_skew","now":1800000000}'));
+    expect(await skew.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({
+      status: 401,
+      code: 'clock_skew',
+      serverTime: 1_800_000_000,
+    });
+    for (const now of ['"1800000000"', '-5', '1.5', '1e300', 'null']) {
+      const odd = createApi('https://api.example', fake(401, `{"error":"clock_skew","now":${now}}`));
+      const err = (await odd.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError;
+      expect(err.code).toBe('clock_skew');
+      expect(err.serverTime).toBeUndefined();
+    }
+    // Only with clock_skew.
+    const other = createApi('https://api.example', fake(401, '{"error":"login_refused","now":1800000000}'));
+    expect(((await other.post('/session', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError).serverTime).toBeUndefined();
+  });
+
+  it('reads how many send tokens an envelope costs from a tokens_needed answer', async () => {
+    const needed = createApi('https://api.example', fake(402, '{"error":"tokens_needed","needed":4}'));
+    expect(await needed.post('/send', {}, checkTokenResponse).catch((e: unknown) => e)).toMatchObject({ status: 402, code: 'tokens_needed', needed: 4 });
+    for (const n of ['"4"', '0', '-1', '1.5', 'null']) {
+      const odd = createApi('https://api.example', fake(402, `{"error":"tokens_needed","needed":${n}}`));
+      const err = (await odd.post('/send', {}, checkTokenResponse).catch((e: unknown) => e)) as ApiError;
+      expect(err.code).toBe('tokens_needed');
+      expect(err.needed).toBeUndefined();
+    }
+  });
+
+  it('reads how long the server asks to wait (Retry-After), and nothing odd', async () => {
+    const answer = (retryAfter: string | null): Fetch => async () =>
+      new Response('{"error":"unavailable"}', { status: 503, headers: retryAfter === null ? {} : { 'Retry-After': retryAfter } });
+    const err = (await createApi('https://api.example', answer('2'))
+      .request('GET', '/inbox', {}, checkTokenResponse)
+      .catch((e: unknown) => e)) as ApiError;
+    expect(err).toMatchObject({ status: 503, code: 'unavailable', retryAfter: 2 });
+    for (const [header, want] of [
+      [null, undefined],
+      ['', undefined],
+      ['-1', undefined],
+      ['1.5', undefined],
+      ['Wed, 21 Oct 2026 07:28:00 GMT', undefined],
+      ['999999999', 86_400],
+    ] as const) {
+      const odd = (await createApi('https://api.example', answer(header))
+        .request('GET', '/inbox', {}, checkTokenResponse)
+        .catch((e: unknown) => e)) as ApiError;
+      expect(odd.retryAfter).toBe(want);
+    }
   });
 
   it('reports unreachable servers and unexpected bodies as NetworkError', async () => {

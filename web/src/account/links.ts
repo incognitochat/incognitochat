@@ -5,6 +5,14 @@
 // people get the same labels, and blocked people stay blocked. Keys are
 // generated here and sealed in the vault (they are copied to new devices
 // later).
+//
+// The server gives a signing key to one account for good, so no two
+// accounts' links share senders' tags: every create, replace and rotation
+// carries an owner proof (the signing key's signature over the link ID and
+// the account ID). Told another account has the key (signing_key_taken: one
+// shared before keys were one account's), the app makes a new signing key
+// and a link with it; senders' tags, labels and blocks for it start over,
+// which the user is told (newKeyToTell, kept until then).
 
 import {
   exportPublicKey,
@@ -14,38 +22,100 @@ import {
   importSigningPublicKey,
   SIGNING_IMPORT,
 } from '../crypto/keys';
-import { LABEL_LINK_KEY, sign } from '../crypto/signing';
+import { LABEL_LINK_KEY, LABEL_LINK_OWNER, sign } from '../crypto/signing';
 import { fromBase64Url, toBase64Url } from '../crypto/encoding';
 import { seal, unseal } from '../crypto/vault';
-import { ApiError, checkObject } from '../net/api';
+import { ApiError, checkObject, type Api } from '../net/api';
 import type { Session } from '../net/session';
 import { hourFloor } from '../protocol/device-list';
-import { KEY_VALIDITY_SECONDS, keyParts, newLinkId, type LinkRef } from '../protocol/link';
-import { deleteSealed, getKey, getMeta, getSealed, putMeta, putSealed, type Database } from '../storage/db';
+import { BundleMismatch, checkBundle, KEY_VALIDITY_SECONDS, keyParts, newLinkId, ownerParts, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
+import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, putMeta, putSealed, type Database } from '../storage/db';
 import { withLock } from '../sync/locks';
-import { indexKey, KEY_RETENTION_MS, scheduleKeyDeletion, unindexKeys } from '../messaging/keys';
+import { isSetUp, readAccount } from './account';
+import {
+  hasKey,
+  indexedNames,
+  indexKey,
+  KEY_RETENTION_MS,
+  linkKeysMailbox,
+  scheduleKeyDeletion,
+  setLinkKeysMailbox,
+  unindexKeys,
+  type KeyEntry,
+} from '../messaging/keys';
 
 const META_LINKS = 'links';
+/** A link change sent whose outcome isn't known yet (LinkChange). */
+const META_CHANGE = 'link-change';
 /** The account's link signing key (sealed), and its public key (meta). */
 const SIGNING = 'link-signing';
 const META_SIGNING_PUBLIC = 'link-signing-public';
+/** Set when the account's link got a new signing key, until the user is told (newKeyToTell). */
+const META_NEW_KEY = 'link-new-key';
 const KEY_VAULT = 'vault-key';
 const LOCK = 'links';
 const ID_ATTEMPTS = 3;
 const ID = /^[A-Za-z0-9_-]{11}$/;
 const FP = /^[A-Za-z0-9_-]{43}$/;
+const MAILBOX = /^[A-Za-z0-9_-]{22}$/;
 
 export interface LinkRecord extends LinkRef {
   /** The encryption keys sealed for this link: validity window and public key (base64url). */
   keys: { from: number; until: number; pub?: string }[];
   /** Unix seconds when the link next gets a new encryption key (weekly, jittered). */
   rotateAt?: number;
+  /**
+   * Its intro mailbox, where first messages arrive: the only one an envelope
+   * written for its keys counts through. Missing for a link made before it
+   * was kept, until the link's bundle says (messaging/engine.ts).
+   */
+  mailbox?: string;
 }
+
+/** What a rotation did: nothing, a new key, or a new link with a new signing key in place of one that couldn't get new keys. */
+export type Rotation = boolean | 'new-link';
 
 /** Link encryption keys are replaced every 6 to 9 days (design D11). */
 const ROTATE_MIN = 6 * 24 * 3600;
 const ROTATE_SPREAD = 3 * 24 * 3600;
 const nextRotation = (now: number) => now + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
+
+/**
+ * How long a new link the server doesn't show is still looked for at upkeep:
+ * well past any request that could still be under way (the app stops
+ * waiting for an answer after 15 seconds, the server works on a request for
+ * at most 10) and the second or so its bundle reads can lag.
+ */
+const CHANGE_SETTLES_AFTER = 10 * 60;
+
+/** A link encryption key as it was sent: the public key and signature in base64url. */
+interface SentKey {
+  key: string;
+  from: number;
+  until: number;
+  signature: string;
+}
+
+/**
+ * A change sent to the server whose outcome isn't known: its answer was
+ * lost (a timeout, a dropped connection, a failure on the way back), or the
+ * app closed meanwhile. Either a new link `id` (in place of `replaces`, if
+ * set) or a new encryption key for link `id`; `at` is when it was first
+ * sent, in Unix seconds. Its key is sealed and indexed before it's sent, so
+ * whatever the server did, first messages written for it can be opened; the
+ * next upkeep (or link action) asks the link's bundle what the server has
+ * and takes that (settle). At most one at a time.
+ */
+type LinkChange =
+  | { kind: 'link'; id: string; fingerprint: string; signingKey: string; key: SentKey; replaces?: string; at: number; proof?: string }
+  | { kind: 'key'; id: string; key: SentKey; at: number };
+
+/**
+ * The server turned the request down, so it changed nothing. Anything else
+ * (no answer, one that can't be read, the server failing) may come after it
+ * made the change.
+ */
+const refused = (err: unknown): err is ApiError => err instanceof ApiError && err.status >= 400 && err.status < 500;
 
 /** What the server says about this account's links. */
 export interface AccountInfo {
@@ -55,19 +125,33 @@ export interface AccountInfo {
   maxLinks: number;
   /** Whether Telegram notices are set up and not turned off. */
   notices: boolean;
+  /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
+  deleting: boolean;
+  /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
+  cleanup: boolean;
 }
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, maxLinks, notices } = v;
+  const { canCreateLinks, admin, links, maxLinks, notices, deleting, cleanup } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
   if (!Number.isSafeInteger(links) || !Number.isSafeInteger(maxLinks)) throw new Error('bad account');
-  return { canCreateLinks, admin, links: links as number, maxLinks: maxLinks as number, notices: notices === true };
+  return {
+    canCreateLinks,
+    admin,
+    links: links as number,
+    maxLinks: maxLinks as number,
+    notices: notices === true,
+    deleting: deleting === true,
+    cleanup: cleanup === true,
+  };
 }
 
 /** Vault names for a link's keys (signingName: links made when each had its own signing key). */
 const signingName = (id: string) => `link:${id}:signing`;
-export const keyName = (id: string, from: number) => `link:${id}:key:${from}`;
+const keyPrefix = (id: string) => `link:${id}:key:`;
+export const keyName = (id: string, from: number) => `${keyPrefix(id)}${from}`;
+const changeName = (change: LinkChange) => keyName(change.id, change.key.from);
 
 export async function listLinks(db: Database): Promise<LinkRecord[]> {
   const value = await getMeta<unknown>(db, META_LINKS);
@@ -101,18 +185,65 @@ async function linkSigningKey(db: Database, vaultKey: CryptoKey): Promise<{ priv
   return { privateKey: pair.privateKey, publicKey, fp: await fingerprint(pair.publicKey) };
 }
 
-/** Creates this account's link. Throws ApiError invitation_required, or link_limit if it has one. */
-export function createLink(db: Database, session: Session, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
-  return withLock(LOCK, () => makeLink(db, session, now, null));
+/**
+ * Gives the account a new link signing key, in place of one the server says
+ * another account has: links made with it get new senders' tags, so their
+ * labels and blocks start over. The user is to be told (noted first, so it's
+ * never missed, whatever becomes of the link).
+ */
+async function renewSigningKey(db: Database, vaultKey: CryptoKey): Promise<{ privateKey: CryptoKey; publicKey: Uint8Array<ArrayBuffer>; fp: string }> {
+  await putMeta(db, META_NEW_KEY, true);
+  await deleteMeta(db, META_SIGNING_PUBLIC);
+  await deleteSealed(db, SIGNING);
+  return linkSigningKey(db, vaultKey);
+}
+
+/**
+ * Whether the user is still to be told that their link has a new signing key
+ * (another account had the old one, or it was gone from this device): they
+ * share the new link, and its labels and blocks start over. Kept on the
+ * device, in every copy of the app, until told (toldNewKey).
+ */
+export async function newKeyToTell(db: Database): Promise<boolean> {
+  return (await getMeta<unknown>(db, META_NEW_KEY)) === true;
+}
+
+/** The user has seen that their link has a new signing key. */
+export function toldNewKey(db: Database): Promise<void> {
+  return deleteMeta(db, META_NEW_KEY);
+}
+
+/** This account's ID, which owner proofs name. */
+async function accountId(db: Database): Promise<string> {
+  const account = await readAccount(db);
+  if (!isSetUp(account)) throw new Error('not set up');
+  return account.accountId;
+}
+
+/** An owner proof: the link signing key's signature over the link ID and this account's ID. */
+async function ownerProof(db: Database, signingKey: CryptoKey, linkId: string): Promise<string> {
+  return toBase64Url(await sign(signingKey, LABEL_LINK_OWNER, ...ownerParts(linkId, await accountId(db))));
+}
+
+/**
+ * Creates this account's link. Throws ApiError invitation_required, or
+ * link_limit if it has one. A link change whose answer was lost is settled
+ * first: if the server made it, its link is the one created.
+ */
+export function createLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
+  return withLock(LOCK, async () => (await settle(db, session, api, now(), true)) ?? makeLink(db, session, now, null));
 }
 
 /**
  * Replaces this account's link with a new one (or creates one if there is
  * none): the old link stops working at once. Conversations carry on, since
- * they no longer go through the link.
+ * they no longer go through the link. A link change whose answer was lost
+ * is settled first: if the server made it, its link is the replacement.
  */
-export function replaceLink(db: Database, session: Session, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
+export function replaceLink(db: Database, session: Session, api: Api, now: () => number = () => Math.floor(Date.now() / 1000)): Promise<LinkRecord> {
   return withLock(LOCK, async () => {
+    const settled = await settle(db, session, api, now(), true);
+    if (settled) return settled;
     const links = await listLinks(db);
     const current = links[links.length - 1];
     // Links from when an account could have several: only one stays.
@@ -129,58 +260,83 @@ export function replaceLink(db: Database, session: Session, now: () => number = 
   });
 }
 
-/** New encryption keys, sealed here first, then the bundle on the server (in place of replaces, if set). */
+/**
+ * New encryption keys, sealed here first, then the bundle on the server (in
+ * place of replaces, if set). If the server says another account has the
+ * signing key, it's made again once with a new one (renewSigningKey).
+ */
 async function makeLink(db: Database, session: Session, now: () => number, replaces: LinkRecord | null): Promise<LinkRecord> {
   const vaultKey = await getKey(db, KEY_VAULT);
   if (!vaultKey) throw new Error('no vault key');
-  const signing = await linkSigningKey(db, vaultKey);
+  let signing = await linkSigningKey(db, vaultKey);
   const encryption = await generateCopyableAgreementKey();
   const encryptionKey = await exportPublicKey(encryption.publicKey);
   // Back-date by a random few hours, so the keys of two links made around
   // the same time don't carry the same times.
   const from = hourFloor(now()) - 3600 * Math.floor(Math.random() * 12);
   const until = from + KEY_VALIDITY_SECONDS;
-  const signature = await sign(signing.privateKey, LABEL_LINK_KEY, ...keyParts(encryptionKey, from, until));
+  let signature = await sign(signing.privateKey, LABEL_LINK_KEY, ...keyParts(encryptionKey, from, until));
+  let renewed = false;
 
   for (let attempt = 1; ; attempt++) {
     const id = newLinkId();
-    // Sealed before the server knows the link, so a link never exists
-    // without its keys on this device.
-    await putSealed(db, keyName(id, from), await seal(vaultKey, encryption.privateKey, keyName(id, from)));
-    try {
-      await session.call(
-        'POST',
-        '/links',
-        {
-          id,
-          signingKey: toBase64Url(signing.publicKey),
-          keys: [{ key: toBase64Url(encryptionKey), from, until, signature: toBase64Url(signature) }],
-          ...(replaces ? { replaces: replaces.id } : {}),
-        },
-        checkObject,
-        { sign: true },
-      );
-    } catch (err) {
-      await deleteSealed(db, keyName(id, from));
-      if (err instanceof ApiError && err.code === 'conflict' && attempt < ID_ATTEMPTS) continue;
-      throw err;
-    }
-    const record: LinkRecord = {
+    const change: LinkChange & { kind: 'link' } = {
+      kind: 'link',
       id,
       fingerprint: signing.fp,
-      keys: [{ from, until, pub: toBase64Url(encryptionKey) }],
-      rotateAt: nextRotation(now()),
+      signingKey: toBase64Url(signing.publicKey),
+      key: { key: toBase64Url(encryptionKey), from, until, signature: toBase64Url(signature) },
+      ...(replaces ? { replaces: replaces.id } : {}),
+      at: now(),
+      proof: await ownerProof(db, signing.privateKey, id),
     };
-    await putMeta(db, META_LINKS, [...(await listLinks(db)).filter((l) => l.id !== replaces?.id), record]);
-    if (replaces) {
-      // Its keys stay until first messages sent before the replacement can
-      // no longer be waiting in the inbox.
-      await scheduleKeyDeletion(db, (e) => e.link?.id === replaces.id, now() * 1000 + KEY_RETENTION_MS);
+    // Kept before the server knows the link, so a link never exists without
+    // its keys on this device, and one whose answer is lost is found later.
+    await begin(db, vaultKey, encryption.privateKey, change, { id: change.id, fingerprint: change.fingerprint });
+    let created: Record<string, unknown>;
+    try {
+      created = await sendLink(db, session, change);
+    } catch (err) {
+      // Without a clear refusal the server may have made it: kept, to settle.
+      if (!refused(err)) throw err;
+      await forget(db, change, null);
+      if (err.code === 'conflict' && attempt < ID_ATTEMPTS) continue;
+      if (err.code === 'signing_key_taken' && !renewed) {
+        signing = await renewSigningKey(db, vaultKey);
+        signature = await sign(signing.privateKey, LABEL_LINK_KEY, ...keyParts(encryptionKey, from, until));
+        renewed = true;
+        continue;
+      }
+      throw err;
     }
-    // First messages to the link are wrapped to this key.
-    await indexKey(db, encryptionKey, { name: keyName(id, from), link: { id, fingerprint: signing.fp } });
-    return record;
+    return adoptLink(db, change, mailboxOf(created), now());
   }
+}
+
+/**
+ * Sends a new link to the server, exactly as its change notes it. A change
+ * noted before owner proofs gets one now, if the account's signing key is
+ * still the change's.
+ */
+async function sendLink(db: Database, session: Session, change: LinkChange & { kind: 'link' }): Promise<Record<string, unknown>> {
+  const { id, signingKey, key, replaces } = change;
+  let proof = change.proof;
+  if (proof === undefined) {
+    const vaultKey = await getKey(db, KEY_VAULT);
+    const signing = vaultKey ? await linkSigningKey(db, vaultKey) : null;
+    if (!signing || signing.fp !== change.fingerprint) throw new Error('no signing key for the change');
+    proof = await ownerProof(db, signing.privateKey, id);
+  }
+  return session.call('POST', '/links', { id, signingKey, keys: [key], ...(replaces ? { replaces } : {}), proof }, checkObject, { sign: true });
+}
+
+/**
+ * The intro mailbox the server picked for a new link. Without a valid one
+ * here, it's learned from the bundle later, as for a link from before it
+ * was kept.
+ */
+function mailboxOf(created: Record<string, unknown>): string | undefined {
+  return typeof created.mailbox === 'string' && MAILBOX.test(created.mailbox) ? created.mailbox : undefined;
 }
 
 /**
@@ -188,58 +344,339 @@ async function makeLink(db: Database, session: Session, now: () => number, repla
  * bundle then lists only the new key, so new first messages go to it; the
  * old key is kept until anything written to it has expired from the inbox.
  * Senders not answered yet fetch the current key before writing again. Run
- * at upkeep; `now` in Unix seconds. Returns whether it rotated.
+ * at upkeep, after settleLinkChange; not while a change is still unsettled.
+ * `now` in Unix seconds. Returns whether it rotated.
+ *
+ * A link that can't get new keys any more (another account has its signing
+ * key, or the key is gone from this device) is replaced instead, by a link
+ * with the account's signing key, made new if it was the one taken: it
+ * returns 'new-link', so the app can say the link changed and its labels
+ * and blocks start over.
  */
-export function rotateLinkKey(db: Database, session: Session, now: number): Promise<boolean> {
+export function rotateLinkKey(db: Database, session: Session, now: number): Promise<Rotation> {
   return withLock(LOCK, async () => {
+    if (await pendingChange(db)) return false;
     const links = await listLinks(db);
     const link = links[links.length - 1];
     if (!link) return false;
-    const save = (changed: LinkRecord) => putMeta(db, META_LINKS, links.map((l) => (l.id === changed.id ? changed : l)));
     if (link.rotateAt === undefined) {
       // A link from before rotation: start its schedule.
-      await save({ ...link, rotateAt: nextRotation(now) });
+      await putMeta(db, META_LINKS, links.map((l) => (l.id === link.id ? { ...link, rotateAt: nextRotation(now) } : l)));
       return false;
     }
     if (now < link.rotateAt) return false;
     const vaultKey = await getKey(db, KEY_VAULT);
     if (!vaultKey) return false;
     const signingKey = await signingKeyFor(db, vaultKey, link);
-    if (!signingKey) return false;
+    if (!signingKey) return replaceStuck(db, session, vaultKey, link, now);
 
+    // Back-dated like a new link's, but after every key this link has had,
+    // since senders take the newest, and a key's `from` names it in the
+    // vault: a key kept after a change that wasn't taken (forget) is sealed
+    // and indexed though not on the record, and must not be overwritten.
+    // No hour left after them yet: the next upkeep tries again.
+    const newest = Math.max(...(await takenFroms(db, link)));
+    if (newest + 3600 > hourFloor(now)) return false;
     const encryption = await generateCopyableAgreementKey();
     const encryptionKey = await exportPublicKey(encryption.publicKey);
-    // Back-dated like a new link's, but never to before the key it replaces,
-    // since senders take the newest.
-    const newest = Math.max(...link.keys.map((k) => k.from));
-    const from = Math.min(hourFloor(now), Math.max(hourFloor(now) - 3600 * Math.floor(Math.random() * 12), newest + 3600));
+    const from = Math.max(hourFloor(now) - 3600 * Math.floor(Math.random() * 12), newest + 3600);
     const until = from + KEY_VALIDITY_SECONDS;
     const signature = await sign(signingKey, LABEL_LINK_KEY, ...keyParts(encryptionKey, from, until));
-    const name = keyName(link.id, from);
-    await putSealed(db, name, await seal(vaultKey, encryption.privateKey, name));
+    const change: LinkChange & { kind: 'key' } = {
+      kind: 'key',
+      id: link.id,
+      key: { key: toBase64Url(encryptionKey), from, until, signature: toBase64Url(signature) },
+      at: now,
+    };
+    // Made before anything is noted, so a failure here leaves nothing behind.
+    const proof = await ownerProof(db, signingKey, link.id);
+    // Indexed before it's published: if the answer is lost, the bundle may
+    // list only this key, and first messages to it must still open.
+    await begin(db, vaultKey, encryption.privateKey, change, { id: link.id, fingerprint: link.fingerprint, ...(link.mailbox ? { mailbox: link.mailbox } : {}) });
     try {
-      await session.call(
-        'PUT',
-        `/links/${link.id}/keys`,
-        { keys: [{ key: toBase64Url(encryptionKey), from, until, signature: toBase64Url(signature) }] },
-        checkObject,
-        { sign: true },
-      );
+      await session.call('PUT', `/links/${link.id}/keys`, { keys: [change.key], proof }, checkObject, { sign: true });
     } catch (err) {
-      await deleteSealed(db, name);
+      // Without a clear refusal the server may have taken it: kept, to settle.
+      if (!refused(err)) throw err;
+      await forget(db, change, null);
       // Gone (replaced or revoked elsewhere): nothing to rotate.
-      if (err instanceof ApiError && err.code === 'not_found') return false;
+      if (err.code === 'not_found') return false;
+      if (err.code === 'signing_key_taken') return replaceStuck(db, session, vaultKey, link, now);
       throw err;
     }
-    await indexKey(db, encryptionKey, { name, link: { id: link.id, fingerprint: link.fingerprint } });
-    await scheduleKeyDeletion(db, (e) => e.link?.id === link.id && e.name !== name, now * 1000 + KEY_RETENTION_MS);
-    await save({
-      ...link,
-      // Keys deleted long ago drop off the record.
-      keys: [...link.keys.filter((k) => k.until + KEY_RETENTION_MS / 1000 > now), { from, until, pub: toBase64Url(encryptionKey) }],
-      rotateAt: nextRotation(now),
-    });
-    return true;
+    return adoptKey(db, change, now);
+  });
+}
+
+/**
+ * Replaces a link that can't get new keys any more with one that can: a
+ * new signing key first if the account's is the one another account has.
+ * Either way the link's key changes, which the user is to be told.
+ */
+async function replaceStuck(db: Database, session: Session, vaultKey: CryptoKey, link: LinkRecord, now: number): Promise<Rotation> {
+  if ((await linkSigningKey(db, vaultKey)).fp === link.fingerprint) await renewSigningKey(db, vaultKey);
+  else await putMeta(db, META_NEW_KEY, true);
+  await makeLink(db, session, () => now, link);
+  return 'new-link';
+}
+
+/**
+ * Finds out what became of a link change whose answer was lost, from the
+ * link's bundle, and takes that: run at upkeep, before anything else that
+ * needs the link. `now` in Unix seconds. Returns whether the account's link
+ * changed (a new link the server made is now the account's), 'new-key' if
+ * it did and the user is still to be told it has a new signing key
+ * (newKeyToTell). Throws (keeping the change) while the bundle can't be
+ * fetched.
+ */
+export function settleLinkChange(db: Database, session: Session, api: Api, now: number): Promise<boolean | 'new-key'> {
+  return withLock(LOCK, async () => {
+    if ((await settle(db, session, api, now, false)) === null) return false;
+    return (await newKeyToTell(db)) ? 'new-key' : true;
+  });
+}
+
+/** The link change waiting to be settled, if any. */
+async function pendingChange(db: Database): Promise<LinkChange | null> {
+  const c = await getMeta<Partial<Record<string, unknown>>>(db, META_CHANGE);
+  const key = c?.key as Partial<SentKey> | undefined;
+  if (!c || typeof c.id !== 'string' || !ID.test(c.id) || !Number.isSafeInteger(c.at)) return null;
+  if (!key || typeof key.key !== 'string' || typeof key.signature !== 'string' || !Number.isSafeInteger(key.from) || !Number.isSafeInteger(key.until)) return null;
+  if (c.kind === 'key') return c as LinkChange;
+  if (c.kind !== 'link' || typeof c.fingerprint !== 'string' || !FP.test(c.fingerprint) || typeof c.signingKey !== 'string') return null;
+  return c.replaces === undefined || (typeof c.replaces === 'string' && ID.test(c.replaces)) ? (c as LinkChange) : null;
+}
+
+/**
+ * Notes a change, then seals and indexes its key, before it's sent: in
+ * that order, so whenever the app closes, the change's key is never left
+ * without the note that settles it (a note whose key isn't sealed was
+ * never sent: settle). Never over a key already kept under the same name.
+ */
+async function begin(db: Database, vaultKey: CryptoKey, privateKey: CryptoKey, change: LinkChange, link: NonNullable<KeyEntry['link']>): Promise<void> {
+  const name = changeName(change);
+  if ((await getSealed(db, name)) || (await indexedNames(db)).has(name)) throw new Error(`key ${name} exists`);
+  await putMeta(db, META_CHANGE, change);
+  await putSealed(db, name, await seal(vaultKey, privateKey, name));
+  await indexKey(db, fromBase64Url(change.key.key), { name, link });
+}
+
+/**
+ * The `from` of every key this link has had that may still be kept: on its
+ * record, sealed in the vault, or in the index (a key kept after a change
+ * that wasn't taken is on the last two only).
+ */
+async function takenFroms(db: Database, link: LinkRecord): Promise<number[]> {
+  const prefix = keyPrefix(link.id);
+  const names = [...(await listSealed(db, prefix)), ...[...(await indexedNames(db))].filter((n) => n.startsWith(prefix))];
+  return [...link.keys.map((k) => k.from), ...names.map((n) => Number(n.slice(prefix.length))).filter((from) => Number.isSafeInteger(from))];
+}
+
+/**
+ * Drops a change that didn't happen. Its key goes at once if nobody can have
+ * been offered it (`retireFrom` null); otherwise (a bundle read can lag a
+ * moment) it's kept like a replaced key, until 35 days after retireFrom
+ * (Unix seconds).
+ */
+async function forget(db: Database, change: LinkChange, retireFrom: number | null): Promise<void> {
+  const name = changeName(change);
+  if (retireFrom !== null && (await hasKey(db, change.key.key))) {
+    await scheduleKeyDeletion(db, (e) => e.name === name, retireFrom * 1000 + KEY_RETENTION_MS);
+  } else {
+    await unindexKeys(db, (e) => e.name === name);
+    await deleteSealed(db, name);
+  }
+  await deleteMeta(db, META_CHANGE);
+}
+
+/** Takes a new link the server made: it becomes the account's link, in place of the one it replaces. */
+async function adoptLink(db: Database, change: LinkChange & { kind: 'link' }, mailbox: string | undefined, now: number): Promise<LinkRecord> {
+  const { id, fingerprint, key, replaces } = change;
+  const record: LinkRecord = {
+    id,
+    fingerprint,
+    keys: [{ from: key.from, until: key.until, pub: key.key }],
+    rotateAt: nextRotation(change.at),
+    ...(mailbox ? { mailbox } : {}),
+  };
+  // The old link's keys are seen to before it leaves the list, and the note
+  // goes last: if the app closes in between, the next settle does it all
+  // again, and no key is left that nothing will ever delete.
+  if (replaces) {
+    // Its keys stay until first messages sent before the replacement can
+    // no longer be waiting in the inbox; loose ones an older version left
+    // open nothing, and go now (backfill no longer looks at the old link).
+    await scheduleKeyDeletion(db, (e) => e.link?.id === replaces, now * 1000 + KEY_RETENTION_MS);
+    for (const name of await looseLinkKeys(db, replaces)) await deleteSealed(db, name);
+  }
+  // First messages to the link are wrapped to this key, and come through its intro mailbox.
+  await indexKey(db, fromBase64Url(key.key), { name: changeName(change), link: { id, fingerprint, ...(mailbox ? { mailbox } : {}) } });
+  await putMeta(db, META_LINKS, [...(await listLinks(db)).filter((l) => l.id !== replaces && l.id !== id), record]);
+  await deleteMeta(db, META_CHANGE);
+  return record;
+}
+
+/** Takes a new key the server published for the link: the others go 35 days on. Returns whether the link is still ours. */
+async function adoptKey(db: Database, change: LinkChange & { kind: 'key' }, now: number): Promise<boolean> {
+  const links = await listLinks(db);
+  const link = links.find((l) => l.id === change.id);
+  if (!link) {
+    await forget(db, change, now);
+    return false;
+  }
+  const name = changeName(change);
+  await scheduleKeyDeletion(db, (e) => e.link?.id === link.id && e.name !== name, now * 1000 + KEY_RETENTION_MS);
+  const { from, until, key } = change.key;
+  const changed: LinkRecord = {
+    ...link,
+    // Keys deleted long ago drop off the record.
+    keys: [...link.keys.filter((k) => k.until + KEY_RETENTION_MS / 1000 > now && k.from !== from), { from, until, pub: key }],
+    rotateAt: nextRotation(change.at),
+  };
+  await putMeta(db, META_LINKS, links.map((l) => (l.id === link.id ? changed : l)));
+  await deleteMeta(db, META_CHANGE);
+  return true;
+}
+
+/**
+ * Settles the link change waiting, if any, by what the link's bundle
+ * shows, and returns the new link if it was one the server made.
+ * - Its key in the bundle: the server made the change, which is taken as
+ *   if the answer had come.
+ * - A new key the bundle doesn't list (or no such link): it wasn't taken.
+ *   The key is kept 35 days, in case it was offered for a moment, and the
+ *   next rotation makes another.
+ * - A new link the server doesn't show: when the user asks again (`again`),
+ *   sent again as it was, with the same ID, so the server can't make it
+ *   twice. Refused, it may have been made after all (its ID taken, the
+ *   account at its limit, the link it replaces gone), so the bundle is asked
+ *   once more. Bundle reads can lag a moment behind a change, so "not
+ *   there" is believed only 10 minutes after the change was last sent
+ *   (a refused send isn't on its way, and doesn't count): until then the
+ *   change is kept and the refusal thrown; after, it's given up, and a new
+ *   link made in its place.
+ * - A link of that ID that isn't ours: ours wasn't made.
+ * - A change whose key isn't sealed was never sent (the app closed, or
+ *   storage failed, before): dropped.
+ */
+async function settle(db: Database, session: Session, api: Api, now: number, again: boolean): Promise<LinkRecord | null> {
+  const change = await pendingChange(db);
+  if (!change) return null;
+  if (!(await getSealed(db, changeName(change)))) {
+    await forget(db, change, null);
+    return null;
+  }
+  if (change.kind === 'key') {
+    const link = (await listLinks(db)).find((l) => l.id === change.id);
+    if (link && typeof (await lookUp(api, change, link.fingerprint)) === 'object') await adoptKey(db, change, now);
+    else await forget(db, change, now);
+    return null;
+  }
+  const found = await lookUp(api, change, change.fingerprint);
+  if (typeof found === 'object') return adoptLink(db, change, found.mailbox, now);
+  if (found === 'other') {
+    await forget(db, change, null);
+    return null;
+  }
+  if (!again) {
+    if (Math.abs(now - change.at) >= CHANGE_SETTLES_AFTER) await forget(db, change, null);
+    return null;
+  }
+  // Sent again now: upkeep's 10 minutes count from here.
+  const resent = { ...change, at: now };
+  await putMeta(db, META_CHANGE, resent);
+  let created: Record<string, unknown> | null = null;
+  let refusal: ApiError | null = null;
+  try {
+    created = await sendLink(db, session, resent);
+  } catch (err) {
+    if (!refused(err)) throw err;
+    refusal = err;
+    // Refused, it isn't on its way: the time is the earlier send's again.
+    await putMeta(db, META_CHANGE, change);
+  }
+  if (created) return adoptLink(db, resent, mailboxOf(created), now);
+  const after = await lookUp(api, change, change.fingerprint);
+  if (typeof after === 'object') return adoptLink(db, change, after.mailbox, now);
+  // Still not shown: believed once the earlier send is 10 minutes old (and
+  // a new link is made in its place), else the refusal stands for now.
+  if (after === 'gone' && Math.abs(now - change.at) < CHANGE_SETTLES_AFTER) throw refusal!;
+  await forget(db, change, null);
+  return null;
+}
+
+/**
+ * What the server has of a change: the link's bundle, signed by our link
+ * signing key, with the change's key in it; 'other' if the link is there
+ * without that key, or isn't ours; 'gone' if there is no such link. Throws
+ * while that can't be told (out of reach, or refused for now).
+ */
+async function lookUp(api: Api, change: LinkChange, fingerprint: string): Promise<Bundle | 'other' | 'gone'> {
+  let bundle: Bundle;
+  try {
+    bundle = await api.request('GET', `/links/${change.id}`, {}, checkBundle);
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'not_found') return 'gone';
+    throw err;
+  }
+  try {
+    // As of its newest key's start, so keys that lapsed meanwhile still check.
+    await verifyBundle({ id: change.id, fingerprint }, bundle, Math.max(...bundle.keys.map((k) => k.from)));
+  } catch (err) {
+    if (err instanceof BundleMismatch) return 'other';
+    throw err;
+  }
+  return bundle.keys.some((k) => toBase64Url(k.key) === change.key.key) ? bundle : 'other';
+}
+
+/**
+ * Keys sealed for a link that the index doesn't name, other than an
+ * unsettled change's: an older version sealed a new key and published it,
+ * but the app closed before it indexed the key. Backfill indexes those the
+ * link's bundle lists (messaging/engine.ts). Read in this order (index,
+ * vault, change), so the key of a change under way, which is noted, sealed
+ * and indexed in that order, never shows here.
+ */
+export async function looseLinkKeys(db: Database, linkId: string): Promise<string[]> {
+  const indexed = await indexedNames(db);
+  const sealed = await listSealed(db, keyPrefix(linkId));
+  const change = await pendingChange(db);
+  return sealed.filter((name) => !indexed.has(name) && !(change && name === changeName(change)));
+}
+
+/**
+ * Deletes loose keys of a link (looseLinkKeys) that its bundle doesn't list
+ * and that are older than its newest key (`newest`, Unix seconds): they can
+ * never be offered again, and open nothing. Checked again under the links
+ * lock, so a key being published meanwhile is never taken for one.
+ */
+export function dropLooseLinkKeys(db: Database, linkId: string, names: string[], newest: number): Promise<void> {
+  return withLock(LOCK, async () => {
+    const loose = new Set(await looseLinkKeys(db, linkId));
+    for (const name of names) {
+      if (loose.has(name) && Number(name.slice(keyPrefix(linkId).length)) < newest) await deleteSealed(db, name);
+    }
+  });
+}
+
+/**
+ * The intro mailbox of one of our links, if known: the current link's, or a
+ * replaced one's while its keys are kept (35 days, longer than anything sent
+ * to it can wait in the inbox).
+ */
+export async function introMailbox(db: Database, id: string): Promise<string | undefined> {
+  return (await listLinks(db)).find((l) => l.id === id)?.mailbox ?? (await linkKeysMailbox(db, id));
+}
+
+/** Records the intro mailbox of a link made before it was kept, on the link and its keys. */
+export function setLinkMailbox(db: Database, id: string, mailbox: string): Promise<void> {
+  if (!MAILBOX.test(mailbox)) return Promise.reject(new Error('bad mailbox'));
+  return withLock(LOCK, async () => {
+    const links = await listLinks(db);
+    if (links.some((l) => l.id === id && l.mailbox !== mailbox)) {
+      await putMeta(db, META_LINKS, links.map((l) => (l.id === id ? { ...l, mailbox } : l)));
+    }
+    await setLinkKeysMailbox(db, id, mailbox);
   });
 }
 
@@ -254,23 +691,46 @@ async function signingKeyFor(db: Database, vaultKey: CryptoKey, link: LinkRecord
 
 /**
  * Revokes a link and deletes its keys. A link the server no longer has counts
- * as revoked. The signing key stays, for the next link.
+ * as revoked. The signing key stays, for the next link. A replacement of it
+ * whose answer was lost is revoked too, first: the server may have made it,
+ * and the user asked for the link to stop working.
  */
 export function revokeLink(db: Database, session: Session, id: string): Promise<void> {
   return withLock(LOCK, () => revoke(db, session, id));
 }
 
 async function revoke(db: Database, session: Session, id: string): Promise<void> {
+  const change = await pendingChange(db);
+  // The link first, then its replacement: a replacement still on its way
+  // then either finds the link gone and makes nothing, or was made first
+  // and is deleted here.
+  await deleteLink(session, id);
+  if (change?.kind === 'link' && change.replaces === id) {
+    await deleteLink(session, change.id);
+    await forget(db, change, null);
+  }
+  // Every key of the link (on its record, indexed, or sealed, loose ones an
+  // older version left included) goes before the link leaves the list: if
+  // the app closes in between, revoking it again finds them.
+  const record = (await listLinks(db)).find((l) => l.id === id);
+  const names = new Set([
+    ...(record?.keys ?? []).map((k) => keyName(id, k.from)),
+    ...(await unindexKeys(db, (e) => e.link?.id === id)).map((e) => e.name),
+    ...(await listSealed(db, keyPrefix(id))),
+  ]);
+  // Links made when each had its own signing key.
+  await deleteSealed(db, signingName(id));
+  for (const name of names) await deleteSealed(db, name);
+  // A new key for it still unsettled went with the rest.
+  if (change?.kind === 'key' && change.id === id) await deleteMeta(db, META_CHANGE);
+  await putMeta(db, META_LINKS, (await listLinks(db)).filter((l) => l.id !== id));
+}
+
+/** Deletes a link on the server; one it doesn't have (any more) counts as deleted. */
+async function deleteLink(session: Session, id: string): Promise<void> {
   try {
     await session.call('DELETE', `/links/${id}`, undefined, checkObject, { sign: true });
   } catch (err) {
     if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
   }
-  const links = await listLinks(db);
-  const record = links.find((l) => l.id === id);
-  await putMeta(db, META_LINKS, links.filter((l) => l.id !== id));
-  await unindexKeys(db, (e) => e.link?.id === id);
-  // Links made when each had its own signing key.
-  await deleteSealed(db, signingName(id));
-  for (const k of record?.keys ?? []) await deleteSealed(db, keyName(id, k.from));
 }

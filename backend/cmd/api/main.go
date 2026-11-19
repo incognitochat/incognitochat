@@ -6,19 +6,19 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/incognitochat/incognitochat/backend/internal/api"
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/config"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
@@ -29,6 +29,7 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/notices"
 	"github.com/incognitochat/incognitochat/backend/internal/push"
 	"github.com/incognitochat/incognitochat/backend/internal/session"
+	"github.com/incognitochat/incognitochat/backend/internal/tally"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/initdata"
 	"github.com/incognitochat/incognitochat/backend/internal/tokens"
 )
@@ -38,6 +39,12 @@ const (
 	minSecretLen = 32
 	// slowRequest is how long a request takes before it is logged.
 	slowRequest = time.Second
+	// requestDeadline cuts off AWS calls a request still waits on, half the
+	// function's timeout (10 s, infra/functions.tf), so the request is
+	// answered (503 unavailable) and its instance freed. A request takes
+	// about 30 ms. A batch of 50 tokens signs for about 3 s at 256 MB
+	// (estimated), after its last AWS call, so this doesn't cut it off.
+	requestDeadline = 5 * time.Second
 )
 
 func main() {
@@ -50,9 +57,13 @@ func main() {
 	server.Log = log
 	router := httpapi.NewRouter()
 	server.Routes(router)
-	// Slow requests are logged, with only their route and duration, to size
-	// the function from data.
-	router.Observe = func(route string, status int, elapsed time.Duration) {
+	// Answers are counted by route, status and error code, and the counts
+	// logged once a minute (internal/tally), for the alarms on limits,
+	// refusals, registrations and tokens. Slow requests are logged, with
+	// only their route and duration, to size the function from data.
+	counts := tally.New(log)
+	router.Observe = func(route string, status int, code string, elapsed time.Duration) {
+		counts.Add(time.Now(), route, status, code)
 		if elapsed >= slowRequest {
 			log.Warn("slow request",
 				slog.String(logx.KeyRoute, route),
@@ -60,23 +71,26 @@ func main() {
 				slog.Int64(logx.KeyDuration, elapsed.Milliseconds()))
 		}
 	}
-	lambda.Start(router.Serve)
+	// SIGTERM, when the instance shuts down, logs the last minute's counts.
+	lambda.StartWithOptions(awsconf.WithDeadline(requestDeadline, router.Serve),
+		lambda.WithEnableSIGTERM(counts.Flush))
 }
 
 func setup(ctx context.Context) (*api.Server, error) {
 	env, err := config.Env(os.Getenv,
-		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_ENDPOINT", "MEDIA_BUCKET",
-		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY")
+		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
+		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY",
+		"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY")
 	if err != nil {
 		return nil, err
 	}
-	aws, err := awsconfig.LoadDefaultConfig(ctx)
+	aws, err := awsconf.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
 	params, err := config.Load(ctx, ssm.NewFromConfig(aws),
 		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"],
-		env["PARAM_MEDIA_ISSUER_KEY"])
+		env["PARAM_MEDIA_ISSUER_KEY"], env["PARAM_PREVIOUS_ISSUER_KEY"], env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"])
 	if err != nil {
 		return nil, err
 	}
@@ -94,18 +108,23 @@ func setup(ctx context.Context) (*api.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokenIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_ISSUER_KEY"]]), tokens.LabelSend)
+	// Each kind's current key and, while a rotation lasts, its previous one
+	// (tokens.NoKey while there is none; docs/deployment.md, Rotating an
+	// issuer key).
+	tokenIssuer, err := tokens.LoadKeyring(params[env["PARAM_ISSUER_KEY"]], params[env["PARAM_PREVIOUS_ISSUER_KEY"]], tokens.LabelSend)
 	if err != nil {
 		return nil, err
 	}
-	mediaIssuer, err := tokens.NewIssuer([]byte(params[env["PARAM_MEDIA_ISSUER_KEY"]]), tokens.LabelMedia)
+	mediaIssuer, err := tokens.LoadKeyring(params[env["PARAM_MEDIA_ISSUER_KEY"]], params[env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"]], tokens.LabelMedia)
 	if err != nil {
 		return nil, err
 	}
 	// The two kinds of token must not share a key: a blind signer can't
 	// tell them apart, so one key would mean one budget.
-	if tokenIssuer.KeyID() == mediaIssuer.KeyID() {
-		return nil, errors.New("api: the send and media issuer keys are the same")
+	for _, send := range tokenIssuer.KeyIDs() {
+		if slices.Contains(mediaIssuer.KeyIDs(), send) {
+			return nil, errors.New("api: a send issuer key is also a media issuer key")
+		}
 	}
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same
@@ -120,17 +139,21 @@ func setup(ctx context.Context) (*api.Server, error) {
 	}
 
 	db := dynamodb.NewFromConfig(aws)
-	wsEndpoint := env["WS_ENDPOINT"]
+	lambdaClient := awslambda.NewFromConfig(aws)
 	// Without this, presigned uploads would carry a checksum of an empty
 	// body, and the app's upload would be refused.
 	s3Client := s3.NewFromConfig(aws, func(o *s3.Options) {
 		o.RequestChecksumCalculation = awsv2.RequestChecksumCalculationWhenRequired
 	})
 	now := time.Now
+	// Only for deleting an account's records: ws records sockets and
+	// pushes to them.
+	sockets := &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now, Key: ephemeral.SocketKey(sessionKey)}
+	dir := &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]}
 	return &api.Server{
 		Telegram:    initdata.NewVerifier(botID),
 		Sessions:    issuer,
-		Directory:   &directory.Store{DB: db, Table: env["TABLE_DIRECTORY"]},
+		Directory:   dir,
 		Nonces:      &ephemeral.Nonces{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Limits:      &ephemeral.Limiter{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Pepper:      pepper,
@@ -138,18 +161,14 @@ func setup(ctx context.Context) (*api.Server, error) {
 		InviteOnly:  config.InviteOnly(os.Getenv("INVITE_ONLY")),
 		Admins:      admins,
 		Inbox:       &inbox.Store{DB: db, Table: env["TABLE_MESSAGES"]},
-		Pause:       api.RandomPause,
 		Issuer:      tokenIssuer,
 		MediaIssuer: mediaIssuer,
 		Spent:       &ephemeral.Spent{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Notices:     &notices.Client{Lambda: awslambda.NewFromConfig(aws), Function: env["NOTIFY_FUNCTION"]},
+		Notices:     &notices.Client{Lambda: lambdaClient, Function: env["NOTIFY_FUNCTION"]},
+		Push:        &push.Client{Lambda: lambdaClient, Function: env["WS_FUNCTION"]},
 		Media:       &media.Bucket{Presign: s3.NewPresignClient(s3Client), S3: s3Client, Name: env["MEDIA_BUCKET"]},
 		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-		Push: &push.Pusher{
-			Sockets: &ephemeral.Sockets{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
-			API: apigatewaymanagementapi.NewFromConfig(aws, func(o *apigatewaymanagementapi.Options) {
-				o.BaseEndpoint = &wsEndpoint
-			}),
-		},
+		Switches:    dir,
+		Sockets:     sockets,
 	}, nil
 }
