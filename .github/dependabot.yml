@@ -1,6 +1,8 @@
 version: 2
 updates:
-  # Keeps the SHA-pinned actions in .github/workflows up to date.
+  # Keeps the SHA-pinned actions in .github/workflows up to date. Not
+  # hosting/deploy.yml's, nor other pins (docs/development.md, Updating by
+  # hand).
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -31,8 +33,11 @@ updates:
       npm:
         patterns: ["*"]
 
+  # The providers of both stacks: the app (applied by every deploy) and
+  # bootstrap.
   - package-ecosystem: terraform
     directories:
+      - /infra
       - /infra/init
     schedule:
       interval: weekly

@@ -32,6 +32,10 @@ jobs:
     name: Backend – test, scan & reproducible build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The SHA-256 of each Lambda bundle, as this job built it: the deploy
+    # checks the bundles it downloads against them (deploy-environment.yml).
+    outputs:
+      bundles: ${{ steps.build.outputs.bundles }}
     defaults:
       run:
         working-directory: backend
@@ -59,6 +63,12 @@ jobs:
             echo "::error::Go is $got, but go.mod pins $want"
             exit 1
           fi
+
+      # The module cache is restored from earlier runs. Before anything here
+      # compiles them, each module's files must still have the hash recorded
+      # when it was downloaded (the hash the go command checks against go.sum).
+      - name: Verify the module cache
+        run: go mod verify
 
       - name: Check formatting
         run: |
@@ -89,7 +99,10 @@ jobs:
       - name: Scan for known vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+      # Any job of the run could replace the uploaded artifact, but not this
+      # job's outputs: the hashes go to the deploy that way.
       - name: Build Lambda bundles twice and compare
+        id: build
         run: |
           ../scripts/build-lambdas.sh dist | tee first.txt
           go clean -cache
@@ -98,6 +111,7 @@ jobs:
             echo "::error::The Lambda build is not reproducible"
             exit 1
           fi
+          { echo 'bundles<<BUNDLES_END'; cat first.txt; echo BUNDLES_END; } >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -195,6 +209,11 @@ jobs:
       - name: Check the deploy passes each version
         run: scripts/check-version-variables.sh
 
+      # Every workflow runs the same Terraform CLI; hosting/deploy.yml, which
+      # Dependabot doesn't see, pins the same actions as these (a warning).
+      - name: Check the pins agree
+        run: scripts/check-pins.sh
+
   deploy-dev:
     name: Deploy to dev
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -207,6 +226,7 @@ jobs:
     with:
       environment: dev
       site-ref: ${{ github.sha }}
+      bundles: ${{ needs.backend.outputs.bundles }}
     secrets: inherit
 
   # release-please keeps a release pull request up to date from the
@@ -273,4 +293,5 @@ jobs:
     with:
       environment: production
       site-ref: ${{ github.event.release.tag_name }}
+      bundles: ${{ needs.backend.outputs.bundles }}
     secrets: inherit

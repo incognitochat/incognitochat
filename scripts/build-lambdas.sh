@@ -9,10 +9,20 @@
 # bundle came from is recorded by the build attestation instead, so a
 # checkout's state (a merge commit, untracked files) can't change the bytes.
 #
+# It always builds with go.mod's toolchain: with another Go installed, the go
+# command downloads that version first (checked against Go's checksum
+# database), so a newer or older local Go can't change the bytes.
+#
 # Usage: scripts/build-lambdas.sh [out-dir]   (default: backend/dist)
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+GOTOOLCHAIN=$(sed -n 's/^toolchain //p' "$root/backend/go.mod")
+if [ -z "$GOTOOLCHAIN" ]; then
+  echo "backend/go.mod has no toolchain line" >&2
+  exit 1
+fi
+export GOTOOLCHAIN
 out=$(mkdir -p "${1:-$root/backend/dist}" && cd "${1:-$root/backend/dist}" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
