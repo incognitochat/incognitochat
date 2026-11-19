@@ -10,6 +10,8 @@
 // Sticker IDs ("pack/name") travel in messages, and name the image files:
 // never rename or remove one.
 
+import { isReactionEmoji } from '../protocol/message';
+
 /** A sticker: its ID and the emoji it stands for. */
 export interface StickerInfo {
   id: string;
@@ -109,6 +111,17 @@ const BY_ID = new Map(PACKS.flatMap((p) => p.stickers.map((s) => [s.id, s] as co
 /** A sticker this version has, by ID. */
 export function findSticker(id: string): StickerInfo | undefined {
   return BY_ID.get(id);
+}
+
+/**
+ * The emoji a sticker in a message stands for: ours for one this version
+ * has; else the sender's, if it's one emoji (as a reaction must be), or
+ * empty, so the generic placeholder shows instead.
+ */
+export function stickerEmoji(sticker: { id: string; e?: string | undefined }): string {
+  const known = findSticker(sticker.id);
+  if (known) return known.e;
+  return sticker.e !== undefined && isReactionEmoji(sticker.e) ? sticker.e : '';
 }
 
 /** The sticker images' license, shown in the sticker panel (it must ship with them). */

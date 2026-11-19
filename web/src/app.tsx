@@ -21,8 +21,8 @@ import {
   type RoundRecorder,
   type RoundRecording,
 } from './media/record';
-import { editable, MAX_FILE_BYTES, shownAs, type Sticker } from './protocol/message';
-import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, type StickerInfo } from './stickers/catalog';
+import { editable, MAX_FILE_BYTES, mediaName, shownAs, type Sticker } from './protocol/message';
+import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, type StickerInfo } from './stickers/catalog';
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import {
@@ -1794,9 +1794,9 @@ function StickerSection({ language, busy, onPick }: { language: Language; busy: 
   );
 }
 
-/** A sticker in a message; one this version doesn't have (a newer pack) shows as its emoji. */
+/** A sticker in a message; one this version doesn't have (a newer pack) shows as its emoji, if it's one. */
 function StickerView({ sticker, language }: { sticker: Sticker; language: Language }) {
-  const emoji = findSticker(sticker.id)?.e ?? sticker.e ?? '';
+  const emoji = stickerEmoji(sticker);
   const url = stickerArt.value?.[sticker.id];
   const label = `${emoji} ${t(language, 'sticker')}`.trim();
   return url ? (
@@ -2172,16 +2172,16 @@ function AttachDialog({
 
 /** A message in a line: its text, with "📷 Photo", "📹 Video", "📎 name" and so on before a caption, or "😉 Sticker". For chat previews, quotes and the reply bar. */
 function contentLine(language: Language, { text, media, sticker }: { text: string; media?: { t: string; n?: string; m?: string } | undefined; sticker?: Sticker | undefined }): string {
-  if (sticker) return `${findSticker(sticker.id)?.e ?? sticker.e ?? ''} ${t(language, 'sticker')}`.trim();
+  if (sticker) return `${stickerEmoji(sticker)} ${t(language, 'sticker')}`.trim();
   if (!media) return text;
   const label = {
     photo: `📷 ${t(language, 'photo')}`,
     video: `📹 ${t(language, 'video')}`,
     gif: t(language, 'gif'),
     voice: `🎤 ${t(language, 'voice')}`,
-    audio: `🎵 ${songTitle(media.n) || t(language, 'music')}`,
+    audio: `🎵 ${songTitle(mediaName(media)) || t(language, 'music')}`,
     round: `⏺️ ${t(language, 'roundMessage')}`,
-    file: `📎 ${media.n ?? t(language, 'file')}`,
+    file: `📎 ${mediaName(media) ?? t(language, 'file')}`,
   }[shownAs(media)];
   return text ? `${label}, ${text}` : label;
 }
@@ -2500,7 +2500,7 @@ function VoiceView({ app, message: m, language, progress }: { app: AppState; mes
 /** A song: play/pause, its title, a seek bar once it's here, and its length (and size, until it's here). Fetched on a tap. */
 function AudioView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const url = useMediaUrl(app, m);
-  const { l, n, s } = m.media!;
+  const { l, s } = m.media!;
   const player = useAudio(url.value, l);
   const total = player.total ? formatLength(language, Math.round(player.total)) : null;
   return (
@@ -2508,7 +2508,7 @@ function AudioView({ app, message: m, language, progress }: { app: AppState; mes
       <PlayButton app={app} message={m} language={language} progress={progress} playing={player.playing} onPlay={player.toggle} />
       <div class="audio-body">
         <span class="audio-title" dir="auto">
-          {songTitle(n) || t(language, 'music')}
+          {songTitle(mediaName(m.media!)) || t(language, 'music')}
         </span>
         {url.value && (
           <input
@@ -2700,6 +2700,7 @@ async function save(app: AppState, m: MessageView, language: Language): Promise<
 /** A file: icon, name and size; tap to download it, then to save or share it. */
 function FileView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const media = m.media!;
+  const name = mediaName(media);
   const busy = progress !== undefined;
   const onClick = () => {
     if (busy) return;
@@ -2708,10 +2709,10 @@ function FileView({ app, message: m, language, progress }: { app: AppState; mess
   };
   return (
     <button type="button" class="file" onClick={onClick} disabled={m.file === 'gone'}>
-      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(app, m) ? '↓' : extension(media.n) || '📄'}</span>
+      <span class="file-icon">{busy ? <Ring fraction={progress} /> : fetchable(app, m) ? '↓' : extension(name) || '📄'}</span>
       <span class="file-info">
         <span class="file-name" dir="auto">
-          {media.n ?? t(language, 'file')}
+          {name ?? t(language, 'file')}
         </span>
         <span class="file-size">{fileNote(language, m) ?? formatSize(language, media.s)}</span>
       </span>

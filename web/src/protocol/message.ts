@@ -12,6 +12,7 @@
 import { concat, fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { importAgreementPublicKey, SUITE } from '../crypto/keys';
 import { message as labelled } from '../crypto/signing';
+import { cleanFileName, MAX_NAME } from './clean';
 import { keyId, MAX_INNER, openEnvelope, sealEnvelope, type RecipientKey } from './envelope';
 
 export const LABEL_AUTH = 'incognitochat/v2/message-auth';
@@ -21,6 +22,7 @@ const TAG_LENGTH = 32;
 export const MAX_TEXT_BYTES = 12_000;
 const MAX_SEEN = 100;
 
+/** `end` is reserved: it's taken in, and does nothing (docs/protocol.md). */
 export type Kind = 'message' | 'seen' | 'reaction' | 'delete' | 'edit' | 'key_update' | 'end';
 const KINDS: readonly Kind[] = ['message', 'seen', 'reaction', 'delete', 'edit', 'key_update', 'end'];
 /** The most messages one "delete" names. */
@@ -90,7 +92,7 @@ export interface Media {
 export interface Sticker {
   /** "pack/name". */
   id: string;
-  /** The emoji it stands for: shown where the sticker isn't known (a newer pack). */
+  /** The emoji it stands for: shown where the sticker isn't known (a newer pack), if it's one emoji (stickerEmoji). */
   e?: string;
 }
 
@@ -101,9 +103,14 @@ export interface Reaction {
   e: string;
 }
 
-/** Whether a string is one emoji, as a reaction must be. */
+/**
+ * Whether a string is one emoji, as a reaction must be. Of combining marks,
+ * only those emoji use: variation selectors (U+FE0E, U+FE0F) and the keycap
+ * (U+20E3), so an emoji can't carry a pile of accents (Zalgo).
+ */
 export function isReactionEmoji(e: string): boolean {
   if (e.length === 0 || e.length > MAX_REACTION) return false;
+  if (/(?![\uFE0E\uFE0F\u20E3])\p{M}/u.test(e)) return false;
   if ([...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(e)].length !== 1) return false;
   return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20E3/u.test(e);
 }
@@ -325,7 +332,8 @@ function checkMedia(value: unknown): void {
   bytes(a.k, 32, 'media key');
   bytes(a.d, 16, 'media secret');
   if (!Number.isSafeInteger(a.s) || (a.s as number) < 1 || (a.s as number) > MAX_FILE_BYTES) throw new MessageError('bad media size');
-  if (a.n !== undefined && (typeof a.n !== 'string' || a.n.length === 0 || a.n.length > 255)) throw new MessageError('bad media name');
+  // Any name is taken in; it's cleaned where it's shown or saved (mediaName).
+  if (a.n !== undefined && (typeof a.n !== 'string' || a.n.length === 0 || a.n.length > MAX_NAME)) throw new MessageError('bad media name');
   if (a.m !== undefined && (typeof a.m !== 'string' || !/^[\w.+-]+\/[\w.+-]+$/.test(a.m) || a.m.length > 100)) throw new MessageError('bad media type');
   for (const dim of ['w', 'h'] as const) {
     if (a[dim] !== undefined && (!Number.isSafeInteger(a[dim]) || (a[dim] as number) < 1 || (a[dim] as number) > 20_000)) throw new MessageError('bad media size');
@@ -391,9 +399,18 @@ const EXTENSIONS: Record<string, string> = {
   'audio/mpeg': 'mp3',
 };
 
-/** The name to save an attachment under: its own, or one made from its kind and type ("video.mp4"). */
+/**
+ * An attachment's own name as the sender gave it, cleaned to show and save
+ * (cleanFileName), or undefined if it has none (or nothing of it is left).
+ */
+export function mediaName(media: { n?: string | undefined }): string | undefined {
+  return (media.n && cleanFileName(media.n)) || undefined;
+}
+
+/** The name to save an attachment under: its own (mediaName), or one made from its kind and type ("video.mp4"). */
 export function fileName(media: { t: string; n?: string; m?: string }): string {
-  if (media.n) return media.n;
+  const own = mediaName(media);
+  if (own) return own;
   const base = { photo: 'photo', video: 'video', gif: 'animation', voice: 'voice', audio: 'audio', round: 'video', file: 'file' }[shownAs(media)];
   const ext = media.m ? EXTENSIONS[media.m] : undefined;
   return ext ? `${base}.${ext}` : base;
