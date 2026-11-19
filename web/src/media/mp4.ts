@@ -176,7 +176,8 @@ function isMetadataUuid(bytes: Uint8Array, box: Box): boolean {
  * The free and skip boxes to empty, by where they start: all of them,
  * except any a chunk offset points into (no muxer puts samples there, but
  * if one did, they'd stay playable). None when where the samples are isn't
- * known: a sample table that couldn't be read, or a fragmented file, whose
+ * known: an edit list, media information or sample table that couldn't be
+ * read, or a fragmented file, whose
  * samples are found from each fragment's moof, which isn't read here.
  */
 function toEmpty(w: Walk): Set<number> | null {

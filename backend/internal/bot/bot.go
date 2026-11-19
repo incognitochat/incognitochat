@@ -1,8 +1,8 @@
-// Package bot is the Telegram side of the app (design §15). The bot only
-// opens the app and tidies up: it answers messages with a button that opens
-// the Mini App, and deletes the service message Telegram posts when a user
-// lets the bot write to them. It never sees what people write to each other,
-// and keeps nothing.
+// Package bot is the Telegram side of the app (docs/architecture.md, Parts).
+// The bot only opens the app and tidies up: it answers messages with a button
+// that opens the Mini App, and deletes the service message Telegram posts when
+// a user lets the bot write to them. It never sees what people write to each
+// other, and keeps nothing.
 //
 // Replies go back in the webhook response itself (Telegram runs a method
 // returned there), so handling an update makes no outgoing request and needs

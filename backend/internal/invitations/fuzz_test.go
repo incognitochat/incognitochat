@@ -42,7 +42,7 @@ func FuzzNormalize(f *testing.F) {
 		if again, ok := Normalize(code); !ok || again != code {
 			t.Fatalf("%q normalizes to %q", code, again)
 		}
-		if again, ok := Normalize("https://t.me/bot/app?startapp=" + Payload(code)); !ok || again != code {
+		if again, ok := Normalize("https://t.me/bot/app?startapp=" + payload(code)); !ok || again != code {
 			t.Fatalf("the link for %q normalizes to %q", code, again)
 		}
 	})

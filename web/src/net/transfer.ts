@@ -29,7 +29,7 @@ export class WrongSize extends Error {
  * up as unreachable: long enough for a slow connection, short enough that a
  * dead one doesn't hold a download (and its place in the queue) for minutes.
  */
-export const DOWNLOAD_IDLE_MS = 30_000;
+const DOWNLOAD_IDLE_MS = 30_000;
 
 /**
  * The same for an upload: given up when no more of it goes, or no answer

@@ -22,7 +22,7 @@
 import type { ConversationRecord, IdDays } from '../storage/db';
 
 export const DAY = 24 * 3600 * 1000;
-/** Envelopes sent longer ago than this (by their `at`), or later than now plus a day, are dropped (design §10). */
+/** Envelopes sent longer ago than this (by their `at`), or later than now plus a day, are dropped (docs/protocol.md, Inner message, Replays and order). */
 export const MAX_AGE = 31 * DAY;
 /**
  * The most envelopes a conversation remembers having taken in. Past it the

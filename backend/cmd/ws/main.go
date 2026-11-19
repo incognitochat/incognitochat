@@ -1,7 +1,7 @@
 // Command ws handles the WebSocket API's routes, and pushes to open apps
-// (design §12). A socket only carries content-free pushes from the server
-// ("something arrived"); every action goes through the HTTPS API, so a
-// dropped socket loses nothing.
+// (docs/protocol.md, Delivery). A socket only carries content-free pushes from
+// the server ("something arrived"); every action goes through the HTTPS API,
+// so a dropped socket loses nothing.
 //
 // $connect checks the session token, sent as the second subprotocol
 // (new WebSocket(url, ["v1", token])) so it never appears in a URL, and

@@ -20,10 +20,10 @@ type sessionRequest struct {
 	Signature bytes64 `json:"signature"`
 }
 
-// session logs a device in (design §7). A device of a replaced account learns
-// so only after its signature checks out. Whatever can be refused without
-// the device's key (a timestamp out of range, a malformed nonce or
-// signature) is refused before the directory is read.
+// session logs a device in (docs/protocol.md, Registration and sessions). A
+// device of a replaced account learns so only after its signature checks out.
+// Whatever can be refused without the device's key (a timestamp out of range,
+// a malformed nonce or signature) is refused before the directory is read.
 func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /session"
 	var in sessionRequest

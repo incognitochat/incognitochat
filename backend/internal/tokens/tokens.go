@@ -1,9 +1,10 @@
-// Package tokens issues and checks anonymous tokens (design §11): send
-// tokens, which pay for messages, and media tokens, which pay for uploads.
-// The two kinds have their own issuer keys, because a blind signer can't see
-// what it signs: only a key of its own gives a kind its own daily budget.
-// Both are RSA blind signatures (RFC 9474, RSABSSA-SHA384-PSS-Deterministic),
-// in the shape of Privacy Pass token type 2 (RFC 9578).
+// Package tokens issues and checks anonymous tokens (docs/protocol.md, Send
+// tokens and media tokens): send tokens, which pay for messages, and media
+// tokens, which pay for uploads. The two kinds have their own issuer keys,
+// because a blind signer can't see what it signs: only a key of its own gives
+// a kind its own daily budget. Both are RSA blind signatures (RFC 9474,
+// RSABSSA-SHA384-PSS-Deterministic), in the shape of Privacy Pass token type 2
+// (RFC 9578).
 //
 // A logged-in client gets a batch of blinded tokens signed. Unblinded, each
 // is an ordinary RSA-PSS signature the issuer can't link to the request that

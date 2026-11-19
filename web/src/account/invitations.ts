@@ -1,10 +1,10 @@
-// Invitations (design D5, v1's rules): codes like "abcd-efgh", shared as
+// Invitations (v1's rules): codes like "abcd-efgh", shared as
 // t.me/<bot>/<app>?startapp=inv<code without the dash>. Joining with one makes
 // this account a member, one level below the code's owner.
 
 import { checkObject } from '../net/api';
 
-export const PAYLOAD_PREFIX = 'inv';
+const PAYLOAD_PREFIX = 'inv';
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 export interface InvitationCode {

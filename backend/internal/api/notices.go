@@ -18,10 +18,10 @@ import (
 // notices per UTC day.
 const NoticeSetupsPerDay = 5
 
-// Notices reaches the notify function, which holds the bot token (as bot
-// does, for its setup) and alone the key that seals chat IDs (design §12).
-// Notices themselves are asked for by the ws function, after a send no open
-// app took (Pusher).
+// Notices reaches the notify function, which holds the bot token (as bot does,
+// for its setup) and alone the key that seals chat IDs (docs/protocol.md,
+// Notices). Notices themselves are asked for by the ws function, after a send
+// no open app took (Pusher).
 type Notices interface {
 	// Seal turns a Telegram chat ID into what the directory stores.
 	Seal(ctx context.Context, chat int64) ([]byte, error)

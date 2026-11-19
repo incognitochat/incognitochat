@@ -1,8 +1,9 @@
 # Protocol
 
 The formats clients and the backend agree on. Each has test vectors that both
-sides check (listed at the end). The design and its reasons are in the design
-notes; this file is only the exact encoding.
+sides check (listed at the end). How the parts fit together is in
+[architecture.md](architecture.md), and what they protect in
+[security.md](security.md); this file is only the exact encoding.
 
 Suite `0x01` throughout: P-256, SHA-256, HKDF-SHA256, AES-256-GCM. Every key,
 signature and envelope is tied to it, so a later suite can never be confused
@@ -1097,7 +1098,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   edit lists), the `uuid` boxes of XMP and of Sony, Canon and Garmin
   cameras wherever they are, and every top-level `uuid` box are renamed
   `free` and zeroed; `free` and `skip` boxes are zeroed (unless a chunk
-  offset points into one, or the file is fragmented or has a sample table
+  offset points into one, or the file is fragmented or has part of a track
   the app can't read); and the times in the movie, track and media
   headers, a QuickTime preview (`pnot`) and producer reference times
   (`prft`) are zeroed, so nothing else in the file moves. Timed metadata
@@ -1388,7 +1389,9 @@ moment 10 to 90 seconds later, not with the send, since the issuer sees
 which account fetches when. Media tokens likewise: once an upload leaves
 fewer than 26 (what a 25 MiB file costs), a batch of 30 comes 10 to
 90 seconds later. A send or upload that finds the wallet short fetches
-right then, as a last resort. A send or upload that has the tokens it
+right then, as a last resort. For uploads that isn't rare: a topped-up
+wallet holds 26 to 55 media tokens, and the largest upload (50 MiB) costs
+51. A send or upload that has the tokens it
 needs never waits for a batch being fetched, so it doesn't go out just
 after that request is answered. The server signs a batch whole or not at
 all, so when it has said fewer than a batch of send tokens are left today,

@@ -1,12 +1,11 @@
-# Encrypted attachments (design phase 5). The app uploads ciphertext straight
-# here with presigned URLs from the api function. An upload stays until the
-# app deletes it (when its message is deleted) or it expires (below), so it
-# can be fetched again meanwhile. Nothing in here can be read without the key
-# in the encrypted message. The name, which presigned URLs and the app's
-# security policy show, ends in random characters rather than the account
-# ID. That doesn't keep the account ID secret: every presigned URL carries
-# the api role's access key ID, which AWS maps to its account
-# (sts:GetAccessKeyInfo).
+# Encrypted attachments (docs/protocol.md, Media). The app uploads ciphertext
+# straight here with presigned URLs from the api function. An upload stays
+# until the app deletes it (when its message is deleted) or it expires (below),
+# so it can be fetched again meanwhile. Nothing in here can be read without the
+# key in the encrypted message. The name, which presigned URLs and the app's
+# security policy show, ends in random characters rather than the account ID.
+# That doesn't keep the account ID secret: every presigned URL carries the api
+# role's access key ID, which AWS maps to its account (sts:GetAccessKeyInfo).
 resource "random_id" "media" {
   byte_length = 6
 }

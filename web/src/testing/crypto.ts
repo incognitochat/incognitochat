@@ -24,7 +24,7 @@ export async function keyPair(k: HexKey): Promise<CryptoKeyPair> {
   };
 }
 
-export interface FixedKey {
+interface FixedKey {
   pair: CryptoKeyPair;
   privateKey: CryptoKey;
   publicKey: Uint8Array<ArrayBuffer>;

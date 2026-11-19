@@ -626,7 +626,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           </div>
         ) : (
           <div class="head-actions">
-            <button type="button" class="link-button" disabled={screen.busy} onClick={() => void confirmDelete(app, language, screen.id, screen.label, !screen.blocked && !screen.ended)}>
+            <button type="button" class="link-button" disabled={screen.busy} onClick={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}>
               {tr('delete')}
             </button>
             <button type="button" class="link-button" disabled={screen.busy} onClick={() => (confirmingBlock.value = true)}>
@@ -824,12 +824,11 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   );
 }
 
-/** Asks, in Telegram's own popup, whether to delete a conversation from this device, or delete and block it. */
 /** The conversation the delete dialog is open for: its label, and whether it's open (so it can be deleted for both sides). */
 const deleting = signal<{ id: string; label: string; active: boolean } | null>(null);
 
-/** Asks before deleting a conversation, with blocking and deleting for both sides as extra, unchecked choices. */
-function confirmDelete(_app: AppState, _language: Language, id: string, label: string, active: boolean): void {
+/** Asks, in the app's own DeleteDialog, before deleting a conversation, with blocking and deleting for both sides as extra, unchecked choices. */
+function confirmDelete(id: string, label: string, active: boolean): void {
   deleting.value = { id, label, active };
 }
 
@@ -1127,7 +1126,6 @@ async function confirmReplace(app: AppState, language: Language): Promise<void> 
   if (choice === 'replace') await app.replaceLink();
 }
 
-/** Telegram-style delivery marks: a clock while sending, one check when sent, two once seen. */
 /**
  * Who started a chat: an arrow in, like an incoming call, when someone wrote
  * to our link (we don't know who they are); out when we wrote to theirs.
@@ -1142,6 +1140,7 @@ function Origin({ role, language }: { role: 'owner' | 'sender'; language: Langua
   );
 }
 
+/** Telegram-style delivery marks: a clock while sending, one check when sent, two once seen, and a warning when it couldn't be sent. */
 function Ticks({ status, language }: { status: MessageView['status']; language: Language }) {
   switch (status) {
     case 'sending':
@@ -1220,7 +1219,7 @@ function ChatRow({
     }
     onReveal(null);
     app.haptic();
-    void confirmDelete(app, language, c.id, c.label, c.status === 'active');
+    void confirmDelete(c.id, c.label, c.status === 'active');
   };
   const onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
@@ -1276,7 +1275,7 @@ function ChatRow({
         aria-hidden={shown === 0}
         onClick={() => {
           onReveal(null);
-          void confirmDelete(app, language, c.id, c.label, c.status === 'active');
+          void confirmDelete(c.id, c.label, c.status === 'active');
         }}
       >
         {tr('delete')}

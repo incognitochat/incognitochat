@@ -1,4 +1,5 @@
-// Links (design §8), byte-compatible with the backend (backend/internal/links).
+// Links (docs/protocol.md, Links), byte-compatible with the backend
+// (backend/internal/links).
 //
 // A link is t.me/<bot>/<app>?startapp=<payload>, where
 //   payload = "1" ‖ link ID (8 bytes, 11 base64url characters)
@@ -13,7 +14,7 @@ import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { fingerprint, importAgreementPublicKey, importSigningPublicKey, SUITE } from '../crypto/keys';
 import { LABEL_LINK_KEY, verify } from '../crypto/signing';
 
-export const LINK_VERSION = '1';
+const LINK_VERSION = '1';
 const ID_LENGTH = 11;
 const FP_LENGTH = 43;
 export const PAYLOAD_LENGTH = 1 + ID_LENGTH + FP_LENGTH;
@@ -63,7 +64,7 @@ export function ownerParts(linkId: string, accountId: string): Uint8Array[] {
 }
 
 /** An encryption key in a bundle, as the API sends it. */
-export interface BundleKey {
+interface BundleKey {
   key: Uint8Array<ArrayBuffer>;
   from: number;
   until: number;

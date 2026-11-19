@@ -1,4 +1,5 @@
-// Package notices sends the Telegram "New message" notices (design §12).
+// Package notices sends the Telegram "New message" notices
+// (docs/protocol.md, Notices).
 //
 // Notices are generic: "New message" in the user's language with a button
 // that opens the app. No labels, counts or names. At most one per account

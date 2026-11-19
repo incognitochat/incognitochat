@@ -10,9 +10,9 @@
 
 import { concat, utf8 } from './encoding';
 
-export const KEM_P256_SHA256 = 0x0010;
-export const KDF_HKDF_SHA256 = 0x0001;
-export const AEAD_AES_128_GCM = 0x0001;
+const KEM_P256_SHA256 = 0x0010;
+const KDF_HKDF_SHA256 = 0x0001;
+const AEAD_AES_128_GCM = 0x0001;
 export const AEAD_AES_256_GCM = 0x0002;
 export type AeadId = typeof AEAD_AES_128_GCM | typeof AEAD_AES_256_GCM;
 

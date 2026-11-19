@@ -1,6 +1,7 @@
 // Package push tells an account's open apps that something arrived, through
-// their WebSocket connections (design §12). The push carries no content: the
-// app then fetches its inbox over HTTPS, so a lost push loses nothing.
+// their WebSocket connections (docs/protocol.md, Delivery). The push carries
+// no content: the app then fetches its inbox over HTTPS, so a lost push loses
+// nothing.
 //
 // The api function doesn't push: after a send it asks the ws function to
 // (Client), without waiting, and ws pushes (Pusher) and asks for a notice

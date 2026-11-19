@@ -9,7 +9,7 @@
 
 import { utf8 } from './encoding';
 
-export const LABEL_MEDIA = 'incognitochat/v2/media';
+const LABEL_MEDIA = 'incognitochat/v2/media';
 const NONCE = 12;
 const TAG = 16;
 const KiB = 1024;
