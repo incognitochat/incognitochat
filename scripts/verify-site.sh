@@ -172,9 +172,11 @@ echo "Fetching ${code_repo}'s history"
 git clone --quiet --filter=blob:none --no-checkout "https://github.com/${code_repo}.git" "$work/code" \
   || die "can't clone ${code_repo}"
 code() { git -C "$work/code" "$@"; }
-code rev-parse --verify --quiet "refs/remotes/origin/${branch}" >/dev/null || die "${code_repo} has no ${branch} branch"
+tip=$(code rev-parse --verify --quiet "refs/remotes/origin/${branch}") || die "${code_repo} has no ${branch} branch"
+on_main=0
 if grep -qxF -- "$commit" <(code rev-list --first-parent "refs/remotes/origin/${branch}"); then
   echo "ok        ${commit} is on ${code_repo}'s ${branch}"
+  on_main=1
 else
   echo "NOT ON MAIN ${commit} isn't on ${code_repo}'s ${branch} (first parents)"
   failed=1
@@ -195,6 +197,33 @@ case $ref in
       failed=1
     fi ;;
 esac
+
+# Whether it is the newest build: the latest release tag for a site built
+# from tags, the head of main for one built from commits. Only a warning: a
+# deploy takes some minutes, and the operator may roll back on purpose.
+stale=''
+case $ref in
+  v*)
+    newest=$(code tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+    if [ -z "$newest" ]; then
+      echo "Note: can't tell which release of ${code_repo} is the latest"
+    elif [ "$newest" != "$ref" ]; then
+      stale="the latest release of ${code_repo} is ${newest}, not ${ref}"
+    else
+      echo "ok        ${ref} is the latest release"
+    fi ;;
+  *)
+    if [ "$on_main" = 1 ] && [ "$commit" != "$tip" ]; then
+      behind=$(code rev-list --count --first-parent "${commit}..${tip}" 2>/dev/null || echo some)
+      stale="${code_repo}'s ${branch} is at ${tip}, ${behind} commit(s) after the site's"
+    elif [ "$on_main" = 1 ]; then
+      echo "ok        ${commit} is the head of ${branch}"
+    fi ;;
+esac
+if [ -n "$stale" ]; then
+  echo "NOT LATEST ${stale}"
+  echo "  Normal while a deploy is running. Otherwise the site is behind, or was rolled back."
+fi
 
 # The signing workflow: the hosting repository's deploy.yml, run from its main
 # branch on GitHub's own runners, at a commit (the certificate's signer digest)
@@ -348,3 +377,6 @@ if [ "$failed" != 0 ]; then
 fi
 echo "Verified: every file matches the manifest and is attested by a reviewed copy of hosting/deploy.yml"
 echo "in ${hosting}, built from ${code_repo} ${ref} (commit ${commit}, on ${branch}); no other ${org} repository has Pages"
+if [ -n "$stale" ]; then
+  echo "Warning: it isn't the newest build (NOT LATEST above)"
+fi

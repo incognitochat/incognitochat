@@ -537,8 +537,11 @@ jobs:
       # The client is built, attested and deployed by the site's own workflow
       # (hosting/deploy.yml, kept in that repository), from this very commit:
       # dev builds the commit, production its release tag. It is sent the
-      # commit too, and refuses to build anything else. The token can only
-      # start that workflow, not change the site.
+      # commit too, and refuses to build anything else, or anything older
+      # than the live site unless asked for rollback: true (never from here).
+      # The token can't change the hosting repository's files or settings,
+      # but it can start that workflow with any inputs, re-run, cancel and
+      # delete its runs, and turn it off (hosting/README.md).
       - name: Ask the site to build this commit
         env:
           GH_TOKEN: ${{ secrets.PAGES_DISPATCH_TOKEN }}

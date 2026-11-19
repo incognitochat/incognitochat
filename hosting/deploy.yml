@@ -13,6 +13,10 @@
 # (first-parent) history, and the checkout must be exactly the commit the
 # request names (CI sends the one it deployed the backend from).
 #
+# And it only moves forward: the commit must be the live site's commit or
+# come after it, and a release tag mustn't be lower than the live one, unless
+# the request says rollback: true (hosting/README.md, Rolling back).
+#
 # Repository variables:
 #   CODE_REPOSITORY  e.g. incognitochat/incognitochat
 #   REFS             "commits" (dev: commit SHAs on RELEASE_BRANCH) or "tags" (vX.Y.Z)
@@ -34,6 +38,11 @@ on:
         description: The full commit SHA the ref must resolve to
         required: true
         type: string
+      rollback:
+        description: Deliberately deploy a build older than the live one (never below v2.4.0)
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -50,6 +59,8 @@ jobs:
       contents: read
       id-token: write # Sigstore signing for the attestations
       attestations: write
+    outputs:
+      live: ${{ steps.forward.outputs.live }}
     steps:
       # A tag is checked out as refs/tags/vX.Y.Z: given a bare name,
       # actions/checkout takes a branch of that name over the tag.
@@ -117,6 +128,58 @@ jobs:
           if ! grep -qxF -- "$head" <(git rev-list --first-parent "refs/remotes/origin/${RELEASE_BRANCH}"); then
             echo "::error::${head} is not on ${RELEASE_BRANCH}"
             exit 1
+          fi
+
+      # Only forward: the app's storage on each device only moves forward,
+      # and an app older than the one that upgraded it can't open it (below
+      # 2.4.0, every user would get a blank app). So the commit must be the
+      # live site's or come after it, and a tag mustn't be lower than the
+      # live one.
+      # The live site is the organization's Pages address, and its
+      # manifest.json was written by an earlier run of this workflow. Nothing
+      # to compare with (no site yet, or it can't be read) only warns;
+      # rollback: true turns the refusals into warnings.
+      - name: Check the site only moves forward
+        id: forward
+        env:
+          REF: ${{ inputs.ref }}
+          ROLLBACK: ${{ inputs.rollback }}
+        run: |
+          back() {
+            if [ "$ROLLBACK" = true ]; then
+              echo "::warning::Rolling back, as the request asks: $1"
+            else
+              echo "::error::$1. Only a deliberate rollback goes back: request it with rollback: true"
+              exit 1
+            fi
+          }
+          site="https://${GITHUB_REPOSITORY_OWNER,,}.github.io"
+          if ! curl -fsS --max-time 30 --retry 3 --max-filesize 1048576 --proto '=https' \
+            -o "$RUNNER_TEMP/live.json" "${site}/manifest.json?nocache=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}"; then
+            echo "::warning::Couldn't read ${site}/manifest.json (no site yet?), so this build isn't compared with the live one"
+            exit 0
+          fi
+          live=$(jq -r --arg re '\A[0-9a-f]{40}\z' '.commit | select(type == "string" and test($re))' \
+            "$RUNNER_TEMP/live.json" 2>/dev/null || true)
+          live_ref=$(jq -r --arg re '\Av[0-9]+\.[0-9]+\.[0-9]+\z' '.ref | select(type == "string" and test($re))' \
+            "$RUNNER_TEMP/live.json" 2>/dev/null || true)
+          if [ -z "$live" ]; then
+            echo "::warning::${site}/manifest.json names no commit, so this build isn't compared with the live one"
+            exit 0
+          fi
+          echo "live=${live}" >> "$GITHUB_OUTPUT"
+          head=$(git rev-parse HEAD)
+          echo "Live: ${live_ref:-$live} (commit ${live}). This build: ${REF} (commit ${head})"
+          if [ "$head" = "$live" ]; then
+            echo "The same commit as the live site"
+          elif ! git cat-file -e "${live}^{commit}" 2>/dev/null; then
+            back "The live site's commit ${live} isn't in the code repository, so this build can't be shown to come after it"
+          elif ! git merge-base --is-ancestor "$live" "$head"; then
+            back "${head} doesn't come after the live site's commit ${live}"
+          fi
+          if [[ $REF == v* && -n $live_ref && $REF != "$live_ref" ]] \
+            && [ "$(printf '%s\n' "${REF#v}" "${live_ref#v}" | sort -V | head -n 1)" = "${REF#v}" ]; then
+            back "${REF} is lower than the live site's ${live_ref}"
           fi
 
       # No dependency cache: this job is the site's root of trust.
@@ -190,5 +253,26 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # The build was compared with the site as it was then. This job re-run
+      # on its own, after another build has gone live, would put the older
+      # one back.
+      - name: Check the site hasn't moved since the build
+        env:
+          CHECKED: ${{ needs.build.outputs.live }}
+          COMMIT: ${{ inputs.commit }}
+          ROLLBACK: ${{ inputs.rollback }}
+        run: |
+          [ "$ROLLBACK" != true ] || exit 0
+          site="https://${GITHUB_REPOSITORY_OWNER,,}.github.io"
+          live=$(curl -fsS --max-time 30 --retry 3 --max-filesize 1048576 --proto '=https' \
+            "${site}/manifest.json?nocache=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}" \
+            | jq -r --arg re '\A[0-9a-f]{40}\z' '.commit | select(type == "string" and test($re))' 2>/dev/null || true)
+          if [ -z "$live" ] || [ -z "$CHECKED" ]; then
+            echo "::warning::Couldn't check that the live site is still the one the build was compared with"
+          elif [ "$live" != "$CHECKED" ] && [ "$live" != "$COMMIT" ]; then
+            echo "::error::The live site moved from ${CHECKED} to ${live} after the build was compared with it; start a new run"
+            exit 1
+          fi
+
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

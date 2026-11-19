@@ -25,8 +25,15 @@ so the app is built so that anyone can check what is actually served.
   and deploys with GitHub's own Pages action. It builds only a commit on
   `main` itself (not one merged in from another branch); CI's request also
   names the commit it deployed the backend from, and the workflow refuses to
-  build any other. This repository can only start that workflow, with a
-  token that can do nothing else.
+  build any other. And it only moves forward: it refuses a commit older than
+  the live site's, or a release lower than the live one, unless the request
+  says `rollback: true`
+  ([hosting/README.md](../hosting/README.md#rolling-back)). This repository
+  starts the workflow with a token that can't change the hosting
+  repository's files or settings, but can still start the workflow with any
+  inputs (`rollback: true` included), re-run, cancel and delete its runs, and
+  turn it off: whoever holds it can keep the site from updating, or roll it
+  back to an older build of `main`, but can't publish anything else.
 - **Locked down at runtime.** A strict Content Security Policy allows only the
   app's own scripts, and connections only to the API, the socket and the
   attachment bucket. The app loads no third-party code, and no code or settings
@@ -55,7 +62,10 @@ until checked. The script checks, in this order:
    script write outside its temporary folder.
 3. The commit is on `main` itself, among its first parents (as the hosting
    workflow requires: a commit that only came in through a merge doesn't
-   count), and a release tag points at it.
+   count), and a release tag points at it. It warns, without failing, when
+   that isn't the newest build: the latest release tag for a site built from
+   tags, the head of `main` for one built from commits. That's normal while
+   a deploy runs; otherwise the site is behind, or was rolled back.
 4. The manifest is attested by the hosting repository's
    `.github/workflows/deploy.yml`, run from that repository's `main` on
    GitHub's own runners, at a commit where that file is byte for byte a copy
@@ -120,7 +130,9 @@ so the script refuses those versions, and warns below 2.102.0.
   The change may show in the hosting repository's public history and
   Actions runs, but an admin of the hosting organization can rewrite that
   history (force-push `main`) and delete runs and deployments.
-- **Doesn't say the build is the newest.** It prints the commit and ref it
+- **Doesn't fail an old build.** It warns when the site isn't the newest
+  build, but still verifies it: a site held back, or rolled back on purpose,
+  is still a genuine build of `main`. It prints the commit and ref it
   checked; compare them with the release or commit you expect.
 - **Covers the backend only through the operator's records** (below). The
   design doesn't rely on the backend: a malicious one can drop or delay

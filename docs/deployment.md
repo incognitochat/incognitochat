@@ -32,9 +32,11 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   same commit (production: the release tag), and waits until the site serves
   it ([verifying.md](verifying.md), [hosting/](../hosting/README.md)). The
   request names the commit too, and the hosting repository refuses to build
-  any other commit, or one that isn't on `main` itself (not merged in from
-  another branch). Before deploying anything, CI checks that the hosting
-  repository's workflow takes that request.
+  any other commit, one that isn't on `main` itself (not merged in from
+  another branch), or one older than the live site's (unless asked to roll
+  back: [hosting/](../hosting/README.md#rolling-back)). Before deploying
+  anything, CI checks that the hosting repository's workflow takes that
+  request.
 
 Both environments run the same steps
 ([`deploy-environment.yml`](../.github/workflows/deploy-environment.yml)).
@@ -217,7 +219,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `SESSION_KEY_VERSION`, `WEBHOOK_SECRET_VERSION`, `CHAT_KEY_VERSION`, `TELEGRAM_ID_PEPPER_VERSION` | variables | Unset by default (1). Raise one to replace that generated secret alone: [what each does](#replacing-a-generated-secret). The pepper's is only for starting over. Keep a raised version set: deleting it means 1, which replaces the secret again. |
 | `SECRETS_VERSION` | variable | Retired: leave it unset, or the deploy stops ([below](#replacing-a-generated-secret)). |
 | `PAGES_REPO`, `PAGES_URL` | variables | The hosting repository and the site's address, for starting its deploy and waiting for it. |
-| `PAGES_DISPATCH_TOKEN` | secret | A token that can only start the hosting repository's workflow. |
+| `PAGES_DISPATCH_TOKEN` | secret | A token for the hosting repository's Actions, to start its workflow. It can't change that repository's files or settings, but it can also start the workflow with any inputs, re-run, cancel and delete its runs, and turn it off ([hosting/](../hosting/README.md#setting-up-a-hosting-repository)). |
 
 The limits below can be tuned without a code change, but none needs
 setting: unset, each takes its default from
