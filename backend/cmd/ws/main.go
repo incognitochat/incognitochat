@@ -80,7 +80,9 @@ func main() {
 		os.Exit(1)
 	}
 	h.log = log
-	lambda.Start(awsconf.WithDeadline(requestDeadline, h.handle))
+	// Lambda gets no error but awsconf.ErrFailed (handle returns none; a
+	// panic is recovered and logged by kind).
+	lambda.Start(awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, h.handle)))
 }
 
 // requestDeadline bounds an invocation's calls (DynamoDB, the socket API,

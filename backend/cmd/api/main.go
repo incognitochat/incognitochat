@@ -72,7 +72,9 @@ func main() {
 		}
 	}
 	// SIGTERM, when the instance shuts down, logs the last minute's counts.
-	lambda.StartWithOptions(awsconf.WithDeadline(requestDeadline, router.Serve),
+	// Lambda gets no error but awsconf.ErrFailed (Serve returns none; a
+	// panic is recovered and logged by kind).
+	lambda.StartWithOptions(awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, router.Serve)),
 		lambda.WithEnableSIGTERM(counts.Flush))
 }
 

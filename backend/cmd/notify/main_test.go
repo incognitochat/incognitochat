@@ -6,12 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-lambda-go/lambda"
+
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/notices"
+	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
 
 type fakeNotifier struct {
@@ -62,6 +67,36 @@ func TestHandle(t *testing.T) {
 		if _, err := handle(context.Background(), json.RawMessage(bad), sealer, n); err == nil {
 			t.Errorf("%s: accepted", bad)
 		}
+	}
+}
+
+// Whatever fails, Lambda gets awsconf.ErrFailed's constant text, and the
+// log the failure's kind and, for a Bot API call, method and answer
+// (PRV-4, BOT-8).
+func TestInvocationFailsWithConstantText(t *testing.T) {
+	sealer, _ := notices.NewSealer(bytes.Repeat([]byte("k"), 32))
+	account := ids.New()
+	var buf bytes.Buffer
+	n := &fakeNotifier{err: errors.Join(
+		fmt.Errorf("Quiet %s: %w", account, errors.New("ProvisionedThroughputExceededException")),
+		&botapi.Error{Method: "sendMessage", Status: 400, Code: 400},
+	)}
+	h := lambda.NewHandler(invocation(logx.New(&buf, "notify"), sealer, n))
+	_, err := h.Invoke(context.Background(), []byte(`{"notify":{"account":"`+account+`"}}`))
+	if err != awsconf.ErrFailed {
+		t.Fatalf("Lambda got %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, account) || strings.Contains(logged, "Provisioned") || !strings.Contains(logged, `"msg":"notify failed"`) ||
+		!strings.Contains(logged, `"method":"sendMessage","status":400,"error_code":400`) {
+		t.Fatalf("logged %s", logged)
+	}
+	if _, err := h.Invoke(context.Background(), []byte(`{"seal":{"chat":0}}`)); err != awsconf.ErrFailed {
+		t.Fatalf("a bad event: Lambda got %v", err)
+	}
+	out, err := h.Invoke(context.Background(), []byte(`{"seal":{"chat":4242}}`))
+	if err != nil || !strings.Contains(string(out), `"sealed"`) {
+		t.Fatalf("seal: %s, %v", out, err)
 	}
 }
 

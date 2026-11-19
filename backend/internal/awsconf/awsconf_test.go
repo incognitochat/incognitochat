@@ -1,13 +1,17 @@
 package awsconf
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -15,6 +19,8 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 // responseError is an error as the SDK returns it for an HTTP status.
@@ -127,5 +133,57 @@ func TestWithDeadline(t *testing.T) {
 	defer cancel()
 	if left, _ := h(ctx, 1); left > 10*time.Millisecond {
 		t.Fatalf("deadline in %v, past the function's", left)
+	}
+}
+
+// Whatever a handler returns or panics with, the Lambda runtime gets only
+// ErrFailed's constant text, and the log only the panic's kind and place
+// (PRV-4). The handler runs as the runtime runs it (lambda.NewHandler).
+func TestGuard(t *testing.T) {
+	const secret = "account-AAAAAAAAAAAAAAAAAAAAAA"
+	var buf bytes.Buffer
+	log := logx.New(&buf, "api")
+	var index []int
+	for _, tc := range []struct {
+		name    string
+		handler func(context.Context, string) (string, error)
+		kind    string // what the log says panicked; "" for no log
+	}{
+		{"returned", func(context.Context, string) (string, error) {
+			return "", fmt.Errorf("lookup %s: %w", secret, errors.New("denied"))
+		}, ""},
+		{"panicked", func(context.Context, string) (string, error) { panic(errors.New(secret)) }, "*errors.errorString"},
+		{"panicked value", func(context.Context, string) (string, error) { panic(secret) }, "string"},
+		{"out of range", func(_ context.Context, in string) (string, error) {
+			return in + fmt.Sprint(index[len(in)]), nil
+		}, "runtime.boundsError"},
+	} {
+		buf.Reset()
+		_, err := lambda.NewHandler(Guard(log, tc.handler)).Invoke(context.Background(), []byte(`"`+secret+`"`))
+		if err != ErrFailed || err.Error() != "invocation failed" {
+			t.Errorf("%s: the runtime got %v", tc.name, err)
+		}
+		if strings.Contains(buf.String(), secret) || strings.Contains(buf.String(), "denied") {
+			t.Errorf("%s: logged %s", tc.name, buf.String())
+		}
+		if tc.kind == "" {
+			if buf.Len() != 0 {
+				t.Errorf("%s: logged %s", tc.name, buf.String())
+			}
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+			t.Fatalf("%s: %q", tc.name, buf.String())
+		}
+		at, _ := line[logx.KeyPanicAt].(string)
+		if line["msg"] != "handler panicked" || line[logx.KeyErrorKind] != tc.kind || !strings.HasPrefix(at, "awsconf.TestGuard.func") {
+			t.Errorf("%s: logged %v", tc.name, line)
+		}
+	}
+	// What works is untouched.
+	out, err := Guard(log, func(_ context.Context, in string) (string, error) { return in + "!", nil })(context.Background(), "ok")
+	if out != "ok!" || err != nil {
+		t.Fatalf("%q, %v", out, err)
 	}
 }

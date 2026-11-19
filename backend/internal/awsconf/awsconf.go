@@ -1,6 +1,6 @@
 // Package awsconf is what the four functions share about calling AWS: few,
-// quick retries, a deadline for each invocation, and telling throttling
-// apart from failure.
+// quick retries, a deadline for each invocation, telling throttling apart
+// from failure, and giving the Lambda runtime nothing it would log.
 //
 // The SDK's default retryer tries a call three times, and after a throttle
 // waits up to 2 s, then up to 4 s. A function has a fixed number of
@@ -13,8 +13,12 @@ package awsconf
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	dynamotypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
 const (
@@ -112,5 +118,57 @@ func WithDeadline[In, Out any](d time.Duration, handler func(context.Context, In
 		ctx, cancel := context.WithTimeout(ctx, d)
 		defer cancel()
 		return handler(ctx, in)
+	}
+}
+
+// ErrFailed is the only error the functions give the Lambda runtime
+// (Guard).
+var ErrFailed = errors.New("invocation failed")
+
+// Guard wraps a Lambda handler so that the runtime gets no error but
+// ErrFailed. The runtime (aws-lambda-go) writes an error it gets, or a
+// panic's value and stack, to the function's log as they are, outside
+// logx. So an error the handler returns becomes ErrFailed (the handler
+// logs it, by kind, itself), and a panic is recovered, logged by its kind
+// and where it happened (no values), and answered with ErrFailed too. The
+// instance then goes on taking invocations.
+func Guard[In, Out any](log *slog.Logger, handler func(context.Context, In) (Out, error)) func(context.Context, In) (Out, error) {
+	return func(ctx context.Context, in In) (out Out, err error) {
+		defer func() {
+			if v := recover(); v != nil {
+				log.Error("handler panicked",
+					slog.String(logx.KeyErrorKind, fmt.Sprintf("%T", v)),
+					slog.String(logx.KeyPanicAt, panicAt()))
+				var zero Out
+				out, err = zero, ErrFailed
+			}
+		}()
+		out, err = handler(ctx, in)
+		if err != nil {
+			err = ErrFailed
+		}
+		return out, err
+	}
+}
+
+// panicAt is where the panic being recovered happened: the function and
+// line (the package's base name, e.g. "api.(*Server).send:42"), of the
+// first frame outside the runtime past its panic. Called from the deferred
+// function that recovers.
+func panicAt() string {
+	pc := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pc[:runtime.Callers(1, pc)])
+	panicking := false
+	for {
+		f, more := frames.Next()
+		if panicking && !strings.HasPrefix(f.Function, "runtime.") {
+			return fmt.Sprintf("%s:%d", f.Function[strings.LastIndexByte(f.Function, '/')+1:], f.Line)
+		}
+		if f.Function == "runtime.gopanic" {
+			panicking = true
+		}
+		if !more {
+			return ""
+		}
 	}
 }

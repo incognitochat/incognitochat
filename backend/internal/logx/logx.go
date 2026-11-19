@@ -8,6 +8,7 @@
 package logx
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,15 +19,19 @@ import (
 const (
 	KeyFunction  = "fn"          // which Lambda function
 	KeyRoute     = "route"       // route pattern, e.g. "POST /session"
-	KeyStatus    = "status"      // HTTP status returned
+	KeyStatus    = "status"      // HTTP status of an answer (the api's, or Telegram's)
 	KeyErrorKind = "error_kind"  // Go type of an error, never its message
 	KeyDuration  = "duration_ms" // how long something took
 	KeyCount     = "count"       // how many items were involved
+	KeyMethod    = "method"      // Bot API method called, e.g. "sendMessage"
+	KeyErrorCode = "error_code"  // Telegram's error_code for a failed Bot API call
+	KeyPanicAt   = "panic_at"    // where a recovered panic happened: function and line
 )
 
 var allowed = map[string]bool{
 	KeyFunction: true, KeyRoute: true, KeyStatus: true,
 	KeyErrorKind: true, KeyDuration: true, KeyCount: true,
+	KeyMethod: true, KeyErrorCode: true, KeyPanicAt: true,
 }
 
 // Allowed groups, of counts only (internal/tally writes them). Each member
@@ -102,11 +107,28 @@ func isCount(group string, a slog.Attr) bool {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// ErrorKind describes an error by its Go type only. Error messages can carry
-// keys or values from the request, so they are never logged.
+// ErrorKind describes an error by its Go type, never its message: error
+// messages can carry keys or values from the request. If the error, or one
+// it wraps, is Detailed, its details are added.
 func ErrorKind(err error) slog.Attr {
 	if err == nil {
 		return slog.Attr{}
 	}
-	return slog.String(KeyErrorKind, fmt.Sprintf("%T", err))
+	kind := slog.String(KeyErrorKind, fmt.Sprintf("%T", err))
+	var d Detailed
+	if !errors.As(err, &d) {
+		return kind
+	}
+	// A group without a key: its attributes are logged at the top level,
+	// each kept only if it is on the allow-list.
+	return slog.Attr{Value: slog.GroupValue(append([]slog.Attr{kind}, d.LogAttrs()...)...)}
+}
+
+// Detailed is an error that can say more about itself than its type, under
+// the keys above, with values from the code or from the service that
+// answered, never from a request: a failed Bot API call gives its method,
+// Telegram's HTTP status and error_code (botapi.Error).
+type Detailed interface {
+	error
+	LogAttrs() []slog.Attr
 }

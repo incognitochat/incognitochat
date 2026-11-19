@@ -139,3 +139,41 @@ func TestErrorKindNil(t *testing.T) {
 		t.Fatal("nil error logged")
 	}
 }
+
+// detailed is an error that describes itself, as botapi.Error does, and
+// tries a key that isn't allowed.
+type detailed struct{}
+
+func (detailed) Error() string { return "sendMessage to chat 4242 failed" }
+
+func (detailed) LogAttrs() []slog.Attr {
+	return []slog.Attr{
+		slog.String(KeyMethod, "sendMessage"),
+		slog.Int(KeyStatus, 429),
+		slog.Int(KeyErrorCode, 429),
+		slog.Int("chat_id", 4242),
+	}
+}
+
+// A detailed error, even joined with others, adds its details at the top
+// level, and only those on the allow-list (BOT-8).
+func TestErrorKindDetails(t *testing.T) {
+	var buf bytes.Buffer
+	log := New(&buf, "notify")
+	log.Warn("notify failed", ErrorKind(errors.Join(errors.New("table"), detailed{})))
+	log.Warn("notify failed", ErrorKind(errors.New("table")))
+	got := lines(t, &buf)
+	for key, want := range map[string]any{
+		"error_kind": "*errors.joinError", "method": "sendMessage", "status": float64(429), "error_code": float64(429),
+	} {
+		if got[0][key] != want {
+			t.Errorf("%s = %v, want %v", key, got[0][key], want)
+		}
+	}
+	if strings.Contains(buf.String(), "4242") {
+		t.Errorf("more than the details was logged: %s", buf.String())
+	}
+	if _, ok := got[1]["method"]; ok || got[1]["error_kind"] != "*errors.errorString" {
+		t.Errorf("a plain error: %v", got[1])
+	}
+}
