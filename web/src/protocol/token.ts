@@ -13,7 +13,7 @@ import { concat, randomBytes } from '../crypto/encoding';
 import { SUITE } from '../crypto/keys';
 import { message } from '../crypto/signing';
 
-export const TOKEN_TYPE = 0x0002;
+const TOKEN_TYPE = 0x0002;
 export const EPOCH_SECONDS = 7 * 24 * 3600;
 export const LABEL_SEND_TOKEN = 'incognitochat/v2/send-token';
 export const LABEL_MEDIA_TOKEN = 'incognitochat/v2/media-token';

@@ -23,10 +23,10 @@ const NAME = 'account-secret';
 const KEY_VAULT = 'vault-key';
 const HMAC: HmacImportParams = { name: 'HMAC', hash: 'SHA-256' };
 
-export const LABEL_SENDER_TAG = 'incognitochat/v2/sender-tag';
-export const LABEL_LABEL = 'incognitochat/v2/label';
+const LABEL_SENDER_TAG = 'incognitochat/v2/sender-tag';
+const LABEL_LABEL = 'incognitochat/v2/label';
 /** Local only: ID tags are never sent. */
-export const LABEL_ID_TAG = 'incognitochat/v2/local-id-tag';
+const LABEL_ID_TAG = 'incognitochat/v2/local-id-tag';
 
 // Frozen with v1's labels: changing or reordering either changes everyone's labels.
 const EMOJI = [

@@ -11,14 +11,12 @@
 export const TELEGRAM_WEB_ORIGIN = 'https://web.telegram.org';
 
 /** Events the client sends us that the app uses. */
-export interface IncomingEvents {
+interface IncomingEvents {
   theme_changed: { theme_params: Record<string, string> };
-  viewport_changed: { height: number; is_expanded: boolean; is_state_stable: boolean };
   safe_area_changed: { top: number; bottom: number; left: number; right: number };
   content_safe_area_changed: { top: number; bottom: number; left: number; right: number };
   back_button_pressed: Record<string, never>;
   write_access_requested: { status: 'allowed' | 'cancelled' };
-  fullscreen_changed: { is_fullscreen: boolean };
   visibility_changed: { is_visible: boolean };
   popup_closed: { button_id?: string };
   /** Telegram Web's "Reload page": the app reloads itself (it said so in iframe_ready). */
@@ -34,7 +32,6 @@ export interface OutgoingEvents {
   web_app_expand: undefined;
   web_app_close: undefined;
   web_app_request_theme: undefined;
-  web_app_request_viewport: undefined;
   web_app_request_safe_area: undefined;
   web_app_request_content_safe_area: undefined;
   web_app_setup_back_button: { is_visible: boolean };
@@ -50,7 +47,7 @@ export interface OutgoingEvents {
 }
 
 /** A native Telegram popup: up to three buttons; ok, close and cancel take no text. */
-export interface PopupParams {
+interface PopupParams {
   title?: string;
   message: string;
   buttons: PopupButton[];

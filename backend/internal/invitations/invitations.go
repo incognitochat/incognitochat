@@ -75,11 +75,6 @@ func Normalize(input string) (string, bool) {
 	return s[:half] + "-" + s[half:], true
 }
 
-// Payload is the start parameter of an invitation link.
-func Payload(code string) string {
-	return PayloadPrefix + strings.ReplaceAll(code, "-", "")
-}
-
 // Remaining is how many invitation uses a member can still put into codes.
 func Remaining(levelAllowance, granted, allocated int) int {
 	return max(0, levelAllowance+granted-allocated)

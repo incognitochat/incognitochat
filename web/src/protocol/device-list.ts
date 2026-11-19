@@ -15,7 +15,7 @@ import { LABEL_DEVICE_LIST, message } from '../crypto/signing';
 export const MAX_VALIDITY_SECONDS = 30 * 24 * 3600;
 const HOUR = 3600;
 
-export interface DeviceEntry {
+interface DeviceEntry {
   /** 22-character device ID. */
   deviceId: string;
   /** The device signing key, a 65-byte P-256 point. */
@@ -24,7 +24,7 @@ export interface DeviceEntry {
   added: number;
 }
 
-export interface DeviceList {
+interface DeviceList {
   seq: number;
   /** SHA-256 of the previous list; 32 zero bytes for the first. */
   prev: Uint8Array;

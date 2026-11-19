@@ -4,7 +4,7 @@
 
 import { checkObject } from '../net/api';
 
-export const PAYLOAD_PREFIX = 'inv';
+const PAYLOAD_PREFIX = 'inv';
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 export interface InvitationCode {

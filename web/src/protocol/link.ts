@@ -14,7 +14,7 @@ import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { fingerprint, importAgreementPublicKey, importSigningPublicKey, SUITE } from '../crypto/keys';
 import { LABEL_LINK_KEY, verify } from '../crypto/signing';
 
-export const LINK_VERSION = '1';
+const LINK_VERSION = '1';
 const ID_LENGTH = 11;
 const FP_LENGTH = 43;
 export const PAYLOAD_LENGTH = 1 + ID_LENGTH + FP_LENGTH;
@@ -64,7 +64,7 @@ export function ownerParts(linkId: string, accountId: string): Uint8Array[] {
 }
 
 /** An encryption key in a bundle, as the API sends it. */
-export interface BundleKey {
+interface BundleKey {
   key: Uint8Array<ArrayBuffer>;
   from: number;
   until: number;

@@ -17,9 +17,9 @@ export const MAX_ROUND_MS = 60 * 1000;
 /** Bars in a voice message's waveform. */
 export const WAVEFORM_BARS = 48;
 /** Recordings shorter than this are dropped, as Telegram does. */
-export const MIN_VOICE_MS = 500;
+const MIN_VOICE_MS = 500;
 /** A video message's width and height, in pixels (Telegram's size). */
-export const ROUND_SIDE = 384;
+const ROUND_SIDE = 384;
 const LEVEL_EVERY_MS = 50;
 const SNAPSHOT_SIDE = 192;
 

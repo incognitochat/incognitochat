@@ -234,7 +234,7 @@ func TestCheck(t *testing.T) {
 	ctx := context.Background()
 	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-0123456789abc"})
 
-	nonces := NewMemoryNonces(func() time.Time { return now })
+	nonces := newMemoryNonces(func() time.Time { return now })
 	if err := Check(ctx, login, &key.PublicKey, nonces, now); err != nil {
 		t.Fatalf("valid login refused: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestCheck(t *testing.T) {
 		t.Fatalf("replayed login: err = %v", err)
 	}
 
-	later := func(d time.Duration) *MemoryNonces { return NewMemoryNonces(func() time.Time { return now.Add(d) }) }
+	later := func(d time.Duration) *memoryNonces { return newMemoryNonces(func() time.Time { return now.Add(d) }) }
 	// A timestamp outside the window is told apart (the device's clock is
 	// off), and is still a refused login for callers that don't.
 	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrClockSkew) || !errors.Is(err, ErrLogin) {
@@ -257,7 +257,7 @@ func TestCheck(t *testing.T) {
 	}
 
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	fresh := NewMemoryNonces(func() time.Time { return now })
+	fresh := newMemoryNonces(func() time.Time { return now })
 	if err := Check(ctx, login, &other.PublicKey, fresh, now); !errors.Is(err, ErrLogin) {
 		t.Fatal("accepted another device's signature")
 	}
@@ -275,7 +275,7 @@ func TestCheck(t *testing.T) {
 		"short nonce":      {AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: "short", Signature: login.Signature},
 		"nonce charset":    {AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: "nonce with spaces!!", Signature: login.Signature},
 	} {
-		if err := Check(ctx, bad, &key.PublicKey, NewMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+		if err := Check(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -303,7 +303,7 @@ func TestCheckTime(t *testing.T) {
 
 func TestMemoryNoncesExpire(t *testing.T) {
 	clock := now
-	m := NewMemoryNonces(func() time.Time { return clock })
+	m := newMemoryNonces(func() time.Time { return clock })
 	ctx := context.Background()
 	if ok, _ := m.Use(ctx, "n", now.Add(time.Minute)); !ok {
 		t.Fatal("first use refused")
@@ -337,7 +337,7 @@ func TestCheckRequest(t *testing.T) {
 		AccountID: account, DeviceID: device, Method: "POST", Path: "/links",
 		Body: []byte(`{"id":"x"}`), Timestamp: now.Unix(), Nonce: "nonce-request-0123",
 	})
-	nonces := NewMemoryNonces(func() time.Time { return now })
+	nonces := newMemoryNonces(func() time.Time { return now })
 	if err := CheckRequest(ctx, r, &key.PublicKey, nonces, now); err != nil {
 		t.Fatalf("valid request refused: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestCheckRequest(t *testing.T) {
 		bad.Nonce = "nonce-" + strings.ReplaceAll(name, " ", "-") + "-0123"
 		bad = signRequest(t, key, bad)
 		change(&bad)
-		if err := CheckRequest(ctx, bad, &key.PublicKey, NewMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+		if err := CheckRequest(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -363,7 +363,7 @@ func TestCheckRequest(t *testing.T) {
 	// A login signature is never a request signature.
 	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-login-012345"})
 	asRequest := SignedRequest{AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: login.Nonce, Signature: login.Signature}
-	if err := CheckRequest(ctx, asRequest, &key.PublicKey, NewMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+	if err := CheckRequest(ctx, asRequest, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
 		t.Fatal("login signature accepted for a request")
 	}
 }

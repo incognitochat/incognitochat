@@ -15,18 +15,18 @@ import { message as labelled } from '../crypto/signing';
 import { cleanFileName, MAX_NAME } from './clean';
 import { keyId, MAX_INNER, openEnvelope, sealEnvelope, type RecipientKey } from './envelope';
 
-export const LABEL_AUTH = 'incognitochat/v2/message-auth';
-export const PROTOCOL_VERSION = 1;
+const LABEL_AUTH = 'incognitochat/v2/message-auth';
+const PROTOCOL_VERSION = 1;
 const TAG_LENGTH = 32;
 /** Room left for everything but the text. */
 export const MAX_TEXT_BYTES = 12_000;
 const MAX_SEEN = 100;
 
 /** `end` is reserved: it's taken in, and does nothing (docs/protocol.md). */
-export type Kind = 'message' | 'seen' | 'reaction' | 'delete' | 'edit' | 'key_update' | 'end';
+type Kind = 'message' | 'seen' | 'reaction' | 'delete' | 'edit' | 'key_update' | 'end';
 const KINDS: readonly Kind[] = ['message', 'seen', 'reaction', 'delete', 'edit', 'key_update', 'end'];
 /** The most messages one "delete" names. */
-export const MAX_DELETE = 100;
+const MAX_DELETE = 100;
 /** A message can be edited for this long after it was sent (by its own `at`). */
 export const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Receivers allow an edit this much later still: arrival times and clocks differ a little. */
@@ -48,10 +48,10 @@ const MAX_REACTION = 32;
  * `round`. Kinds this version doesn't know are accepted and shown as files,
  * so a newer sender's attachments still arrive (see shownAs).
  */
-export type MediaKind = 'photo' | 'video' | 'gif' | 'voice' | 'audio' | 'round' | 'file';
+type MediaKind = 'photo' | 'video' | 'gif' | 'voice' | 'audio' | 'round' | 'file';
 const MEDIA_KINDS: readonly MediaKind[] = ['photo', 'video', 'gif', 'voice', 'audio', 'round', 'file'];
 /** Most waveform bars a voice message carries. */
-export const MAX_WAVEFORM = 100;
+const MAX_WAVEFORM = 100;
 /** Longest video, voice or music length, in seconds. */
 const MAX_LENGTH = 24 * 60 * 60;
 /** Largest file that can be attached. */
@@ -97,7 +97,7 @@ export interface Sticker {
 }
 
 /** A reaction to a message: one emoji, or empty to take one's reaction back. */
-export interface Reaction {
+interface Reaction {
   /** The message reacted to (16 bytes), from either side of the conversation. */
   to: string;
   e: string;

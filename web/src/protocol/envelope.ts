@@ -14,11 +14,11 @@ import { open, seal } from '../crypto/hpke';
 import { SUITE } from '../crypto/keys';
 import { message } from '../crypto/signing';
 
-export const LABEL_KEY_ID = 'incognitochat/v2/key-id';
-export const LABEL_WRAP = 'incognitochat/v2/wrap';
-export const LABEL_BODY = 'incognitochat/v2/body';
+const LABEL_KEY_ID = 'incognitochat/v2/key-id';
+const LABEL_WRAP = 'incognitochat/v2/wrap';
+const LABEL_BODY = 'incognitochat/v2/body';
 
-export const KEY_ID_LENGTH = 8;
+const KEY_ID_LENGTH = 8;
 const ENC_LENGTH = 65;
 const WRAPPED_KEY_LENGTH = 32 + 16;
 export const WRAP_LENGTH = KEY_ID_LENGTH + ENC_LENGTH + WRAPPED_KEY_LENGTH;

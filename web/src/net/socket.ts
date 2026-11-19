@@ -30,7 +30,7 @@ export const REOPEN_MS = 30 * 60_000;
 export const REOPEN_RETRY_MS = 60_000;
 export const MAX_REOPEN_RETRY_MS = 4 * REOPEN_RETRY_MS;
 
-export interface PushSocketDeps {
+interface PushSocketDeps {
   url: string;
   /** A current session token. */
   token: () => Promise<string>;
@@ -42,7 +42,7 @@ export interface PushSocketDeps {
   WebSocket?: typeof WebSocket;
 }
 
-export interface PushSocket {
+interface PushSocket {
   /** Connects now if visible, and keeps a socket while visible. */
   start(): void;
   /** The app was shown or hidden. */

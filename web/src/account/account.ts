@@ -7,8 +7,8 @@
 // Telegram user chose this account key, and that launch registers it.
 //
 // Keys on this device:
-// - account key: copyable (sealed in the vault for linking devices later),
-//   used through a non-extractable working copy;
+// - account key: copyable (sealed in the vault, though never copied: one
+//   device per account), used through a non-extractable working copy;
 // - device signing key: non-extractable, never sent anywhere;
 // - vault key: non-extractable, seals the copyable keys.
 // Non-extractable only stops code from reading a key out. All of them are
@@ -38,13 +38,13 @@ const KEY_DEVICE = 'device-signing-key';
 const KEY_VAULT = 'vault-key';
 const LOCK = 'account';
 /** How long logIn waits before trying a login refused right after a setup again. */
-export const REFUSED_RETRY_MS = 1_000;
+const REFUSED_RETRY_MS = 1_000;
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
 const LINK_PARAM = /^[A-Za-z0-9_-]{1,64}$/;
 
-export type AccountRecord =
+type AccountRecord =
   /** Keys exist; waiting for the registration launch. */
   | { state: 'pending'; deviceId: string; fingerprint: string }
   /**
@@ -64,7 +64,7 @@ export type AccountRecord =
  * stays replaced when the server later only refuses it, so its warning isn't
  * lost when the server forgets the replacement.
  */
-export type SetUpState = 'registered' | 'replaced' | 'refused';
+type SetUpState = 'registered' | 'replaced' | 'refused';
 
 const SET_UP: readonly unknown[] = ['registered', 'replaced', 'refused'] satisfies SetUpState[];
 

@@ -18,7 +18,7 @@ export interface StickerInfo {
   e: string;
 }
 
-export interface Pack {
+interface Pack {
   id: string;
   stickers: readonly StickerInfo[];
 }

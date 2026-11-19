@@ -41,7 +41,7 @@ const IV = 12;
 export type LocalMedia = Omit<Media, 'id' | 'k' | 'd'> & Partial<Pick<Media, 'id' | 'k' | 'd'>>;
 
 /** One side's reaction to a message, and when it was set; an empty emoji is one taken back. */
-export interface ReactionMark {
+interface ReactionMark {
   e: string;
   at: number;
 }
@@ -165,7 +165,7 @@ export async function getPendingEdits(db: Database, conv: string): Promise<Pendi
  * they changed (by identity). at: when (our clock) one of them came, if one
  * just did.
  */
-export interface EditsChange {
+interface EditsChange {
   now: PendingEdit[];
   before: PendingEdit[];
   at?: number;
@@ -357,7 +357,7 @@ export async function sentEnvelopeAt(db: Database, conv: string, id: string): Pr
  * conversation's record deletes these in the same transaction, with what it
  * remembers by keyed hashes.
  */
-export function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
+function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
   return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv))]);
 }
 
@@ -878,7 +878,7 @@ export async function noteSeenBefore(db: Database, conv: string, upTo: number): 
 }
 
 /** What the chat list shows of a conversation's newest message: who wrote it, and the start of it. */
-export interface PreviewView {
+interface PreviewView {
   out: boolean;
   text: string;
   media?: { t: string; n?: string; m?: string };
@@ -1046,7 +1046,7 @@ const SWEEP = 'sweep';
  * its look through the files goes on (the last key it looked at; none: the
  * start). Keys only, nothing of what they hold, in `meta`.
  */
-export interface SweepState {
+interface SweepState {
   convs: { id: string; seen: number }[];
   files: { key: [string, string]; seen: number }[];
   after?: [string, string];
@@ -1156,7 +1156,7 @@ export async function dropStrayFiles(db: Database, keys: [string, string][]): Pr
 const UPLOAD_DELETES = 'upload-deletes';
 
 /** An upload to delete, with its delete secret. */
-export interface UploadDelete {
+interface UploadDelete {
   id: string;
   d: string;
   /**
@@ -1240,7 +1240,7 @@ const EARLY = 'early-envelopes';
  */
 export const MAX_EARLY = 50;
 export const MAX_EARLY_BYTES = 64 * 1024;
-export const MAX_EARLY_DELETES = 50;
+const MAX_EARLY_DELETES = 50;
 export const MAX_EARLY_DELETE_BYTES = 32 * 1024;
 
 /** An envelope kept for a conversation not started yet: the link it came through, and what it said (its `conv` and `from` say which conversation). */

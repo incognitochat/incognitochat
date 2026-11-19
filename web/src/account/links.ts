@@ -72,7 +72,7 @@ export interface LinkRecord extends LinkRef {
 }
 
 /** What a rotation did: nothing, a new key, or a new link with a new signing key in place of one that couldn't get new keys. */
-export type Rotation = boolean | 'new-link';
+type Rotation = boolean | 'new-link';
 
 /** Link encryption keys are replaced every 6 to 9 days (docs/protocol.md, Key rotation). */
 const ROTATE_MIN = 6 * 24 * 3600;
@@ -121,7 +121,6 @@ export interface AccountInfo {
   canCreateLinks: boolean;
   admin: boolean;
   links: number;
-  maxLinks: number;
   /** Whether Telegram notices are set up and not turned off. */
   notices: boolean;
   /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
@@ -132,14 +131,13 @@ export interface AccountInfo {
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, maxLinks, notices, deleting, cleanup } = v;
+  const { canCreateLinks, admin, links, notices, deleting, cleanup } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
-  if (!Number.isSafeInteger(links) || !Number.isSafeInteger(maxLinks)) throw new Error('bad account');
+  if (!Number.isSafeInteger(links)) throw new Error('bad account');
   return {
     canCreateLinks,
     admin,
     links: links as number,
-    maxLinks: maxLinks as number,
     notices: notices === true,
     deleting: deleting === true,
     cleanup: cleanup === true,
