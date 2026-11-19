@@ -178,7 +178,8 @@ secret: one person keeps the same label through the same link.
 - **Encryption:** each message gets a random content key; the body is
   AES-256-GCM, and the content key is wrapped for the recipient's current key
   with HPKE (RFC 9180, P-256, single shot), written against WebCrypto and
-  checked with the RFC's test vectors.
+  checked with the CFRG's HPKE test vectors; whole envelopes have fixed
+  vectors that the backend's tests open with Go's `crypto/hpke`.
 - **Authentication:** an HMAC tag with a key both sides can compute. The
   recipient knows who wrote, but can't prove it to anyone else (deniable). The
   server holds neither key, so it can't forge one.

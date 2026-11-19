@@ -40,7 +40,7 @@ async function keyPair(sk: string, pk: string): Promise<CryptoKeyPair> {
 
 const vectors = (data as { vectors: Vector[] }).vectors;
 
-describe.each(vectors.map((v) => [v.aead_id === 1 ? 'AES-128-GCM' : 'AES-256-GCM', v] as const))('RFC 9180 vector, %s', (_, v) => {
+describe.each(vectors.map((v) => [v.aead_id === 1 ? 'AES-128-GCM' : 'AES-256-GCM', v] as const))('CFRG HPKE vector, %s', (_, v) => {
   const aead = v.aead_id as AeadId;
 
   it('derives every intermediate value', async () => {
@@ -60,7 +60,7 @@ describe.each(vectors.map((v) => [v.aead_id === 1 ? 'AES-128-GCM' : 'AES-256-GCM
     expect(v.nonce).toBe(v.base_nonce); // the first encryption uses the base nonce
   });
 
-  it('seals and opens exactly as the RFC says', async () => {
+  it('seals and opens exactly as the vector says', async () => {
     const ephemeral = await keyPair(v.skEm, v.pkEm);
     const { enc, ct } = await seal(fromHex(v.pkRm), fromHex(v.info), fromHex(v.aad), fromHex(v.pt), { aead, ephemeral });
     expect(toHex(enc)).toBe(v.enc);

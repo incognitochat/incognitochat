@@ -1,9 +1,10 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { utf8 } from '../crypto/encoding';
+import { fromHex, toHex, utf8 } from '../crypto/encoding';
 import { generateVaultKey } from '../crypto/vault';
 import { getSealed, openDatabase, putKey } from '../storage/db';
-import { accountSecret, label, senderTag } from './secret';
+import vectors from '../../../backend/internal/envelope/testdata/vectors.json';
+import { accountSecret, idTag, label, senderTag } from './secret';
 
 let n = 0;
 async function db() {
@@ -38,5 +39,24 @@ describe('account secret', () => {
     // The same bytes as a link fingerprint give an unrelated label.
     expect(await label(mine, 'link', tag)).not.toBe(l);
     expect(await label(mine, 'link', utf8('fp'))).toMatch(/^\S+ [0-9A-Z]{4}$/u);
+  });
+});
+
+// Fixed-input vectors (backend/internal/envelope/testdata/vectors.json, where
+// Go checks the sender and ID tags too). Labels and tags are frozen: changing
+// one changes everyone's labels and blocks, and what the device remembers.
+describe('vectors', () => {
+  const secret = () => crypto.subtle.importKey('raw', fromHex(vectors.accountSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+
+  it('give the same sender tags', async () => {
+    for (const v of vectors.senderTags) expect(toHex(await senderTag(await secret(), v.linkFingerprint))).toBe(v.tag);
+  });
+
+  it('give the same labels', async () => {
+    for (const v of vectors.labels) expect(await label(await secret(), v.kind as 'anon' | 'link', fromHex(v.data))).toBe(v.label);
+  });
+
+  it('give the same ID tags', async () => {
+    for (const v of vectors.idTags) expect(await idTag(await secret(), v.conv, v.id)).toBe(v.tag);
   });
 });

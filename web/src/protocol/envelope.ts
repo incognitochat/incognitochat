@@ -82,9 +82,11 @@ async function aes(key: Uint8Array<ArrayBuffer>, usage: 'encrypt' | 'decrypt'): 
   return crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, [usage]);
 }
 
-const bodyAad = () => message(LABEL_BODY, new Uint8Array([SUITE]));
+/** The body's AES-GCM additional data. */
+export const bodyAad = () => message(LABEL_BODY, new Uint8Array([SUITE]));
 
-async function wrapInfo(id: Uint8Array, body: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+/** A wrap's HPKE info: it names the key ID and the body, so a wrap can't be moved. */
+export async function wrapInfo(id: Uint8Array, body: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', body));
   return message(LABEL_WRAP, new Uint8Array([SUITE]), id, digest);
 }

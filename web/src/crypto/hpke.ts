@@ -1,7 +1,9 @@
 // HPKE (RFC 9180), Base mode, single shot: DHKEM(P-256, HKDF-SHA256),
-// HKDF-SHA256, AES-GCM. Written against WebCrypto and checked with the RFC's
-// test vectors (hpke-vectors.json) rather than taken from a library: the most
-// common JavaScript one is unaudited and had a nonce-reuse bug in 2025.
+// HKDF-SHA256, AES-GCM. Written against WebCrypto and checked with the CFRG
+// test vectors (hpke-vectors.json; the AES-128-GCM one is also in RFC 9180
+// Appendix A.3, the AES-256-GCM one only in the CFRG file) rather than taken
+// from a library: the most common JavaScript one is unaudited and had a
+// nonce-reuse bug in 2025.
 //
 // Only what the envelope needs: one Seal per context (sequence number 0), no
 // PSK or Auth modes, no exporter.
