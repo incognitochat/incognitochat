@@ -19,8 +19,8 @@
 #       Before applying, and after each bootstrap (scripts/bootstrap.sh):
 #       whether the deploy role is denied reading user data and leaving
 #       access behind (infra/init, deploy_limits), and still allowed what
-#       the deploy does with the functions. A deploy role older than this
-#       code stops the deploy before anything changes.
+#       the deploy does with the functions and the edge. A deploy role
+#       older than this code stops the deploy before anything changes.
 #   roles
 #       After applying: every call in the JSON on standard input (Terraform's
 #       permission_checks output, at least 4), against each role's policy and
@@ -181,6 +181,8 @@ deploy-role)
   log_group="arn:${partition}:logs:${region}:${account}:log-group:/aws/lambda/${prefix}-api"
   media="arn:${partition}:s3:::${prefix}-media-check"
   boundary="arn:${partition}:iam::${account}:policy/${prefix}-lambda-boundary"
+  request_policy="arn:${partition}:cloudfront::${account}:origin-request-policy/check"
+  ip_set="arn:${partition}:wafv2:us-east-1:${account}:global/ipset/${prefix}-check/check"
   # An account that isn't this one (AWS's example account ID).
   outsider=111122223333
 
@@ -236,6 +238,13 @@ deploy-role)
   check allowed "changing a table" "$role" dynamodb:UpdateTable "${table}-directory"
   check allowed "reading a log group's metric filters" "$role" logs:DescribeMetricFilters "$log_group"
   check allowed "setting the media bucket's policy" "$role" s3:PutBucketPolicy "$media"
+  # The edge: CloudFront's origin request policy, and the firewall's IP sets
+  # (in us-east-1) and its rules that use them.
+  check allowed "creating an origin request policy" "$role" cloudfront:CreateOriginRequestPolicy "*"
+  check allowed "changing an origin request policy" "$role" cloudfront:UpdateOriginRequestPolicy "$request_policy"
+  check allowed "creating a firewall IP set" "$role" wafv2:CreateIPSet "$ip_set"
+  check allowed "changing a firewall IP set" "$role" wafv2:UpdateIPSet "$ip_set"
+  check allowed "letting the firewall's rules use an IP set" "$role" wafv2:UpdateWebACL "$ip_set"
   finish "Checked the deploy role's limits"
   ;;
 roles)

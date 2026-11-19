@@ -1,12 +1,14 @@
 # Cost and health alerts for the account: a monthly budget and a few
-# CloudWatch alarms, all publishing to one SNS topic. They live in this stack
-# so that CI, which can't change it, can't silence them either. The six on
-# the api function's request counts are the exception: CI deploys what they
-# read (the log line, the metric filters, the log level), so it could.
+# CloudWatch alarms, all publishing to one SNS topic, except those on
+# CloudFront and its firewall, whose metrics are in us-east-1: they publish
+# to a second topic there (at the end). They live in this stack so that CI,
+# which can't change it, can't silence them either. The six on the api
+# function's request counts are the exception: CI deploys what they read
+# (the log line, the metric filters, the log level), so it could.
 #
-# The topic starts without subscribers: whoever runs the deployment
-# subscribes an address themselves (docs/deployment.md), so no address is
-# ever written to the repository or to Terraform state.
+# The topics start without subscribers: whoever runs the deployment
+# subscribes an address to each themselves (docs/deployment.md), so no
+# address is ever written to the repository or to Terraform state.
 
 resource "aws_sns_topic" "alerts" {
   name = "${local.prefix}-alerts"
@@ -121,6 +123,81 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
 
+# The other functions failing at all: crashes and timeouts, and errors
+# they return to Lambda (notify's: a notice it couldn't send, unless
+# Telegram's flood control or a blocked bot refused it; ws logs a failed
+# push instead). api invokes ws, and ws notify, without waiting, and Lambda
+# never tries those events again (../functions.tf): each failure is a lost
+# push or notice, and so is an event dropped after waiting a minute for
+# room to run (AsyncEventsDropped, which counts failed events too). A bot
+# update that failed, Telegram sends again.
+resource "aws_cloudwatch_metric_alarm" "function_errors" {
+  for_each = {
+    bot    = { errors = "Errors" }
+    notify = { errors = "Errors", dropped = "AsyncEventsDropped" }
+    ws     = { errors = "Errors", dropped = "AsyncEventsDropped" }
+  }
+
+  alarm_name          = "${local.prefix}-${each.key}-errors"
+  alarm_description   = "The ${each.key} function failed${length(each.value) > 1 ? " or dropped an event" : ""} in the last 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "failures"
+    expression  = "SUM(METRICS())"
+    label       = "Failed or dropped"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = each.value
+    content {
+      id = metric_query.key
+      metric {
+        namespace   = "AWS/Lambda"
+        metric_name = metric_query.value
+        dimensions  = { FunctionName = "${local.prefix}-${each.key}" }
+        stat        = "Sum"
+        period      = local.alarm_period
+      }
+    }
+  }
+}
+
+# The WebSocket API refusing requests. ClientError counts those API Gateway
+# refused before ws ran: mostly its throttle (WS_THROTTLE_RATE_LIMIT,
+# WS_THROTTLE_BURST_LIMIT), which everyone shares, so a flood of connects
+# keeps real apps from connecting and pushes stop. IntegrationError counts
+# those ws refused or failed: a session that doesn't check out (forged or
+# ended), more connects than one account may make, or ws's own failure.
+# The API's ID is random (../websocket.tf), so the queries take every
+# WebSocket API in the account: the app stack makes one.
+resource "aws_cloudwatch_metric_alarm" "ws_api" {
+  for_each = { client-errors = "ClientError", integration-errors = "IntegrationError" }
+
+  alarm_name          = "${local.prefix}-ws-${each.key}"
+  alarm_description   = "More than ${var.ws_errors_alarm} WebSocket requests were counted as ${each.value} in 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.ws_errors_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "errors"
+    expression  = "SELECT SUM(${each.value}) FROM SCHEMA(\"AWS/ApiGateway\", ApiId)"
+    label       = each.value
+    period      = local.alarm_period
+    return_data = true
+  }
+}
+
 # A table refusing requests: its per-second cap (a cost guard in the app
 # stack) is reached, so real users are being turned away.
 resource "aws_cloudwatch_metric_alarm" "table_throttles" {
@@ -144,6 +221,59 @@ resource "aws_cloudwatch_metric_alarm" "table_throttles" {
 
   dynamic "metric_query" {
     for_each = { reads = "ReadThrottleEvents", writes = "WriteThrottleEvents" }
+    content {
+      id = metric_query.key
+      metric {
+        namespace   = "AWS/DynamoDB"
+        metric_name = metric_query.value
+        dimensions  = { TableName = "${local.prefix}-${each.key}" }
+        stat        = "Sum"
+        period      = local.alarm_period
+      }
+    }
+  }
+}
+
+# A table nearing its cap, before the cap refuses anyone: the share of its
+# read or write cap (whichever is higher) it used on average over 5
+# minutes. The caps are the app stack's (variables.tf).
+locals {
+  table_caps = {
+    reads  = coalesce(var.table_max_read_units, var.github_environment == "production" ? 400 : 200)
+    writes = coalesce(var.table_max_write_units, var.github_environment == "production" ? 200 : 100)
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "table_capacity" {
+  for_each = toset(["directory", "messages", "ephemeral"])
+
+  alarm_name          = "${local.prefix}-${each.key}-table-capacity"
+  alarm_description   = "The ${each.key} table used more than ${var.table_capacity_alarm_percent}% of its read cap (${local.table_caps.reads} units a second) or of its write cap (${local.table_caps.writes}) over 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.table_capacity_alarm_percent
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "used"
+    expression  = "MAX([reads_share, writes_share])"
+    label       = "Share of the cap used (%)"
+    return_data = true
+  }
+
+  # The units used in 5 minutes, as a share of what the cap allows in them.
+  dynamic "metric_query" {
+    for_each = local.table_caps
+    content {
+      id         = "${metric_query.key}_share"
+      expression = "100 * ${metric_query.key} / ${metric_query.value * local.alarm_period}"
+    }
+  }
+
+  dynamic "metric_query" {
+    for_each = { reads = "ConsumedReadCapacityUnits", writes = "ConsumedWriteCapacityUnits" }
     content {
       id = metric_query.key
       metric {
@@ -206,6 +336,59 @@ resource "aws_cloudwatch_metric_alarm" "media_download_bytes" {
     label       = "BytesDownloaded"
     period      = local.alarm_period
     return_data = true
+  }
+}
+
+# What the media bucket holds, from S3's free daily storage metric. Each
+# account may upload 500 MiB a day, and uploads nobody fetches stay 30
+# days, billed all the while: many accounts can park a lot without sending
+# anything. The metric is named by the bucket, whose name is random
+# (../media.tf), so it is looked up: before the app stack's first deploy
+# there is none, and the alarm comes with the next run of this stack.
+data "aws_s3_buckets" "media" {
+  prefix        = "${local.prefix}-media-"
+  bucket_region = local.region
+}
+
+locals {
+  # Every bucket with the name, though the app stack makes one.
+  media_buckets = sort([for b in coalesce(data.aws_s3_buckets.media.buckets, []) : b.name])
+}
+
+resource "aws_cloudwatch_metric_alarm" "media_stored" {
+  count = length(local.media_buckets) > 0 ? 1 : 0
+
+  alarm_name        = "${local.prefix}-media-stored"
+  alarm_description = "The media bucket holds more than ${var.media_stored_gib_alarm} GiB."
+  # S3 reports it once a day, hours late: the alarm looks at the last two
+  # days, so that it always has a figure.
+  evaluation_periods  = 2
+  datapoints_to_alarm = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.media_stored_gib_alarm * 1073741824
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "stored"
+    expression  = "SUM(METRICS())"
+    label       = "BucketSizeBytes"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = local.media_buckets
+    content {
+      id = "bucket${metric_query.key}"
+      metric {
+        namespace   = "AWS/S3"
+        metric_name = "BucketSizeBytes"
+        dimensions  = { BucketName = metric_query.value, StorageType = "StandardStorage" }
+        stat        = "Average"
+        period      = 86400
+      }
+    }
   }
 }
 
@@ -294,4 +477,93 @@ resource "aws_cloudwatch_metric_alarm" "token_requests" {
       }
     }
   }
+}
+
+# --- us-east-1: CloudFront and its firewall --------------------------------
+# Their metrics are there, whatever the app's region, and an alarm notifies
+# only a topic in its own region: a second topic, subscribed like the first.
+
+resource "aws_sns_topic" "edge_alerts" {
+  provider = aws.global
+  name     = "${local.prefix}-edge-alerts"
+}
+
+data "aws_iam_policy_document" "edge_alerts_topic" {
+  statement {
+    sid       = "AlarmsPublish"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.edge_alerts.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
+  }
+}
+
+resource "aws_sns_topic_policy" "edge_alerts" {
+  provider = aws.global
+  arn      = aws_sns_topic.edge_alerts.arn
+  policy   = data.aws_iam_policy_document.edge_alerts_topic.json
+}
+
+# The API's distribution answering with server errors: the function URL
+# failing or out of reach, or the api function answering 5xx (503 while a
+# table refuses requests at its cap, or while attachments are paused). The
+# distribution's ID is random (../edge.tf), so the query takes every
+# distribution in the account: the app stack makes one. A share is noisy
+# while there are few requests, so it must hold for 15 minutes.
+resource "aws_cloudwatch_metric_alarm" "edge_5xx" {
+  provider = aws.global
+
+  alarm_name          = "${local.prefix}-edge-5xx"
+  alarm_description   = "More than ${var.edge_5xx_rate_alarm}% of CloudFront's answers were 5xx errors, in each of the last three 5-minute periods."
+  evaluation_periods  = 3
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.edge_5xx_rate_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.edge_alerts.arn]
+  ok_actions          = [aws_sns_topic.edge_alerts.arn]
+
+  metric_query {
+    id          = "rate"
+    expression  = "SELECT AVG(\"5xxErrorRate\") FROM SCHEMA(\"AWS/CloudFront\", DistributionId, Region)"
+    label       = "5xxErrorRate"
+    period      = local.alarm_period
+    return_data = true
+  }
+}
+
+# The firewall blocking requests, all its rules together: a flood is being
+# held off, or real users behind a busy address are refused. CloudFront
+# and the firewall still bill each blocked request. Only where the app
+# stack puts the firewall (FIREWALL), production by default.
+locals {
+  firewall = coalesce(var.firewall, var.github_environment == "production")
+}
+
+resource "aws_cloudwatch_metric_alarm" "firewall_blocks" {
+  count    = local.firewall ? 1 : 0
+  provider = aws.global
+
+  alarm_name        = "${local.prefix}-firewall-blocks"
+  alarm_description = "The firewall blocked more than ${var.firewall_blocks_alarm} requests in 5 minutes."
+  namespace         = "AWS/WAFV2"
+  metric_name       = "BlockedRequests"
+  # The web ACL's metric name, as the app stack sets it (../edge.tf).
+  dimensions          = { WebACL = "${local.prefix}-api", Rule = "ALL" }
+  statistic           = "Sum"
+  period              = local.alarm_period
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.firewall_blocks_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.edge_alerts.arn]
+  ok_actions          = [aws_sns_topic.edge_alerts.arn]
 }

@@ -297,7 +297,8 @@ the server never sees a key, name or type.
   is stored, three times at most and only in the first three hours after
   payment; once the upload is stored it says so. The app runs two uploads at
   a time and asks for a URL only when one can start. Request metrics on the
-  bucket feed alarms on uploads, downloads and the data downloaded.
+  bucket feed alarms on uploads, downloads and the data downloaded, and
+  S3's daily storage metric one on what the bucket holds.
 - **Emergency switches.** If those costs run away, the operator can pause
   uploads or downloads for everyone, with the AWS CLI or from the app's
   admin screen, and no release. They are one settings item in the directory

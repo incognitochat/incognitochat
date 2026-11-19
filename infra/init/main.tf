@@ -16,6 +16,23 @@ provider "aws" {
   }
 }
 
+# CloudFront's and its firewall's metrics are in us-east-1, whatever the
+# app's region, and an alarm notifies only a topic in its own region: the
+# alarms on them, and their topic, live there (alerts.tf).
+provider "aws" {
+  alias  = "global"
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project     = "incognitochat"
+      Environment = var.github_environment
+      Stack       = "bootstrap"
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 

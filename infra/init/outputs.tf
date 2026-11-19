@@ -37,3 +37,8 @@ output "alerts_topic_arn" {
   description = "SNS topic the budget and the alarms publish to; subscribe an address to it to receive them"
   value       = aws_sns_topic.alerts.arn
 }
+
+output "edge_alerts_topic_arn" {
+  description = "SNS topic in us-east-1 the alarms on CloudFront and its firewall publish to; subscribe an address to it too"
+  value       = aws_sns_topic.edge_alerts.arn
+}

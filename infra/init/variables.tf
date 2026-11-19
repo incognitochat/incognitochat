@@ -28,9 +28,12 @@ variable "github_environment" {
   type        = string
   default     = "production"
 
+  # At most 15 characters: the builds bucket's name prefix
+  # ("incognitochat-<environment>-builds-", lambda_signing.tf) may have at
+  # most 37.
   validation {
-    condition     = can(regex("^[a-z][a-z0-9]{1,15}$", var.github_environment))
-    error_message = "github_environment must be 2-16 lowercase letters or digits, starting with a letter (e.g. dev, production)."
+    condition     = can(regex("^[a-z][a-z0-9]{1,14}$", var.github_environment))
+    error_message = "github_environment must be 2-15 lowercase letters or digits, starting with a letter (e.g. dev, production)."
   }
 }
 
@@ -125,5 +128,95 @@ variable "refusals_alarm" {
   validation {
     condition     = var.refusals_alarm > 0
     error_message = "refusals_alarm must be positive."
+  }
+}
+
+# The tables' caps as the app stack sets them (../variables.tf, GitHub
+# variables TABLE_MAX_READ_UNITS and TABLE_MAX_WRITE_UNITS), with the same
+# defaults by environment, for the alarms on the capacity the tables use
+# (alerts.tf). They must match: where those GitHub variables are set, set
+# these to the same values (TF_VAR_table_max_read_units,
+# TF_VAR_table_max_write_units), or the alarms fire at another share of
+# the caps.
+variable "table_max_read_units" {
+  description = "Each table's cap on read request units a second, as the app stack sets it (GitHub variable TABLE_MAX_READ_UNITS). Unset (null), 400 in production and 200 elsewhere, as there"
+  type        = number
+  default     = null
+
+  validation {
+    condition     = coalesce(var.table_max_read_units, 1) >= 1 && coalesce(var.table_max_read_units, 1) <= 3000
+    error_message = "table_max_read_units must be from 1 to 3,000, as in the app stack."
+  }
+}
+
+variable "table_max_write_units" {
+  description = "Each table's cap on write request units a second, as the app stack sets it (GitHub variable TABLE_MAX_WRITE_UNITS). Unset (null), 200 in production and 100 elsewhere, as there"
+  type        = number
+  default     = null
+
+  validation {
+    condition     = coalesce(var.table_max_write_units, 1) >= 1 && coalesce(var.table_max_write_units, 1) <= 1000
+    error_message = "table_max_write_units must be from 1 to 1,000, as in the app stack."
+  }
+}
+
+variable "table_capacity_alarm_percent" {
+  description = "Share of a table's read or write cap, in percent, above which the units it used over 5 minutes raise an alarm, before the cap refuses anyone"
+  type        = number
+  default     = 70
+
+  validation {
+    condition     = var.table_capacity_alarm_percent > 0 && var.table_capacity_alarm_percent <= 100
+    error_message = "table_capacity_alarm_percent must be above 0 and at most 100."
+  }
+}
+
+variable "ws_errors_alarm" {
+  description = "WebSocket requests refused in 5 minutes above which an alarm is raised, separately for those API Gateway refused before the ws function ran (ClientError: mostly its throttle) and those ws refused or failed (IntegrationError). 300 is 1 a second"
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.ws_errors_alarm > 0
+    error_message = "ws_errors_alarm must be positive."
+  }
+}
+
+variable "media_stored_gib_alarm" {
+  description = "GiB held in the media bucket above which an alarm is raised (S3 measures it once a day). 50 GiB costs about $1.15 a month at $0.023 per GB; one account may upload 500 MiB a day, and uploads nobody fetches stay 30 days"
+  type        = number
+  default     = 50
+
+  validation {
+    condition     = var.media_stored_gib_alarm > 0
+    error_message = "media_stored_gib_alarm must be positive."
+  }
+}
+
+variable "firewall" {
+  description = "Whether the app stack puts its firewall (AWS WAF) in front of CloudFront (GitHub variable FIREWALL), for the alarm on the requests it blocks. Unset (null), true in production only. Must be true wherever the firewall is on, or nothing alarms on its blocks"
+  type        = bool
+  default     = null
+}
+
+variable "edge_5xx_rate_alarm" {
+  description = "Share of CloudFront's answers, in percent, that may be 5xx errors before an alarm is raised. It must be passed in 3 periods of 5 minutes in a row, as the share is noisy while traffic is low"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.edge_5xx_rate_alarm > 0 && var.edge_5xx_rate_alarm <= 100
+    error_message = "edge_5xx_rate_alarm must be above 0 and at most 100."
+  }
+}
+
+variable "firewall_blocks_alarm" {
+  description = "Requests the firewall blocked in 5 minutes above which an alarm is raised (3000 is 10 a second). CloudFront and the firewall still bill each blocked request"
+  type        = number
+  default     = 3000
+
+  validation {
+    condition     = var.firewall_blocks_alarm > 0
+    error_message = "firewall_blocks_alarm must be positive."
   }
 }
