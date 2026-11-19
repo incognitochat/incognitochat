@@ -7,9 +7,11 @@ variable "environment" {
   description = "Environment name; must match the bootstrap stack (infra/init), which only allows names with this prefix"
   type        = string
 
+  # At most 15 characters, as in infra/init: the builds bucket's name prefix
+  # there ("incognitochat-<environment>-builds-") may have at most 37.
   validation {
-    condition     = can(regex("^[a-z][a-z0-9]{1,15}$", var.environment))
-    error_message = "environment must be 2-16 lowercase letters or digits, starting with a letter."
+    condition     = can(regex("^[a-z][a-z0-9]{1,14}$", var.environment))
+    error_message = "environment must be 2-15 lowercase letters or digits, starting with a letter."
   }
 }
 

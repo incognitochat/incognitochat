@@ -161,7 +161,10 @@ rerunning the bootstrap.
 
 Alerts are a monthly cost budget (`MONTHLY_BUDGET=<dollars>` when
 bootstrapping; 50 for production and 15 otherwise by default) and a few
-alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
+alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`,
+except the two on CloudFront and its firewall: their metrics are in
+us-east-1, whatever the app's region, so they publish to a second topic
+there, `incognitochat-<env>-edge-alerts`.
 
 | Alert | When |
 |---|---|
@@ -172,6 +175,12 @@ alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`:
 | `<table>-table-throttles` | A table refused requests because its per-second cap was reached. |
 | `media-uploads`, `media-downloads` | The media bucket had more than 3,000 PUT or GET requests in 5 minutes (10 a second; `media_requests_alarm`). These go straight to S3, past the API and its alarms, and each is billed. They read the bucket's request metrics, which the app stack turns on. Those are billed like custom metrics, $0.30 a month each for up to 16, counted only in hours with requests: at most about $5 a month per environment. |
 | `media-download-bytes` | More than 2 GiB was downloaded from the media bucket in 5 minutes (about 7 MB a second; `media_download_gib_alarm`). Downloads cost by the data sent: one 51 MiB download costs as much as about 11,000 GET requests. Same request metrics. |
+| `media-stored` | The media bucket holds more than 50 GiB (`media_stored_gib_alarm`; about $1.15 a month). S3 measures it once a day, hours late, so this one is slow. The bootstrap finds the bucket by its name, so the alarm appears at the first bootstrap after the app stack's first deploy. |
+| `bot-errors`, `notify-errors`, `ws-errors` | That function failed at all in 5 minutes (a crash, a timeout, or an error it returned to Lambda), or, for `notify` and `ws`, dropped an event after waiting a minute to run. Those two are invoked without waiting and never retried, so each is a lost notice or push. |
+| `ws-client-errors`, `ws-integration-errors` | The WebSocket API counted more than 300 `ClientError`s (refused by API Gateway before `ws` ran: mostly its throttle) or `IntegrationError`s (refused or failed by `ws`) in 5 minutes (`ws_errors_alarm`, each alarm on its own). |
+| `<table>-table-capacity` | A table used more than 70% of its read or write cap on average over 5 minutes (`table_capacity_alarm_percent`), before the cap refuses anyone. |
+| `edge-5xx` (us-east-1) | More than 5% of CloudFront's answers were 5xx errors in each of three 5-minute periods in a row (`edge_5xx_rate_alarm`). |
+| `firewall-blocks` (us-east-1) | The firewall blocked more than 3,000 requests in 5 minutes (10 a second; `firewall_blocks_alarm`). Only where `firewall` is true: by default in production alone. |
 | `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
 | `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
 | `limit-hits` | The `api` function answered `429` (`rate_limited` or `daily_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
@@ -184,16 +193,31 @@ with `TF_VAR_<name>` when rerunning the bootstrap. The bootstrap doesn't
 remember them: set each again at every rerun, or it goes back to its
 default.
 
-What to do when a media alarm fires: [emergency switches](#emergency-switches).
-When a count alarm fires: [request counts](#request-counts).
+Three of the bootstrap's settings must match the app stack's, which it
+can't read. Unset, each takes the same default by environment as there,
+so they only need setting where the GitHub variable is set:
+`table_max_read_units` and `table_max_write_units` (the capacity alarms'
+thresholds come from them; `TABLE_MAX_READ_UNITS` and
+`TABLE_MAX_WRITE_UNITS`), and `firewall` (whether the firewall's alarm
+exists; true in production alone, while `FIREWALL` is on there). Set them
+the same way, with `TF_VAR_<name>` at every rerun.
 
-The topic starts without subscribers, so no address is stored in the
-repository or in Terraform state. Subscribe one, and confirm the email AWS
-sends:
+What to do when a media alarm fires (`media-stored` too):
+[emergency switches](#emergency-switches). When a count alarm fires:
+[request counts](#request-counts). When another fires:
+[health alarms](#health-alarms).
+
+The topics start without subscribers, so no address is stored in the
+repository or in Terraform state. Subscribe one to each, and confirm the
+emails AWS sends:
 
 ```shell
 AWS_PROFILE=<profile> aws sns subscribe --region <aws-region> --protocol email \
   --topic-arn "$(terraform -chdir=infra/init output -raw alerts_topic_arn)" \
+  --notification-endpoint <address>
+# CloudFront's and the firewall's alarms, in us-east-1.
+AWS_PROFILE=<profile> aws sns subscribe --region us-east-1 --protocol email \
+  --topic-arn "$(terraform -chdir=infra/init output -raw edge_alerts_topic_arn)" \
   --notification-endpoint <address>
 ```
 
@@ -224,7 +248,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
-| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. |
+| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with three rate limits ([below](#the-firewall)). Off by default: about $8 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
 | `SESSION_KEY_VERSION`, `WEBHOOK_SECRET_VERSION`, `CHAT_KEY_VERSION`, `TELEGRAM_ID_PEPPER_VERSION` | variables | Unset by default (1). Raise one to replace that generated secret alone: [what each does](#replacing-a-generated-secret). The pepper's is only for starting over. Keep a raised version set: deleting it means 1, which replaces the secret again. |
 | `SECRETS_VERSION` | variable | Retired: leave it unset, or the deploy stops ([below](#replacing-a-generated-secret)). |
@@ -239,7 +263,7 @@ anything else), so an environment comes from the repository alone.
 
 | Name | Default | What |
 |---|---|---|
-| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere; at most 3,000 and 1,000 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. At most 3,000 and 1,000, what one partition can take: sends to mailboxes that don't exist all read and write the same few placeholder items, which must not be throttled before the table is. |
+| `TABLE_MAX_READ_UNITS`, `TABLE_MAX_WRITE_UNITS` | 400 and 200 in production, 200 and 100 elsewhere; at most 3,000 and 1,000 | Each table's cap on read and write request units a second ([cost guards](#cost-guards)). Elsewhere is lower: dev has no firewall and a small budget. At most 3,000 and 1,000, what one partition can take: sends to mailboxes that don't exist all read and write the same few placeholder items, which must not be throttled before the table is. Where set, set the bootstrap's `table_max_read_units` and `table_max_write_units` the same, for its capacity alarms. |
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |
@@ -349,6 +373,13 @@ plan would show are closed. What IAM can't close is listed below, and in
   [delete the parameter](#replacing-a-generated-secret) to drop its history.
 - **The WebSocket API**: it manages it, and IAM can't limit which routes,
   integrations or other APIs it adds. Nothing checks these yet.
+- **The edge**: it manages CloudFront distributions, origin access controls
+  and origin request policies (their IDs are random, so IAM can't tell the
+  stack's own from others in the account; creating an origin request
+  policy can't be limited at all), and, in us-east-1, the firewall's web
+  ACLs and IP sets named with the prefix. A web ACL's rules may use only
+  those IP sets. It can read and change the addresses in them, as it can
+  change the rules.
 
 The bootstrap and every deploy check the denies and the calls the deploy
 needs with IAM's policy simulator (`scripts/check-function-roles.sh
@@ -610,8 +641,9 @@ environments' half that (fewer large messages: they cost more send tokens,
 and storing an envelope takes a write unit per KB on the messages table).
 Watch each table's `ConsumedReadCapacityUnits` and
 `ConsumedWriteCapacityUnits` (namespace AWS/DynamoDB, dimension TableName,
-`<prefix>-<table>`; the sum over a minute divided by 60 is the rate). Raise
-the caps once real use regularly passes half of them; unless
+`<prefix>-<table>`; the sum over a minute divided by 60 is the rate; the
+`<table>-table-capacity` alarms fire past 70% of a cap). Raise the caps
+once real use regularly passes half of them; unless
 `FIREWALL_LOOKUPS_TOTAL_LIMIT` is set, the firewall's limit on lookups
 follows ([the firewall](#the-firewall)).
 
@@ -800,6 +832,67 @@ about $2 a month per environment, at most about $6.50.
    is off is answered `clock_skew` instead. With an `api-invocations` alarm
    too, it's a flood: see [the firewall](#the-firewall).
 
+## Health alarms
+
+The alarms on the other functions, the WebSocket API, the tables' capacity
+and the edge ([above](#setting-up-an-environment); `infra/init/alerts.tf`).
+Each costs $0.10 a month per metric it reads: about $1.60 a month for
+these in production, $1.50 elsewhere. The functions' logs, in Logs Insights
+on `/aws/lambda/<prefix>-<function>`, keep warnings and errors only, with
+allow-listed fields.
+
+**When one fires:**
+
+- `bot-errors`, `notify-errors`, `ws-errors`: read the function's log
+  around then. Many `notify` failures with nothing else wrong mean Telegram
+  is refusing the bot: a revoked or changed token (set `BOT_TOKEN` and raise
+  `BOT_TOKEN_VERSION`), or Telegram is down. Dropped events with
+  `lambda-throttles` mean the function had no room to run for a minute:
+  load past its share (`RESERVE_CONCURRENCY`, the account's Lambda quota) or
+  a flood of sends. Timeouts with a `<table>-table-throttles` alarm are a
+  table at its cap. A single failure that doesn't come back can wait.
+- `ws-client-errors`: the WebSocket API's throttle (`WS_THROTTLE_RATE_LIMIT`,
+  `WS_THROTTLE_BURST_LIMIT`), which everyone shares, is used up. Apps that
+  can't connect poll instead, so messages still arrive, later. With
+  `ConnectCount` (namespace AWS/ApiGateway) far above what the `api`
+  function's use suggests, or with `ws-integration-errors`, it's a flood of
+  connects: nothing at the edge limits the WebSocket API, so raising the
+  throttle only lets more of a flood through. With more of everything, it's
+  real use: raise the throttle.
+- `ws-integration-errors`: `ws` refused connects or failed: sessions that
+  don't check out (forged, or ended: expected for a while after a deploy
+  that replaced the session key), more connects than one account may make,
+  or `ws` failing (then `ws-errors` or a table alarm fires too). Otherwise
+  someone is connecting with junk, or one account over and over; each
+  costs a `ws` run, within the throttle.
+- `<table>-table-capacity`: look at the table's consumed units
+  ([cost guards](#cost-guards)) next to the `api` function's invocations and
+  [request counts](#request-counts). Real growth: raise
+  `TABLE_MAX_READ_UNITS` or `TABLE_MAX_WRITE_UNITS`, and the bootstrap's
+  `table_max_read_units` or `table_max_write_units` to match, before the
+  cap turns people away. A flood: [the firewall](#the-firewall) and the
+  count alarms say where it comes in; the cap still bounds the bill.
+- `media-stored`: compare with the uploads of the last days (`PutRequests`
+  in the bucket's request metrics, the `MediaTokenRequests` count). Real use
+  deletes most attachments once fetched, so a steady climb without
+  downloads is uploads parked on purpose. Pausing uploads
+  ([emergency switches](#emergency-switches)) stops the growth; what is
+  there expires after 30 days.
+- `edge-5xx`: see which of these it comes with. `api-errors`: the function
+  failing (its log). A `<table>-table-throttles` alarm: `503 unavailable`
+  while a table is at its cap. Paused attachments: `503 uploads_paused` or
+  `downloads_paused`, expected while paused. None of these: CloudFront can't
+  reach the function URL, or is refused by it. CloudFront's metrics are in
+  us-east-1 (namespace AWS/CloudFront, dimensions DistributionId and Region
+  `Global`).
+- `firewall-blocks`: a flood is being held off, or busy addresses are.
+  The firewall's metrics (us-east-1, namespace AWS/WAFV2, dimensions WebACL
+  `<prefix>-api` and Rule `<prefix>-api-<rule>`) say which rule blocks.
+  CloudFront and the firewall still bill each blocked request, about $1.80
+  per million together, and while `lookups-total` blocks, everyone's
+  lookups by ID are refused. If it lasts, watch what it costs (CloudFront's
+  `Requests`).
+
 ## CloudFront in front of the API
 
 A CloudFront distribution stands in front of the `api` function URL
@@ -851,8 +944,8 @@ client that connects to an edge's IPv6 address by hand, and this hasn't been
 tested. If edges serve such requests, one host can still spread a flood
 over many IPv6 addresses past both per-address rules: `lookups-total` still
 bounds lookups by ID, and nothing at the edge bounds the rest. A rule that
-blocks IPv6 addresses outright would settle it, but the deploy role would
-need to manage IP sets for it (`infra/init`).
+blocks IPv6 addresses outright would settle it, with an IP set, which the
+deploy role may now manage (`infra/init`).
 
 ### The firewall
 

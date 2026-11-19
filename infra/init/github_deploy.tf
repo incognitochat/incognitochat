@@ -365,8 +365,9 @@ resource "aws_iam_role_policy_attachment" "deploy_functions" {
 # The edge in front of the API: CloudFront and its firewall. A policy of its
 # own, because one managed policy can't hold everything.
 data "aws_iam_policy_document" "deploy_edge" {
-  # CloudFront in front of the API. Distribution and access-control IDs are
-  # random, so this can't be narrowed by name.
+  # CloudFront in front of the API, and the policy saying which parts of a
+  # request it passes on to the function. Distribution, access-control and
+  # policy IDs are random, so this can't be narrowed by name.
   statement {
     sid = "CloudFront"
     actions = [
@@ -384,14 +385,20 @@ data "aws_iam_policy_document" "deploy_edge" {
       "cloudfront:GetOriginAccessControlConfig",
       "cloudfront:UpdateOriginAccessControl",
       "cloudfront:DeleteOriginAccessControl",
+      "cloudfront:GetOriginRequestPolicyConfig",
+      "cloudfront:UpdateOriginRequestPolicy",
+      "cloudfront:DeleteOriginRequestPolicy",
     ]
     resources = [
       "arn:${local.partition}:cloudfront::${local.account_id}:distribution/*",
       "arn:${local.partition}:cloudfront::${local.account_id}:origin-access-control/*",
+      "arn:${local.partition}:cloudfront::${local.account_id}:origin-request-policy/*",
     ]
   }
 
-  # AWS's managed cache and origin-request policies, looked up by name.
+  # AWS's managed cache and origin-request policies, looked up by name, and
+  # the stack's own origin-request policy, which IAM can't name before it
+  # exists.
   statement {
     sid = "CloudFrontPolicies"
     actions = [
@@ -399,13 +406,16 @@ data "aws_iam_policy_document" "deploy_edge" {
       "cloudfront:GetCachePolicy",
       "cloudfront:ListOriginRequestPolicies",
       "cloudfront:GetOriginRequestPolicy",
+      "cloudfront:CreateOriginRequestPolicy",
       "cloudfront:ListOriginAccessControls",
     ]
     resources = ["*"]
   }
 
-  # The firewall in front of CloudFront: web ACLs named with the prefix
-  # (they live in us-east-1, as CloudFront's do), and AWS's managed rules.
+  # The firewall in front of CloudFront: web ACLs and IP sets named with
+  # the prefix (they live in us-east-1, as CloudFront's do), and AWS's
+  # managed rules. A web ACL's rules may use only those IP sets: creating or
+  # changing it is checked against each one it uses.
   statement {
     sid = "Firewall"
     actions = [
@@ -419,8 +429,29 @@ data "aws_iam_policy_document" "deploy_edge" {
     ]
     resources = [
       "arn:${local.partition}:wafv2:us-east-1:${local.account_id}:global/webacl/${local.prefix}-*/*",
+      "arn:${local.partition}:wafv2:us-east-1:${local.account_id}:global/ipset/${local.prefix}-*/*",
       "arn:${local.partition}:wafv2:us-east-1:${local.account_id}:global/managedruleset/*/*",
     ]
+  }
+
+  # IP sets the firewall's rules use, such as addresses an admin blocks
+  # during an incident.
+  statement {
+    sid = "FirewallIpSets"
+    actions = [
+      "wafv2:CreateIPSet",
+      "wafv2:GetIPSet",
+      "wafv2:UpdateIPSet",
+      "wafv2:DeleteIPSet",
+    ]
+    resources = ["arn:${local.partition}:wafv2:us-east-1:${local.account_id}:global/ipset/${local.prefix}-*/*"]
+  }
+
+  # Doesn't support resource-level permissions: names and IDs only.
+  statement {
+    sid       = "FirewallIpSetsList"
+    actions   = ["wafv2:ListIPSets"]
+    resources = ["*"]
   }
 }
 
