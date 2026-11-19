@@ -3,7 +3,9 @@
 // Notices are generic: "New message" in the user's language with a button
 // that opens the app. No labels, counts or names. At most one per account
 // every few minutes, and the previous one is deleted once a new one went
-// out. A notice that couldn't be sent leaves the previous one in place.
+// out, if it is under 48 hours old (Telegram lets bots delete their
+// messages no later; an older one stays). A notice that couldn't be sent
+// leaves the previous one in place.
 // Refused outright, it uses up no quiet period, so the next message can
 // notify; refused by Telegram's flood control, the account waits as long
 // as Telegram asks (at least a minute) and the function instance sends

@@ -1,5 +1,6 @@
-// The vault seals keys that must be copyable to a new device, under a
-// non-extractable AES-GCM key kept in the app's storage on this device.
+// The vault seals extractable keys (made so to be copied to another device,
+// which the app doesn't do: one device per account) under a non-extractable
+// AES-GCM key kept in the app's storage on this device.
 //
 // Honest limits: any script running on the app's origin can ask the vault key
 // to unseal. The non-extractable flag only stops code from reading a key out;

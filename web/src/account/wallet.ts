@@ -48,9 +48,13 @@ export const TOKEN_BATCH = 20;
  * done before a send finds the wallet short.
  */
 export const LOW_WATER = 14;
-/** Batch size for media tokens: more than the largest upload costs (26). */
+/**
+ * Batch size for media tokens: what a 29 MiB file costs. The largest upload
+ * (a 50 MiB file) costs 51; an upload short of tokens fetches what it lacks
+ * when it is sent.
+ */
 export const MEDIA_BATCH = 30;
-/** Refill media tokens when fewer than the largest upload costs are left. */
+/** Refill media tokens when fewer than this are left: what a 25 MiB file costs. */
 export const MEDIA_LOW_WATER = 26;
 
 export interface StoredToken {

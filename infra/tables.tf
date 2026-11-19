@@ -1,7 +1,8 @@
 # Three tables, split because point-in-time recovery, TTL and IAM are set per
 # table. All use pk/sk string keys and expire items through the "e" attribute
-# (Unix seconds, rounded to the hour where it could reveal timing). TTL deletes
-# can lag by days, so reads also filter expired items.
+# (Unix seconds, rounded to the hour in directory and messages, and to the
+# minute in ephemeral). TTL deletes can lag by days, so reads also filter
+# expired items.
 #
 # Point-in-time recovery stays off everywhere: it would keep deleted data
 # restorable for up to 35 days. Encryption at rest uses the AWS-owned key: the
@@ -11,7 +12,8 @@ locals {
     # Accounts, devices, device lists, links and their bundles, the mailbox
     # registry, invitations.
     directory = {}
-    # Undelivered ciphertext, one item per message per device. No sender, no account.
+    # Undelivered ciphertext, one item per message per device, keyed by the
+    # recipient's account and device. No sender.
     messages = {}
     # Socket connections, rate counters, login nonces, spent tokens.
     ephemeral = {}

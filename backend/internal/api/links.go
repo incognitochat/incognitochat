@@ -87,8 +87,8 @@ func (s *Server) account(_ context.Context, _ httpapi.Request, c caller) httpapi
 	})
 }
 
-// LinkChangesPerDay limits how often an account creates or replaces its link
-// per UTC day. Each new link is a new intro mailbox.
+// LinkChangesPerDay limits how often a person (Telegram user) creates or
+// replaces their link per UTC day. Each new link is a new intro mailbox.
 const LinkChangesPerDay = 5
 
 // createLink stores a link's bundle. The client chooses the link ID, so it

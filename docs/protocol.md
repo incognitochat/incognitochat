@@ -73,7 +73,9 @@ may still get a token, and one set up in about the last second may be
 refused: the app logs in once more a second later when that happens right
 after a setup, its own or another copy's. Each logged-in request reads the
 device and its account again, in one strongly consistent read, so a
-replaced or deleted account is refused at its first request.
+replaced or deleted account is refused at its first request. Opening a push
+socket is the exception: it checks the token alone
+([security.md](security.md#other-limits)).
 
 **Clocks.** A login or signed request whose timestamp is more than 60 seconds
 from the server's clock, and a new account's device list issued outside its
@@ -180,7 +182,8 @@ next step finds what one left.
 A device without an account may ask `POST /accounts/lookup {initData}` whether
 its Telegram user has one, to say "your account is on another device" instead
 of offering setup. Like notices, it accepts only a plain or registration
-launch, never one that names a link or an invitation, and stores nothing. An
+launch, never one that names a link or an invitation, and stores nothing
+but the Telegram user's daily count of lookups (at most 30 a day). An
 account being deleted (below) doesn't count: a lookup says there is none,
 and setting up again replaces it without `replace`, so without the warning
 about taking an account over; what is left of it goes with the new
@@ -293,8 +296,9 @@ The new link has a new ID and new encryption keys but the **same signing
 key**, so its fingerprint stays the same. Sender tags are made from that
 fingerprint, so the same people keep the same tags across replacements, which
 keeps blocks and labels. Conversations carry on, since after the first message
-they don't go through the link; a sender the owner hasn't answered yet keeps
-writing to the old intro mailbox until the owner replies.
+they don't go through the link. A sender the owner hasn't answered yet keeps
+writing to the old intro mailbox, which went with the old link, so what they
+send is dropped, without their being told, until the owner replies.
 
 **Owner proof.** Creating or replacing a link (`POST /links`) and rotating
 its keys (`PUT /links/{id}/keys`) carry `proof`, the link signing key's
@@ -836,12 +840,12 @@ each mailbox's owner, to deliver, but not who writes to it.
 
 - Each link has an intro mailbox, listed in its bundle (`mailbox`); first
   messages go there. Clients keep a small pool of further mailboxes
-  (`POST /mailboxes`, up to 10 a request, 100 a day and 4,000 in all per
-  account) and take one when a conversation needs it. A take that leaves
-  the pool low has it topped up at a random moment after, so creating one
-  happens right before a send only rarely: when more chats start in one
-  burst than the pool holds, or a top-up failed (offline, or the day's
-  mailboxes used up) or didn't run (the app closed first).
+  (`POST /mailboxes`, up to 10 a request, 100 a day per Telegram user and
+  4,000 in all per account) and take one when a conversation needs it. A
+  take that leaves the pool low has it topped up at a random moment after,
+  so creating one happens right before a send only rarely: when more chats
+  start in one burst than the pool holds, or a top-up failed (offline, or
+  the day's mailboxes used up) or didn't run (the app closed first).
 - `POST /send {mailbox, envelope, token | tokens, quiet?}` needs no login,
   only send tokens: as many as the envelope costs, one per started 2.5 KiB
   (Send tokens, below), so one for all but long texts. The server checks
@@ -1086,9 +1090,10 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   "incognitochat/v2/media")`, padded to the next power of two from 16 KiB up
   to 1 MiB, then to the next whole MiB.
 - The recipient gets a download URL with `GET /media/{id}` (no login; the ID
-  is the permission; at most 5 a day per file), fetches and decrypts the file and
-  keeps it on the device. The URL starts a download within a minute, and S3
-  answers it with `Content-Encoding: identity` and type
+  is the permission; at most 5 a day per file, counted when the URL is
+  given, so a download that then fails uses one up), fetches and decrypts
+  the file and keeps it on the device. The URL starts a download within a
+  minute, and S3 answers it with `Content-Encoding: identity` and type
   `application/octet-stream` whatever the upload claimed, so no browser
   unpacks a compressed upload, and with `Cache-Control: no-store`, so no
   browser keeps a copy of the ciphertext in its cache (all three are in its
@@ -1157,8 +1162,9 @@ stickers from it.
 ## Notices
 
 The bot can tell someone that a message is waiting: a generic "New message"
-with a button that opens the app, never who wrote or what. Only the `notify`
-function holds the bot token.
+with a button that opens the app, never who wrote or what. `notify` holds
+the bot token to send notices, and `bot` holds it too, used only when the
+deploy sets the bot up (its webhook, menu button and command).
 
 - The app turns notices on with `POST /notices {initData}`, sending its
   Telegram launch data. The server accepts only a plain launch or a
@@ -1172,7 +1178,8 @@ function holds the bot token.
   Push), `ws` asks `notify` to send the owner a notice, without waiting.
   `notify` sends at most one every 3 minutes per account (its quiet period is
   stored under a keyed hash of the account, with a key derived from the chat
-  key), and deletes the previous one, so the chat holds one notice at most.
+  key), and deletes the previous one, so the chat holds one notice at most,
+  besides older ones Telegram no longer let it delete (below).
   If Telegram refuses (the bot is blocked), notices turn off.
 - In order: `notify` reads the account's notice settings, then starts its
   quiet period for 30 seconds (rounded up to the minute), longer than it
@@ -1337,7 +1344,7 @@ The app keeps at least 14 send tokens, twice what the longest message
 costs. Once fewer are left after a send, it fetches a batch at a random
 moment 10 to 90 seconds later, not with the send, since the issuer sees
 which account fetches when. Media tokens likewise: once an upload leaves
-fewer than 26 (what the largest upload costs), a batch of 30 comes 10 to
+fewer than 26 (what a 25 MiB file costs), a batch of 30 comes 10 to
 90 seconds later. A send or upload that finds the wallet short fetches
 right then, as a last resort. A send or upload taking tokens never waits
 for a batch being fetched, so it doesn't go out just after that request

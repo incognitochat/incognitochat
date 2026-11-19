@@ -9,9 +9,9 @@
 //     envelopes it took in and which messages it deleted without keeping
 //     their IDs. Never sent.
 //
-// Kept as an HMAC key: sealed in the vault (copied to new devices later), used
-// through a non-extractable working copy. Both are in the app's storage, so a
-// copy of it holds the secret (crypto/vault.ts).
+// Kept as an HMAC key: sealed in the vault, used through a non-extractable
+// working copy. Both are in the app's storage, so a copy of it holds the
+// secret (crypto/vault.ts).
 
 import { getKey, getSealed, putKey, putSealed, type Database } from '../storage/db';
 import { message } from '../crypto/signing';

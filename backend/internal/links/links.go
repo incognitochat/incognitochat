@@ -34,8 +34,8 @@ const (
 	// MaxActive is how many links one account can have at a time: one, which
 	// can be replaced (a new address, the same identity).
 	MaxActive = 1
-	// MaxKeys is how many encryption keys a bundle can list (v2.0 uses one,
-	// two while rotating).
+	// MaxKeys is how many encryption keys a bundle can list (the app sends
+	// one, also when rotating).
 	MaxKeys = 4
 	// MaxKeyValidity is the longest an encryption key may be offered for.
 	MaxKeyValidity = 8 * 7 * 24 * time.Hour

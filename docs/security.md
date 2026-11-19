@@ -44,7 +44,7 @@ device.
 | Who | Can | Gets |
 |---|---|---|
 | A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when. |
-| The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
+| The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also: which Telegram user owns each account, and so each link and mailbox (the stored hash of a Telegram ID is one keyed hash, and with the key, every possible ID can be hashed in minutes), as the sealed chat IDs of accounts that set up notices also say; and which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
 | The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can set, at each login, the clock someone's app dates messages by, anywhere within a minute of the device's: a recipient working with it can read that in what the person sends, as a tag. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | A compromised deploy (a step of the CI job, or a deploy someone got approved) | Deploy code CI signs, change what Terraform manages, read the secrets (older values too), invoke `bot` and `notify` | Through code it deploys, what the functions can reach, until the next deploy replaces it. Can't read the tables, logs or attachments itself. Most ways to leave access behind are denied; some IAM can't deny, and the next deploy finds only some of those (see Other limits). |
 | The bot-token holder | Everything Telegram's bot APIs allow | Who uses the bot, when notices go out. No content. Can send look-alike notices that open a look-alike page, which has none of the user's keys. |
@@ -301,8 +301,11 @@ it. This is how close it gets.
   writes to whom), and which accounts had the app open in which minute.
   That is part of what watching live shows them anyway (What users still
   have to trust, 2.).
-- **Who invited whom** can be guessed from when an invitation code is used.
-  An invitation link only asks; it's used when the person taps Join.
+- **Who invited whom.** Using an invitation code is a request from the
+  person's session that names the code, and the code names whose it is, so
+  the server sees who invited whom. It doesn't store it: the person keeps
+  only their invitation level, one below the inviter's. An invitation link
+  only asks; it's used when the person taps Join.
 - **Activity and volume:** roughly how many mailboxes and messages an account
   has.
 - **A brand-new user's first message** follows their registration closely in
@@ -377,6 +380,18 @@ it. This is how close it gets.
   (or whoever controls it) could have `notify` send any account a notice,
   at most one every 3 minutes, skipping `ws`'s check that no open app took
   the push. The notice is still the generic one, and says nothing more.
+- **Opening a socket checks only the session token.** `ws` checks the
+  token's signature and expiry and reads nothing about the account (its
+  role can't read the directory), unlike `api`, which reads the device and
+  its account for every request. So a token issued before the account was
+  replaced or deleted still opens sockets until it expires, 15 minutes at
+  most, though nothing is pushed to an ended account. And whoever holds a
+  live token can open sockets for the account that take its pushes ahead
+  of its app's own (pushes go to the newest sockets first), for up to about
+  40 minutes after the token expires: meanwhile the app learns of new
+  messages only when it polls, every 2 minutes, and no notice goes out. The
+  same token can already fetch the account's waiting envelopes, and confirm
+  them, which deletes them.
 - **What `notify` can reach.** It holds the key that opens chat IDs, so its
   role is narrowed ([infra/functions.tf](../infra/functions.tf)). In the
   directory it may only read and update items in account partitions
@@ -433,9 +448,14 @@ it. This is how close it gets.
   anyone out, and it reads or stores nothing about anyone. Messages keep
   working.
 - **Forward secrecy is weekly, not per message.** Encryption keys rotate about
-  weekly and old private keys are deleted after 35 days. A stolen device key
-  exposes at most about five weeks of messages a malicious server might have
-  kept.
+  weekly, and an old private key is deleted 35 days after it was replaced (a
+  conversation key, 35 days after the other side first wrote to the new
+  one). So keys taken from a device open about the last five weeks of
+  messages a malicious server might have kept, and more where a key wasn't
+  replaced: a conversation key rotates only with the next message or
+  receipt sent in that conversation, a link key only when the app opens,
+  and an old conversation key stays as long as the other side never writes
+  to the new one ([protocol.md](protocol.md#key-rotation)).
 - **What a compromised deploy can still do.** The CI deploy role may make
   only the calls the app stack's Terraform makes, and is denied much of the
   rest that matters: reading or writing table items, exporting or backing
