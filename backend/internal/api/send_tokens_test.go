@@ -187,8 +187,17 @@ func TestIntroCapGivesBackTokens(t *testing.T) {
 	if n := spent.count(t, paid); n != 0 {
 		t.Fatalf("%d tokens stayed spent", n)
 	}
-	// They pay for a send elsewhere.
-	if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": largest, "tokens": paid}); status != http.StatusOK {
+	// Given back once only: replayed at the capped link, they stay spent.
+	status, out = h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if n := spent.count(t, paid); n != envelope.MaxTokens {
+		t.Fatalf("replayed: %d of %d tokens stayed spent", n, envelope.MaxTokens)
+	}
+	// Tokens given back pay for a send elsewhere.
+	again := mintTokens(t, h.now, envelope.MaxTokens)
+	status, out = h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": again})
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": largest, "tokens": again}); status != http.StatusOK {
 		t.Fatalf("the same tokens elsewhere: %d %v", status, out)
 	}
 	// The next hour, the link takes first messages again.

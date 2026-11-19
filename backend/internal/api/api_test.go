@@ -763,6 +763,9 @@ func (l *memLimiter) CountedAt(key string, window time.Duration, _ time.Time) in
 type memSpent struct {
 	mu    sync.Mutex
 	spent map[string]bool
+	// givenBack is the tokens given back once: as ephemeral.Spent does,
+	// they aren't given back again.
+	givenBack map[string]bool
 	// calls counts Spend calls, refused ones too: each costs the table a
 	// write.
 	calls int
@@ -797,9 +800,17 @@ func (m *memSpent) SpendAll(ctx context.Context, tokens []ephemeral.TokenNonce) 
 	return len(tokens) > 0, nil
 }
 
+// Unspend gives a spent token back, once at most (ephemeral.Spent.Unspend).
 func (m *memSpent) Unspend(_ context.Context, nonce []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.spent[string(nonce)] || m.givenBack[string(nonce)] {
+		return nil
+	}
+	if m.givenBack == nil {
+		m.givenBack = map[string]bool{}
+	}
+	m.givenBack[string(nonce)] = true
 	delete(m.spent, string(nonce))
 	return nil
 }
