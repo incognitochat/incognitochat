@@ -150,9 +150,27 @@ jobs:
       - name: Test
         run: npm test
 
+      # Built with settings, as hosting/deploy.yml builds the site, so the
+      # settings checks and the security policy built from them are compared
+      # too: made-up addresses, and the first published issuer key that has
+      # a media key. Nothing built here is deployed or kept.
       - name: Build twice and compare
+        env:
+          VITE_API_URL: https://api.example.invalid/
+          VITE_BOT_USERNAME: example_bot
+          VITE_APP_NAME: example
+          VITE_WS_URL: wss://ws.example.invalid/live
+          VITE_MEDIA_ORIGIN: https://media.example.invalid
         run: |
+          VITE_ISSUER_KEY=$(jq -r '[to_entries[] | select(.value | type == "object" and has("media")) | .key][0] // empty' issuer-keys.json)
+          if [ -z "$VITE_ISSUER_KEY" ]; then
+            echo "::error::issuer-keys.json has no entry with a media key"
+            exit 1
+          fi
+          export VITE_ISSUER_KEY
           npm run build
+          grep -qF 'https://api.example.invalid' dist/index.html \
+            || { echo "::error::The build didn't take its settings (no API in the security policy)"; exit 1; }
           (cd dist && find . -type f | sort | xargs sha256sum) | tee ../first.txt
           rm -rf dist node_modules/.vite
           npm run build
@@ -161,13 +179,6 @@ jobs:
             echo "::error::The web build is not reproducible"
             exit 1
           fi
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: web-dist
-          path: web/dist
-          if-no-files-found: error
-          retention-days: 7
 
   terraform:
     name: Terraform – format & validate
@@ -234,10 +245,14 @@ jobs:
   # tags the release and publishes it, which deploys production (below). It
   # uses a GitHub App's token: pull requests opened with GITHUB_TOKEN get no
   # CI, and releases published with it start no workflows.
+  # Only after dev has deployed the same commit (deploy-dev runs on every
+  # push and dispatch on main, as this job does), so a release is never
+  # tagged from a commit dev refused; until a failed dev deploy is re-run,
+  # its commit's release waits.
   release:
     name: Release
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: [backend, web, terraform]
+    needs: [backend, web, terraform, deploy-dev]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release

@@ -21,7 +21,10 @@
 #        DEPLOY_TAGS=<pattern> ... deploy from tags matching it instead, e.g. 'v*.*.*'
 #                                  (production deploys published releases).
 #        REVIEWERS=<login>[,<login>] ... GitHub users who must approve each deploy
-#                                  (when unset, the environment keeps its current ones).
+#                                  (when unset, the environment keeps its current ones;
+#                                  set but empty, none).
+#        ALLOW_NO_REVIEWERS=1 ... lets REVIEWERS remove all of the environment's
+#                                  required reviewers (refused otherwise).
 #        MONTHLY_BUDGET=<dollars> ... the account's monthly cost budget
 #                                  (default: 50 for production, 15 otherwise).
 #        AUTO_APPROVE=1 ... skips Terraform's interactive approval.
@@ -120,19 +123,55 @@ AWS_REGION=$region "$root/scripts/check-function-roles.sh" deploy-role "$deploy_
 # --- GitHub -------------------------------------------------------------------
 echo "Configuring GitHub environment '${environment}'"
 
-# Required reviewers: as given, or the environment's current ones (the PUT
-# below replaces them).
-if [[ -n "${REVIEWERS:-}" ]]; then
-  reviewers=$(for login in ${REVIEWERS//,/ }; do gh api "users/${login}" --jq '{type: "User", id: .id}'; done | jq -sc .)
+# The PUT below replaces the environment's protection settings, so read them
+# first. Only a 404 (a new environment) means it has none: on any other
+# error, saving would drop production's required reviewers, so stop.
+gh_error=$(mktemp)
+if current=$(gh api "repos/${repo}/environments/${environment}" 2>"$gh_error"); then
+  rm -f "$gh_error"
+elif grep -q 'HTTP 404' "$gh_error"; then
+  rm -f "$gh_error"
+  current='{}'
+  echo "The environment doesn't exist yet: creating it"
 else
-  reviewers=$(gh api "repos/${repo}/environments/${environment}" \
-    --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[] | {type, id: .reviewer.id}]' \
-    2>/dev/null || echo '[]')
+  echo "Couldn't read the GitHub environment '${environment}', so nothing was changed there:" >&2
+  cat "$gh_error" >&2
+  rm -f "$gh_error"
+  exit 1
 fi
-jq -n --argjson reviewers "$reviewers" \
-  '{deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}, reviewers: $reviewers}' |
-  gh api --method PUT "repos/${repo}/environments/${environment}" --input - >/dev/null
+# shellcheck disable=SC2016 # jq's own variables
+rule='def rule: [.protection_rules[]? | select(.type == "required_reviewers")][0];'
+has_reviewers=$(jq "$rule"' rule != null' <<<"$current")
+
+# Required reviewers: as given (none if REVIEWERS is set but empty), or the
+# current ones.
+if [[ -n "${REVIEWERS+set}" ]]; then
+  reviewers=$(for login in ${REVIEWERS//,/ }; do
+    gh api "users/${login}" --jq '{type: "User", id: .id}' || exit 1
+  done | jq -sc .)
+else
+  reviewers=$(jq -c "$rule"' [rule | .reviewers[]? | {type, id: .reviewer.id}]' <<<"$current")
+fi
+if [[ $reviewers == "[]" && $has_reviewers == true && "${ALLOW_NO_REVIEWERS:-}" != 1 ]]; then
+  echo "The environment '${environment}' has required reviewers, and this would remove them." >&2
+  echo "Set ALLOW_NO_REVIEWERS=1 if that is what you want." >&2
+  exit 1
+fi
+
+# The other settings stay as they are (a new environment gets GitHub's
+# defaults): whether whoever started a deploy may approve it, whether admins
+# may skip the protection rules, and the wait before a deploy starts.
+# shellcheck disable=SC2016 # jq's own variables
+body=$(jq -c --argjson reviewers "$reviewers" "$rule"'
+  {deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}, reviewers: $reviewers}
+  + (if has("can_admins_bypass") then {can_admins_bypass} else {} end)
+  + (rule // {} | if has("prevent_self_review") then {prevent_self_review} else {} end)
+  + ([.protection_rules[]? | select(.type == "wait_timer") | {wait_timer}][0] // {})' <<<"$current")
+gh api --method PUT "repos/${repo}/environments/${environment}" --input - <<<"$body" >/dev/null
 echo "Required reviewers: $(jq length <<<"$reviewers")"
+if [[ $reviewers == "[]" && $policy_type == tag ]]; then
+  echo "Warning: deploys to '${environment}' need nobody's approval (set REVIEWERS)." >&2
+fi
 
 # Exactly one deployment policy: the branch, or the release tag pattern.
 found=0

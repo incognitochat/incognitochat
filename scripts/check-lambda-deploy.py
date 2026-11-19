@@ -4,9 +4,13 @@
 For every <name>.zip in the build directory, it fetches the code that the
 function <prefix>-<name> holds from Lambda itself, and checks that:
 
+  - the function runs that package as the app stack sets it (infra/functions.tf):
+    a .zip package, no layers, the provided.al2023 runtime on arm64, handler
+    bootstrap. Nothing else can run code in the function;
   - the function has a code signing config that enforces signatures;
   - the deployed package is that build plus AWS Signer's signature: the same
-    files with the same bytes and modes, and nothing else but META_INF/;
+    files with the same bytes and modes, and nothing else but META_INF/; and
+    no name appears twice in either;
   - Lambda's CodeSha256 is the hash of that package.
 
 It prints both hashes, so the public log ties the deployed code to the
@@ -30,6 +34,14 @@ import zipfile
 
 SIGNATURE = re.compile(r"META_INF/(aws_signer_signature_v[0-9.]+\.SF)?")
 
+# How every function runs its code (infra/functions.tf).
+RUNS_AS = {
+    "PackageType": "Zip",
+    "Runtime": "provided.al2023",
+    "Handler": "bootstrap",
+    "Architectures": ["arm64"],
+}
+
 
 def aws(*args):
     # AWS's error text can hold ARNs, so it isn't printed.
@@ -39,14 +51,22 @@ def aws(*args):
     return json.loads(run.stdout) if run.stdout.strip() else {}
 
 
-def entries(archive):
-    return {i.filename: (archive.read(i), i.external_attr >> 16) for i in archive.infolist()}
+def entries(package, what):
+    """Each file's bytes and mode, by name. A name may appear only once: of
+    two entries with the same name, which one runs depends on the unzipper."""
+    archive = zipfile.ZipFile(io.BytesIO(package))
+    found = {}
+    for info in archive.infolist():
+        if info.filename in found:
+            raise ValueError(f"{info.filename} appears twice in the {what} package")
+        found[info.filename] = (archive.read(info), info.external_attr >> 16)
+    return found
 
 
 def compare(built, deployed):
     """Returns why deployed isn't built plus a signature, or None."""
-    want = entries(zipfile.ZipFile(io.BytesIO(built)))
-    got = entries(zipfile.ZipFile(io.BytesIO(deployed)))
+    want = entries(built, "built")
+    got = entries(deployed, "deployed")
     extra = sorted(got.keys() - want.keys())
     if not any(name != "META_INF/" for name in extra):
         return "the deployed package has no signature"
@@ -58,9 +78,22 @@ def compare(built, deployed):
     return None
 
 
+def runs_as(configuration):
+    """Returns how the function doesn't run its code as RUNS_AS says, or None."""
+    if configuration.get("Layers"):
+        return f"the function has layers ({len(configuration['Layers'])}), which add code to it"
+    for key, want in RUNS_AS.items():
+        if configuration.get(key) != want:
+            return f"{key} is {configuration.get(key)!r}, not {want!r}"
+    return None
+
+
 def check(build, function):
     built = build.read_bytes()
     config = aws("lambda", "get-function", "--function-name", function)
+    problem = runs_as(config["Configuration"])
+    if problem:
+        return problem
 
     signing = aws("lambda", "get-function-code-signing-config", "--function-name", function)
     arn = signing.get("CodeSigningConfigArn")
@@ -94,7 +127,7 @@ def main():
     for build in builds:
         try:
             problem = check(build, f"{sys.argv[2]}-{build.stem}")
-        except (RuntimeError, OSError, KeyError, zipfile.BadZipFile) as err:
+        except (RuntimeError, OSError, KeyError, ValueError, zipfile.BadZipFile) as err:
             problem = str(err) or type(err).__name__
         if problem:
             print(f"::error::{build.stem}: {problem}")
