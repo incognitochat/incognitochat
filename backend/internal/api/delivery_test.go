@@ -195,6 +195,16 @@ func TestCheckMailboxes(t *testing.T) {
 		status, out := h.as(t, owner, http.MethodPost, "/mailboxes/check", map[string]any{"ids": bad}, false)
 		wantError(t, status, out, http.StatusBadRequest, "bad_request")
 	}
+	// As many as the app sends at once, and no more (CON-11).
+	many := make([]string, MailboxCheckBatch+1)
+	for i := range many {
+		many[i] = ids.New()
+	}
+	if status, out := h.as(t, owner, http.MethodPost, "/mailboxes/check", map[string]any{"ids": many[:MailboxCheckBatch]}, false); status != http.StatusOK || len(out["missing"].([]any)) != MailboxCheckBatch {
+		t.Fatalf("a full batch: %d", status)
+	}
+	status, out = h.as(t, owner, http.MethodPost, "/mailboxes/check", map[string]any{"ids": many}, false)
+	wantError(t, status, out, http.StatusBadRequest, "bad_request")
 	status, out = h.call(t, nil, "", http.MethodPost, "/mailboxes/check", map[string]any{"ids": []any{gone}}, false)
 	wantError(t, status, out, http.StatusUnauthorized, "session_expired")
 }

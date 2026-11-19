@@ -9,6 +9,8 @@
 //	account_exists                        the Telegram user has another account; repeat with replace to end it
 //	conflict                              a concurrent change won; try again
 //	rate_limited                          too many attempts; try later
+//	daily_limit                           429: a daily limit is used up; try after Retry-After, when the UTC day ends
+//	clock_skew                            401: a timestamp, or a new account's device list, is too far from the server's clock, which "now" gives; sign again
 //	login_refused                         the device can't log in
 //	account_replaced                      the account was replaced by a new registration
 //	session_expired                       the session token is missing or expired; log in again
@@ -25,12 +27,14 @@
 //	invalid_envelope                      the envelope's layout can't be valid
 //	mailbox_limit                         the account has the most mailboxes allowed
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
+//	tokens_needed                         402: a send brought more or fewer tokens than its envelope costs, which "needed" gives
 //	unknown_issuer_key                    a token batch names, or a token is for, an issuer key the server doesn't hold (an app built for a retired key)
 //	uploads_paused                        the operator has paused uploads of attachments for now (switches.go); try later
 //	downloads_paused                      the operator has paused downloads of attachments for now (switches.go); try later
 //	in_progress                           the account, or what is left of one it replaced, is being deleted in steps (or another step runs now); repeat the request
 //	account_deleting                      the account is being deleted: it takes no request but GET and DELETE /account
 //	not_found                             no such route, or no such link (revoked links included)
+//	method_not_allowed                    the route exists, but not with this method
 //	unavailable                           503: the server is overloaded for now (AWS throttled it, or it ran out of time); try again after Retry-After
 //	internal                              something failed on the server
 package api

@@ -21,7 +21,6 @@ import (
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/inbox"
 	"github.com/incognitochat/incognitochat/backend/internal/keyed"
-	"github.com/incognitochat/incognitochat/backend/internal/links"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 )
 
@@ -319,8 +318,15 @@ func accepted() httpapi.Response {
 	return httpapi.JSON(http.StatusOK, map[string]string{})
 }
 
-// MailboxChecksPerDay limits POST /mailboxes/check per account.
-const MailboxChecksPerDay = 20
+const (
+	// MailboxChecksPerDay limits POST /mailboxes/check per person
+	// (Telegram user).
+	MailboxChecksPerDay = 20
+	// MailboxCheckBatch is the most IDs one POST /mailboxes/check takes: as
+	// many as the app sends in one (web/src/messaging/engine.ts,
+	// CHECK_CHUNK), well within the body limit.
+	MailboxCheckBatch = 1000
+)
 
 // checkMailboxes tells the app which of the mailboxes it holds are no longer
 // its own, so it stops handing them out as reply addresses. That happens
@@ -335,7 +341,7 @@ func (s *Server) checkMailboxes(ctx context.Context, req httpapi.Request, c call
 	if err := httpapi.DecodeJSON(req, &in); err != nil {
 		return httpapi.DecodeError(err)
 	}
-	if len(in.IDs) == 0 || len(in.IDs) > MaxMailboxes+links.MaxActive {
+	if len(in.IDs) == 0 || len(in.IDs) > MailboxCheckBatch {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
 	for _, id := range in.IDs {
