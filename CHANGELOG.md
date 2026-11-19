@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.5.0](https://github.com/incognitochat/incognitochat/compare/v2.4.0...v2.5.0) (2026-11-19)
+
+
+### Features
+
+* **infra:** alarms for the functions, sockets, tables and edge ([#176](https://github.com/incognitochat/incognitochat/issues/176)) ([f0d4923](https://github.com/incognitochat/incognitochat/commit/f0d49232d2d6af6a5ef5c9377486bf46da7bbea0))
+* **infra:** forward only what the API needs, and an IP block list for incidents ([#179](https://github.com/incognitochat/incognitochat/issues/179)) ([3568a27](https://github.com/incognitochat/incognitochat/commit/3568a278fc40771b1f441e3c3ac35285f1428fdb))
+
+
+### Bug Fixes
+
+* **api:** backend hardening from the low audit findings ([#172](https://github.com/incognitochat/incognitochat/issues/172)) ([38512a2](https://github.com/incognitochat/incognitochat/commit/38512a2f4255197a4ab7173c7371e67a1ae0011d))
+* **crypto:** uniform blinding factor, and fixed test vectors on both sides ([#180](https://github.com/incognitochat/incognitochat/issues/180)) ([0db4ceb](https://github.com/incognitochat/incognitochat/commit/0db4cebe8ac755d64e7c0b806074c785c24af4b7))
+* **hosting:** build the site only for the commit CI names ([#166](https://github.com/incognitochat/incognitochat/issues/166)) ([e760dd8](https://github.com/incognitochat/incognitochat/commit/e760dd85af463b561f4a083462474c06b93fb4ac))
+* **hosting:** deploy the site only forward unless a rollback is asked for ([#169](https://github.com/incognitochat/incognitochat/issues/169)) ([2abae4b](https://github.com/incognitochat/incognitochat/commit/2abae4bbcda2b1e0114fc322c89852117d5668f8))
+* **media:** strip more video metadata and bound the MP4 parser ([#182](https://github.com/incognitochat/incognitochat/issues/182)) ([5d7fa02](https://github.com/incognitochat/incognitochat/commit/5d7fa0243292ab41fbc89c033b1a2efb9f6a1d94))
+* **web:** clean what peers send before showing or saving it ([#183](https://github.com/incognitochat/incognitochat/issues/183)) ([e5503c4](https://github.com/incognitochat/incognitochat/commit/e5503c4a5e455935b7dbe1587179cddb581bf74a))
+* **web:** lock fallback and timing-safe refills ([#170](https://github.com/incognitochat/incognitochat/issues/170)) ([64bc69d](https://github.com/incognitochat/incognitochat/commit/64bc69d29ffdc8e8831c83906cc5376114a05da7))
+* **web:** no orphaned records, and fewer uploads left after deletion ([#178](https://github.com/incognitochat/incognitochat/issues/178)) ([b01b491](https://github.com/incognitochat/incognitochat/commit/b01b491fa3c894c98d65cfa110696a90be65fa55))
+* **web:** sturdier error paths, upload watchdog and reload handling ([#185](https://github.com/incognitochat/incognitochat/issues/185)) ([66ccb26](https://github.com/incognitochat/incognitochat/commit/66ccb26414fece2fea1a76f19d8ab809fb067062))
+
 ## [2.4.0](https://github.com/incognitochat/incognitochat/compare/v2.3.0...v2.4.0) (2026-11-18)
 
 
