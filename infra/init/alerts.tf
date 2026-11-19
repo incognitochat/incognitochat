@@ -508,8 +508,8 @@ resource "aws_cloudwatch_metric_alarm" "token_requests" {
 # --- us-east-1: CloudFront and its firewall --------------------------------
 # Their metrics are there, whatever the app's region, and an alarm notifies
 # only a topic in its own region: a second topic, subscribed like the first.
-# The change alerts on IAM, CloudFront and the firewall, whose events are
-# recorded there too, publish to it as well (audit.tf).
+# The change alerts on what is recorded there too (IAM, CloudFront, the
+# firewall…) publish to it as well (audit.tf).
 
 resource "aws_sns_topic" "edge_alerts" {
   provider = aws.global
@@ -534,7 +534,7 @@ data "aws_iam_policy_document" "edge_alerts_topic" {
     }
   }
 
-  # The change alerts on IAM, CloudFront and the firewall (audit.tf).
+  # The change alerts recorded in us-east-1: IAM, CloudFront, the firewall… (audit.tf).
   statement {
     sid       = "ChangeAlertsPublish"
     actions   = ["sns:Publish"]
@@ -549,7 +549,7 @@ data "aws_iam_policy_document" "edge_alerts_topic" {
       test     = "ArnEquals"
       variable = "aws:SourceArn"
       values = [
-        aws_cloudwatch_event_rule.iam_changes.arn,
+        aws_cloudwatch_event_rule.global_changes.arn,
         aws_cloudwatch_event_rule.edge_changes.arn,
       ]
     }

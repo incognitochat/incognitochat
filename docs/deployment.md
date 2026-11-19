@@ -929,8 +929,10 @@ and a signed digest of each hour's files, so a changed or deleted file
 shows. Files are kept 365 days (`audit_retention_days`, set with
 `TF_VAR_audit_retention_days` at every rerun), then deleted; one deleted or
 replaced before then stays 30 days more as an older version. The bucket's
-policy lets only this trail write, and nobody delete a file: deleting
-records early takes changing that policy first, which sends an alert.
+policy lets only this trail write, and nobody delete a file. Deleting or
+replacing a file is a data event, which nothing alerts on, so it first
+takes changing that policy, which sends an alert, as does shortening the
+lifecycle.
 The deploy role can't call CloudTrail at all or touch the bucket
 ([above](#what-the-deploy-role-may-do)).
 
@@ -979,62 +981,87 @@ the region each is recorded in:
 
 | Rule | Topic | When | Whose calls |
 |---|---|---|---|
-| `changes` | `alerts` | A function's code, settings, URL, permissions or code signing; the signing profile; a bucket's settings (policy, public access, versioning, lifecycle, logging…); a parameter written, deleted or shared; a table exported, backed up, restored, streamed elsewhere or given a policy | Anyone's but the deploy role's |
-| `audit-changes` | `alerts` | CloudTrail (the trail stopped, changed or deleted, or another made), Access Analyzer, EventBridge rules, SNS topics and subscriptions | Anyone's |
-| `iam-changes` (us-east-1) | `edge-alerts` | IAM: roles, policies, users, groups, access keys, MFA, identity providers; and, in us-east-1, EventBridge rules and SNS topics | Anyone's |
+| `changes` | `alerts` | Functions (code, settings, URL, permissions, code signing), the signing profile, buckets' settings (policy, public access, versioning, lifecycle, logging…), parameters (written, deleted, shared), tables (exports, backups, restores, point-in-time recovery, streams, expiry, deletion protection, policies) | Anyone's but the deploy role's |
+| `audit-changes` | `alerts` | CloudTrail (the trail stopped, changed or deleted, or another made in this region), Access Analyzer, EventBridge rules, SNS topics and subscriptions; logging: log deliveries, subscriptions, exports and retention, and the WebSocket API (its stage's logging, routes and integrations) | Anyone's |
+| `global-changes` (us-east-1) | `edge-alerts` | IAM: roles, policies, users, groups, access keys, MFA, identity providers (all but the policy simulator and reports); and in us-east-1 too, another trail made, EventBridge rules, SNS topics, and logging (CloudFront's access logs are set up there, as log deliveries) | Anyone's |
 | `edge-changes` (us-east-1) | `edge-alerts` | CloudFront and the firewall | Anyone's but the deploy role's |
 | `access-findings` | `alerts` | IAM Access Analyzer found new access from outside the account (below) | |
+
+A trail made in a region other than the app's and us-east-1 sends no
+email; the trail records it.
+
+They work only while the trail logs: EventBridge gets CloudTrail's events
+only from a trail that is logging, and this is the account's only one.
+Stopping or deleting it probably sends one last alert, and then none at
+all, for anything, until the bootstrap turns it back on. So an alert on
+`StopLogging`, `DeleteTrail`, `UpdateTrail` or `PutEventSelectors` is the
+one to act on at once (below, "When one fires").
 
 Each email names the call and the service, who made it (the caller's ARN
 and kind), from which IP address, the region and the time, the error code
 if AWS refused it (someone tried), and the command that prints the whole
 record.
 
-Deploys change functions, buckets, parameters, CloudFront and the
+Deploys change functions, buckets, parameters, tables, CloudFront and the
 firewall, and sign code, as their job, so the rules on those leave out the
 deploy role's own calls: what a deploy changed is in its public log in
 GitHub Actions (Terraform's plan and apply), and the trail records each
-call. The deploy role changes IAM only when the app stack changes a
-function role's policy, which is rare, and can't call CloudTrail at all,
-so the rules on those include its calls.
+call. The rules on IAM, CloudTrail, logging and the WebSocket API include
+its calls: it changes IAM only when the app stack changes a function
+role's policy, the functions' log retention (`LOG_RETENTION_DAYS`) and the
+WebSocket API only when the app stack changes them, all rare, and can't
+call CloudTrail at all.
 
-**How many emails.** None for a normal deploy, one or two for a deploy
-that changes a function role's policy. One per change an admin makes:
-a bootstrap rerun that changes something sends one per call it makes,
-mostly IAM's (`edge-alerts`). The first apply of this sends a few, for the
-setup itself, and Access Analyzer's first findings.
+**How many emails.** None for a normal deploy; one or a few for a deploy
+that changes a function role's policy, the log retention or the WebSocket
+API. One per change an admin makes: a bootstrap rerun that changes
+something sends one per call it makes, mostly IAM's (`edge-alerts`). The
+first apply of this may send a few dozen, for the setup itself (the
+bucket's settings, the rules and their targets, the topics' policies, the
+policy versions, the trail, the analyzer), then the subscriptions, Access
+Analyzer's first findings, and one for each finding archived.
 
 **Access Analyzer.** An analyzer, `<prefix>-access`, in the app's region,
 reads the policies of the account's roles, buckets, functions, topics and
 so on, and makes a finding for each that lets another account, or anyone,
 in. Some are on purpose, and are found at first: the deploy role (GitHub's
-OIDC provider may assume it) and, while their URLs need no auth, `api` and
-`bot` (anyone may call them). Read each once (IAM, Access Analyzer) and
-archive those. An archived finding stays archived while that access stays
-as it is.
+OIDC provider may assume it); while their URLs need no auth, `api` and
+`bot` (anyone may call them); and any role admins sign in through from
+another account (an AWS Organization's `OrganizationAccountAccessRole`, or
+the roles IAM Identity Center makes). Read each once (IAM, Access
+Analyzer) and archive those; each archive is a change, and sends an
+`audit-changes` email. An archived finding stays archived while that
+access stays as it is. They're archived by hand, not by an archive rule:
+one wide enough to take `api`'s and `bot`'s public URLs would also take a
+permission that lets anyone invoke them directly.
 
 **When one fires:**
 
+- The trail stopped, deleted or changed (`StopLogging`, `DeleteTrail`,
+  `UpdateTrail`, `PutEventSelectors`): act at once. Rerun the bootstrap,
+  which puts the trail back as it was. Until then no change alert is sent,
+  for anything: read the event history (which records with the trail off
+  too) for everything done between the stop and the rerun, then go on
+  below for each call there you don't know.
 - Read who made the call and from where. If it was you, another admin, or
   a deploy you know of (its run in GitHub Actions at that time), there's
   nothing to do.
 - Otherwise take the caller's credentials as stolen. An admin's: end their
   sessions (in IAM, the role's "Revoke active sessions"; for a user,
   deactivate their access keys) and replace their password and keys. The
-  deploy role's
-  (an IAM change no deploy you know of made): a compromised CI job or
-  approval ([security.md](security.md#other-limits)); end its sessions the
-  same way, and stop deploys until you know how.
+  deploy role's (an IAM, logging or WebSocket API change no deploy you
+  know of made): a compromised CI job or approval
+  ([security.md](security.md#other-limits)); end its sessions the same
+  way, and stop deploys until you know how.
 - Then undo the change. Rerun the bootstrap for what it manages (the roles
   and their policies, code signing, the trail, the alerts), and run a
   deploy for what the app stack manages: its plan shows and undoes changes
-  to the functions, buckets, parameters, CloudFront and the firewall, and
-  its checks compare the running code with the attested build
+  to the functions, buckets, parameters, tables, log retention, the
+  WebSocket API, CloudFront and the firewall, and its checks compare the
+  running code with the attested build
   ([verifying.md](verifying.md#the-backend)). Delete what neither made: a
-  role, a user, an access key, another trail, a function permission.
-- The trail stopped, changed or deleted: rerun the bootstrap, which puts it
-  back as it was, and find out who in the event history, which records
-  with the trail off too.
+  role, a user, an access key, another trail, a function permission, a log
+  delivery, subscription or export.
 - An Access Analyzer finding that isn't on purpose: remove that access (the
   resource's policy), and find out in the trail who added it.
 
@@ -1046,7 +1073,9 @@ the trail, its bucket, the rules and the analyzer, a statement to each
 topic's policy and two to `-github-deploy-limits`, and destroys nothing;
 then every simulator check should pass. A deploy of the change against an
 older bootstrap stops at the deploy role's check, before applying anything.
-Then read Access Analyzer's first findings and archive those on purpose.
+A few minutes later, `aws cloudtrail get-trail-status --name <prefix>-audit`
+should show `IsLogging` true and no `LatestDeliveryError`. Then read Access
+Analyzer's first findings and archive those on purpose.
 
 ## CloudFront in front of the API
 

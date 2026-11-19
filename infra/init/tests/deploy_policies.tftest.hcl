@@ -200,6 +200,15 @@ run "audit_bucket_policy" {
     ])
     error_message = "The audit bucket's policy doesn't deny deleting records to everyone."
   }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.audit_bucket.json).Statement :
+      s.Effect == "Deny" && s.Principal == "*" && flatten([s.Action]) == ["s3:PutObject"]
+      && try(s.Condition, null) == { Bool = { "aws:PrincipalIsAWSService" = "false" } }
+    ])
+    error_message = "The audit bucket's policy lets someone other than an AWS service write records."
+  }
 }
 
 # The trail records every region's management events and nothing else (no
@@ -215,7 +224,7 @@ run "audit_trail_and_alerts" {
       aws_s3_bucket_lifecycle_configuration.audit,
       aws_cloudwatch_event_rule.changes,
       aws_cloudwatch_event_rule.audit_changes,
-      aws_cloudwatch_event_rule.iam_changes,
+      aws_cloudwatch_event_rule.global_changes,
       aws_cloudwatch_event_rule.edge_changes,
       aws_cloudwatch_event_rule.access_findings,
     ]
@@ -269,19 +278,71 @@ run "audit_trail_and_alerts" {
 
   assert {
     condition = alltrue([
-      for r in [aws_cloudwatch_event_rule.iam_changes, aws_cloudwatch_event_rule.audit_changes] :
-      !can(jsondecode(r.event_pattern).detail.userIdentity)
+      for r in [aws_cloudwatch_event_rule.global_changes, aws_cloudwatch_event_rule.audit_changes] :
+      !strcontains(r.event_pattern, "userIdentity")
     ])
-    error_message = "The IAM or audit change alerts leave out some callers."
+    error_message = "The change alerts on IAM, CloudTrail or logging leave out some callers."
   }
 
   assert {
     condition = (
-      contains(jsondecode(aws_cloudwatch_event_rule.iam_changes.event_pattern).detail.eventSource, "iam.amazonaws.com")
-      && contains(jsondecode(aws_cloudwatch_event_rule.audit_changes.event_pattern).detail.eventSource, "cloudtrail.amazonaws.com")
-      && !contains([for p in jsondecode(aws_cloudwatch_event_rule.iam_changes.event_pattern).detail.eventName : p.prefix], "Simulate")
+      toset(jsondecode(aws_cloudwatch_event_rule.changes.event_pattern).detail.eventSource) == toset([
+        "lambda.amazonaws.com", "signer.amazonaws.com", "s3.amazonaws.com", "ssm.amazonaws.com", "dynamodb.amazonaws.com",
+      ])
+      && toset(flatten([for b in jsondecode(aws_cloudwatch_event_rule.audit_changes.event_pattern).detail["$or"] : b.eventSource])) == toset([
+        "cloudtrail.amazonaws.com", "access-analyzer.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com",
+        "apigateway.amazonaws.com", "logs.amazonaws.com",
+      ])
+      && toset(flatten([for b in jsondecode(aws_cloudwatch_event_rule.global_changes.event_pattern).detail["$or"] : b.eventSource])) == toset([
+        "iam.amazonaws.com", "cloudtrail.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com", "logs.amazonaws.com",
+      ])
     )
-    error_message = "The change alerts miss IAM or CloudTrail changes, or match the deploy's policy simulations."
+    error_message = "A change alert misses a service: functions, signing, buckets, parameters and tables; CloudTrail, the alerts, logging and API Gateway; or, in us-east-1, IAM, CloudTrail, the alerts and logging."
+  }
+
+  # IAM: every change but the deploy's policy simulations and reports.
+  assert {
+    condition = [
+      for b in jsondecode(aws_cloudwatch_event_rule.global_changes.event_pattern).detail["$or"] : b.eventName
+      if b.eventSource == ["iam.amazonaws.com"]
+    ] == [[{ "anything-but" = { prefix = ["Simulate", "Generate"] } }]]
+    error_message = "The IAM change alert leaves out more than policy simulations and reports, or matches them."
+  }
+
+  # Logging, in both regions: deliveries (CloudFront's access logs, with
+  # clients' IP addresses), copies and retention; not the log streams the
+  # functions create at each start.
+  assert {
+    condition = alltrue([
+      for r in [aws_cloudwatch_event_rule.audit_changes, aws_cloudwatch_event_rule.global_changes] : alltrue([
+        for names in [for b in jsondecode(r.event_pattern).detail["$or"] : b.eventName if b.eventSource == ["logs.amazonaws.com"]] :
+        alltrue([for n in ["CreateDelivery", "PutDeliverySource", "PutSubscriptionFilter", "CreateExportTask", "PutRetentionPolicy"] : contains(names, n)])
+        && !contains(names, "CreateLogStream")
+      ])
+    ])
+    error_message = "The logging change alerts miss log deliveries, copies or retention, or match the functions' log streams."
+  }
+}
+
+# With the app in us-east-1, its rules there already have CloudTrail, the
+# alerts and logging: the other rule has IAM alone, without "$or".
+run "global_changes_in_us_east_1" {
+  command = plan
+
+  variables {
+    aws_region = "us-east-1"
+  }
+
+  plan_options {
+    target = [aws_cloudwatch_event_rule.global_changes]
+  }
+
+  assert {
+    condition = jsondecode(aws_cloudwatch_event_rule.global_changes.event_pattern).detail == {
+      eventSource = ["iam.amazonaws.com"]
+      eventName   = [{ "anything-but" = { prefix = ["Simulate", "Generate"] } }]
+    }
+    error_message = "With the app in us-east-1, the IAM change alert also matches what the app's rules there do."
   }
 }
 

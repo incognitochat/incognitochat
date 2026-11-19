@@ -15,7 +15,8 @@
 # It lives in this stack, which only an admin applies, and the deploy role
 # is denied every CloudTrail call and every call on the trail's bucket
 # (github_deploy.tf, deploy_limits), so a deploy can't stop the record,
-# narrow it or delete what it holds. An admin can; the alerts say when.
+# narrow it or delete what it holds. An admin can; the alerts say when,
+# except that once the trail stops, so do they (below).
 
 locals {
   audit_trail_name = "${local.prefix}-audit"
@@ -29,7 +30,8 @@ resource "aws_s3_bucket" "audit" {
   bucket_prefix = "${local.prefix}-audit-"
 }
 
-# A file deleted or overwritten stays, as an older version, for 30 days.
+# A file deleted or replaced (once the bucket policy allows it) stays, as
+# an older version, for 30 days.
 resource "aws_s3_bucket_versioning" "audit" {
   bucket = aws_s3_bucket.audit.id
 
@@ -93,9 +95,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
   depends_on = [aws_s3_bucket_versioning.audit]
 }
 
-# Only this trail may write, only under this account's AWSLogs/, and nobody
-# may delete a file: to delete one early, an admin must first change this
-# policy, which sends an alert (aws_cloudwatch_event_rule.changes).
+# Only this trail may write, only under this account's AWSLogs/; nobody
+# else may write, nor anyone delete a file. Deleting or replacing records is
+# a data event, which nothing alerts on, so an admin must first change this
+# policy, which does alert (aws_cloudwatch_event_rule.changes). Shortening
+# the lifecycle alerts too.
 data "aws_iam_policy_document" "audit_bucket" {
   statement {
     sid       = "TrailChecksAcl"
@@ -134,6 +138,25 @@ data "aws_iam_policy_document" "audit_bucket" {
       test     = "StringEquals"
       variable = "s3:x-amz-acl"
       values   = ["bucket-owner-full-control"]
+    }
+  }
+
+  # CloudTrail writes as an AWS service; anyone else is denied.
+  statement {
+    sid       = "DenyOtherWrites"
+    effect    = "Deny"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.audit.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:PrincipalIsAWSService"
+      values   = ["false"]
     }
   }
 
@@ -206,16 +229,24 @@ resource "aws_cloudtrail" "audit" {
 # EventBridge rules on the default bus, matching CloudTrail's management
 # events as AWS delivers them: free, and only calls that change something
 # (the rules see no reads). An event reaches the bus of the region it was
-# recorded in: the app's region for its functions, buckets, parameters and
-# the trail; us-east-1 for IAM, CloudFront and the firewall. Each rule
-# emails its region's alerts topic (alerts.tf).
+# recorded in: the app's region for its functions, buckets, parameters,
+# logs and the trail; us-east-1 for IAM, CloudFront and the firewall, and
+# CloudFront's log deliveries. Each rule emails its region's alerts topic
+# (alerts.tf).
 #
-# Deploys change functions, buckets, parameters, CloudFront and the
+# They work only while a trail logs: EventBridge gets CloudTrail's events
+# only from a logging trail, and this is the account's only one. Stopping
+# or deleting it probably sends one last alert (the call is recorded before
+# logging stops), and then none at all until the bootstrap turns it back
+# on (docs/security.md).
+#
+# Deploys change functions, buckets, parameters, tables, CloudFront and the
 # firewall, and sign code, as their job: the rules on those leave out the
 # deploy role's own calls, which CI's public logs show (the plan and the
-# apply) and the trail records. The deploy role never changes IAM (but for
-# the functions' roles' policies, and only when the app stack changes them)
-# or CloudTrail (denied), so the rules on those include its calls.
+# apply) and the trail records. The deploy role changes IAM only when the
+# app stack changes a function role's policy, the WebSocket API or the
+# functions' log retention only when the app stack changes them, and never
+# CloudTrail (denied), so the rules on those include its calls.
 
 locals {
   # How CloudTrail names the deploy role's sessions (github_deploy.tf).
@@ -254,47 +285,68 @@ locals {
     EOT
   }
 
-  # IAM calls that change something (not Get, List, Simulate, Generate,
-  # Tag). On EventBridge and SNS they cover the rules and topics the alerts
-  # go through, too.
-  change_prefixes = [
-    for p in [
-      "Add", "Attach", "Change", "Create", "Deactivate", "Delete", "Detach", "Disable",
-      "Enable", "Put", "Remove", "Reset", "Resync", "Set", "Subscribe", "Unsubscribe",
-      "Update", "Upload",
-    ] : { prefix = p }
-  ]
+  # The rules receive only calls that change something, so IAM's need no
+  # list: only its policy simulations (each deploy's checks) and reports
+  # are left out, and a write call AWS adds later is matched too.
+  iam_changes = {
+    eventSource = ["iam.amazonaws.com"]
+    eventName   = [{ "anything-but" = { prefix = ["Simulate", "Generate"] } }]
+  }
+
+  # The trail, Access Analyzer, and the rules and topics the alerts go
+  # through. Publishing isn't a change (nor a management event, but an
+  # alert must never match the alert it sends).
+  watch_changes = {
+    eventSource = ["cloudtrail.amazonaws.com", "access-analyzer.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com"]
+    eventName   = [{ "anything-but" = ["Publish", "PublishBatch", "PutEvents"] }]
+  }
+
+  # What CloudWatch Logs keeps, for how long, and copies of it elsewhere: a
+  # log delivery (CloudFront's access logs, with each client's IP address),
+  # a subscription, an export, retention. By name: the functions create a
+  # log stream at each start, which would match otherwise.
+  log_changes = {
+    eventSource = ["logs.amazonaws.com"]
+    eventName = [
+      "PutRetentionPolicy", "DeleteRetentionPolicy", "PutSubscriptionFilter", "CreateExportTask",
+      "PutDestination", "PutDestinationPolicy", "PutDeliverySource", "PutDeliveryDestination",
+      "PutDeliveryDestinationPolicy", "CreateDelivery", "UpdateDeliveryConfiguration",
+      "PutAccountPolicy", "PutDataProtectionPolicy", "DeleteDataProtectionPolicy",
+      "PutResourcePolicy", "PutIntegration", "PutTransformer",
+    ]
+  }
+
+  # us-east-1's rule by anyone: IAM, and, unless us-east-1 is the app's
+  # region, where audit_changes has them, the same as audit_changes but for
+  # Access Analyzer (only in the app's region) and API Gateway (unused
+  # there). A pattern's "$or" needs two branches or more. Through JSON, as
+  # the branches aren't of one type.
+  global_changes = [for b in concat(
+    [jsonencode(local.iam_changes)],
+    local.region == "us-east-1" ? [] : [
+      jsonencode(merge(local.watch_changes, { eventSource = ["cloudtrail.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com"] })),
+      jsonencode(local.log_changes),
+    ],
+  ) : jsondecode(b)]
 }
 
 # In the app's region, by anyone but the deploy role: the functions (code,
 # settings, URLs, permissions, code signing), the signing profile, the
 # buckets' settings (policies, public access, versioning, lifecycle…), the
-# parameters (the secrets), and the tables' copies and policies (which the
-# deploy role is denied anyway).
+# parameters (the secrets), and the tables (exports, backups, restores,
+# point-in-time recovery, streams, expiry, policies). The functions only
+# read parameters and use items and objects, which never reach the rules,
+# so whole services can be matched.
 resource "aws_cloudwatch_event_rule" "changes" {
   name        = "${local.prefix}-changes"
-  description = "Changes to functions, code signing, buckets, parameters and table copies, by anyone but the deploy role"
+  description = "Changes to functions, code signing, buckets, parameters and tables, by anyone but the deploy role"
 
   event_pattern = jsonencode({
     "detail-type" = ["AWS API Call via CloudTrail"]
     detail = {
-      "$or" = [
-        { eventSource = ["lambda.amazonaws.com", "signer.amazonaws.com", "s3.amazonaws.com"] },
-        {
-          eventSource = ["ssm.amazonaws.com"]
-          eventName = [
-            "PutParameter", "DeleteParameter", "DeleteParameters", "LabelParameterVersion",
-            "UnlabelParameterVersion", "PutResourcePolicy", "DeleteResourcePolicy",
-          ]
-        },
-        {
-          eventSource = ["dynamodb.amazonaws.com"]
-          eventName = [
-            "ExportTableToPointInTime", "ImportTable", "CreateBackup", "RestoreTableFromBackup",
-            "RestoreTableToPointInTime", "PutResourcePolicy", "DeleteResourcePolicy",
-            "EnableKinesisStreamingDestination", "UpdateKinesisStreamingDestination",
-          ]
-        },
+      eventSource = [
+        "lambda.amazonaws.com", "signer.amazonaws.com", "s3.amazonaws.com", "ssm.amazonaws.com",
+        "dynamodb.amazonaws.com",
       ]
       userIdentity = local.not_deploy_role
     }
@@ -312,19 +364,21 @@ resource "aws_cloudwatch_event_target" "changes" {
 }
 
 # In the app's region, by anyone, the deploy role included: the trail
-# (stopped, deleted, changed, or another one made), Access Analyzer, and the
-# rules and topic these alerts go through.
+# (stopped, deleted, changed, or another one made), Access Analyzer, the
+# rules and topic these alerts go through, what the logs keep and copies
+# of them, and the WebSocket API (an access log of its stage would record
+# each client's IP address).
 resource "aws_cloudwatch_event_rule" "audit_changes" {
   name        = "${local.prefix}-audit-changes"
-  description = "Changes to CloudTrail, Access Analyzer, EventBridge rules and SNS topics, by anyone"
+  description = "Changes to CloudTrail, Access Analyzer, EventBridge rules, SNS topics, logging and API Gateway, by anyone"
 
-  # Publishing isn't a change (and isn't a management event, but an alert
-  # must never match the alert it sends).
   event_pattern = jsonencode({
     "detail-type" = ["AWS API Call via CloudTrail"]
     detail = {
-      eventSource = ["cloudtrail.amazonaws.com", "access-analyzer.amazonaws.com", "events.amazonaws.com", "sns.amazonaws.com"]
-      eventName   = [{ "anything-but" = ["Publish", "PublishBatch", "PutEvents"] }]
+      "$or" = [
+        merge(local.watch_changes, { eventSource = concat(local.watch_changes.eventSource, ["apigateway.amazonaws.com"]) }),
+        local.log_changes,
+      ]
     }
   })
 }
@@ -340,27 +394,30 @@ resource "aws_cloudwatch_event_target" "audit_changes" {
 }
 
 # In us-east-1, by anyone, the deploy role included: IAM (roles, policies,
-# users, access keys…), and there too the rules and topic these alerts go
-# through, unless that is the app's region, where the rule above has them.
-resource "aws_cloudwatch_event_rule" "iam_changes" {
+# users, access keys…), and there too another trail made, the rules and
+# topic these alerts go through, and what the logs keep (CloudFront's log
+# deliveries are set up there), unless that is the app's region, where
+# audit_changes has them. A trail made in another region is in the trail
+# alone.
+resource "aws_cloudwatch_event_rule" "global_changes" {
   provider = aws.global
 
-  name        = "${local.prefix}-iam-changes"
-  description = "Changes to IAM, EventBridge rules and SNS topics, by anyone"
+  name        = "${local.prefix}-global-changes"
+  description = "Changes to IAM, and in us-east-1 to CloudTrail, EventBridge rules, SNS topics and logging, by anyone"
 
+  # Through JSON too: one branch and an "$or" of several aren't one type.
   event_pattern = jsonencode({
     "detail-type" = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventSource = concat(["iam.amazonaws.com"], local.region == "us-east-1" ? [] : ["events.amazonaws.com", "sns.amazonaws.com"])
-      eventName   = local.change_prefixes
-    }
+    detail = jsondecode(
+      length(local.global_changes) == 1 ? jsonencode(local.global_changes[0]) : jsonencode({ "$or" = local.global_changes })
+    )
   })
 }
 
-resource "aws_cloudwatch_event_target" "iam_changes" {
+resource "aws_cloudwatch_event_target" "global_changes" {
   provider = aws.global
 
-  rule = aws_cloudwatch_event_rule.iam_changes.name
+  rule = aws_cloudwatch_event_rule.global_changes.name
   arn  = aws_sns_topic.edge_alerts.arn
 
   input_transformer {
@@ -402,7 +459,9 @@ resource "aws_cloudwatch_event_target" "edge_changes" {
 # account's roles, buckets, functions, topics and so on in this region, and
 # makes a finding for each that lets another account, or anyone, in. Some
 # are on purpose (docs/deployment.md, Audit trail and change alerts): read
-# them once and archive them. A new active finding is emailed.
+# them once and archive them by hand. Not by an archive rule: one wide
+# enough to take api's and bot's public URLs would also take a permission
+# that lets anyone invoke them directly. A new active finding is emailed.
 resource "aws_accessanalyzer_analyzer" "account" {
   analyzer_name = "${local.prefix}-access"
   type          = "ACCOUNT"

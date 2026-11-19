@@ -568,16 +568,19 @@ it. This is how close it gets.
   keys themselves.
 - **The record of changes is in the account it watches.** The account
   records its management calls (an audit trail kept a year) and emails
-  changes to permissions, functions, secrets, buckets' settings and the
-  trail itself ([deployment.md](deployment.md#audit-trail-and-change-alerts)).
-  That holds against the deploy role, which can't touch the trail, not
-  against an account admin, or whoever has an admin's access: they can stop
-  the trail, change its bucket's policy and delete records, turn off the
-  rules, or unsubscribe the email address. Each of those sends an alert
-  while the alerts still work, but one done first can silence the rest
-  (the rule that watches the rules can't report its own removal), and
-  AWS's own 90-day event history is all that stays. Nothing outside the
-  account holds a copy.
+  changes to permissions, functions, secrets, logging, buckets' settings
+  and the trail itself
+  ([deployment.md](deployment.md#audit-trail-and-change-alerts)). That
+  holds against the deploy role, which can't touch the trail, not against
+  an account admin, or whoever has an admin's access. Stopping or deleting
+  the trail sends one alert and then silences all the others, since
+  EventBridge receives CloudTrail's events only while a trail logs: one
+  call turns every alert off until an admin reruns the bootstrap. An admin
+  can also change the bucket's policy and delete records, turn off the
+  rules, or unsubscribe the email address; each of those sends an alert
+  while the alerts still work, but the rule that watches the rules can't
+  report its own removal. AWS's own 90-day event history is all that
+  stays for certain, and nothing outside the account holds a copy.
 
 ## How the remaining gaps could close
 
