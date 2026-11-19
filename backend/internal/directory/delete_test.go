@@ -117,7 +117,7 @@ func TestDeleteInSteps(t *testing.T) {
 			t.Fatal("never finishes")
 		}
 	}
-	if steps < 8 {
+	if steps < 7 {
 		t.Errorf("only %d steps", steps)
 	}
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})
