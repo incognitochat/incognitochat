@@ -2,7 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { concat, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
 import { keyId, sealEnvelope, sendTokensFor } from './envelope';
-import { checkMessage, fileName, MAX_TEXT_BYTES, MessageError, newId, openMessage, passiveType, sealMessage, shownAs, type ConversationKey, type Draft } from './message';
+import {
+  checkMessage,
+  fileName,
+  isReactionEmoji,
+  MAX_TEXT_BYTES,
+  mediaName,
+  MessageError,
+  newId,
+  openMessage,
+  passiveType,
+  sealMessage,
+  shownAs,
+  type ConversationKey,
+  type Draft,
+} from './message';
 
 async function conversationKey(): Promise<ConversationKey & { id: Uint8Array }> {
   const pair = await generateCopyableAgreementKey();
@@ -138,6 +152,19 @@ describe('checkMessage', () => {
     expect(shownAs(checkMessage({ ...valid, text: undefined, media: round }).media!)).toBe('round');
   });
 
+  it('takes in any name and sticker emoji, to be cleaned where shown: refusing would lose the message', () => {
+    for (const n of ['photo_\u202Egpj.exe', '../../a\nb\\c', '\u202E', 'x'.repeat(255)]) {
+      expect(checkMessage({ ...valid, media: { ...media, t: 'file', n } }).media?.n).toBe(n);
+    }
+    for (const e of ['ok', '\u202Eab', 'a\u0301\u0301\u0301']) {
+      expect(checkMessage({ ...valid, text: undefined, sticker: { id: 'new_pack/cat', e } }).sticker?.e).toBe(e);
+    }
+  });
+
+  it('takes in `end`, reserved, with nothing on it', () => {
+    expect(checkMessage({ ...valid, kind: 'end', text: undefined }).kind).toBe('end');
+  });
+
   it('accepts a sticker on its own', () => {
     const sticker = { id: 'faces/winking_face', e: '😉' };
     expect(checkMessage({ ...valid, text: undefined, sticker }).sticker).toEqual(sticker);
@@ -163,6 +190,7 @@ describe('checkMessage', () => {
     }
     for (const bad of [
       reaction,
+      { ...reaction, reaction: { to: valid.id, e: '👍\u0301\u0301\u0301' } },
       { ...reaction, reaction: { to: valid.id, e: 'ok' } },
       { ...reaction, reaction: { to: valid.id, e: '👍👍' } },
       { ...reaction, reaction: { to: valid.id, e: 'a' } },
@@ -242,6 +270,28 @@ describe('checkMessage', () => {
     for (const m of ['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/pdf', 'text/plain']) expect(passiveType(m)).toBe('application/octet-stream');
   });
 
+  it('takes one emoji as a reaction, with only the marks emoji use', () => {
+    for (const e of [
+      '👍',
+      '👍🏿',
+      '\u2764\uFE0F',
+      '\u263A\uFE0E',
+      '1\uFE0F\u20E3',
+      '#\uFE0F\u20E3',
+      '🇮🇷',
+      // A flag with tags (Scotland).
+      '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}',
+      '👨\u200D👩\u200D👧',
+      '👩🏽\u200D\u2764\uFE0F\u200D💋\u200D👨🏻',
+      '\u{1F3F3}\uFE0F\u200D\u{1F308}',
+    ]) {
+      expect(isReactionEmoji(e)).toBe(true);
+    }
+    for (const e of ['', 'a', 'ok', '👍👍', '👍\u0301', '👍' + '\u0336'.repeat(10), '\u2764\u20DD', '1\u20E3\u0308', '\u202E👍']) {
+      expect(isReactionEmoji(e)).toBe(false);
+    }
+  });
+
   it('names attachments for saving', () => {
     expect(fileName({ t: 'file', n: 'report.pdf' })).toBe('report.pdf');
     expect(fileName({ t: 'photo', m: 'image/jpeg' })).toBe('photo.jpg');
@@ -251,6 +301,26 @@ describe('checkMessage', () => {
     expect(fileName({ t: 'voice', m: 'audio/mp4' })).toBe('voice.m4a');
     expect(fileName({ t: 'round', m: 'video/mp4' })).toBe('video.mp4');
     expect(fileName({ t: 'audio', n: 'song.mp3', m: 'audio/mpeg' })).toBe('song.mp3');
+  });
+
+  it("cleans a sender's file name for showing, sharing and saving", () => {
+    // The bidi override would show "photoexe.jpg"; the file is an .exe.
+    expect(fileName({ t: 'file', n: 'photo\u202Egpj.exe' })).toBe('photogpj.exe');
+    expect(fileName({ t: 'file', n: 'a\u2066b\u2069.pdf\u200F' })).toBe('ab.pdf');
+    expect(fileName({ t: 'file', n: '../../etc/passwd' })).toBe('.._.._etc_passwd');
+    expect(fileName({ t: 'file', n: 'C:\\Windows\\x.bat' })).toBe('C:_Windows_x.bat');
+    expect(fileName({ t: 'file', n: 'two\nlines.txt' })).toBe('two lines.txt');
+    expect(fileName({ t: 'file', n: '\uFEFFdoc\u0000.txt' })).toBe('doc.txt');
+    expect(fileName({ t: 'file', n: 'x'.repeat(255) })).toBe('x'.repeat(255));
+    // Nothing left: a name of its own, as with none.
+    expect(fileName({ t: 'photo', n: '\u202E\u202C', m: 'image/jpeg' })).toBe('photo.jpg');
+    expect(mediaName({ n: '\u202E\u202C' })).toBeUndefined();
+    expect(mediaName({})).toBeUndefined();
+    // Persian and emoji names are as they were.
+    for (const n of ['نامه\u200Cها.pdf', '👨\u200D👩\u200D👧 🇮🇷 1\uFE0F\u20E3.jpg']) {
+      expect(fileName({ t: 'file', n })).toBe(n);
+      expect(mediaName({ n })).toBe(n);
+    }
   });
 });
 

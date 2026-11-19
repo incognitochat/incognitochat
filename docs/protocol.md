@@ -466,7 +466,7 @@ JSON fields:
 | Field | Meaning |
 |---|---|
 | `v` | 1 |
-| `kind` | `message`, `seen`, `reaction`, `delete`, `edit`, `key_update` or `end` |
+| `kind` | `message`, `seen`, `reaction`, `delete`, `edit`, `key_update` or `end` (reserved: see below) |
 | `conv` | conversation ID (16 bytes) |
 | `id` | message ID (16 bytes) |
 | `at` | sent time, Unix milliseconds in whole seconds, by the server's clock as the sender knows it (see Times, below) |
@@ -481,7 +481,7 @@ JSON fields:
 | `earlier` | `true`: the recipient's messages written up to the oldest one named in `seen` (that second included) were read too (`seen` only; see Receipts) |
 | `media` | an attachment (`message` only, with or without text): `{t, id, k, d, s, n?, m?, w?, h?, l?, v?, p?}`, see Media |
 | `sticker` | a sticker (`message` only, with no text or attachment): `{id, e?}`, see Stickers |
-| `reaction` | a reaction (`reaction` only): `{to, e}`, where `to` is the ID of a message in the conversation, from either side, and `e` one emoji (one grapheme with an emoji code point, at most 32 UTF-16 units) or empty to take the reaction back |
+| `reaction` | a reaction (`reaction` only): `{to, e}`, where `to` is the ID of a message in the conversation, from either side, and `e` one emoji (one grapheme with an emoji code point, at most 32 UTF-16 units, with no combining marks but U+FE0E, U+FE0F and U+20E3) or empty to take the reaction back |
 | `delete` | IDs of the sender's own messages to delete on the recipient's device too (`delete` only, 1–100) |
 | `all` | `true`: the whole conversation instead, both sides' messages (`delete` only, instead of `delete`) |
 | `edit` | a new text for one of the sender's own messages (`edit` only): `{to, text}`, `text` at most 12,000 UTF-8 bytes, empty only for an attachment's caption |
@@ -491,6 +491,11 @@ text, an attachment or a sticker; `seen` needs `seen` and no text;
 `reaction` needs `reaction`, `edit` needs `edit`, and `delete` needs
 `delete` or `all` (one of them), and nothing else; `earlier` goes only
 with `seen`; `key_update` and `end` carry none of these.
+
+`end` is reserved and does nothing: no app sends it, and one that comes is
+taken in and changes nothing. Older versions ended the conversation on one
+(no more replies); a conversation they left that way is active again from
+the next thing the other side sends.
 
 **Times.** `at` is the server's clock as the sender's app knows it (Clocks,
 above), rounded down to the whole second: the device's own clock, to the
@@ -1070,6 +1075,16 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   (base64url, at most 3000 characters). The server never sees a key, name or type. A kind the
   recipient's version doesn't know (lowercase letters and `_`, at most 16)
   is accepted and shown as a file.
+- **The name** `n` is any 1–255 UTF-16 units, and taken in as it is: a
+  message refused for it would be acked and lost. Where it's shown, shared
+  or saved (the save page too), the recipient cleans it first: bidi
+  controls (U+200E/F, U+202A–202E, U+2066–2069, U+061C), the byte-order
+  mark and C0/C1 control characters go, line breaks and tabs become a
+  space, and `/` and `\` become `_`; ZWNJ and ZWJ stay. So
+  `photo<U+202E>gpj.exe` shows and saves as `photogpj.exe`, not as
+  `photoexe.jpg`. A name with nothing left is replaced by one made from
+  the kind and type, as for no name. The save page, whose link anyone can
+  make, also cuts a longer name to 255.
 - What each kind is: a photo is redrawn on the sender's device (at most
   1280 px, JPEG), which drops its metadata. A video is sent as recorded (no
   compression), with its location, device and time metadata removed: the
@@ -1162,7 +1177,8 @@ Microsoft's Fluent Emoji, MIT licensed). Sending one uploads nothing: the
 message names it, `sticker: {id, e?}`, where `id` is `pack/name` (lowercase
 letters, digits and `_`; pack at most 32 characters, name at most 40) and `e`
 the emoji it stands for (at most 16 UTF-16 units). A sticker the recipient's
-version doesn't have, from a newer pack, shows as that emoji. There are no
+version doesn't have, from a newer pack, shows as that emoji if it's one
+emoji (as a reaction's `e` must be), else as a generic sticker sign. There are no
 Telegram sticker packs: a Mini App can't reach them, and fetching them
 through the bot would tell the server who uses which.
 

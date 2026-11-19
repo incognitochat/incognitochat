@@ -2166,9 +2166,13 @@ export function createMessaging(deps: MessagingDeps) {
           conv.reactions = kept.slice(-MAX_PENDING_REACTIONS);
         }
       }
-    } else if (message.kind === 'end') {
-      changed = conv.status !== 'ended';
-      conv.status = 'ended';
+    }
+    // `end` is reserved and does nothing (docs/protocol.md): no app sends
+    // it. A conversation an older version ended on one is active again from
+    // the next thing they send.
+    if (message.kind !== 'end' && conv.status === 'ended') {
+      conv.status = 'active';
+      changed = true;
     }
     // A delete of the whole conversation takes, by their clock, their
     // messages sent by then, and ours up to the newest they had by then

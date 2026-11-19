@@ -17,6 +17,7 @@ import { fromBase64Url, toBase64Url, utf8 } from '../crypto/encoding';
 import { decryptFile, uploadSize } from '../crypto/media';
 import { checkObject, type Api } from '../net/api';
 import type { Transfer } from '../net/transfer';
+import { cleanFileName } from '../protocol/clean';
 import { fileName, MAX_FILE_BYTES, passiveType, type Media } from '../protocol/message';
 
 export const SAVE_PREFIX = '#save=';
@@ -30,7 +31,11 @@ export function saveUrl(base: string, media: Media): string {
   return `${base}${SAVE_PREFIX}${toBase64Url(utf8(JSON.stringify(ticket)))}`;
 }
 
-/** Reads a save ticket from the address's fragment, or null if there isn't a valid one. */
+/**
+ * Reads a save ticket from the address's fragment, or null if there isn't a
+ * valid one. Anyone can make one, so its name is cleaned as a message's is
+ * (cleanFileName, which also caps it at 255), and left out if nothing's left.
+ */
 export function readTicket(hash: string): SaveTicket | null {
   if (!hash.startsWith(SAVE_PREFIX)) return null;
   try {
@@ -46,8 +51,10 @@ export function readTicket(hash: string): SaveTicket | null {
       (t.s as number) <= MAX_FILE_BYTES &&
       (t.n === undefined || typeof t.n === 'string') &&
       (t.m === undefined || (typeof t.m === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(t.m)));
+    if (!ok) return null;
+    const n = t.n === undefined ? '' : cleanFileName(t.n as string);
     // Older links also carry a delete secret, which is left out.
-    return ok ? { id, k: t.k as string, s: t.s as number, ...(t.n !== undefined ? { n: t.n as string } : {}), ...(t.m !== undefined ? { m: t.m as string } : {}) } : null;
+    return { id, k: t.k as string, s: t.s as number, ...(n ? { n } : {}), ...(t.m !== undefined ? { m: t.m as string } : {}) };
   } catch {
     return null;
   }

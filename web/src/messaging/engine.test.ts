@@ -14,7 +14,7 @@ import { sendTokensFor } from '../protocol/envelope';
 import { checkBundle, ownerParts, type LinkRef } from '../protocol/link';
 import { challenge, epochOf, LABEL_MEDIA_TOKEN } from '../protocol/token';
 import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, returnTokens, takeTokens, TOKEN_BATCH } from '../account/wallet';
-import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
+import { editable, MAX_TEXT_BYTES, newId, sealMessage } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
@@ -43,7 +43,7 @@ import {
 } from './store';
 import { MAX_PENDING_EDIT_BYTES, MAX_PENDING_EDITS } from '../storage/db';
 import { TransferError, WrongSize, type Transfer } from '../net/transfer';
-import { KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
+import { conversationKey, KEY_RETENTION_MS, scheduleKeyDeletion, sealedMatches, unindexKeys, type KeyEntry } from './keys';
 import { pendingLocks, withLock } from '../sync/locks';
 
 // A modified app chooses its IDs: tests make it reuse some (nextIds).
@@ -1286,6 +1286,64 @@ describe('blocks', () => {
     await sender.messaging.block(conv);
     await owner.messaging.send(await across(sender.db, conv, owner.db), 'please reply');
     expect(await sender.messaging.sync()).toBe(0);
+  });
+});
+
+describe('the reserved `end` kind', () => {
+  /** A modified app: sends `end` in a conversation, to where it writes. */
+  async function sendEnd(backend: Awaited<ReturnType<typeof fakeBackend>>, who: Person, conv: string, to: string): Promise<void> {
+    const c = (await getConversation(who.db, conv))!;
+    const sealed = await sealMessage(
+      { kind: 'end', conv: c.wire, id: newId(), at: pace(), ...(c.myMailbox ? { reply: c.myMailbox } : {}) },
+      await conversationKey(who.db, c.myKey!),
+      fromBase64Url(c.peerKey!),
+    );
+    backend.inboxes.get(to)!.push({ id: rand(), mailbox: c.sendTo, envelope: toBase64Url(sealed) });
+  }
+
+  it('does nothing: the chat stays open for replies', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+
+    await sendEnd(backend, sender, conv, 'owner');
+    expect(await owner.messaging.sync()).toBe(0);
+    // Taken in (acked), and nothing changed.
+    expect(backend.inboxes.get('owner')).toEqual([]);
+    expect((await getConversation(owner.db, mine))!.status).toBe('active');
+    await owner.messaging.send(mine, 'still here');
+    await sender.messaging.sync();
+    expect((await listMessages(sender.db, conv)).map((m) => m.text)).toEqual(['hello', 'hi', 'still here']);
+  });
+
+  it('a chat an older version ended on one is active again from their next message', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    await sender.messaging.sync();
+    await putConversation(owner.db, { ...(await getConversation(owner.db, mine))!, status: 'ended' });
+
+    // Another `end` leaves it as it is.
+    await sendEnd(backend, sender, conv, 'owner');
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await getConversation(owner.db, mine))!.status).toBe('ended');
+
+    await sender.messaging.send(conv, 'are you there?');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect((await getConversation(owner.db, mine))!.status).toBe('active');
+    await owner.messaging.send(mine, 'yes');
+    expect(await sender.messaging.sync()).toBe(1);
   });
 });
 

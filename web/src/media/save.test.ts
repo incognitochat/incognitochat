@@ -35,6 +35,21 @@ describe('save tickets', () => {
     expect(readTicket(new URL(bad).hash)).toBeNull();
   });
 
+  it('clean the name anyone can put in one, and cap it at 255', () => {
+    const ticket = (n: unknown) => `#save=${toBase64Url(new TextEncoder().encode(JSON.stringify({ id: media.id, k: media.k, s: 5, n })))}`;
+    expect(readTicket(ticket('photo_\u202Egpj.exe'))?.n).toBe('photo_gpj.exe');
+    expect(readTicket(ticket('../a/b\nc.txt'))?.n).toBe('.._a_b c.txt');
+    expect(readTicket(ticket('x'.repeat(10_000) + '.exe'))?.n).toBe('x'.repeat(255));
+    expect(readTicket(ticket('😀'.repeat(200)))?.n).toBe('😀'.repeat(127));
+    // Nothing left: no name, so the page says "file".
+    expect(readTicket(ticket('\u202E\uFEFF'))).toEqual({ id: media.id, k: media.k, s: 5 });
+    expect(readTicket(ticket(42))).toBeNull();
+    // What the app makes is unchanged.
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, n: 'نامه\u200Cها 👨\u200D👩\u200D👧.pdf' })).hash)?.n).toBe('نامه\u200Cها 👨\u200D👩\u200D👧.pdf');
+    // And the app's link is clean already.
+    expect(readTicket(new URL(saveUrl('https://x/', { ...media, n: 'a\u202Eb/c' })).hash)?.n).toBe('ab_c');
+  });
+
   it('carries no delete secret, and still reads older links that did', () => {
     const url = saveUrl('https://x/', media);
     expect(new TextDecoder().decode(fromBase64Url(new URL(url).hash.slice(SAVE_PREFIX.length)))).not.toContain(media.d);
