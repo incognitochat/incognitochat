@@ -75,6 +75,7 @@ import {
   getMedia,
   getMessage,
   getPendingEdits,
+  getSweep,
   hasMessage,
   keepEarly,
   lastSentAt,
@@ -93,6 +94,7 @@ import {
   pendingUploadDeletes,
   putConversation,
   putMedia,
+  putSweep,
   queueUploadDeletes,
   saveConversation,
   sealPendingEdit,
@@ -106,6 +108,10 @@ import {
   setText,
   stillSending,
   strayConversations,
+  strayFiles,
+  SWEEP_GRACE_MS,
+  SWEEP_KEPT,
+  SWEEP_SCAN,
   takeSentAt,
   triedUploadDeletes,
   unread,
@@ -333,7 +339,11 @@ export function isPaused(err: unknown): boolean {
  * the server refused it, or what came before it (a 4xx answer: a cap,
  * invalid_token, tokens_needed, a bad envelope), or there was nothing to
  * pay or answer with (NoTokens, NoMailboxes). Not a lost answer, a timeout
- * or a failing server (5xx): the message may have arrived.
+ * or a failing server (5xx): the message may have arrived. The server
+ * answers every 4xx of POST /send before it stores the envelope. This also
+ * relies on deliver() never trying a send again after a lost answer: a
+ * refusal of that second try (invalid_token, its tokens spent by the first)
+ * would no longer say the message didn't go out.
  */
 function refusedOutright(err: unknown): boolean {
   return err instanceof NoTokens || err instanceof NoMailboxes || (err instanceof ApiError && err.status >= 400 && err.status < 500);
@@ -1598,9 +1608,11 @@ export function createMessaging(deps: MessagingDeps) {
    * for what arrived before. What the server can't confirm now is kept and
    * confirmed later; once MAX_PENDING wait, the walk stops, so nothing is
    * read again and again before it's confirmed. Items that can't be taken
-   * in yet (NotYet) stay unconfirmed, and the walk goes past them.
+   * in yet (NotYet) stay unconfirmed, and the walk goes past them. With
+   * `until` (Unix ms, now()'s clock), no page is fetched from then on: the
+   * next sync carries on.
    */
-  function sync(): Promise<number> {
+  function sync(options: { until?: number } = {}): Promise<number> {
     return withLock('messaging-sync', async () => {
       let received = 0;
       unresolved = new Map();
@@ -1616,6 +1628,7 @@ export function createMessaging(deps: MessagingDeps) {
         if (!w.round) w.origin = w.after;
         walk = w;
         for (let page = 0; page < MAX_INBOX_PAGES && pending.size < MAX_PENDING; page++) {
+          if (options.until !== undefined && now() >= options.until) break;
           const path: string = w.after ? `/inbox?after=${w.after}` : '/inbox';
           let listed: ReturnType<typeof checkInbox>;
           try {
@@ -1974,10 +1987,12 @@ export function createMessaging(deps: MessagingDeps) {
     const editsBefore = fresh ? [] : await getPendingEdits(db, conv.id);
     ({ c: conv, ids, edits } = await tidied(conv, t, before, editsBefore));
     ids.applied = remember(ids.applied, tag, message.at, MAX_APPLIED).days;
-    if (!conv.newest) {
+    if (!conv.newest && !conv.hidden) {
       // Kept from before the newest was (older versions set lastReceived
       // from any kind, in the order taken in): start from their newest
-      // message here.
+      // message here. Not in one out of the list: it has no messages but
+      // one a try that stopped halfway stored, this one, which must count
+      // as newer.
       const start = await newestTheirs(db, conv.id);
       if (start) conv = { ...conv, newest: { at: start.at, tag: await tagOf(start.id) } };
     }
@@ -2333,18 +2348,47 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Deletes what a change that stopped halfway left on this device with
    * nothing to show it (store.ts): messages whose conversation isn't here,
-   * with their files, and files whose message isn't. At most SWEEP_MOST of
-   * each per upkeep; the rest go at the next. A conversation's messages
-   * only under its lock, which taking a message in holds: one being started
-   * has its record by the time it's free. Needs no network.
+   * with their files, and files whose message isn't. Each only once a later
+   * upkeep, SWEEP_GRACE_MS or more after one first found it, finds it still
+   * stray; at most SWEEP_MOST of each per upkeep, the rest at the next.
+   * Conversations are looked through whole (one step each), files
+   * SWEEP_SCAN at a time, going on where the last upkeep stopped. A
+   * conversation's messages go only under its lock, which taking a message
+   * in holds. One copy of the app at a time. Needs no network.
    */
-  async function sweep(): Promise<void> {
-    let left = SWEEP_MOST;
-    for (const conv of await strayConversations(db)) {
-      if (left <= 0) break;
-      left -= await withLock(`send:${conv}`, () => dropStrayMessages(db, conv, left));
-    }
-    await dropStrayFiles(db, SWEEP_MOST);
+  function sweep(): Promise<void> {
+    return withLock('sweep', async () => {
+      const t = now();
+      const was = await getSweep(db);
+      // A time ahead of now was set by a clock set back since: from now.
+      const since = (seen: number | undefined) => (seen === undefined || seen > t ? t : seen);
+      const due = (seen: number) => t - seen >= SWEEP_GRACE_MS;
+
+      const first = new Map(was.convs.map((c) => [c.id, c.seen]));
+      const convs: { id: string; seen: number }[] = [];
+      let left = SWEEP_MOST;
+      for (const id of (await strayConversations(db)).slice(0, SWEEP_KEPT)) {
+        const c = { id, seen: since(first.get(id)) };
+        if (left > 0 && due(c.seen)) {
+          const most = left;
+          const removed = await withLock(`send:${id}`, () => dropStrayMessages(db, id, most));
+          left -= removed;
+          // All of its messages went, or its conversation is here now: no longer noted.
+          if (removed < most) continue;
+        }
+        convs.push(c);
+      }
+
+      const files = new Map(was.files.map((f) => [JSON.stringify(f.key), { key: f.key, seen: since(f.seen) }]));
+      const { strays, last } = await strayFiles(db, was.after, SWEEP_SCAN);
+      for (const key of strays) if (!files.has(JSON.stringify(key))) files.set(JSON.stringify(key), { key, seen: t });
+      // Those due are looked at again as they're deleted: any whose message
+      // came meanwhile stays, and isn't noted any more.
+      const ready = [...files.values()].filter((f) => due(f.seen)).slice(0, SWEEP_MOST);
+      await dropStrayFiles(db, ready.map((f) => f.key));
+      for (const f of ready) files.delete(JSON.stringify(f.key));
+      await putSweep(db, { convs, files: [...files.values()].slice(0, SWEEP_KEPT), ...(last ? { after: last } : {}) });
+    });
   }
 
   /**

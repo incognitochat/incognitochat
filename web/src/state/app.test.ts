@@ -120,6 +120,8 @@ function fakeServer(
     inboxGate: null as Promise<void> | null,
     // Run when the inbox is fetched: what arrives with it.
     onInbox: null as (() => Promise<void>) | null,
+    // Run when an upload is deleted, before it answers.
+    onMediaDelete: null as (() => Promise<void>) | null,
     // How GET /media/{id} answers: with this download URL, or failing so, or
     // (neither set) not_found, no such upload.
     mediaUrl: null as string | null,
@@ -179,6 +181,7 @@ function fakeServer(
       }
       // By the upload's own secret, without logging in.
       if (method === 'POST' && /^\/media\/[^/]+\/delete$/.test(path)) {
+        await state.onMediaDelete?.();
         take(outcomes.mediaDelete);
         return check({});
       }
@@ -1301,17 +1304,79 @@ describe('deleting the account', () => {
     expect(fetches()).toHaveLength(1);
   });
 
+  it('fetches nothing when finishing a deletion the server says is under way', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api, { issuer });
+    // Started by another copy of the app, or said by a server that lies.
+    server.state.deleting = true;
+    await owner.app.home();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'deleting' });
+    server.calls.length = 0;
+    // Finish deleting.
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(server.calls.filter((c) => c.startsWith('GET /inbox'))).toEqual([]);
+  });
+
   it('tries the uploads the server could not delete again, waiting longer each time, before deleting the account', async () => {
     const failing = new ApiError(500, 'internal');
     const server = fakeServer({ mediaDelete: [failing, new NetworkError('offline')] });
-    const owner = await registered(server.api, { issuer, stepPauseMs: 1 });
+    const owner = await registered(server.api, { issuer, stepPauseMs: 7 });
     await chatOnDevice(owner.db);
     await photo(owner.db);
-    owner.app.askDeleteAccount();
-    await owner.app.deleteAccount();
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      owner.app.askDeleteAccount();
+      await owner.app.deleteAccount();
+      // One step pause, then two.
+      expect(timeouts.mock.calls.map((c) => c[1]).filter((ms) => ms === 7 || ms === 14 || ms === 28)).toEqual([7, 14]);
+    } finally {
+      timeouts.mockRestore();
+    }
     const deletes = server.calls.filter((c) => c === 'POST /media/upload-p1/delete');
     expect(deletes).toHaveLength(3);
     expect(server.calls.indexOf('DELETE /account')).toBeGreaterThan(server.calls.lastIndexOf('POST /media/upload-p1/delete'));
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+  });
+
+  it('stops trying them again when another copy changes the account', async () => {
+    const failing = new ApiError(500, 'internal');
+    const server = fakeServer({ mediaDelete: Array.from({ length: 10 }, () => failing) });
+    const owner = await registered(server.api, { issuer, stepPauseMs: 1 });
+    await chatOnDevice(owner.db);
+    await photo(owner.db);
+    // Another copy drops the record meanwhile (it finished, say).
+    server.state.onMediaDelete = () => deleteMeta(owner.db, 'deleting');
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(server.calls).not.toContain('DELETE /account');
+    // Not tried again: it stopped, and looked again from the start (whose
+    // login and usual flush come after).
+    const first = server.calls.indexOf('POST /media/upload-p1/delete');
+    const login = server.calls.indexOf('POST /session', first);
+    expect(login).toBeGreaterThan(first);
+    expect(server.calls.slice(first + 1, login)).not.toContain('POST /media/upload-p1/delete');
+  });
+
+  it('stops trying them again once its time is up, and goes on with the deletion', async () => {
+    const failing = new ApiError(500, 'internal');
+    const server = fakeServer({ mediaDelete: Array.from({ length: 10 }, () => failing) });
+    const owner = await registered(server.api, { issuer, stepPauseMs: 1 });
+    await chatOnDevice(owner.db);
+    await photo(owner.db);
+    // The first try takes 11 seconds.
+    let ahead = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + ahead);
+    server.state.onMediaDelete = async () => void (ahead = 11_000);
+    try {
+      owner.app.askDeleteAccount();
+      await owner.app.deleteAccount();
+    } finally {
+      clock.mockRestore();
+    }
+    expect(server.calls.filter((c) => c === 'POST /media/upload-p1/delete')).toHaveLength(1);
+    expect(server.state.deleted).toBe(true);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 

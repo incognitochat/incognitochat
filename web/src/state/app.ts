@@ -102,10 +102,18 @@ const META_DELETING = 'deleting';
 const STEPS_PER_RUN = 400;
 const RUN_FOR_MS = 10 * 60_000;
 /**
- * Before a deletion's request, the uploads still to delete that the server
- * couldn't take (out of reach, or failing) are tried again this many times,
+ * Before a deletion's first step, for how long the app fetches what still
+ * waits for the device (a deletion just confirmed) and tries again the
+ * uploads the server couldn't delete: it starts nothing more of either
+ * after that (a request under way then can take up to its 15-second
+ * timeout), and goes on with the deletion.
+ */
+const PREPARE_MS = 10_000;
+/**
+ * How many times the uploads still to delete that the server couldn't take
+ * (out of reach, or failing) are tried again before a deletion's step,
  * after waiting so many step pauses (DELETE_STEP_PAUSE_MS) each: about 7
- * seconds in all, at most.
+ * seconds in all between tries, within PREPARE_MS.
  */
 const UPLOAD_DELETE_RETRIES = [1, 2, 4];
 /** The longest wait a step's Retry-After (503 unavailable, 429) is honoured for. */
@@ -1567,14 +1575,15 @@ export function createApp(deps: Deps) {
    * Deletes the account, or carries on deleting it, as the user confirmed
    * (deleteAccount, or a launch with the record of it): first the uploads of
    * the attachments this device received (best effort; any it can't delete,
-   * or never sees, expire within 31 days), then everything the server holds
+   * or never sees, expire within 30 days), then everything the server holds
    * for the account (DELETE /account, signed), then everything on this
    * device. A deletion just confirmed (first) fetches the messages still
-   * waiting for this device before that, so their uploads go too. The other
-   * side of each conversation isn't told: their messages go nowhere, like
-   * to any unknown mailbox. Nothing else is asked of the server once the
-   * deletion has started: it takes no other request from an account being
-   * deleted (uploads are deleted by their own secrets, without logging in).
+   * waiting for this device before that, so their uploads go too. Nothing
+   * more of this starts after PREPARE_MS. The other side of each
+   * conversation isn't told: their messages go nowhere, like to any unknown
+   * mailbox. Nothing else is asked of the server once the deletion has
+   * started: it takes no other request from an account being deleted
+   * (uploads are deleted by their own secrets, without logging in).
    *
    * Only for the account it started with: before each request and before
    * wiping anything, it checks that this device still holds that account
@@ -1602,6 +1611,7 @@ export function createApp(deps: Deps) {
     const still = async () => run === deletionRun && (await stillDeleting(target));
     const pause = deps.stepPauseMs ?? DELETE_STEP_PAUSE_MS;
     const until = Date.now() + RUN_FOR_MS;
+    const prepareUntil = Date.now() + PREPARE_MS;
     let steps = 0;
     let finished = false;
     try {
@@ -1610,28 +1620,33 @@ export function createApp(deps: Deps) {
       if (messaging) {
         // The messages still waiting for this device, so their attachments'
         // uploads are deleted below too: only before the first DELETE
-        // /account, which the server takes no other request after.
-        if (first) {
+        // /account, which the server takes no other request after, and only
+        // for the account this deletes (another copy may have finished and
+        // set up another meanwhile).
+        if (first && (await still())) {
           try {
-            await messaging.sync();
+            await messaging.sync({ until: prepareUntil });
           } catch {
-            // Best effort: theirs expire on their own within 31 days.
+            // Best effort: theirs expire on their own within 30 days.
           }
         }
         for (const c of await listConversations(deps.db)) {
           try {
             await messaging.discardUploads(await attachmentsOf(deps.db, await listRecords(deps.db, c.id)));
           } catch {
-            // They expire on their own within 31 days.
+            // They expire on their own within 30 days.
           }
         }
         // Done before the device is wiped, which takes the list with it.
         // Those the server couldn't take then are tried again a few times,
-        // waiting longer each time; any left expire within 31 days.
+        // waiting longer each time, while there's time (PREPARE_MS) and the
+        // device isn't offline; any left expire within 30 days.
         await messaging.flushUploadDeletes();
         for (const times of UPLOAD_DELETE_RETRIES) {
           if ((await pendingUploadDeletes(deps.db)).length === 0 || !(await still())) break;
-          await new Promise((resolve) => setTimeout(resolve, times * pause));
+          const wait = times * pause;
+          if (Date.now() + wait >= prepareUntil || offline()) break;
+          await new Promise((resolve) => setTimeout(resolve, wait));
           await messaging.flushUploadDeletes();
         }
       }

@@ -17,7 +17,7 @@ import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, ret
 import { editable, MAX_TEXT_BYTES, newId } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
-import { canResend, createMessaging, LINK_KEY_RETRY_MS, SyncFailed, type MessagingDeps } from './engine';
+import { canResend, createMessaging, LINK_KEY_RETRY_MS, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
 import {
   addMessage,
   clearMedia,
@@ -4199,6 +4199,45 @@ describe('a send refused after its upload', () => {
     await sender.messaging.flushUploadDeletes();
     expect(backend.uploads.size).toBe(0);
   });
+
+  it('deletes the upload when there were no tokens to send it with', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    // The wallet is empty, and the day's send tokens are used up.
+    await takeTokens(sender.db, backend.issuer.keyId, await countTokens(sender.db, backend.issuer.keyId));
+    failRequest(sender, 'POST', /^\/tokens$/, new ApiError(429, 'rate_limited'));
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    await expect(sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } })).rejects.toBeInstanceOf(NoTokens);
+    await sender.messaging.flushUploadDeletes();
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it("deletes the upload of a first reply that had no mailbox to give; keeps it when the server failed on the way", async () => {
+    for (const [failure, kept] of [
+      [new ApiError(429, 'rate_limited'), 0],
+      [new ApiError(500, 'internal'), 1],
+    ] as const) {
+      const backend = await fakeBackend();
+      const owner = await person(backend, 'owner');
+      const sender = await person(backend, 'sender');
+      const { ref, bundle } = await linkOf(backend, owner);
+      const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+      await owner.messaging.sync();
+      const local = await across(sender.db, conv, owner.db);
+      expect(await poolSize(owner.db)).toBe(0);
+      // The first reply takes a mailbox, and the pool has to be refilled.
+      failRequest(owner, 'POST', /^\/mailboxes$/, failure);
+      const photo = crypto.getRandomValues(new Uint8Array(2000));
+      const sending = owner.messaging.sendMedia(local, { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } });
+      if (kept) await expect(sending).rejects.toBe(failure);
+      else await expect(sending).rejects.toBeInstanceOf(NoMailboxes);
+      await owner.messaging.flushUploadDeletes();
+      expect(backend.uploads.size).toBe(kept);
+    }
+  });
 });
 
 describe('what a change that stops halfway leaves', () => {
@@ -4230,7 +4269,7 @@ describe('what a change that stops halfway leaves', () => {
     expect(await owner.db.getAllKeys('media')).toEqual([]);
   });
 
-  it('keeps no file of ours when its message could not be stored: both are written in one go', async () => {
+  it('stores no file of ours before its message: one whose message could not be stored leaves none', async () => {
     const { backend, sender, ref, bundle } = await chat();
     const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
     pause.before = async (c) => {
@@ -4262,7 +4301,8 @@ describe('what a change that stops halfway leaves', () => {
 
   it('shows a first message stored just before the app closed, when it comes again: never one without its conversation', async () => {
     const { owner, sender, ref, bundle } = await chat();
-    await sender.messaging.startConversation(ref, bundle, 'hello');
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const [first] = await listMessages(sender.db, conv);
     // Stored, then the app closes before its conversation is written.
     pause.after = async (_, text) => {
       if (text === 'hello') throw new Error('closed');
@@ -4275,23 +4315,70 @@ describe('what a change that stops halfway leaves', () => {
     expect(await owner.messaging.sync()).toBe(1);
     expect(await listConversations(owner.db)).toEqual([expect.objectContaining({ id: c!.id, hidden: false, unread: 1 })]);
     expect((await listMessages(owner.db, c!.id)).map((m) => m.text)).toEqual(['hello']);
+    // As newest as on the usual path: our first reply names it as `last`.
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ lastReceived: first!.id, newest: { at: first!.at }, lastMessage: { id: first!.id } });
     // And only once.
     expect(await owner.messaging.sync()).toBe(0);
     expect(await listMessages(owner.db, c!.id)).toHaveLength(1);
   });
 
-  it('upkeep deletes messages whose conversation is gone, and files whose message is, on this device only', async () => {
+  it('upkeep deletes messages whose conversation is gone, and files whose message is, once still so an hour later; on this device only', async () => {
     const { owner } = await chat();
     // Left by an older version, or a change that stopped halfway.
     const media = { t: 'photo', s: 1, w: 1, h: 1, id: 'U'.repeat(22), k: 'K'.repeat(43), d: 'D'.repeat(22) };
     await addMessage(owner.db, { id: 'm1', conv: 'gone', at: 1, out: false, status: 'received', file: 'local' }, { text: 'lost', media });
     await putMedia(owner.db, 'gone', 'm1', new Uint8Array([1]));
     await owner.db.put('media', new Uint8Array([2]), ['gone', 'm2']);
+    const left = async () => [await owner.db.getAllKeys('messages'), await owner.db.getAllKeys('media')];
+    const all = await left();
+    // Found and noted, keys only: nothing goes yet (a write under way, in
+    // another copy of the app say, may be about to finish it).
     await owner.messaging.maintain();
-    expect(await owner.db.getAllKeys('messages')).toEqual([]);
-    expect(await owner.db.getAllKeys('media')).toEqual([]);
+    expect(await left()).toEqual(all);
+    expect(await owner.db.get('meta', 'sweep')).toMatchObject({ convs: [{ id: 'gone' }], files: [{ key: ['gone', 'm2'] }] });
+    // Still so at an upkeep less than an hour later: still nothing.
+    const later = (ms: number) => owner.open({ now: () => Date.now() + ms });
+    await later(30 * 60_000).maintain();
+    expect(await left()).toEqual(all);
+    // An hour or more after it was found: it goes, and so do the notes.
+    await later(61 * 60_000).maintain();
+    expect(await left()).toEqual([[], []]);
+    expect(await owner.db.get('meta', 'sweep')).toBeUndefined();
     // Its upload stays: taken in again, the same message may be in a conversation that is here.
     expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+  });
+
+  it("upkeep never sweeps a conversation's messages while they're being taken in: only under its lock, looked at again", async () => {
+    const { owner } = await chat();
+    // A first message stored and its conversation not yet, as an older copy
+    // of the app takes it in (under the chat's lock); noted long enough ago.
+    await addMessage(owner.db, { id: 'm1', conv: 'new', at: 1, out: false, status: 'received' }, { text: 'hello' });
+    await putMeta(owner.db, 'sweep', { convs: [{ id: 'new', seen: Date.now() - 2 * 60 * 60_000 }], files: [] });
+    let release!: () => void;
+    const held = withLock('send:new', () => new Promise<void>((resolve) => (release = resolve)));
+    const upkeep = owner.messaging.maintain();
+    await waitingFor('send:new');
+    await putConversation(owner.db, {
+      id: 'new',
+      wire: 'W'.repeat(22),
+      role: 'owner',
+      link: { id: 'L'.repeat(11), fingerprint: 'F'.repeat(43) },
+      label: 'x',
+      peerKey: 'k',
+      myKey: null,
+      sendTo: 'S'.repeat(22),
+      myMailbox: null,
+      lastAt: 1,
+      unread: 1,
+      status: 'active',
+      lastReceived: null,
+    });
+    release();
+    await held;
+    await upkeep;
+    expect(await owner.db.getAllKeys('messages')).toEqual([['new', 'm1']]);
+    // Not stray any more: no longer noted.
+    expect(await owner.db.get('meta', 'sweep')).toBeUndefined();
   });
 });
 

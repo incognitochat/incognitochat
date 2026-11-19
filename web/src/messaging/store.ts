@@ -397,8 +397,10 @@ function placeAfter(same: MessageRecord[]): number {
 export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed' | 'order'>, body: MessageBody, file?: Uint8Array<ArrayBuffer>): Promise<void> {
   const sealed = await sealBody(db, record.id, body);
   const sealedFile = file && (await sealFile(db, record.id, file));
-  // Read and written in one transaction, so two stored at once don't take the same place.
-  const tx = db.transaction(['messages', 'media'], 'readwrite');
+  // Read and written in one transaction, so two stored at once don't take
+  // the same place. The media store only with a file: else reads of files
+  // (a chat's pictures) needn't wait for messages being stored.
+  const tx = db.transaction(sealedFile ? ['messages', 'media'] : ['messages'], 'readwrite');
   const messages = tx.objectStore('messages');
   const order = placeAfter(await messages.index('byConversation').getAll([record.conv, record.at]));
   await messages.put({ ...record, order, sealed });
@@ -1013,6 +1015,60 @@ export async function clearMessages(
 // envelope, taken in again, may have brought the same message into a
 // conversation that is here. Files kept under the message ID alone, from
 // before version 4, are left: nothing stores files so any more.
+//
+// In two passes: what one upkeep finds is noted (SweepState), and deleted
+// only if a later upkeep, at least SWEEP_GRACE_MS after, finds it still
+// stray. So nothing a write under way leaves for a moment is deleted, from
+// this version or from an older copy of the app open at the same time
+// (same database version): this one writes a file with its message, and a
+// conversation before its messages (addMessage, putMedia ifMessage,
+// receive), but version 2.4.0 writes a file it sends before its message,
+// and a first message before its conversation, in separate transactions.
+// On top of that, a conversation's messages go only under its lock, which
+// taking messages in holds (where the engine has Web Locks, across copies),
+// and each is looked at again in the transaction that deletes it.
+
+/** How long something stays stray before the sweep deletes it. */
+export const SWEEP_GRACE_MS = 60 * 60_000;
+/**
+ * How many files one sweep looks at: those after where the last stopped,
+ * going round to the start, so a big media store is looked at a part at a
+ * time, in a short transaction.
+ */
+export const SWEEP_SCAN = 1000;
+/** The most strays of each kind the sweep keeps track of; any more are found again later. */
+export const SWEEP_KEPT = 1000;
+
+const SWEEP = 'sweep';
+
+/**
+ * What the sweep found stray, with when (our clock) it first did, and where
+ * its look through the files goes on (the last key it looked at; none: the
+ * start). Keys only, nothing of what they hold, in `meta`.
+ */
+export interface SweepState {
+  convs: { id: string; seen: number }[];
+  files: { key: [string, string]; seen: number }[];
+  after?: [string, string];
+}
+
+function isFileKey(value: unknown): value is [string, string] {
+  return Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' && typeof value[1] === 'string';
+}
+
+/** The sweep's notes (none if there are none, or they can't be read). */
+export async function getSweep(db: Database): Promise<SweepState> {
+  const kept = await getMeta<Partial<SweepState>>(db, SWEEP);
+  const seen = (x: { seen?: unknown }) => typeof x.seen === 'number' && Number.isFinite(x.seen);
+  const convs = Array.isArray(kept?.convs) ? kept.convs.filter((c) => !!c && typeof c.id === 'string' && seen(c)) : [];
+  const files = Array.isArray(kept?.files) ? kept.files.filter((f) => !!f && isFileKey(f.key) && seen(f)) : [];
+  return { convs, files, ...(isFileKey(kept?.after) ? { after: kept.after } : {}) };
+}
+
+export async function putSweep(db: Database, state: SweepState): Promise<void> {
+  if (state.convs.length === 0 && state.files.length === 0 && !state.after) await deleteMeta(db, SWEEP);
+  else await putMeta(db, SWEEP, state);
+}
 
 /**
  * The conversations that messages are kept under but that aren't here. Only
@@ -1055,23 +1111,37 @@ export async function dropStrayMessages(db: Database, conv: string, most: number
 }
 
 /**
- * Deletes up to `most` files whose message isn't here, each only if it
- * still isn't (checked in the same transaction). Only keys are read, all
- * looked up at once. Returns how many went.
+ * The files whose message isn't here, of up to `count` after `after` (from
+ * the start without it), and the last key looked at, if there may be more
+ * after it (none: it reached the end). Only keys are read, all looked up at
+ * once, in one short transaction.
  */
-export async function dropStrayFiles(db: Database, most: number): Promise<number> {
-  if (most <= 0) return 0;
-  const read = db.transaction(['media', 'messages']);
+export async function strayFiles(
+  db: Database,
+  after: [string, string] | undefined,
+  count: number,
+): Promise<{ strays: [string, string][]; last?: [string, string] }> {
+  const tx = db.transaction(['media', 'messages']);
   // Array keys only: those from before version 4 are strings, which sort first.
-  const keys = (await read.objectStore('media').getAllKeys(IDBKeyRange.lowerBound([]))) as [string, string][];
-  const found = await Promise.all(keys.map((key) => read.objectStore('messages').getKey(key)));
-  await read.done;
-  const strays = keys.filter((_, i) => found[i] === undefined).slice(0, most);
-  if (strays.length === 0) return 0;
+  const range = after ? IDBKeyRange.lowerBound(after, true) : IDBKeyRange.lowerBound([]);
+  const keys = (await tx.objectStore('media').getAllKeys(range, count)) as [string, string][];
+  const found = await Promise.all(keys.map((key) => tx.objectStore('messages').getKey(key)));
+  await tx.done;
+  const strays = keys.filter((_, i) => found[i] === undefined);
+  return keys.length === count && count > 0 ? { strays, last: keys.at(-1)! } : { strays };
+}
+
+/**
+ * Deletes these files, each only if its message still isn't here (checked
+ * in the same transaction). Returns how many went.
+ */
+export async function dropStrayFiles(db: Database, keys: [string, string][]): Promise<number> {
+  if (keys.length === 0) return 0;
   const tx = db.transaction(['media', 'messages'], 'readwrite');
   const gone = await Promise.all(
-    strays.map(async (key) => {
+    keys.map(async (key) => {
       if ((await tx.objectStore('messages').getKey(key)) !== undefined) return false;
+      if ((await tx.objectStore('media').getKey(key)) === undefined) return false;
       await tx.objectStore('media').delete(key);
       return true;
     }),

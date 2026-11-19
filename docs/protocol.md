@@ -259,10 +259,13 @@ the server's word. Before its first request, the app fetches the messages
 still waiting for the device (best effort, and only then: the server takes
 no other request once the deletion has started), then deletes the uploads
 of the attachments it received (`POST /media/{id}/delete`, which needs no
-login), trying those that fail a few more times, for about 7 seconds at
-most; any it couldn't delete, or never saw, expire within 30 days.
-Afterwards it deletes everything on the device. The other side of each
-conversation isn't told.
+login), trying those that fail again a few times, waiting about 7 seconds
+in all between tries (not while the device says it's offline). It starts
+no more fetching or trying again 10 seconds after it began (a request
+under way then can take up to its 15-second timeout), and goes on with the
+deletion; any upload it couldn't delete, or never saw, expires within 30
+days. Afterwards it deletes everything on the device. The other side of
+each conversation isn't told.
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
 (1 byte), sequence number (8), SHA-256 of the previous list (32; zeros for the

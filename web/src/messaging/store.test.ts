@@ -26,6 +26,7 @@ import {
   getConversation,
   getMedia,
   getMessage,
+  getSweep,
   getPendingEdits,
   keepEarly,
   lastShown,
@@ -38,9 +39,11 @@ import {
   pageMessages,
   putConversation,
   putMedia,
+  putSweep,
   saveConversation,
   setStatuses,
   strayConversations,
+  strayFiles,
   unread,
   unreadIds,
   withPreview,
@@ -421,7 +424,7 @@ describe('the upkeep sweep', () => {
     expect(await getMessage(db, 'kept', 'k1')).toMatchObject({ text: 'here' });
   });
 
-  it('deletes files whose message is gone, a few at a time, and leaves those kept from before version 4', async () => {
+  it('finds files whose message is gone a part of the store at a time, going round, and leaves those kept from before version 4', async () => {
     const db = await fresh();
     await putConversation(db, conversation('c'));
     await addMessage(db, { id: 'm1', conv: 'c', at: 1, out: false, status: 'read', file: 'local' }, { text: '' });
@@ -430,9 +433,35 @@ describe('the upkeep sweep', () => {
     for (const id of ['x1', 'x2', 'x3']) await db.put('media', new Uint8Array([9]), ['c', id]);
     // Under the message ID alone, as version 3 kept it.
     await db.put('media', new Uint8Array([8]), 'legacy');
-    expect(await dropStrayFiles(db, 2)).toBe(2);
-    expect(await dropStrayFiles(db, 2)).toBe(1);
-    expect(await dropStrayFiles(db, 2)).toBe(0);
-    expect(await db.getAllKeys('media')).toEqual(['legacy', ['c', 'm1']]);
+    // Two keys at a time, each part going on after the last.
+    const first = await strayFiles(db, undefined, 2);
+    expect(first).toEqual({ strays: [['c', 'x1']], last: ['c', 'x1'] });
+    const second = await strayFiles(db, first.last, 2);
+    expect(second).toEqual({ strays: [['c', 'x2'], ['c', 'x3']], last: ['c', 'x3'] });
+    // The end: no key to go on after, so the next starts again.
+    expect(await strayFiles(db, second.last, 2)).toEqual({ strays: [] });
+    expect((await strayFiles(db, undefined, 10)).strays).toEqual([['c', 'x1'], ['c', 'x2'], ['c', 'x3']]);
+  });
+
+  it('deletes only files whose message still is not here, and only those named', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    for (const id of ['x1', 'x2', 'x3']) await db.put('media', new Uint8Array([9]), ['c', id]);
+    // x2's message came meanwhile (a send of an older version, say, which stores the file first).
+    await addMessage(db, { id: 'x2', conv: 'c', at: 1, out: true, status: 'sending', file: 'local' }, { text: '' });
+    expect(await dropStrayFiles(db, [['c', 'x1'], ['c', 'x2'], ['c', 'gone']])).toBe(1);
+    expect(await db.getAllKeys('media')).toEqual([['c', 'x2'], ['c', 'x3']]);
+  });
+
+  it('keeps its notes of what it found, keys and times only, and reads nothing it does not know as notes', async () => {
+    const db = await fresh();
+    expect(await getSweep(db)).toEqual({ convs: [], files: [] });
+    const state = { convs: [{ id: 'gone', seen: 5 }], files: [{ key: ['c', 'x1'] as [string, string], seen: 6 }], after: ['c', 'x1'] as [string, string] };
+    await putSweep(db, state);
+    expect(await getSweep(db)).toEqual(state);
+    await db.put('meta', { convs: [{ id: 1 }, { id: 'ok', seen: 2 }], files: 'no', after: ['x'] }, 'sweep');
+    expect(await getSweep(db)).toEqual({ convs: [{ id: 'ok', seen: 2 }], files: [] });
+    await putSweep(db, { convs: [], files: [] });
+    expect(await db.get('meta', 'sweep')).toBeUndefined();
   });
 });
