@@ -953,8 +953,11 @@ export function createApp(deps: Deps) {
    * background: the screen doesn't wait, and a failure is retried next time.
    */
   function seen(id: string): void {
+    // Redrawn whether or not it all went: a call that joined one under way
+    // fails if the run after it does, though its own messages were marked.
     void messaging
       ?.markSeen(id)
+      .catch(() => {})
       .then(() => showChat(id))
       .catch(() => {});
   }

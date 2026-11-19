@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openChannel, useProfile, withLock, withLockIfFree, type LockManagerLike, type SyncEvent } from './locks';
+import { openChannel, pendingLocks, useProfile, withLock, withLockIfFree, type LockManagerLike, type SyncEvent } from './locks';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -133,6 +133,22 @@ describe('without Web Locks on the device', () => {
     useProfile('');
     release();
     await holding;
+  });
+
+  it('lists the locks requests wait for, for tests', async () => {
+    let release!: () => void;
+    const holding = withLock('test-pending', () => new Promise<void>((r) => (release = r)), null);
+    expect(pendingLocks()).toEqual([]);
+    const next = withLock('test-pending', async () => 'next', null);
+    const after = withLock('test-pending', async () => 'after', null);
+    expect(pendingLocks()).toEqual(['incognitochat:test-pending']);
+    await sleep(5);
+    expect(pendingLocks()).toEqual(['incognitochat:test-pending']);
+    release();
+    await holding;
+    expect(await next).toBe('next');
+    expect(await after).toBe('after');
+    expect(pendingLocks()).toEqual([]);
   });
 });
 

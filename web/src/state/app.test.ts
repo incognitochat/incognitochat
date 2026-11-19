@@ -12,21 +12,24 @@ import type { TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
-import type { MessagingDeps } from '../messaging/engine';
+import type { Messaging, MessagingDeps } from '../messaging/engine';
 import { confirmationMatches, createApp, type Deps, type Screen } from './app';
 import { encryptFile, newFileKey } from '../crypto/media';
 import { toBase64Url } from '../crypto/encoding';
 
 // The engine as it is, but what the app gives it is kept, so tests can call
-// its callbacks (onWaiting, onResume) as the engine would.
-const engines = vi.hoisted(() => ({ deps: [] as MessagingDeps[] }));
+// its callbacks (onWaiting, onResume) as the engine would; and so is what
+// it makes, so they can watch the app call it.
+const engines = vi.hoisted(() => ({ deps: [] as MessagingDeps[], made: [] as Messaging[] }));
 vi.mock('../messaging/engine', async (importOriginal) => {
   const original = await importOriginal<typeof import('../messaging/engine')>();
   return {
     ...original,
     createMessaging: (deps: MessagingDeps) => {
       engines.deps.push(deps);
-      return original.createMessaging(deps);
+      const made = original.createMessaging(deps);
+      engines.made.push(made);
+      return made;
     },
   };
 });
@@ -750,6 +753,20 @@ describe('syncing', () => {
     open();
     await Promise.all(syncs);
     expect(inbox()).toBe(before + 2);
+  });
+
+  it('tells other copies when upkeep deleted keys, and forgets its own when another copy did', async () => {
+    const server = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    engines.deps.length = 0;
+    engines.made.length = 0;
+    const { app, broadcasts } = await registered(server.api, { issuer });
+    broadcasts.length = 0;
+    engines.deps.at(-1)!.onKeysDeleted!();
+    expect(broadcasts).toEqual([{ type: 'keys-changed' }]);
+    const forget = vi.spyOn(engines.made.at(-1)!, 'forgetKeys');
+    app.keysChanged();
+    expect(forget).toHaveBeenCalledOnce();
   });
 
   it('backs its poll off while the server is in trouble, but syncs when shown', async () => {

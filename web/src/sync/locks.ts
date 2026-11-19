@@ -31,17 +31,33 @@ function defaultLocks(): LockManagerLike | null {
  * name nobody holds or waits for isn't kept.
  */
 const held = new Map<string, Promise<void>>();
+/** How many requests for each name wait for an earlier holder (pendingLocks). */
+const waiting = new Map<string, number>();
 
 function holdHere<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const before = held.get(name) ?? Promise.resolve();
+  const before = held.get(name);
   let done!: () => void;
   const mine = new Promise<void>((resolve) => (done = resolve));
-  const last = before.then(() => mine);
+  const last = (before ?? Promise.resolve()).then(() => mine);
   held.set(name, last);
-  return before.then(fn).finally(() => {
+  if (before) waiting.set(name, (waiting.get(name) ?? 0) + 1);
+  const turn = before?.then(() => {
+    const left = waiting.get(name)! - 1;
+    if (left > 0) waiting.set(name, left);
+    else waiting.delete(name);
+  });
+  return (turn ?? Promise.resolve()).then(fn).finally(() => {
     done();
     if (held.get(name) === last) held.delete(name);
   });
+}
+
+/**
+ * For tests: the names of the locks that requests wait for, where Web Locks
+ * are missing (as navigator.locks.query() lists them where they aren't).
+ */
+export function pendingLocks(): string[] {
+  return [...waiting.keys()];
 }
 
 /**

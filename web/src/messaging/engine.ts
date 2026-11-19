@@ -152,7 +152,11 @@ const MAX_SEEN = 50;
 const META_EMPTY_SINCE = 'empty-chats-since';
 /** The most send tokens one envelope can cost: what the largest there can be costs. */
 const MAX_SEND_TOKENS = sendTokensFor(MAX_ENVELOPE);
-/** Send tokens are fetched in the background this long after the wallet runs low, plus up to TOP_UP_SPREAD_MS more, at random. */
+/**
+ * Send tokens, media tokens and pooled mailboxes are fetched in the
+ * background this long after they run low, plus up to TOP_UP_SPREAD_MS
+ * more, at random (refillSoon).
+ */
 const TOP_UP_MIN_MS = 10_000;
 const TOP_UP_SPREAD_MS = 80_000;
 const META_BLOCKED = 'blocked-tags';
@@ -446,6 +450,8 @@ export function createMessaging(deps: MessagingDeps) {
       const timer = setTimeout(fn, ms);
       return () => clearTimeout(timer);
     });
+  /** Set by stop(): background work (refillSoon, deleting uploads again) starts no more timers. */
+  let stopped = false;
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
   /** When a conversation whose link-key fetch failed may fetch again (Unix ms; refreshLinkKey). */
   const linkKeyRetryAt = new Map<string, number>();
@@ -795,7 +801,11 @@ export function createMessaging(deps: MessagingDeps) {
       } finally {
         flushing = null;
       }
-      if (deferred.size > 0) later(() => void flushUploadDeletes(), UPLOAD_DELETE_AGAIN_MS);
+      if (deferred.size > 0 && !stopped) {
+        later(() => {
+          if (!stopped) void flushUploadDeletes();
+        }, UPLOAD_DELETE_AGAIN_MS);
+      }
     })();
     return flushing;
   }
@@ -1393,8 +1403,8 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * What runs low as it's used, and is fetched ahead: send tokens, media
    * tokens and the mailbox pool. Whether it's low, and what tops it up (each
-   * looks again under its lock, so copies of the app that check at once
-   * fetch one batch, not one each).
+   * looks again under its refill lock, so copies of the app that check at
+   * once fetch one batch, not one each).
    */
   const supplies: Record<'send' | 'media' | 'pool', { low: () => Promise<boolean>; topUp: () => Promise<void> }> = {
     send: { low: async () => (await countTokens(db, issuer.keyId, Math.floor(now() / 1000))) < LOW_WATER, topUp },
@@ -1414,11 +1424,14 @@ export function createMessaging(deps: MessagingDeps) {
    * the server sees which account fetches when, and a fetch right before an
    * anonymous send would say whose it was. What's left meanwhile is enough
    * for two of the longest messages, the largest upload, or a few new
-   * chats; only more than that in one burst has a send fetch first.
+   * chats; only more than that in one burst, or a top-up that failed or
+   * didn't run, has a send fetch first. Nothing once stopped (stop()): a
+   * send still under way then starts no timer.
    */
   async function refillSoon(what: keyof typeof supplies): Promise<void> {
+    if (stopped) return;
     try {
-      if (!(await supplies[what].low()) || toppingUp.has(what)) return;
+      if (!(await supplies[what].low()) || toppingUp.has(what) || stopped) return;
     } catch {
       return;
     }
@@ -1426,7 +1439,7 @@ export function createMessaging(deps: MessagingDeps) {
       what,
       later(() => {
         toppingUp.delete(what);
-        void supplies[what].topUp().catch(() => {});
+        if (!stopped) void supplies[what].topUp().catch(() => {});
       }, TOP_UP_MIN_MS + Math.random() * TOP_UP_SPREAD_MS),
     );
   }
@@ -1488,9 +1501,11 @@ export function createMessaging(deps: MessagingDeps) {
         if (refilled) throw new NoTokens();
         // Out of tokens: fetching right before an upload is a timing hint,
         // but the wallet is normally refilled well ahead (maintain(),
-        // refillSoon()), with what the largest upload costs.
+        // refillSoon()), with what the largest upload costs. Not if, by
+        // then, another upload's refill has brought what this one needs.
         try {
-          await refillTokens(db, session, mediaIssuer, Math.min(MAX_BATCH, Math.max(MEDIA_BATCH, count - taken.length)), seconds(), 'media');
+          const needed = count - taken.length;
+          await refillTokens(db, session, mediaIssuer, Math.min(MAX_BATCH, Math.max(MEDIA_BATCH, needed)), seconds(), 'media', needed);
         } catch (err) {
           // The day's media tokens are used up.
           if (err instanceof ApiError && err.code === 'rate_limited') throw new NoTokens();
@@ -1513,8 +1528,9 @@ export function createMessaging(deps: MessagingDeps) {
     if (!tokens) {
       // Too few: fetching right before a send is a timing hint, but the
       // wallet is normally refilled well ahead (maintain(), refillSoon()),
-      // with twice what the longest message costs.
-      await fetchSendTokens(count);
+      // with twice what the longest message costs. Not if, by then,
+      // another send's refill has brought what this one needs.
+      await fetchSendTokens(count, count);
       tokens = await takeTokens(db, issuer.keyId, count, seconds());
     }
     if (!tokens) throw new NoTokens();
@@ -1730,10 +1746,12 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
-   * Stops the timers a pause and low supplies set: the app no longer syncs
-   * or sends (signed out, or the engine replaced).
+   * Stops the timers a pause, low supplies and uploads still to delete set:
+   * the app no longer syncs or sends (signed out, or the engine replaced).
+   * Work still under way then starts no new ones (stopped).
    */
   function stop(): void {
+    stopped = true;
     clearResume();
     for (const cancel of toppingUp.values()) cancel();
     toppingUp.clear();

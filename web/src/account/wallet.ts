@@ -7,7 +7,8 @@
 // Tokens are fetched in batches ahead of time, at random moments, rarely
 // right before a send: the issuer would otherwise see an account fetch one
 // and, a moment later, an anonymous send. Only a wallet emptied faster than
-// that (more spent in one burst than it keeps) has a send fetch first.
+// that (more spent in one burst than it keeps), or whose top-up failed or
+// didn't run, has a send fetch first.
 //
 // Each build names one issuer key of each kind (config.ts): its tokens are
 // fetched for that key, which the request names, and only those are counted
@@ -27,10 +28,14 @@ import { withLock } from '../sync/locks';
 
 export type TokenKind = 'send' | 'media';
 
-/** Where each kind is kept, fetched, and how it is labelled. */
-const KINDS: Record<TokenKind, { meta: string; lock: string; path: string; label: string }> = {
-  send: { meta: 'send-tokens', lock: 'send-tokens', path: '/tokens', label: LABEL_SEND_TOKEN },
-  media: { meta: 'media-tokens', lock: 'media-tokens', path: '/tokens/media', label: LABEL_MEDIA_TOKEN },
+/**
+ * Where each kind is kept, fetched, and how it is labelled. `lock` is held
+ * briefly, to take tokens or add them; `refillLock` while a batch is
+ * fetched (refillTokens).
+ */
+const KINDS: Record<TokenKind, { meta: string; lock: string; refillLock: string; path: string; label: string }> = {
+  send: { meta: 'send-tokens', lock: 'send-tokens', refillLock: 'send-tokens-refill', path: '/tokens', label: LABEL_SEND_TOKEN },
+  media: { meta: 'media-tokens', lock: 'media-tokens', refillLock: 'media-tokens-refill', path: '/tokens/media', label: LABEL_MEDIA_TOKEN },
 };
 
 /** The most tokens the server signs in one request. */
@@ -142,8 +147,13 @@ export async function countTokens(db: Database, keyId: Uint8Array, now = nowSeco
  * the batch: this build is for a key it no longer takes, or not yet.
  *
  * With `below`, only if fewer than that of the build's key are here once
- * this holds the wallet's lock (another copy of the app may just have
- * topped it up). Returns how many of the build's key are here.
+ * this holds the refill lock (another copy of the app may just have topped
+ * the wallet up). Returns how many of the build's key are here.
+ *
+ * Batches are fetched one at a time (refillLock), but the wallet's own lock
+ * is held only to add them: a send taking tokens meanwhile doesn't wait for
+ * the request, so it doesn't go out right after the account's request was
+ * answered.
  */
 export function refillTokens(
   db: Database,
@@ -154,8 +164,8 @@ export function refillTokens(
   kind: TokenKind = 'send',
   below = Infinity,
 ): Promise<number> {
-  const { meta, lock, path, label } = KINDS[kind];
-  return withLock(lock, async () => {
+  const { meta, lock, refillLock, path, label } = KINDS[kind];
+  return withLock(refillLock, async () => {
     const held = usable(await stored(db, kind), now, issuer.keyId).length;
     if (held >= below) return held;
     const epoch = epochOf(now);
@@ -183,9 +193,11 @@ export function refillTokens(
       const sig = await finalize(issuer.key, inputs[i]!, fromBase64Url(signatures[i]!), states[i]!);
       fresh.push({ token: toBase64Url(concat(inputs[i]!, sig)), epoch });
     }
-    const kept = inDate(await stored(db, kind), now);
-    await putMeta(db, meta, [...kept, ...fresh]);
-    return usable(kept, now, issuer.keyId).length + fresh.length;
+    return withLock(lock, async () => {
+      const kept = inDate(await stored(db, kind), now);
+      await putMeta(db, meta, [...kept, ...fresh]);
+      return usable(kept, now, issuer.keyId).length + fresh.length;
+    });
   });
 }
 

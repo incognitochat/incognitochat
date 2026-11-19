@@ -143,21 +143,33 @@ export async function lookupKey(db: Database, id: Uint8Array): Promise<KeyEntry 
   return (await index(db))[toBase64Url(id)];
 }
 
-/** Our key for a key ID, unsealed, if we have one. clear() drops the unsealed copies (after deletions). */
+/**
+ * Our key for a key ID, unsealed, if we have one. clear() drops the
+ * unsealed copies (after deletions); a find that started before it doesn't
+ * keep what it unsealed, which may be a key just deleted.
+ */
 export function keyFinder(db: Database): ((id: Uint8Array) => Promise<RecipientKey | undefined>) & { clear(): void } {
   const cache = new Map<string, RecipientKey>();
+  /** How many times the cache was cleared. */
+  let cleared = 0;
   const find = async (id: Uint8Array) => {
     const k = toBase64Url(id);
     const cached = cache.get(k);
     if (cached) return cached;
+    const since = cleared;
     const entry = (await index(db))[k];
     if (!entry) return undefined;
     const key = await unsealKey(db, entry.name);
     const found = { privateKey: key, publicKey: fromBase64Url(entry.pub) };
-    cache.set(k, found);
+    if (cleared === since) cache.set(k, found);
     return found;
   };
-  return Object.assign(find, { clear: () => cache.clear() });
+  return Object.assign(find, {
+    clear: () => {
+      cleared++;
+      cache.clear();
+    },
+  });
 }
 
 async function unsealKey(db: Database, name: string): Promise<CryptoKey> {
