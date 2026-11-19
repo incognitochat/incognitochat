@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { concat, toBase64Url, utf8 } from '../crypto/encoding';
 import { exportPublicKey, generateCopyableAgreementKey } from '../crypto/keys';
-import { keyId, sealEnvelope, sendTokensFor } from './envelope';
+import { fixedKeys, seedCrypto } from '../testing/crypto';
+import { Random } from '../testing/random';
+import { EnvelopeError, keyId, MAX_INNER, openEnvelope, sealEnvelope, sendTokensFor } from './envelope';
 import {
   checkMessage,
   fileName,
   isReactionEmoji,
+  MAX_FILE_BYTES,
   MAX_TEXT_BYTES,
   mediaName,
   MessageError,
@@ -16,6 +19,8 @@ import {
   shownAs,
   type ConversationKey,
   type Draft,
+  type Media,
+  type Message,
 } from './message';
 
 async function conversationKey(): Promise<ConversationKey & { id: Uint8Array }> {
@@ -366,5 +371,224 @@ describe('what messages cost', () => {
     expect(await tokens(sent({ text: 'a'.repeat(5000) }))).toBe(4);
     expect(await tokens(sent({ text: 'a'.repeat(MAX_TEXT_BYTES) }))).toBe(7);
     expect(await tokens(sent({ kind: 'edit', edit: { to: newId(), text: 'س'.repeat(MAX_TEXT_BYTES / 2) } }))).toBe(7);
+  });
+});
+
+describe('messages, on random input', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const LETTERS = [...'abc xyz 019 .,!?\n"\\', ...'سلام دنیا', '\u200c', 'é', '👋', '👨‍👩‍👧', '\ud83d'];
+  const words = (r: Random, max = 200) => Array.from({ length: 1 + r.int(max) }, () => r.pick(LETTERS)).join('');
+  const id = (r: Random) => toBase64Url(r.bytes(16));
+  const ids = (r: Random) => Array.from({ length: 1 + r.int(100) }, () => id(r));
+
+  function randomMedia(r: Random): Media {
+    const media: Media = {
+      t: r.pick(['photo', 'video', 'gif', 'voice', 'audio', 'round', 'file', 'voice_note']),
+      id: id(r),
+      k: toBase64Url(r.bytes(32)),
+      d: id(r),
+      s: 1 + r.int(MAX_FILE_BYTES),
+    };
+    if (r.oneIn(2)) media.n = words(r, 255).slice(0, 255);
+    if (r.oneIn(2)) media.m = r.pick(['image/jpeg', 'image/svg+xml', 'video/mp4', 'audio/mp4', 'application/vnd.oasis.opendocument.text']);
+    if (r.oneIn(2)) {
+      media.w = 1 + r.int(20_000);
+      media.h = 1 + r.int(20_000);
+    }
+    if (r.oneIn(2)) media.l = r.int(24 * 60 * 60 + 1);
+    if (r.oneIn(3)) media.v = toBase64Url(r.bytes(1 + r.int(100)));
+    if (r.oneIn(2)) media.p = toBase64Url(r.bytes(1 + r.int(2250)));
+    return media;
+  }
+
+  /** A random well-formed draft of any kind. */
+  function randomDraft(r: Random): Draft {
+    const base = { conv: id(r), id: id(r), at: 1 + r.int(2 ** 47) };
+    const extra: Partial<Draft> = {};
+    if (r.oneIn(3)) extra.reply = id(r);
+    if (r.oneIn(4)) extra.tag = toBase64Url(r.bytes(32));
+    if (r.oneIn(3)) extra.last = id(r);
+    switch (r.int(10)) {
+      case 0:
+        return { kind: 'seen', ...base, ...extra, seen: ids(r), ...(r.oneIn(2) ? { earlier: true as const } : {}) };
+      case 1:
+        return { kind: 'reaction', ...base, ...extra, reaction: { to: id(r), e: r.pick(['👍', '❤️', '👨‍👩‍👧', '🇮🇷', '1️⃣', '']) } };
+      case 2:
+        return { kind: 'delete', ...base, ...extra, ...(r.oneIn(4) ? { all: true as const } : { delete: ids(r) }) };
+      case 3:
+        return { kind: 'edit', ...base, ...extra, edit: { to: id(r), text: r.oneIn(5) ? '' : words(r) } };
+      case 4:
+        return { kind: r.pick(['key_update', 'end'] as const), ...base, ...extra };
+      default: {
+        const draft: Draft = { kind: 'message', ...base, ...extra };
+        if (r.oneIn(2)) draft.replyTo = id(r);
+        const what = r.pick([0, 1, 1, 2]);
+        if (what === 0) draft.sticker = { id: r.pick(['faces/winking_face', 'new_pack/cat_2']), ...(r.oneIn(2) ? { e: '😉' } : {}) };
+        if (what === 1) draft.media = randomMedia(r);
+        if (what === 2 || (what === 1 && r.oneIn(2))) draft.text = `x${words(r)}`;
+        return draft;
+      }
+    }
+  }
+
+  /** As sealMessage fills it in, with made-up keys. */
+  const complete = (r: Random, draft: Draft): Message => ({ v: 1, ...draft, from: toBase64Url(r.bytes(65)), to: toBase64Url(r.bytes(8)) });
+
+  const FIELDS = ['v', 'kind', 'conv', 'id', 'at', 'from', 'to', 'reply', 'tag', 'last', 'text', 'replyTo', 'seen', 'earlier', 'media', 'sticker', 'reaction', 'delete', 'all', 'edit'];
+  const INNER = ['t', 'id', 'k', 'd', 's', 'n', 'm', 'w', 'h', 'l', 'v', 'p', 'e', 'to', 'text'];
+
+  /** Any JSON value, leaning to ones near what the fields take. */
+  function randomValue(r: Random, depth = 2): unknown {
+    switch (r.int(depth > 0 ? 9 : 7)) {
+      case 0:
+        return r.pick([null, true, false]);
+      case 1:
+        return r.pick([0, -1, 1, 1.5, 1e300, 2 ** 53, 20_000, 20_001, MAX_FILE_BYTES + 1, 24 * 60 * 60 + 1, r.int(2 ** 32)]);
+      case 2:
+        return r.pick(['', ' ', '👍', '👍👍', 'message', 'seen', 'delete', 'photo', 'image/jpeg', 'a/b', 'pack/name', words(r, 20)]);
+      case 3:
+        return toBase64Url(r.bytes(r.pick([0, 8, 15, 16, 17, 32, 65, 101])));
+      case 4:
+        return `${toBase64Url(r.bytes(16))}=`;
+      case 5:
+        return 'A'.repeat(r.pick([3001, 12_001]));
+      case 6:
+        return r.int(2 ** 40);
+      case 7:
+        return Array.from({ length: r.int(4) }, () => randomValue(r, depth - 1));
+      default:
+        return Object.fromEntries(Array.from({ length: r.int(5) }, () => [r.pick([...FIELDS, ...INNER, '__proto__']), randomValue(r, depth - 1)]));
+    }
+  }
+
+  /** One to three fields deleted or set to something else, at the top or (mostly) one level in. */
+  function change(r: Random, message: Record<string, unknown>): void {
+    for (let n = 1 + r.int(3); n > 0; n--) {
+      const nested = Object.values(message).filter((v): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v));
+      const target = nested.length && !r.oneIn(3) ? r.pick(nested) : message;
+      const keys = Object.keys(target);
+      const key = keys.length && !r.oneIn(4) ? r.pick(keys) : r.pick(target === message ? FIELDS : INNER);
+      if (r.oneIn(4)) delete target[key];
+      else target[key] = randomValue(r);
+    }
+  }
+
+  // The type each known field must have in an accepted message.
+  const str = (v: unknown) => typeof v === 'string';
+  const int = (v: unknown) => Number.isSafeInteger(v);
+  const strings = (v: unknown) => Array.isArray(v) && v.every(str);
+  const shape =
+    (fields: Record<string, (v: unknown) => boolean>, required: string[]) =>
+    (v: unknown): boolean => {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+      const o = v as Record<string, unknown>;
+      return required.every((f) => f in o) && Object.entries(fields).every(([f, ok]) => o[f] === undefined || ok(o[f]));
+    };
+  const wellTyped = shape(
+    {
+      v: (v) => v === 1,
+      kind: str,
+      conv: str,
+      id: str,
+      at: int,
+      from: str,
+      to: str,
+      reply: str,
+      tag: str,
+      last: str,
+      text: str,
+      replyTo: str,
+      seen: strings,
+      earlier: (v) => v === true,
+      media: shape({ t: str, id: str, k: str, d: str, s: int, n: str, m: str, w: int, h: int, l: int, v: str, p: str }, ['t', 'id', 'k', 'd', 's']),
+      sticker: shape({ id: str, e: str }, ['id']),
+      reaction: shape({ to: str, e: str }, ['to', 'e']),
+      delete: strings,
+      all: (v) => v === true,
+      edit: shape({ to: str, text: str }, ['to', 'text']),
+    },
+    ['v', 'kind', 'conv', 'id', 'at', 'from', 'to'],
+  );
+
+  /** Checks it as a received message would be: either accepted, well typed and the same again after a JSON round trip, or refused with a MessageError. */
+  function checkOrRefuse(value: unknown, round: number): void {
+    let message: Message;
+    try {
+      message = checkMessage(value);
+    } catch (err) {
+      expect(err, `round ${round}`).toBeInstanceOf(MessageError);
+      return;
+    }
+    expect(wellTyped(message), `round ${round}: ${JSON.stringify(message)}`).toBe(true);
+    expect(checkMessage(JSON.parse(JSON.stringify(message))), `round ${round}`).toEqual(message);
+  }
+
+  it('accept every well-formed message, unchanged by a JSON round trip', () => {
+    const r = new Random(0x6d736701);
+    for (let round = 0; round < 500; round++) {
+      const message = complete(r, randomDraft(r));
+      expect(wellTyped(message)).toBe(true);
+      expect(checkMessage(JSON.parse(JSON.stringify(message))), `round ${round}`).toEqual(message);
+    }
+  });
+
+  it('refuse changed fields and random values with a MessageError only', () => {
+    const r = new Random(0x6d736702);
+    for (let round = 0; round < 3000; round++) {
+      if (r.oneIn(5)) {
+        checkOrRefuse(randomValue(r, 3), round);
+        continue;
+      }
+      const message = JSON.parse(JSON.stringify(complete(r, randomDraft(r)))) as Record<string, unknown>;
+      change(r, message);
+      checkOrRefuse(message, round);
+    }
+  });
+
+  it('refuse changed JSON text with a MessageError only', () => {
+    const r = new Random(0x6d736703);
+    for (let round = 0; round < 500; round++) {
+      const json = r.mutate(utf8(JSON.stringify(complete(r, randomDraft(r)))));
+      let value: unknown;
+      try {
+        // As openMessage reads it; what doesn't parse is refused there ("not JSON").
+        value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(json));
+      } catch {
+        continue;
+      }
+      checkOrRefuse(value, round);
+    }
+  });
+
+  it('open to exactly what was sealed, and never once anything is changed', async () => {
+    // Fixed keys and seeded randomness: a failing round fails the same way every run.
+    const r = new Random(0x6d736704);
+    const [sender, other, , ephemeral] = await fixedKeys();
+    const recipient = { ...other!, id: await keyId(other!.publicKey) };
+    const find = finder(recipient);
+    seedCrypto(r, ephemeral!.pair);
+    for (let round = 0; round < 150; round++) {
+      const draft = randomDraft(r);
+      const envelope = await sealMessage(draft, sender!, recipient.publicKey);
+      const { message } = await openMessage(envelope, find);
+      expect(message, `round ${round}`).toEqual({ v: 1, ...draft, from: toBase64Url(sender!.publicKey), to: toBase64Url(recipient.id) });
+      // The envelope changed; the inner message (tag and JSON) changed and sealed again; or made-up JSON with a made-up tag.
+      let changed: Uint8Array;
+      const way = r.int(3);
+      if (way === 0) {
+        changed = r.mutate(envelope);
+        if (changed.length === envelope.length && changed.every((b, i) => b === envelope[i])) continue;
+      } else {
+        const { inner } = await openEnvelope(envelope, find);
+        const mutated = way === 1 ? r.mutate(inner) : concat(r.bytes(32), utf8(JSON.stringify(r.oneIn(2) ? randomValue(r, 3) : complete(r, randomDraft(r)))));
+        if (mutated.length > MAX_INNER || (mutated.length === inner.length && mutated.every((b, i) => b === inner[i]))) continue;
+        changed = await sealEnvelope([recipient.publicKey], mutated);
+      }
+      const result = await openMessage(changed, find).catch((err: unknown) => err);
+      expect(result instanceof EnvelopeError || result instanceof MessageError, `round ${round}: ${String(result)}`).toBe(true);
+    }
   });
 });

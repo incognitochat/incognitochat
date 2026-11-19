@@ -325,9 +325,25 @@ it. This is how close it gets.
   has.
 - **A brand-new user's first message** follows their registration closely in
   time.
-- **Files keep their metadata.** Photos are redrawn and videos have their
-  location and time data removed, but a file sent "as a file" is sent
-  untouched, location included if it has any.
+- **Attachments can keep metadata.** Photos are redrawn, which drops
+  theirs. A video sent "as video" has the usual location, device and time
+  tags removed: the MP4/QuickTime metadata boxes, XMP, the boxes Sony,
+  Canon and Garmin cameras add, data some cameras leave in unused space,
+  and the recording times in its headers. Not everything goes, though:
+  - a GPS or other sensor track recorded alongside the picture, as action
+    cameras, drones and dashcams often write;
+  - a timecode track, which cameras often set to the time of day;
+  - other makers' own data the app doesn't know, and the names of the
+    encoder and handlers, which hint at the device;
+  - everything, in a video the app can't read (a WebM, or an MP4 with
+    extra data after its end): that is sent as it was.
+
+  A file sent "as a file" is sent untouched, location included if it has
+  any. Music and GIFs are sent as they are too: an audio file sent "as
+  music" keeps its tags (title, artist, album, date, cover picture; a
+  phone's voice recorder may name a recording after the place it was
+  made), and a GIF any comments or XMP data in it (its preview, the first
+  frame drawn again on the device, has none).
 - **Abuse can't be traced to a person**, by design. Blocks, budgets, caps and
   replacing a link are the remedies.
 

@@ -1091,9 +1091,19 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   make, also cuts a longer name to 255.
 - What each kind is: a photo is redrawn on the sender's device (at most
   1280 px, JPEG), which drops its metadata. A video is sent as recorded (no
-  compression), with its location, device and time metadata removed: the
-  MP4/QuickTime `udta` and `meta` boxes are renamed `free` and the header
-  times zeroed, so nothing else in the file moves. A GIF is sent as it is.
+  compression), with most location, device and time metadata removed: the
+  MP4/QuickTime `udta` and `meta` boxes (at the top level, and in the
+  movie, its tracks, their media, media information, sample tables and
+  edit lists), the `uuid` boxes of XMP and of Sony, Canon and Garmin
+  cameras wherever they are, and every top-level `uuid` box are renamed
+  `free` and zeroed; `free` and `skip` boxes are zeroed (unless a chunk
+  offset points into one, or the file is fragmented or has a sample table
+  the app can't read); and the times in the movie, track and media
+  headers, a QuickTime preview (`pnot`) and producer reference times
+  (`prft`) are zeroed, so nothing else in the file moves. Timed metadata
+  tracks (a camera's GPS or timecode track) are kept, and a video the app
+  can't read is sent as it was. A GIF is sent as it is, with any metadata
+  in it.
   A voice message is recorded in the app (AAC in MP4 where the browser can,
   else Opus in WebM or Ogg; at most 15 minutes), with a waveform taken from
   the microphone level while recording (or from the recording, where the
@@ -1102,8 +1112,8 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   384 × 384 square (mirrored for the front camera, as the sender saw it),
   with sound, as H.264 in MP4 where the browser can, else WebM; at most a
   minute, with a preview frame and no device or place metadata. Music is the
-  audio file as it is, with its length. A file is the original bytes,
-  untouched (location included, if it has any).
+  audio file as it is (its tags included), with its length. A file is the
+  original bytes, untouched (location included, if it has any).
 - **Fetched by itself.** Photos up to 5 MiB, and voice and video messages
   and GIFs up to 10 MiB, by the size `s` their message gives, are fetched
   when their conversation opens (each kind can be turned off); larger ones,

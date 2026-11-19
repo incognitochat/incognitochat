@@ -8,25 +8,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fromHex, toBase64Url, toHex, utf8 } from '../crypto/encoding';
 import { open } from '../crypto/hpke';
+import { keyPair, type HexKey as Key } from '../testing/crypto';
 import vectors from '../../../backend/internal/envelope/testdata/vectors.json';
 import { bodyAad, keyId, openEnvelope, parseEnvelope, wrapInfo, type RecipientKey } from './envelope';
 import { openMessage, sealMessage, type Draft } from './message';
-
-interface Key {
-  privateKey: string;
-  publicKey: string;
-}
-
-/** Imports a P-256 key pair from its scalar and uncompressed point. */
-async function keyPair(k: Key): Promise<CryptoKeyPair> {
-  const point = fromHex(k.publicKey);
-  const jwk = { kty: 'EC', crv: 'P-256', x: toBase64Url(point.slice(1, 33)), y: toBase64Url(point.slice(33, 65)) };
-  const params = { name: 'ECDH', namedCurve: 'P-256' };
-  return {
-    privateKey: await crypto.subtle.importKey('jwk', { ...jwk, d: toBase64Url(fromHex(k.privateKey)) }, params, false, ['deriveBits']),
-    publicKey: await crypto.subtle.importKey('jwk', jwk, params, true, []),
-  };
-}
 
 async function recipientKey(k: Key): Promise<RecipientKey> {
   return { privateKey: (await keyPair(k)).privateKey, publicKey: fromHex(k.publicKey) };
