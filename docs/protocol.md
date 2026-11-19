@@ -472,8 +472,8 @@ JSON fields:
 | `at` | sent time, Unix milliseconds in whole seconds, by the server's clock as the sender knows it (see Times, below) |
 | `from` | sender's current conversation public key (65 bytes); a new one is a rotation |
 | `to` | key ID of the recipient key it was written for; must be the key that opened it |
-| `reply` | mailbox to write back to (16 bytes), first messages or when it changes |
-| `tag` | sender tag (32 bytes), first message through a link: `HMAC-SHA256(account secret, Message("incognitochat/v2/sender-tag", UTF-8 of the link fingerprint))`, the same for one person on every link with that fingerprint |
+| `reply` | mailbox to write back to (16 bytes), on everything the sender sends once it has one for the conversation: it takes one with the first thing it sends that isn't a receipt or a delete |
+| `tag` | sender tag (32 bytes), on everything sent by the side that wrote through a link: `HMAC-SHA256(account secret, Message("incognitochat/v2/sender-tag", UTF-8 of the link fingerprint))`, the same for one person on every link with that fingerprint |
 | `last` | ID of the newest envelope taken in from the other side (by its `at`); in a `delete` with `all`, the newest of the other side's messages the sender has (see Replays and order) |
 | `text` | the text (`message` only; at most 12,000 UTF-8 bytes) |
 | `replyTo` | ID of the message this answers |

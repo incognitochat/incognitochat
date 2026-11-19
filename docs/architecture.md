@@ -444,6 +444,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
   instance logs one line a minute of request counts by route, status and
   error code, counts only, for the alarms
   ([deployment.md](deployment.md#request-counts)).
-- Code signing: the functions run only code signed by CI's AWS Signer
-  profile, and each deploy checks that the running code is the attested build
+- Code signing: the functions run only code signed by the environment's AWS
+  Signer profile, which the deploy role signs with (whatever it uploads), and
+  each deploy checks that the running code is the attested build
   ([verifying.md](verifying.md#the-backend)).

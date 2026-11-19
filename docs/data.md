@@ -108,6 +108,7 @@ The keyed hashes and the edits are kept apart from the conversation itself
 | Login nonces, spent send and media tokens (and whether one was given back). Nothing about whose they were | Replay protection | Minutes, up to two weeks |
 | Error logs, without IDs, IP addresses or content | Fixing problems | 7 days |
 | Request counts: once a minute, how many requests each server instance answered, by route (`POST /send`, never the path with its IDs) and status, and by error code (`rate_limited`, say). Counts only, nothing about who | Alarms on limits being hit, refused requests, and how many accounts and tokens are given out ([deployment.md](deployment.md#request-counts)) | The log lines 7 days. The metrics made from them (registrations, token batches, 429s overall and by route, three kinds of refusal): kept by CloudWatch for 15 days a minute at a time, 63 days 5 minutes at a time and 15 months an hour at a time, and they can't be deleted |
+| Request counts at the firewall, only where the API has one in front of it (by default in production alone): how many requests it allowed and blocked, overall and by rule, and, added by AWS, how many per country and per device type (desktop or mobile, say). Counts only, nothing about who | The alarm on blocked requests, and seeing which rule blocks ([deployment.md](deployment.md#the-firewall)) | Kept by CloudWatch for 15 days a minute at a time, 63 days 5 minutes at a time and 15 months an hour at a time, and they can't be deleted |
 
 DynamoDB can take some days to delete an item after it expires; an expired
 one is never used again, but a copy of the table made meanwhile still holds
@@ -186,10 +187,11 @@ The services the software runs on:
 - **GitHub Pages** serves the app's files. It sees the IP address of every app
   load, and the link being opened, which is part of the page address.
 - **The device's browser**, when an attachment is saved outside Telegram,
-  opens a save page; the address, which holds the file's key, may stay in its
-  history. Once the upload is gone the link fetches nothing, but its key
-  still opens any copy of the encrypted file kept elsewhere. The download is
-  marked not to be cached, so the browser keeps no copy of its own.
+  opens a save page; the address, which holds the file's key, name and type,
+  may stay in its history, and the name and type can be read from it there.
+  Once the upload is gone the link fetches nothing, but its key still opens
+  any copy of the encrypted file kept elsewhere. The download is marked not
+  to be cached, so the browser keeps no copy of its own.
 
 None of them receive message content. The app loads no third-party code and
 has no analytics or trackers.

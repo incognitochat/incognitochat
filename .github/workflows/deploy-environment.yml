@@ -432,12 +432,15 @@ jobs:
           done
           echo "API_LOCKED=$(terraform output -raw api_locked)" >> "$GITHUB_ENV"
 
-      # The bot registers its own webhook (with its secret) and menu button:
-      # neither the bot token nor the webhook secret passes through CI. Right
-      # after the checks of what was deployed, before the smoke tests: after
-      # a new webhook secret (WEBHOOK_SECRET_VERSION), the bot refuses every
-      # update until this step has run, so a failed smoke test mustn't
-      # leave it that way.
+      # The bot registers its own webhook (with its secret) and menu button,
+      # so the calls to Telegram are made inside the function, not here. The
+      # secrets still reach this job: the bot token and the issuer keys go to
+      # the checks and Terraform steps above, and Terraform makes the
+      # generated ones, the webhook secret among them (docs/deployment.md,
+      # Secrets at rest). Right after the checks of what was deployed,
+      # before the smoke tests: after a new webhook secret
+      # (WEBHOOK_SECRET_VERSION), the bot refuses every update until this
+      # step has run, so a failed smoke test mustn't leave it that way.
       - name: Set up the bot
         working-directory: infra
         run: |

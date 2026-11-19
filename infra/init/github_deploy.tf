@@ -283,7 +283,9 @@ data "aws_iam_policy_document" "deploy_functions" {
 
   # Code signing (lambda_signing.tf): upload builds, have them signed, and
   # deploy the signed copies. Bucket settings, the profile and the code
-  # signing config stay out of reach.
+  # signing config stay out of reach. Signer signs whatever this role
+  # uploads, so a signature shows only that code came through this role,
+  # not what it was built from (docs/verifying.md, The backend).
   statement {
     sid = "BuildsBucket"
     actions = [
