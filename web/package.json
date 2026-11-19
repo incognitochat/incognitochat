@@ -14,10 +14,10 @@
   "dependencies": {
     "@preact/signals": "2.11.4",
     "idb": "8.0.4",
-    "preact": "11.1.1"
+    "preact": "11.2.0"
   },
   "devDependencies": {
-    "fake-indexeddb": "6.2.7",
+    "fake-indexeddb": "6.2.8",
     "typescript": "7.0.2",
     "vite": "8.3.6",
     "vitest": "5.1.0"
