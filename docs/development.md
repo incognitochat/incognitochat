@@ -13,7 +13,7 @@ dependencies. Deploying is in [deployment.md](deployment.md).
 | `infra/` | App Terraform for one environment: tables, the media bucket, SSM parameters, the four functions with function URLs, the WebSocket API. Applied by CI. |
 | `infra/init/` | Bootstrap Terraform, applied once per AWS account by an admin: state bucket, GitHub OIDC provider, deploy role, the functions' roles and their permissions boundary, code signing. CI can't change its own permissions. |
 | `hosting/` | The reviewed copy of the hosting repository's workflow ([verifying.md](verifying.md)). |
-| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `check-function-roles.sh` (checks the functions may call each other, permissions boundary included, what the deploy role is denied, and whom the functions' resource policies let invoke them), `verify-site.sh`. |
+| `scripts/` | `bootstrap.sh`, `build-lambdas.sh` (reproducible Lambda bundles), `check-lambda-deploy.py` (checks a deploy runs the attested bundles), `check-function-roles.sh` (checks the functions may call each other, permissions boundary included, what the deploy role is denied, and whom the functions' resource policies let invoke them), `check-pins.sh` (checks that versions pinned in several places agree), `verify-site.sh`. |
 | `docs/` | This documentation. |
 
 ## Checks
@@ -62,6 +62,9 @@ terraform -chdir=infra test        # renders function role policies; no AWS call
 terraform -chdir=infra/init test   # renders the deploy role's policies; no AWS calls
 ```
 
+**Pins:** `scripts/check-pins.sh` (the workflows' Terraform versions agree,
+and `hosting/deploy.yml` pins the same actions as `.github/workflows`).
+
 ## Reproducible builds
 
 The same commit always produces byte-identical Lambda bundles and web files,
@@ -84,8 +87,13 @@ and CI builds everything twice and compares. Keep it that way:
 - npm installs exact versions only, runs no install scripts, accepts no git
   dependencies, and refuses packages published less than 7 days ago
   (`web/.npmrc`). CI verifies registry signatures.
-- `govulncheck` runs on every build; Dependabot proposes updates with a 7-day
-  cooldown.
+- `govulncheck` runs on every build. Every week, `.github/workflows/scan.yml`
+  runs it again, and `npm audit` on the app's runtime dependencies, so a new
+  advisory shows without a code change.
+- Dependabot proposes updates with a 7-day cooldown: the actions in
+  `.github/workflows`, Go modules, npm packages, and the Terraform providers
+  of `infra/` and `infra/init/`. What it doesn't cover is
+  [updated by hand](#updating-by-hand).
 - The app loads no third-party code at runtime. Its only runtime dependencies
   are Preact, its signals, and `idb`.
 - The backend's are the AWS SDK and Lambda runtime, Cloudflare's `circl`
@@ -93,6 +101,25 @@ and CI builds everything twice and compares. Keep it that way:
   `filippo.io/bigmod` (constant-time arithmetic for signing tokens, the code
   Go's `crypto/rsa` uses). bigmod compiles in `golang.org/x/sys/cpu` (the
   Go team's, BSD-licensed), to pick its assembly for the CPU.
+
+### Updating by hand
+
+Dependabot doesn't update these. Check them every month or so, and when the
+weekly scan reports a fix in a newer version:
+
+- **Go:** the `toolchain` line in `backend/go.mod`. CI fails if it gets
+  another Go, and `scripts/build-lambdas.sh` builds with it.
+- **Node:** `web/.nvmrc`, used by CI, the scan and the hosting workflow.
+- **Terraform CLI:** `TERRAFORM_VERSION` in `ci.yml` and
+  `deploy-environment.yml`. CI fails if they differ.
+- **govulncheck:** its version in `ci.yml`, `scan.yml` and the commands above.
+- **DynamoDB Local:** the image's tag and digest in `ci.yml`, and its tag in
+  the commands above and `backend/internal/dynamotest`.
+- **The hosting workflow's actions:** `hosting/deploy.yml` is outside
+  `.github/workflows`, so Dependabot doesn't see it. CI warns when an action
+  it shares with `.github/workflows` is pinned to another commit;
+  `upload-pages-artifact` and `deploy-pages` are only there. Copy each change
+  into the hosting repositories ([hosting/README.md](../hosting/README.md)).
 
 ## Conventions
 

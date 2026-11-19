@@ -195,6 +195,11 @@ jobs:
       - name: Check the deploy passes each version
         run: scripts/check-version-variables.sh
 
+      # Every workflow runs the same Terraform CLI; hosting/deploy.yml, which
+      # Dependabot doesn't see, pins the same actions as these (a warning).
+      - name: Check the pins agree
+        run: scripts/check-pins.sh
+
   deploy-dev:
     name: Deploy to dev
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
