@@ -1,0 +1,72 @@
+name: Scan
+
+# Checks the dependencies for known vulnerabilities every week: CI checks
+# them only when the code changes, and advisories come out any day. A
+# workflow of its own, since a schedule in ci.yml would also deploy dev. It
+# builds and deploys nothing; a failed run is the alert (GitHub notifies
+# whoever last changed the schedule). It also runs when this file changes.
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays, 06:23 UTC
+  pull_request:
+    paths:
+      - .github/workflows/scan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend – govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No module cache: the scan leaves nothing behind for the builds.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache: false
+
+      # The standard library's advisories depend on the Go version: a finding
+      # there is fixed by raising go.mod's toolchain line.
+      - name: Check the pinned toolchain
+        run: |
+          want=$(sed -n 's/^toolchain //p' go.mod)
+          got=$(go env GOVERSION)
+          if [ "$got" != "$want" ]; then
+            echo "::error::Go is $got, but go.mod pins $want"
+            exit 1
+          fi
+
+      - name: Scan for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  web:
+    name: Web – npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          package-manager-cache: false
+
+      # What the app ships (its runtime dependencies), read from the lock
+      # file: nothing is installed.
+      - name: Audit the runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
