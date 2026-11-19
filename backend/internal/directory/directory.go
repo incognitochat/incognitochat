@@ -8,7 +8,7 @@
 //	A#<account>  F#<fingerprint> marks a link signing key the account has (links.go)
 //	A#<account>  I#<code>    marks an invitation code the account made (invitations.go)
 //	A#<account>  K#<link>    marks a link the account owns (links.go)
-//	A#<account>  L           signed device list: bytes (b), signature (s), sequence (q)
+//	A#<account>  L           older accounts' signed device list: bytes (b), signature (s), sequence (q); no longer stored
 //	A#<account>  M#<mailbox> marks a mailbox the account owns (mailboxes.go)
 //	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek)
 //	F#<fingerprint> F        a link signing key: the account that has it (a), none once it ended (links.go)
@@ -38,7 +38,7 @@
 //   - Replaced (Replace): its item becomes a marker (g = "r") that, with its
 //     device keys, expires after ReplacedTTL, so its devices can be told
 //     what happened after checking their signatures; its links and device
-//     list go at once. The account that replaced it lists it (ro) until the
+//     list (if it has one) go at once. The account that replaced it lists it (ro) until the
 //     rest is deleted (CleanUp).
 //   - Deleted (DELETE /account): its item is marked (dl) and its link goes
 //     in the first step (MarkDeleting), then everything else (Delete), the
@@ -156,14 +156,11 @@ type Account struct {
 
 // NewAccount is a registration to store.
 type NewAccount struct {
-	ID            string
-	TelegramHash  string
-	AccountKey    []byte
-	DeviceID      string
-	DeviceKey     []byte
-	DeviceList    []byte
-	DeviceListSig []byte
-	DeviceListSeq uint64
+	ID           string
+	TelegramHash string
+	AccountKey   []byte
+	DeviceID     string
+	DeviceKey    []byte
 }
 
 // Device is a device's signing key, with what requests need to know about
@@ -319,15 +316,16 @@ const (
 // however much old owns. One transaction moves the Telegram user's item to
 // n; turns old's item into a marker (g = "r") that expires after
 // ReplacedTTL, and gives its device keys the same expiry, so its devices
-// can still be told; deletes its device list and its links (their bundles
-// then answer "not found"), and turns the items of the signing keys it has
-// into tombstones (endKeys); and lists old among n's leftovers, with any old
-// had itself. From then on nothing else of old is used either: deliveries
-// to its mailboxes find no live owner (Recipients), nor do its invitation
-// codes (Redeem), and nothing new joins its partition (making anything
-// there checks its item, now a marker). What is left goes in steps
-// (CleanUp). It returns ErrConflict if the Telegram user's account changed
-// since old was read, or one of its links did.
+// can still be told; deletes its device list (only older accounts have
+// one) and its links (their bundles then answer "not found"), and turns
+// the items of the signing keys it has into tombstones (endKeys); and lists
+// old among n's leftovers, with any old had itself. From then on nothing
+// else of old is used either: deliveries to its mailboxes find no live
+// owner (Recipients), nor do its invitation codes (Redeem), and nothing new
+// joins its partition (making anything there checks its item, now a
+// marker). What is left goes in steps (CleanUp). It returns ErrConflict if
+// the Telegram user's account changed since old was read, or one of its
+// links did.
 //
 // An old account being deleted (its own DELETE /account started) keeps no
 // marker: its item and devices become stubs with no keys (dl), so its device
@@ -980,8 +978,8 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 }
 
 // newAccountItems stores a new account: its item, listing leftovers (the
-// accounts it replaced whose items are still to be deleted), its device and
-// its device list.
+// accounts it replaced whose items are still to be deleted), and its
+// device. Its device list is checked at registration, and not stored.
 func (s *Store) newAccountItems(n NewAccount, leftovers []string) []types.TransactWriteItem {
 	pk := accountPK(n.ID)
 	account := attrs{"ak": bv(n.AccountKey), "th": sv(n.TelegramHash)}
@@ -997,12 +995,6 @@ func (s *Store) newAccountItems(n NewAccount, leftovers []string) []types.Transa
 		{Put: &types.Put{
 			TableName: &s.Table,
 			Item:      item(pk, devicePrefix+n.DeviceID, attrs{"k": bv(n.DeviceKey)}),
-		}},
-		{Put: &types.Put{
-			TableName: &s.Table,
-			Item: item(pk, skDeviceList, attrs{
-				"b": bv(n.DeviceList), "s": bv(n.DeviceListSig), "q": nv(int64(n.DeviceListSeq)),
-			}),
 		}},
 	}
 }

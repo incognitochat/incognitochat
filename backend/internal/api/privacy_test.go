@@ -205,7 +205,6 @@ func TestSendDoesTheSameWork(t *testing.T) {
 	fresh := newDevice(t)
 	if err := h.server.Directory.Replace(ctx, old, directory.NewAccount{
 		ID: ids.New(), TelegramHash: th, AccountKey: raw(t, fresh.ak), DeviceID: fresh.id, DeviceKey: raw(t, fresh.dsk),
-		DeviceList: []byte("list"), DeviceListSig: []byte("sig"), DeviceListSeq: 1,
 	}, h.now); err != nil {
 		t.Fatal(err)
 	}

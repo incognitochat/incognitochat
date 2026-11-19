@@ -1,4 +1,4 @@
-package devicelist
+package devicelist_test
 
 import (
 	"bytes"
@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/incognitochat/incognitochat/backend/internal/devicelist"
+	"github.com/incognitochat/incognitochat/backend/internal/devicelist/devicelisttest"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
@@ -32,29 +34,26 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-func vector(t *testing.T) List {
-	return List{
+func vector(t *testing.T) devicelist.List {
+	return devicelist.List{
 		Seq:     1,
 		Issued:  issued,
-		Expires: issued.Add(MaxValidity),
-		Entries: []Entry{{DeviceID: "AAAAAAAAAAAAAAAAAAAAAA", Key: mustHex(t, vectorKey), Added: issued}},
+		Expires: issued.Add(devicelist.MaxValidity),
+		Entries: []devicelist.Entry{{DeviceID: "AAAAAAAAAAAAAAAAAAAAAA", Key: mustHex(t, vectorKey), Added: issued}},
 	}
 }
 
 func TestEncodeMatchesClient(t *testing.T) {
-	got := Encode(vector(t))
+	got := devicelisttest.Encode(vector(t))
 	if want := mustHex(t, vectorList); !bytes.Equal(got, want) {
 		t.Fatalf("Encode = %x\nwant     %x", got, want)
 	}
-	l, err := Parse(got)
+	l, err := devicelist.Parse(got)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if l.Seq != 1 || !l.Issued.Equal(issued) || len(l.Entries) != 1 || l.Entries[0].DeviceID != "AAAAAAAAAAAAAAAAAAAAAA" {
 		t.Fatalf("Parse = %+v", l)
-	}
-	if _, ok := l.Device("AAAAAAAAAAAAAAAAAAAAAA"); !ok {
-		t.Fatal("Device didn't find the entry")
 	}
 }
 
@@ -74,17 +73,17 @@ func sign(t *testing.T, key *ecdsa.PrivateKey, raw []byte) []byte {
 func TestVerify(t *testing.T) {
 	ak, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	raw := Encode(vector(t))
+	raw := devicelisttest.Encode(vector(t))
 	sig := sign(t, ak, raw)
-	if _, err := Verify(raw, sig, &ak.PublicKey); err != nil {
+	if _, err := devicelist.Verify(raw, sig, &ak.PublicKey); err != nil {
 		t.Fatalf("valid list refused: %v", err)
 	}
-	if _, err := Verify(raw, sig, &other.PublicKey); err == nil {
+	if _, err := devicelist.Verify(raw, sig, &other.PublicKey); err == nil {
 		t.Fatal("accepted a list signed by another key")
 	}
 	tampered := bytes.Clone(raw)
 	tampered[len(tampered)-20] ^= 1
-	if _, err := Verify(tampered, sign(t, other, tampered), &ak.PublicKey); err == nil {
+	if _, err := devicelist.Verify(tampered, sign(t, other, tampered), &ak.PublicKey); err == nil {
 		t.Fatal("accepted a tampered list")
 	}
 }
@@ -92,19 +91,19 @@ func TestVerify(t *testing.T) {
 func TestParseRejects(t *testing.T) {
 	devKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	rawKey, _ := devKey.PublicKey.Bytes()
-	entry := Entry{DeviceID: ids.New(), Key: rawKey, Added: issued}
+	entry := devicelist.Entry{DeviceID: ids.New(), Key: rawKey, Added: issued}
 
-	cases := map[string]func(l *List){
-		"sequence zero":       func(l *List) { l.Seq = 0 },
-		"no devices":          func(l *List) { l.Entries = nil },
-		"expires before":      func(l *List) { l.Expires = l.Issued },
-		"valid too long":      func(l *List) { l.Expires = l.Issued.Add(MaxValidity + Granularity) },
-		"issued off the hour": func(l *List) { l.Issued = l.Issued.Add(time.Second) },
-		"added after issued":  func(l *List) { l.Entries[0].Added = l.Issued.Add(Granularity) },
-		"duplicate device":    func(l *List) { l.Entries = append(l.Entries, l.Entries[0]) },
-		"bad key":             func(l *List) { l.Entries[0].Key = bytes.Repeat([]byte{4}, 65) },
-		"too many devices": func(l *List) {
-			for range MaxDevices {
+	cases := map[string]func(l *devicelist.List){
+		"sequence zero":       func(l *devicelist.List) { l.Seq = 0 },
+		"no devices":          func(l *devicelist.List) { l.Entries = nil },
+		"expires before":      func(l *devicelist.List) { l.Expires = l.Issued },
+		"valid too long":      func(l *devicelist.List) { l.Expires = l.Issued.Add(devicelist.MaxValidity + devicelist.Granularity) },
+		"issued off the hour": func(l *devicelist.List) { l.Issued = l.Issued.Add(time.Second) },
+		"added after issued":  func(l *devicelist.List) { l.Entries[0].Added = l.Issued.Add(devicelist.Granularity) },
+		"duplicate device":    func(l *devicelist.List) { l.Entries = append(l.Entries, l.Entries[0]) },
+		"bad key":             func(l *devicelist.List) { l.Entries[0].Key = bytes.Repeat([]byte{4}, 65) },
+		"too many devices": func(l *devicelist.List) {
+			for range devicelist.MaxDevices {
 				e := entry
 				e.DeviceID = ids.New()
 				l.Entries = append(l.Entries, e)
@@ -113,29 +112,29 @@ func TestParseRejects(t *testing.T) {
 	}
 	for name, change := range cases {
 		l := vector(t)
-		l.Entries = append([]Entry(nil), l.Entries...)
+		l.Entries = append([]devicelist.Entry(nil), l.Entries...)
 		change(&l)
-		if _, err := Parse(Encode(l)); err == nil {
+		if _, err := devicelist.Parse(devicelisttest.Encode(l)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 
 	ok := vector(t)
 	ok.Entries = append(ok.Entries, entry)
-	if _, err := Parse(Encode(ok)); err != nil {
+	if _, err := devicelist.Parse(devicelisttest.Encode(ok)); err != nil {
 		t.Errorf("two devices refused: %v", err)
 	}
 
-	good := Encode(vector(t))
-	if _, err := Parse(devicesig.Message(devicesig.LabelSession, []byte{1})); err == nil {
+	good := devicelisttest.Encode(vector(t))
+	if _, err := devicelist.Parse(devicesig.Message(devicesig.LabelSession, []byte{1})); err == nil {
 		t.Error("accepted another label")
 	}
-	if _, err := Parse(append(bytes.Clone(good), 0, 0, 0, 0)); err == nil {
+	if _, err := devicelist.Parse(append(bytes.Clone(good), 0, 0, 0, 0)); err == nil {
 		t.Error("accepted an extra empty part")
 	}
 	wrongSuite := bytes.Clone(good)
 	wrongSuite[2+len(devicesig.LabelDeviceList)+4] = 2
-	if _, err := Parse(wrongSuite); err == nil {
+	if _, err := devicelist.Parse(wrongSuite); err == nil {
 		t.Error("accepted another suite")
 	}
 }

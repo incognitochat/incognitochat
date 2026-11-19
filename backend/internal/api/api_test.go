@@ -25,6 +25,7 @@ import (
 	"github.com/cloudflare/circl/blindsign/blindrsa"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicelist"
+	"github.com/incognitochat/incognitochat/backend/internal/devicelist/devicelisttest"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
@@ -1030,7 +1031,7 @@ func (d *device) registration(t *testing.T, now time.Time, change func(r map[str
 	if change != nil {
 		change(body, &list, &initData)
 	}
-	listBytes := devicelist.Encode(list)
+	listBytes := devicelisttest.Encode(list)
 	parts := RegisterParts(initData, raw(t, d.ak), d.id, raw(t, d.dsk))
 	msg := devicesig.Message(devicesig.LabelRegister, parts...)
 	defaults := map[string]any{
@@ -1235,7 +1236,7 @@ func TestRegisterRejects(t *testing.T) {
 			list.Expires = list.Issued.Add(time.Hour)
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"list signed by the device key", func(t *testing.T, d *device, r map[string]any, list *devicelist.List, _ *string) {
-			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelist.Encode(*list)))
+			r["deviceListSig"] = b64(signP1363(t, d.dsk, devicelisttest.Encode(*list)))
 		}, http.StatusBadRequest, "invalid_device_list"},
 		{"bad device ID", func(t *testing.T, d *device, r map[string]any, _ *devicelist.List, _ *string) {
 			r["device"] = "short"

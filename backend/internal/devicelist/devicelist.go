@@ -2,8 +2,10 @@
 //
 // The list says which devices belong to the account. Devices sign it with the
 // account key and check each other's copies, so a server that adds a device
-// of its own is caught. The server only checks that a list is well formed and
-// signed, and stores it.
+// of its own is caught. The server only checks that a new account's first
+// list is well formed and signed; it doesn't store it, since with one device
+// per account nothing reads it. (devicelisttest builds lists, as the app
+// does, for tests.)
 //
 // A list is a devicesig message labelled LabelDeviceList with the parts:
 //
@@ -18,7 +20,6 @@ package devicelist
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -57,22 +58,6 @@ type List struct {
 	Issued  time.Time
 	Expires time.Time
 	Entries []Entry
-}
-
-// Encode returns the list's signed bytes.
-func Encode(l List) []byte {
-	parts := [][]byte{
-		{devicesig.Suite},
-		u64(l.Seq),
-		l.Prev[:],
-		u64(uint64(l.Issued.Unix())),
-		u64(uint64(l.Expires.Unix())),
-	}
-	for _, e := range l.Entries {
-		id, _ := ids.Decode(e.DeviceID)
-		parts = append(parts, id[:], e.Key, u64(uint64(e.Added.Unix())))
-	}
-	return devicesig.Message(devicesig.LabelDeviceList, parts...)
 }
 
 // Parse reads a list and checks it is well formed. It doesn't check the
@@ -141,25 +126,6 @@ func Verify(raw, signature []byte, accountKey *ecdsa.PublicKey) (List, error) {
 		return List{}, ErrInvalid
 	}
 	return l, nil
-}
-
-// Hash is what the next list records as its previous list.
-func Hash(raw []byte) [32]byte {
-	return sha256.Sum256(raw)
-}
-
-// Device returns the entry for a device, if the list has one.
-func (l List) Device(id string) (Entry, bool) {
-	for _, e := range l.Entries {
-		if e.DeviceID == id {
-			return e, true
-		}
-	}
-	return Entry{}, false
-}
-
-func u64(v uint64) []byte {
-	return binary.BigEndian.AppendUint64(nil, v)
 }
 
 func readU64(b []byte) (uint64, bool) {
