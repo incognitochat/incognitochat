@@ -128,11 +128,7 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 func (s *Server) authenticate(ctx context.Context, route string, req httpapi.Request) (caller, httpapi.Response, bool) {
 	token := httpapi.Header(req, SessionHeader)
 	if token == "" {
-		// Apps built before SessionHeader send "Authorization: Bearer <token>".
-		var ok bool
-		if token, ok = strings.CutPrefix(httpapi.Header(req, "Authorization"), "Bearer "); !ok {
-			return caller{}, httpapi.Error(http.StatusUnauthorized, "session_expired"), false
-		}
+		return caller{}, httpapi.Error(http.StatusUnauthorized, "session_expired"), false
 	}
 	claims, err := s.Sessions.Verify(token, s.Now())
 	if err != nil {

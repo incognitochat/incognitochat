@@ -452,10 +452,12 @@ resource "aws_lambda_function_url" "api" {
   cors {
     allow_origins = var.client_origins
     allow_methods = ["GET", "POST", "PUT", "DELETE"]
-    # x-session carries the session token (authorization is still allowed
-    # for apps built before it); x-amz-content-sha256 is the body's hash,
-    # which Lambda needs once CloudFront signs requests to this URL.
-    allow_headers = ["authorization", "content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
+    # x-session carries the session token (never authorization, which the
+    # app doesn't send: CloudFront's signature goes there, between it and
+    # this URL, which CORS doesn't cover); x-amz-content-sha256 is the
+    # body's hash, which Lambda needs once CloudFront signs requests to
+    # this URL.
+    allow_headers = ["content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
     # So the app can read how long to wait after 503 unavailable or
     # daily_limit; a browser hides other headers from a page on another
     # origin.
