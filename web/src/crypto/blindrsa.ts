@@ -107,10 +107,22 @@ export interface BlindState {
   inv: bigint;
 }
 
-function randomUnit(n: bigint, k: number): bigint {
+/**
+ * The blinding factor r, uniform over the units mod n (RFC 9474's
+ * random_integer_uniform), by rejection sampling: k random bytes with the
+ * bits above n's length cleared, drawn again while r ≤ 1, r ≥ n or r shares
+ * a factor with n. Never reduced mod n: that would make small values more
+ * likely, and the issuer, who can recover r from a spent token and the blind
+ * signature it made, could look for that bias to link the two.
+ */
+export function randomUnit(n: bigint, k: number): bigint {
+  const excess = 8 * k - n.toString(2).length;
+  if (excess < 0 || excess > 7) throw new Error('bad modulus length');
   for (;;) {
-    const r = os2ip(crypto.getRandomValues(new Uint8Array(k))) % n;
-    if (r > 1n && gcd(r, n) === 1n) return r;
+    const bytes = crypto.getRandomValues(new Uint8Array(k));
+    bytes[0]! &= 0xff >>> excess;
+    const r = os2ip(bytes);
+    if (r > 1n && r < n && gcd(r, n) === 1n) return r;
   }
 }
 
