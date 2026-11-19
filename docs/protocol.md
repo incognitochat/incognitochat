@@ -1097,7 +1097,7 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   edit lists), the `uuid` boxes of XMP and of Sony, Canon and Garmin
   cameras wherever they are, and every top-level `uuid` box are renamed
   `free` and zeroed; `free` and `skip` boxes are zeroed (unless a chunk
-  offset points into one, or the file is fragmented or has a sample table
+  offset points into one, or the file is fragmented or has part of a track
   the app can't read); and the times in the movie, track and media
   headers, a QuickTime preview (`pnot`) and producer reference times
   (`prft`) are zeroed, so nothing else in the file moves. Timed metadata

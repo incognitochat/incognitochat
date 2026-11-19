@@ -328,13 +328,17 @@ it. This is how close it gets.
 - **Attachments can keep metadata.** Photos are redrawn, which drops
   theirs. A video sent "as video" has the usual location, device and time
   tags removed: the MP4/QuickTime metadata boxes, XMP, the boxes Sony,
-  Canon and Garmin cameras add, data some cameras leave in unused space,
-  and the recording times in its headers. Not everything goes, though:
+  Canon and Garmin cameras add, data some cameras leave in unused space
+  (`free` and `skip` boxes), and the recording times in its headers. Not
+  everything goes, though:
   - a GPS or other sensor track recorded alongside the picture, as action
     cameras, drones and dashcams often write;
   - a timecode track, which cameras often set to the time of day;
   - other makers' own data the app doesn't know, and the names of the
     encoder and handlers, which hint at the device;
+  - data in unused space, in a fragmented recording (some dashcams and
+    recording apps, and every MP4 a browser records) or in a video with
+    part of a track the app can't read;
   - everything, in a video the app can't read (a WebM, or an MP4 with
     extra data after its end): that is sent as it was.
 
