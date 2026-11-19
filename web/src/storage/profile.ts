@@ -1,13 +1,18 @@
 // One local profile per Telegram account.
 //
-// A Telegram app gives every Mini App one storage area, shared by all the
-// Telegram accounts logged in to it (Telegram Desktop, the mobile apps and
-// Telegram Web all allow several). Without profiles, a second account on the
-// same app would open the first account's keys, links and conversations.
+// Storage belongs to the web origin, not to a Mini App: whatever opens this
+// page on its origin (this bot, or any bot's web_app button) finds the same
+// storage, shared by all the Telegram accounts logged in to that Telegram
+// app (Telegram Desktop, the mobile apps and Telegram Web all allow
+// several). Without profiles, a second account on the same app would open
+// the first account's keys, links and conversations.
 //
 // So each Telegram account gets its own database, locks and channel, named
-// after a hash of its user ID: the name doesn't show the ID, and the ID is
-// never sent anywhere. Outside Telegram there is one default profile.
+// after a hash of its user ID. The hash only keeps the ID out of plain
+// sight: user IDs are few enough to try them all, so whoever can read the
+// storage can tell which Telegram account a profile is for, and the
+// database's name stays after the account is deleted. The ID is never sent
+// anywhere. Outside Telegram there is one default profile.
 
 import { toBase64Url, utf8 } from '../crypto/encoding';
 import { DB_NAME } from './db';

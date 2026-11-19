@@ -372,6 +372,17 @@ it. This is how close it gets.
   needs crypto-shredding: a key kept outside the app's storage (the phone's
   secure storage, or a passphrase), deleted with the account. The app
   doesn't do that yet.
+- **Any bot can open the real app.** Telegram lets any bot's `web_app`
+  button open any web page, this app's included. Opened that way, the page
+  runs on the app's origin, so it finds the keys on the device (where the
+  Telegram app shares storage between bots, which differs by client) and
+  logs in with the device key, which needs no launch data. The launch data,
+  and the link or invitation it names, then come from that bot, and the app
+  can't tell which bot it was. So a launch never acts by itself: a link
+  shows its screen and opens a chat the user already writes to only on a
+  tap, an invitation joins only on Join, and "seen" waits for a tap in the
+  app. Registration, notices and account lookups take launch data only
+  when it was signed for the app's own bot.
 - **Edits rely on honest apps too.** An edit asks the other side's app to
   replace a message's text and mark it edited; a modified app could keep the
   original, as anyone can keep a screenshot. Only the sender's own messages

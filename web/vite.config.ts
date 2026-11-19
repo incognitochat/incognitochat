@@ -58,8 +58,11 @@ function checkSettings(env: Record<string, string>): BuildSettings {
 // The Content Security Policy is a <meta> tag because GitHub Pages can't send
 // headers. It is only added to production builds: Vite's dev server injects
 // inline scripts that the policy would block. The page may only connect to
-// its own origin, the API, the push socket and the media bucket; media
-// (decrypted attachments) only plays from blob: URLs.
+// its own origin (the sticker art), the API, the push socket and the media
+// bucket; media (decrypted attachments) only plays from blob: URLs. No string
+// may reach an HTML or script sink, and no script may create a Trusted Types
+// policy to let one through: the app writes the DOM only through Preact, and
+// neither it nor its dependencies create one.
 function policy(settings: BuildSettings): string {
   return [
     "default-src 'none'",
@@ -74,6 +77,7 @@ function policy(settings: BuildSettings): string {
     "form-action 'none'",
     "object-src 'none'",
     "require-trusted-types-for 'script'",
+    "trusted-types 'none'",
   ].join('; ');
 }
 

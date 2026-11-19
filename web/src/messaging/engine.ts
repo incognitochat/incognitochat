@@ -1483,8 +1483,9 @@ export function createMessaging(deps: MessagingDeps) {
    * TOP_UP_MIN_MS to TOP_UP_MIN_MS + TOP_UP_SPREAD_MS later, not with a send:
    * the server sees which account fetches when, and a fetch right before an
    * anonymous send would say whose it was. What's left meanwhile is enough
-   * for two of the longest messages, the largest upload, or a few new
-   * chats; only more than that in one burst, or a top-up that failed or
+   * for two of the longest messages, an upload of 25 MiB, or a few new
+   * chats; only more than that in one burst (a larger upload included: the
+   * largest, 50 MiB, costs 51 media tokens), or a top-up that failed or
    * didn't run, has a send fetch first. Nothing once stopped (stop()): a
    * send still under way then starts no timer.
    */
@@ -1566,10 +1567,11 @@ export function createMessaging(deps: MessagingDeps) {
         }
         // A refill that brought nothing: give up rather than ask again.
         if (refilled) throw new NoTokens();
-        // Out of tokens: fetching right before an upload is a timing hint,
-        // but the wallet is normally refilled well ahead (maintain(),
-        // refillSoon()), with what a 25 MiB file costs. Not if, by
-        // then, another upload's refill has brought what this one needs.
+        // Out of tokens: fetching right before an upload is a timing hint.
+        // The wallet is refilled well ahead (maintain(), refillSoon()), but
+        // only to what a 25 MiB file costs, at least: a larger upload (the
+        // largest costs 51) can still find it short. Not if, by then,
+        // another upload's refill has brought what this one needs.
         try {
           const needed = count - taken.length;
           await refillTokens(db, session, mediaIssuer, Math.min(MAX_BATCH, Math.max(MEDIA_BATCH, needed)), seconds(), 'media', needed);

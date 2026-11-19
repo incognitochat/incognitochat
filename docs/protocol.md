@@ -1389,7 +1389,9 @@ moment 10 to 90 seconds later, not with the send, since the issuer sees
 which account fetches when. Media tokens likewise: once an upload leaves
 fewer than 26 (what a 25 MiB file costs), a batch of 30 comes 10 to
 90 seconds later. A send or upload that finds the wallet short fetches
-right then, as a last resort. A send or upload that has the tokens it
+right then, as a last resort. For uploads that isn't rare: a topped-up
+wallet holds 26 to 55 media tokens, and the largest upload (50 MiB) costs
+51. A send or upload that has the tokens it
 needs never waits for a batch being fetched, so it doesn't go out just
 after that request is answered. The server signs a batch whole or not at
 all, so when it has said fewer than a batch of send tokens are left today,

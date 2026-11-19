@@ -35,9 +35,9 @@ so the app is built so that anyone can check what is actually served.
   turn it off: whoever holds it can keep the site from updating, or roll it
   back to an older build of `main`, but can't publish anything else.
 - **Locked down at runtime.** A strict Content Security Policy allows only the
-  app's own scripts, and connections only to the API, the socket and the
-  attachment bucket. The app loads no third-party code, and no code or settings
-  from the backend.
+  app's own scripts, and connections only to the API, the socket, the
+  attachment bucket and the app's own origin (for the sticker art). The app
+  loads no third-party code, and no code or settings from the backend.
 
 ## Checking a live site
 

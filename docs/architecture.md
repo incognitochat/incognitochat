@@ -398,7 +398,9 @@ The panel under the message box has emoji and stickers, as in Telegram.
   never opened or answered goes 31 days after the last thing came for it.
   How many messages one chat keeps isn't limited yet.
 - **Lockdown:** a strict Content Security Policy (only the app's own scripts;
-  connections only to the API, the socket and the bucket), Trusted Types, one
+  connections only to the API, the socket, the bucket and the app's own
+  origin, for the sticker art), Trusted Types (no string reaches an HTML or
+  script sink, and no script may create a policy to let one through), one
   deterministic JavaScript file, and no code or settings loaded from the
   backend.
 - **Languages:** English and Persian, right-to-left included, with Telegram's
