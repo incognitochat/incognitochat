@@ -82,11 +82,15 @@ func invocation(log *slog.Logger, router *httpapi.Router) func(context.Context, 
 	return awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, router.Serve))
 }
 
+// envNames are the environment variables the function must have.
+var envNames = []string{
+	"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
+	"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY",
+	"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY",
+}
+
 func setup(ctx context.Context) (*api.Server, error) {
-	env, err := config.Env(os.Getenv,
-		"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
-		"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY",
-		"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY")
+	env, err := config.Env(os.Getenv, envNames...)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +101,18 @@ func setup(ctx context.Context) (*api.Server, error) {
 	params, err := config.Load(ctx, ssm.NewFromConfig(aws),
 		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"],
 		env["PARAM_MEDIA_ISSUER_KEY"], env["PARAM_PREVIOUS_ISSUER_KEY"], env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"])
+	if err != nil {
+		return nil, err
+	}
+	return newServer(aws, os.Getenv, params)
+}
+
+// newServer builds the server from the function's environment (getenv) and
+// the parameters setup loaded (params, by their names in the environment):
+// it checks the keys and wires each store and client to its table,
+// function or bucket. It makes no AWS call.
+func newServer(aws awsv2.Config, getenv func(string) string, params map[string]string) (*api.Server, error) {
+	env, err := config.Env(getenv, envNames...)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +151,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same
 	// one their account stores, so the plain IDs go no further than here.
-	adminIDs, err := config.TelegramIDs(os.Getenv("ADMIN_TELEGRAM_IDS"))
+	adminIDs, err := config.TelegramIDs(getenv("ADMIN_TELEGRAM_IDS"))
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +180,7 @@ func setup(ctx context.Context) (*api.Server, error) {
 		Limits:      &ephemeral.Limiter{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Pepper:      pepper,
 		Now:         now,
-		InviteOnly:  config.InviteOnly(os.Getenv("INVITE_ONLY")),
+		InviteOnly:  config.InviteOnly(getenv("INVITE_ONLY")),
 		Admins:      admins,
 		Inbox:       &inbox.Store{DB: db, Table: env["TABLE_MESSAGES"]},
 		Issuer:      tokenIssuer,

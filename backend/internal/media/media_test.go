@@ -157,6 +157,43 @@ func TestStored(t *testing.T) {
 	}
 }
 
+func TestDelete(t *testing.T) {
+	// S3 answers 204 to a DELETE whether or not the key is there; one the
+	// role may not delete is refused.
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Path == "/b/m/denied" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`<Error><Code>AccessDenied</Code></Error>`))
+			return
+		}
+		deleted = append(deleted, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	client := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String(srv.URL),
+		UsePathStyle: true,
+		Credentials:  credentials.NewStaticCredentialsProvider("AKIDEXAMPLE", "secret", ""),
+	})
+	bucket := &Bucket{S3: client, Name: "b"}
+	for _, id := range []string{"there", "gone"} {
+		if err := bucket.Delete(context.Background(), id); err != nil {
+			t.Errorf("Delete(%s) = %v", id, err)
+		}
+	}
+	if len(deleted) != 2 || deleted[0] != "/b/m/there" || deleted[1] != "/b/m/gone" {
+		t.Errorf("deleted %v", deleted)
+	}
+	if err := bucket.Delete(context.Background(), "denied"); err == nil {
+		t.Error("a refused delete succeeded")
+	}
+}
+
 func TestPaddedSize(t *testing.T) {
 	for _, size := range []int64{16 << 10, 32 << 10, 64 << 10, 128 << 10, 256 << 10, 512 << 10, 1 << 20, 2 << 20, 7 << 20, MaxSize} {
 		if !PaddedSize(size) {
