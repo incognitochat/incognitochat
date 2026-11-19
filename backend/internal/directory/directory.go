@@ -70,6 +70,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 )
 
@@ -842,10 +843,16 @@ type ownedItem struct {
 func (s *Store) deleteOwned(ctx context.Context, accountID string, items []ownedItem) error {
 	var mu sync.Mutex
 	var first error
-	var wg sync.WaitGroup
-	next := make(chan ownedItem)
+	var workers awsconf.Workers
+	// All queued at once, so a worker that panics (awsconf.Workers) can't
+	// leave this waiting on it.
+	next := make(chan ownedItem, len(items))
+	for _, it := range items {
+		next <- it
+	}
+	close(next)
 	for range min(sharedParallel, len(items)) {
-		wg.Go(func() {
+		workers.Go(func() {
 			for it := range next {
 				var err error
 				if it.keep {
@@ -875,11 +882,7 @@ func (s *Store) deleteOwned(ctx context.Context, accountID string, items []owned
 			}
 		})
 	}
-	for _, it := range items {
-		next <- it
-	}
-	close(next)
-	wg.Wait()
+	workers.Wait()
 	return first
 }
 

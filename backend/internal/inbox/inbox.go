@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/envelope"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
@@ -317,8 +318,8 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var (
-		wg sync.WaitGroup
-		mu sync.Mutex
+		workers awsconf.Workers
+		mu      sync.Mutex
 	)
 	slots := make(chan struct{}, ackParallel)
 	for _, id := range itemIDs {
@@ -330,9 +331,8 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 			<-slots
 			break
 		}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
+		workers.Go(func() {
+			defer func() { <-slots }()
 			_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 				TableName: &s.Table,
 				Key: map[string]types.AttributeValue{
@@ -350,9 +350,9 @@ func (s *Store) Ack(ctx context.Context, accountID, deviceID string, itemIDs []s
 			case err != nil:
 				failed = append(failed, id)
 			}
-		}()
+		})
 	}
-	wg.Wait()
+	workers.Wait()
 	return missing, failed
 }
 

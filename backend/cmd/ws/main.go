@@ -80,9 +80,14 @@ func main() {
 		os.Exit(1)
 	}
 	h.log = log
-	// Lambda gets no error but awsconf.ErrFailed (handle returns none; a
-	// panic is recovered and logged by kind).
-	lambda.Start(awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, h.handle)))
+	lambda.Start(h.invocation())
+}
+
+// invocation is the function's handler: handle, under awsconf.Guard, so
+// Lambda gets no error but awsconf.ErrFailed (handle returns none) and a
+// panic is logged by its kind.
+func (h *handler) invocation() func(context.Context, event) (any, error) {
+	return awsconf.Guard(h.log, awsconf.WithDeadline(requestDeadline, h.handle))
 }
 
 // requestDeadline bounds an invocation's calls (DynamoDB, the socket API,

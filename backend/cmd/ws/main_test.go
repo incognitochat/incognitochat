@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	apitypes "github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
@@ -332,5 +334,31 @@ func TestConnectThenDeliver(t *testing.T) {
 	}
 	if conns, _ := sockets.Connections(ctx, account); len(conns) != 0 {
 		t.Fatalf("left on record: %v", conns)
+	}
+}
+
+// panickingPusher panics, with the account in its value.
+type panickingPusher struct{}
+
+func (panickingPusher) Push(_ context.Context, account string) (bool, error) {
+	panic(errors.New("push to " + account))
+}
+
+// The function's handler is under awsconf.Guard: a delivery that panics
+// reaches Lambda as awsconf.ErrFailed, logged by its kind only (PRV-4).
+func TestInvocationIsGuarded(t *testing.T) {
+	var logs bytes.Buffer
+	h := &handler{pusher: panickingPusher{}, notices: &memNotices{}, log: logx.New(&logs, "ws")}
+	account := ids.New()
+	panicked := func() (v any) {
+		defer func() { v = recover() }()
+		_, _ = lambda.NewHandler(h.invocation()).Invoke(context.Background(), []byte(`{"push":{"account":"`+account+`"}}`))
+		return nil
+	}()
+	if panicked != awsconf.ErrFailed {
+		t.Fatalf("Lambda got %v", panicked)
+	}
+	if logged := logs.String(); strings.Contains(logged, account) || !strings.Contains(logged, `"msg":"handler panicked"`) {
+		t.Fatalf("logged %s", logged)
 	}
 }

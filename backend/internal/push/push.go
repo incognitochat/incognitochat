@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewaymanagementapi/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 )
 
@@ -74,9 +75,9 @@ func (p *Pusher) push(ctx context.Context, account string) (delivered, rounds in
 		round := conns[:min(Fanout, len(conns))]
 		conns = conns[len(round):]
 		var mu sync.Mutex
-		var wg sync.WaitGroup
+		var workers awsconf.Workers
 		for _, c := range round {
-			wg.Go(func() {
+			workers.Go(func() {
 				err := p.post(ctx, account, c)
 				mu.Lock()
 				defer mu.Unlock()
@@ -90,7 +91,7 @@ func (p *Pusher) push(ctx context.Context, account string) (delivered, rounds in
 				}
 			})
 		}
-		wg.Wait()
+		workers.Wait()
 	}
 	return delivered, rounds, errors.Join(errs...)
 }
