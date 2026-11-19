@@ -19,9 +19,13 @@ import {
   deleteMessage,
   dropEmptyConversation,
   dropPendingEdits,
+  dropStrayFiles,
+  dropStrayMessages,
   earlyFor,
   forgetEarly,
   getConversation,
+  getMedia,
+  getMessage,
   getPendingEdits,
   keepEarly,
   lastShown,
@@ -33,8 +37,10 @@ import {
   PAGE,
   pageMessages,
   putConversation,
+  putMedia,
   saveConversation,
   setStatuses,
+  strayConversations,
   unread,
   unreadIds,
   withPreview,
@@ -360,5 +366,73 @@ describe('envelopes that came before the message starting their conversation', (
     // The newest stayed.
     expect(all.at(-1)!.id).toBe('id119');
     expect(all.length).toBeLessThan(10);
+  });
+});
+
+describe('attachments and their messages', () => {
+  const photo = { t: 'photo', s: 3, w: 1, h: 1, m: 'image/jpeg' };
+
+  it('stores one of ours going out with its message, in the same transaction', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    const file = new Uint8Array([1, 2, 3]);
+    await addMessage(db, { id: 'm1', conv: 'c', at: 1, out: true, status: 'sending', file: 'local' }, { text: '', media: photo }, file);
+    expect(await getMedia(db, 'c', 'm1')).toEqual(file);
+    expect(await db.getAllKeys('media')).toEqual([['c', 'm1']]);
+    // Without one, only the message.
+    await addMessage(db, { id: 'm2', conv: 'c', at: 2, out: false, status: 'received', file: 'remote' }, { text: '', media: photo });
+    expect(await db.getAllKeys('media')).toEqual([['c', 'm1']]);
+  });
+
+  it('keeps a fetched file only if its message is still here, and then marks it as here, in one transaction', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await addMessage(db, { id: 'm1', conv: 'c', at: 1, out: false, status: 'received', file: 'remote' }, { text: '', media: photo });
+    const file = new Uint8Array([4, 5, 6]);
+    expect(await putMedia(db, 'c', 'm1', file, { ifMessage: true })).toBe(true);
+    expect(await getMedia(db, 'c', 'm1')).toEqual(file);
+    expect((await getMessage(db, 'c', 'm1'))!.file).toBe('local');
+    // Deleted while it downloaded: nothing is kept.
+    await deleteMessage(db, 'c', 'm1');
+    expect(await putMedia(db, 'c', 'm1', file, { ifMessage: true })).toBe(false);
+    expect(await db.getAllKeys('media')).toEqual([]);
+  });
+});
+
+describe('the upkeep sweep', () => {
+  it('finds messages whose conversation is gone, one step per conversation, and deletes them with their files', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('kept'));
+    await addMessage(db, { id: 'k1', conv: 'kept', at: 1, out: false, status: 'read', file: 'local' }, { text: 'here' });
+    await putMedia(db, 'kept', 'k1', new Uint8Array([1]));
+    // A first message stored by a try that stopped before its conversation was.
+    for (let i = 0; i < 3; i++) await addMessage(db, { id: `s${i}`, conv: 'stray', at: i, out: false, status: 'received', file: 'local' }, { text: 'lost' });
+    await putMedia(db, 'stray', 's0', new Uint8Array([2]));
+    await addMessage(db, { id: 'o1', conv: 'other', at: 5, out: true, status: 'sent' }, { text: 'lost too' });
+    expect(await strayConversations(db)).toEqual(['other', 'stray']);
+    // At most `most` at a time, the rest at the next.
+    expect(await dropStrayMessages(db, 'stray', 2)).toBe(2);
+    expect(await dropStrayMessages(db, 'stray', 2)).toBe(1);
+    expect(await dropStrayMessages(db, 'other', 5)).toBe(1);
+    expect(await strayConversations(db)).toEqual([]);
+    expect(await db.getAllKeys('media')).toEqual([['kept', 'k1']]);
+    // Never a conversation that's here (by the time it looks).
+    expect(await dropStrayMessages(db, 'kept', 5)).toBe(0);
+    expect(await getMessage(db, 'kept', 'k1')).toMatchObject({ text: 'here' });
+  });
+
+  it('deletes files whose message is gone, a few at a time, and leaves those kept from before version 4', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await addMessage(db, { id: 'm1', conv: 'c', at: 1, out: false, status: 'read', file: 'local' }, { text: '' });
+    await putMedia(db, 'c', 'm1', new Uint8Array([1]));
+    // Left by a fetch that finished after its message was deleted (an older version).
+    for (const id of ['x1', 'x2', 'x3']) await db.put('media', new Uint8Array([9]), ['c', id]);
+    // Under the message ID alone, as version 3 kept it.
+    await db.put('media', new Uint8Array([8]), 'legacy');
+    expect(await dropStrayFiles(db, 2)).toBe(2);
+    expect(await dropStrayFiles(db, 2)).toBe(1);
+    expect(await dropStrayFiles(db, 2)).toBe(0);
+    expect(await db.getAllKeys('media')).toEqual(['legacy', ['c', 'm1']]);
   });
 });

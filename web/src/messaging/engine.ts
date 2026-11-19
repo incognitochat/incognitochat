@@ -64,6 +64,8 @@ import {
   deleteMessage,
   dropEmptyConversation,
   dropPendingEdits,
+  dropStrayFiles,
+  dropStrayMessages,
   earlyFor,
   findLinkConversation,
   forgetEarly,
@@ -103,6 +105,7 @@ import {
   setStatuses,
   setText,
   stillSending,
+  strayConversations,
   takeSentAt,
   triedUploadDeletes,
   unread,
@@ -125,6 +128,8 @@ const UPLOAD_DELETE_PARALLEL = 6;
  * uploads up from a copy that can lag a moment behind.
  */
 const UPLOAD_DELETE_AGAIN_MS = 30_000;
+/** The most messages, and the most files, one upkeep's sweep deletes (the rest wait for the next). */
+const SWEEP_MOST = 200;
 const MAX_INBOX_PAGES = 10;
 /** After the server limits this device's inbox fetches, they pause this long, plus up to as much again (its limits are per minute). */
 const SYNC_PAUSE_MS = 30_000;
@@ -323,6 +328,17 @@ export function isPaused(err: unknown): boolean {
   return err instanceof ApiError && (err.code === 'uploads_paused' || err.code === 'downloads_paused');
 }
 
+/**
+ * Whether a send's failure says for sure that its message didn't go out:
+ * the server refused it, or what came before it (a 4xx answer: a cap,
+ * invalid_token, tokens_needed, a bad envelope), or there was nothing to
+ * pay or answer with (NoTokens, NoMailboxes). Not a lost answer, a timeout
+ * or a failing server (5xx): the message may have arrived.
+ */
+function refusedOutright(err: unknown): boolean {
+  return err instanceof NoTokens || err instanceof NoMailboxes || (err instanceof ApiError && err.status >= 400 && err.status < 500);
+}
+
 /** Whether one of our attachments can be sent again: it failed before it was uploaded, and its file is here. */
 export function canResend(m: Pick<MessageView, 'out' | 'status' | 'file' | 'media' | 'legacyFile'>): boolean {
   return m.out && m.status === 'failed' && m.file === 'local' && !!m.media && !m.media.id && !m.legacyFile;
@@ -450,7 +466,7 @@ export function createMessaging(deps: MessagingDeps) {
       const timer = setTimeout(fn, ms);
       return () => clearTimeout(timer);
     });
-  /** Set by stop(): background work (refillSoon, deleting uploads again) starts no more timers. */
+  /** Set by stop(): background work (refillSoon, deleting uploads again) starts no more timers, and upkeep no more steps. */
   let stopped = false;
   const nextRotation = () => now() + ROTATE_MIN + Math.floor(Math.random() * ROTATE_SPREAD);
   /** When a conversation whose link-key fetch failed may fetch again (Unix ms; refreshLinkKey). */
@@ -551,8 +567,8 @@ export function createMessaging(deps: MessagingDeps) {
     if (!conversation) throw new Error('unknown conversation');
     const id = newId();
     const at = await stampIn(conv, id);
-    await putMedia(db, conv, id, out.file);
-    await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media));
+    // The file with its message, in one transaction: never one without the other.
+    await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media), out.file);
     await onStored?.(id);
     await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
     await deliverMedia(conv, id, at, out, caption, replyTo, onProgress);
@@ -596,7 +612,10 @@ export function createMessaging(deps: MessagingDeps) {
    * either fails. If the message was deleted meanwhile (here, or with its
    * chat), it stops quietly, with no error to show: before the upload, if
    * that's still waiting its turn, or after it, or once it failed; an upload
-   * that was made is then deleted from the server.
+   * that was made is then deleted from the server. So is one whose message
+   * failed before it could go out, or was refused outright
+   * (refusedOutright); after any other failure it may have arrived, and its
+   * upload stays.
    */
   async function deliverMedia(
     conv: string,
@@ -609,18 +628,24 @@ export function createMessaging(deps: MessagingDeps) {
   ): Promise<void> {
     /** The upload, once paid for: deleted if the message is. */
     let made: Media | undefined;
+    /** Set once the message, naming the upload, may go out: from then on, only a refusal says it didn't. */
+    let going = false;
     try {
       const media = await upload(out, () => stillSending(db, conv, id), (m) => (made = m), onProgress);
       // Checked and stored under the chat's send lock, which deleting it
       // takes too: it's either deleted before this, and not sent, or after
       // it was sent.
       await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media }, {
-        still: () => patchMessage(db, conv, id, 'sending', { media }),
+        still: async () => (going = await patchMessage(db, conv, id, 'sending', { media })),
       });
       await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
       if (err instanceof Cancelled || !(await stillSending(db, conv, id))) return deleteUploadsLater([made], true);
       await setMessageStatus(db, conv, id, 'failed');
+      // The upload is of use to no one if its message surely didn't go out:
+      // it failed before it could, or was refused. One that may have arrived
+      // (no answer, the server failing) stays, for the other side to fetch.
+      if (!going || refusedOutright(err)) await deleteUploadsLater([made], true);
       throw err;
     }
   }
@@ -718,7 +743,8 @@ export function createMessaging(deps: MessagingDeps) {
    * message or the conversation, or it expires.
    *
    * Returns where the file is now: 'gone' if the server has no such upload
-   * (expired, or deleted); 'broken' if the bucket refuses it (S3 answers 403
+   * (expired, or deleted), or the message is no longer here (deleted while
+   * its file downloaded); 'broken' if the bucket refuses it (S3 answers 403
    * or 404 for a file never uploaded, but also for a URL that expired
    * before it was used: a tap tries again, with a fresh URL), or if the
    * upload isn't what the message says (another size, or it doesn't decrypt
@@ -757,9 +783,9 @@ export function createMessaging(deps: MessagingDeps) {
       } catch {
         return mark('broken');
       }
-      await putMedia(db, conv, id, file);
-      await setFile(db, conv, id, 'local');
-      return 'local';
+      // Kept, and marked as here, only if its message still is: one deleted
+      // while its file downloaded (here, or by their delete) is gone.
+      return (await putMedia(db, conv, id, file, { ifMessage: true })) ? 'local' : 'gone';
     });
   }
 
@@ -1882,8 +1908,11 @@ export function createMessaging(deps: MessagingDeps) {
     fresh?: ConversationRecord,
     early: Message[] = [],
   ): Promise<boolean> {
+    // A new conversation is stored first, out of the list (hidden), so its
+    // first message is never kept without it: if taking it in stops
+    // halfway, the envelope, delivered again, finds this one.
+    if (fresh) await saveConversation(db, fresh);
     if (early.length > 0) {
-      if (fresh) await saveConversation(db, fresh);
       for (const e of early) await takeIn(item, e, entry, t, local);
       await forgetEarly(db, t - MAX_AGE, { link: entry.link!.id, wire: message.conv, from: message.from });
       fresh = undefined;
@@ -1918,8 +1947,10 @@ export function createMessaging(deps: MessagingDeps) {
     // Taken in already: delivered again (by a server that kept it, or a
     // stale inbox read), maybe to another copy of the app. Or a message this
     // conversation has (from before envelopes taken in were remembered).
-    // Dropped before anything changes.
-    if (remembers(before.applied, tag) || (await hasMessage(db, conv.id, message.id))) return false;
+    // Dropped before anything changes. Not for one out of the list, which has
+    // no messages: one there was stored by a try that stopped before the
+    // conversation was written, and this takes it in again.
+    if (remembers(before.applied, tag) || (!conv.hidden && (await hasMessage(db, conv.id, message.id)))) return false;
     if (entry.conv && entry.pub === conv.myKey) {
       // They have our current key, so they no longer write to older ones:
       // those go once anything written to them has expired from the inbox.
@@ -2300,12 +2331,30 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
+   * Deletes what a change that stopped halfway left on this device with
+   * nothing to show it (store.ts): messages whose conversation isn't here,
+   * with their files, and files whose message isn't. At most SWEEP_MOST of
+   * each per upkeep; the rest go at the next. A conversation's messages
+   * only under its lock, which taking a message in holds: one being started
+   * has its record by the time it's free. Needs no network.
+   */
+  async function sweep(): Promise<void> {
+    let left = SWEEP_MOST;
+    for (const conv of await strayConversations(db)) {
+      if (left <= 0) break;
+      left -= await withLock(`send:${conv}`, () => dropStrayMessages(db, conv, left));
+    }
+    await dropStrayFiles(db, SWEEP_MOST);
+  }
+
+  /**
    * Upkeep, run at a random moment after the app opens: tops up the mailbox
    * pool and the token wallets (as refillSoon does once they run low), so a
    * send rarely has to fetch first; deletes old keys whose time has come
    * (telling other copies, onKeysDeleted); forgets what conversations
    * remember of envelopes too old to come again, and empty conversations
    * through our link nothing more can come for that we never opened;
+   * deletes messages and files left with nothing to show them (sweep);
    * settles a link change whose answer was lost; fills in what older
    * versions didn't keep (links' intro mailboxes and keys); gives the link
    * a new key when due.
@@ -2314,6 +2363,7 @@ export function createMessaging(deps: MessagingDeps) {
     const steps = [
       forgetExpired,
       forgetEmpty,
+      sweep,
       flushUploadDeletes,
       healMailboxes,
       topUpPool,
@@ -2338,9 +2388,11 @@ export function createMessaging(deps: MessagingDeps) {
     ];
     // Each on its own: one that fails (out of reach, or a daily limit
     // reached) doesn't keep the others from running. The first failure is
-    // reported once all have run.
+    // reported once all have run. Once stopped (stop()), no more start: the
+    // one under way is the last.
     let failure: { err: unknown } | null = null;
     for (const step of steps) {
+      if (stopped) break;
       try {
         await step();
       } catch (err) {

@@ -218,13 +218,17 @@ explained in [security.md](security.md#what-still-leaks).
   attachments forever, for a month or for a week; clear a chat's or all of
   them; and choose which kinds download by themselves. A cleared attachment
   can be fetched again only while the server still holds it.
-- **Delete their account** in the app (on the Link tab). It ends at once, and
+- **Delete their account** in the app (on the Link tab). First the app
+  deletes from the server the attachments they received: those of the
+  messages on the device, and of those still waiting for it, which it
+  fetches first. Any it couldn't delete, or never saw (one that arrived
+  later), expire within 30 days, and so do the ones they sent, which stay
+  for the other side to fetch. Then the account ends at once, and
   everything the server holds for it is deleted within minutes (the link,
-  mailboxes, waiting messages and attachments, invitation codes, keys, and
-  the hash of the Telegram ID; only its link signing keys' fingerprints
-  stay, naming nobody), then the app clears everything on the
-  device (see On the device for what that leaves). They can set up a new
-  account later.
+  mailboxes, waiting messages, invitation codes, keys, and the hash of the
+  Telegram ID; only its link signing keys' fingerprints stay, naming
+  nobody), then the app clears everything on the device (see On the device
+  for what that leaves). They can set up a new account later.
 - **Set up again on another device** if they can't use theirs any more. This
   replaces the old account: its link goes and its mailboxes stop at once, and
   they're deleted within minutes while the new device's app is open.

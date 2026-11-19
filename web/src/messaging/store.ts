@@ -389,13 +389,20 @@ function placeAfter(same: MessageRecord[]): number {
   return same.reduce((last, m) => Math.max(last, m.order ?? 0), -1) + 1;
 }
 
-/** Stores a message, after any of its conversation with the same `at`. */
-export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed' | 'order'>, body: MessageBody): Promise<void> {
+/**
+ * Stores a message, after any of its conversation with the same `at`; with
+ * `file`, its attachment too (one of ours going out), in the same
+ * transaction: neither is kept without the other.
+ */
+export async function addMessage(db: Database, record: Omit<MessageRecord, 'sealed' | 'order'>, body: MessageBody, file?: Uint8Array<ArrayBuffer>): Promise<void> {
   const sealed = await sealBody(db, record.id, body);
+  const sealedFile = file && (await sealFile(db, record.id, file));
   // Read and written in one transaction, so two stored at once don't take the same place.
-  const tx = db.transaction('messages', 'readwrite');
-  const order = placeAfter(await tx.store.index('byConversation').getAll([record.conv, record.at]));
-  await tx.store.put({ ...record, order, sealed });
+  const tx = db.transaction(['messages', 'media'], 'readwrite');
+  const messages = tx.objectStore('messages');
+  const order = placeAfter(await messages.index('byConversation').getAll([record.conv, record.at]));
+  await messages.put({ ...record, order, sealed });
+  if (sealedFile) await tx.objectStore('media').put(sealedFile, [record.conv, record.id]);
   await tx.done;
 }
 
@@ -488,22 +495,39 @@ export async function deleteMessage(db: Database, conv: string, id: string): Pro
   await tx.done;
 }
 
-/** Keeps a message's attachment on this device, sealed under the storage key. */
-export async function putMedia(db: Database, conv: string, id: string, file: Uint8Array<ArrayBuffer>): Promise<void> {
+/** An attachment's file sealed under the storage key, bound to its message's ID. */
+async function sealFile(db: Database, id: string, file: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   const iv = randomBytes(IV);
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8(`media:${id}`) }, await storageKey(db), file);
+  return concat(iv, new Uint8Array(ct));
+}
+
+/**
+ * Keeps a message's attachment on this device, sealed under the storage
+ * key. With ifMessage (a file just fetched), only if the message is still
+ * here, checked in the same transaction, which then also marks its file as
+ * here (`local`): one deleted while its file downloaded leaves no file
+ * behind. Returns whether the file was kept.
+ */
+export async function putMedia(db: Database, conv: string, id: string, file: Uint8Array<ArrayBuffer>, options: { ifMessage?: boolean } = {}): Promise<boolean> {
+  const sealed = await sealFile(db, id, file);
   const tx = db.transaction(['messages', 'media'], 'readwrite');
   const messages = tx.objectStore('messages');
   const media = tx.objectStore('media');
-  // A file kept from before version 4 (cleared and fetched again, say) moves to the current key.
   const record = await messages.get([conv, id]);
-  for (const key of fileKeys(conv, id, record)) await media.delete(key);
-  if (record?.legacyFile) {
-    const { legacyFile: _, ...rest } = record;
-    await messages.put(rest);
+  if (options.ifMessage && !record) {
+    await tx.done;
+    return false;
   }
-  await media.put(concat(iv, new Uint8Array(ct)), [conv, id]);
+  // A file kept from before version 4 (cleared and fetched again, say) moves to the current key.
+  for (const key of fileKeys(conv, id, record)) await media.delete(key);
+  if (record && (record.legacyFile || options.ifMessage)) {
+    const { legacyFile: _, ...rest } = record;
+    await messages.put(options.ifMessage ? { ...rest, file: 'local' } : rest);
+  }
+  await media.put(sealed, [conv, id]);
   await tx.done;
+  return true;
 }
 
 /** A message's attachment, if it's on this device. */
@@ -979,6 +1003,81 @@ export async function clearMessages(
   }
   await tx.done;
   return { left, unread, removed };
+}
+
+// Upkeep's sweep for what a change that stopped halfway (the app closed, or
+// storage refused a write), in this version or an older one, can leave with
+// nothing to show it and nothing else to delete it: messages whose
+// conversation isn't here, and files whose message isn't. Only on this
+// device: an upload such a message names stays on the server, since its
+// envelope, taken in again, may have brought the same message into a
+// conversation that is here. Files kept under the message ID alone, from
+// before version 4, are left: nothing stores files so any more.
+
+/**
+ * The conversations that messages are kept under but that aren't here. Only
+ * keys are read, and one step per conversation: the index is skipped past
+ * all of one's messages at once.
+ */
+export async function strayConversations(db: Database): Promise<string[]> {
+  const tx = db.transaction(['conversations', 'messages']);
+  const here = new Set(await tx.objectStore('conversations').getAllKeys());
+  const strays: string[] = [];
+  let cursor = await tx.objectStore('messages').index('byConversation').openKeyCursor();
+  while (cursor) {
+    const conv = cursor.key[0];
+    if (!here.has(conv)) strays.push(conv);
+    // Past every time of this conversation's: arrays sort after numbers.
+    cursor = await cursor.continue([conv, []] as unknown as [string, number]);
+  }
+  await tx.done;
+  return strays;
+}
+
+/**
+ * Deletes up to `most` messages of a conversation that isn't here, with
+ * their files, in one transaction; none if the conversation is here (by
+ * now). Returns how many went.
+ */
+export async function dropStrayMessages(db: Database, conv: string, most: number): Promise<number> {
+  const tx = db.transaction(['conversations', 'messages', 'media'], 'readwrite');
+  let removed = 0;
+  if ((await tx.objectStore('conversations').getKey(conv)) === undefined) {
+    let cursor = await tx.objectStore('messages').index('byConversation').openCursor(allOf(conv));
+    for (; cursor && removed < most; cursor = await cursor.continue()) {
+      for (const key of fileKeys(conv, cursor.value.id, cursor.value)) await tx.objectStore('media').delete(key);
+      await cursor.delete();
+      removed++;
+    }
+  }
+  await tx.done;
+  return removed;
+}
+
+/**
+ * Deletes up to `most` files whose message isn't here, each only if it
+ * still isn't (checked in the same transaction). Only keys are read, all
+ * looked up at once. Returns how many went.
+ */
+export async function dropStrayFiles(db: Database, most: number): Promise<number> {
+  if (most <= 0) return 0;
+  const read = db.transaction(['media', 'messages']);
+  // Array keys only: those from before version 4 are strings, which sort first.
+  const keys = (await read.objectStore('media').getAllKeys(IDBKeyRange.lowerBound([]))) as [string, string][];
+  const found = await Promise.all(keys.map((key) => read.objectStore('messages').getKey(key)));
+  await read.done;
+  const strays = keys.filter((_, i) => found[i] === undefined).slice(0, most);
+  if (strays.length === 0) return 0;
+  const tx = db.transaction(['media', 'messages'], 'readwrite');
+  const gone = await Promise.all(
+    strays.map(async (key) => {
+      if ((await tx.objectStore('messages').getKey(key)) !== undefined) return false;
+      await tx.objectStore('media').delete(key);
+      return true;
+    }),
+  );
+  await tx.done;
+  return gone.filter(Boolean).length;
 }
 
 // Uploads to delete from the server, kept until done, so deleting survives

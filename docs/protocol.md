@@ -255,9 +255,13 @@ take the server's word: it keeps the chats readable, as when signed out
 confirmation. Until the user confirms that, no answer from the server,
 `login_refused` included, deletes anything on the device. So an account is
 never left half deleted and in use, and nothing on the device is deleted on
-the server's word. Before its first request, the app deletes the uploads
-still waiting for it (`POST /media/{id}/delete`, which needs no login);
-afterwards it deletes everything on the device. The other side of each
+the server's word. Before its first request, the app fetches the messages
+still waiting for the device (best effort, and only then: the server takes
+no other request once the deletion has started), then deletes the uploads
+of the attachments it received (`POST /media/{id}/delete`, which needs no
+login), trying those that fail a few more times, for about 7 seconds at
+most; any it couldn't delete, or never saw, expire within 30 days.
+Afterwards it deletes everything on the device. The other side of each
 conversation isn't told.
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
@@ -1044,6 +1048,11 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   copy that can lag a moment behind, so for these the app takes a first
   `not_found` as "not yet" and asks once more about 30 seconds later (or
   on the next start).
+- **Failed after the upload.** If its message surely didn't go out (it
+  failed before it could, or the server refused it with a `4xx`, or there
+  were no tokens or no mailbox to send it with), the upload is deleted the
+  same way. After any other failure (no answer, a `5xx`) the message may
+  have arrived, and the upload stays for the other side to fetch.
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),
@@ -1339,11 +1348,11 @@ moment 10 to 90 seconds later, not with the send, since the issuer sees
 which account fetches when. Media tokens likewise: once an upload leaves
 fewer than 26 (what the largest upload costs), a batch of 30 comes 10 to
 90 seconds later. A send or upload that finds the wallet short fetches
-right then, as a last resort. A send or upload taking tokens never waits
-for a batch being fetched, so it doesn't go out just after that request
-is answered. The server signs a batch whole or not at all, so when it has
-said fewer than a batch of send tokens are left today, the app asks for
-just those.
+right then, as a last resort. A send or upload that has the tokens it
+needs never waits for a batch being fetched, so it doesn't go out just
+after that request is answered. The server signs a batch whole or not at
+all, so when it has said fewer than a batch of send tokens are left today,
+the app asks for just those.
 
 A token is accepted in its own week and the next, and only once: the server
 remembers spent nonces until then. A send refused by a mailbox's cap (30 a
