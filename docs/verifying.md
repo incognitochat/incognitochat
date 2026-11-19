@@ -169,7 +169,10 @@ gh attestation verify dist/api.zip --repo <org>/<org>
 ```
 
 The hashes printed should match the deploy log, and the attestation proves
-the bundle was built by this repository's workflow.
+the bundle was built by this repository's workflow. The script builds with
+the Go toolchain `backend/go.mod` pins (its `toolchain` line), whatever Go is
+installed: with another version, Go downloads the pinned one first, checked
+against Go's checksum database (the installed Go must be 1.21 or later).
 
 What this doesn't prove: whoever controls the AWS account can switch code
 signing off and deploy something else, and only the account's own records
