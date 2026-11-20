@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.6.0](https://github.com/incognitochat/incognitochat/compare/v2.5.0...v2.6.0) (2026-11-20)
+
+
+### Features
+
+* delete accounts nobody has used for a year ([#194](https://github.com/incognitochat/incognitochat/issues/194)) ([da65d1b](https://github.com/incognitochat/incognitochat/commit/da65d1b8a58422a4d4278037f8bcfb071bf13069))
+* delete attachments in batches ([#188](https://github.com/incognitochat/incognitochat/issues/188)) ([03282b6](https://github.com/incognitochat/incognitochat/commit/03282b6a1ef48a9806e3e9108f139d3cce3e6603))
+* **infra:** an audit trail of account changes, with alerts ([#187](https://github.com/incognitochat/incognitochat/issues/187)) ([b407948](https://github.com/incognitochat/incognitochat/commit/b4079482856b888658b8dac30602aaa3dad39ad4))
+* keep deleted link IDs, forget notice data when off, and clearer refusals ([#189](https://github.com/incognitochat/incognitochat/issues/189)) ([919ce08](https://github.com/incognitochat/incognitochat/commit/919ce08d82400d0a16ec7718714dcdada0b0ab00))
+* keep the admins' Telegram IDs in encrypted storage ([#191](https://github.com/incognitochat/incognitochat/issues/191)) ([fe3a61a](https://github.com/incognitochat/incognitochat/commit/fe3a61adbba66f041f80cdf4012eed235cab1d16))
+* **web:** correct English counts, and a language switch ([#196](https://github.com/incognitochat/incognitochat/issues/196)) ([bbcb4cc](https://github.com/incognitochat/incognitochat/commit/bbcb4cc57b413b15ee655ead62dcce47cc2e1d47))
+* **web:** keep the draft during an edit, and resend messages that didn't go ([#195](https://github.com/incognitochat/incognitochat/issues/195)) ([6a1b203](https://github.com/incognitochat/incognitochat/commit/6a1b2038c204045f449644d4927b46968a8768e7))
+* **web:** readable colours, and keyboard and screen-reader use ([#193](https://github.com/incognitochat/incognitochat/issues/193)) ([e364600](https://github.com/incognitochat/incognitochat/commit/e364600869aa51ce6173141ce2fc829b9a619649))
+
+
+### Bug Fixes
+
+* **ci:** stop the version check failing when grep stops early ([#197](https://github.com/incognitochat/incognitochat/issues/197)) ([0feed58](https://github.com/incognitochat/incognitochat/commit/0feed58ee474d90f131d523a13978aa7221c0757))
+* **media:** attachments don't hint which phone sent them ([#192](https://github.com/incognitochat/incognitochat/issues/192)) ([167dd17](https://github.com/incognitochat/incognitochat/commit/167dd175b9f8dbed4c971694a2a0ce68112cea59))
+
 ## [2.5.0](https://github.com/incognitochat/incognitochat/compare/v2.4.0...v2.5.0) (2026-11-19)
 
 
