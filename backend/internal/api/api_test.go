@@ -64,6 +64,7 @@ type memAccount struct {
 	noticesOff bool
 	deleting   bool
 	leftovers  []string // accounts it replaced, still to clean up
+	lastUse    string   // the month it was last used (directory.Store.Used)
 }
 
 type memCode struct {
@@ -100,6 +101,8 @@ type memDirectory struct {
 	goneOnDelete bool
 	// leased are the accounts a step holds (Lease).
 	leased map[string]bool
+	// useRecorded is the newest month a login recorded (UseRecorded).
+	useRecorded string
 }
 
 func newMemDirectory() *memDirectory {
@@ -622,7 +625,24 @@ func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (b
 
 func (m *memDirectory) put(n directory.NewAccount) {
 	m.telegram[n.TelegramHash] = n.ID
-	m.accounts[n.ID] = &memAccount{key: n.AccountKey, th: n.TelegramHash, devices: map[string][]byte{n.DeviceID: n.DeviceKey}}
+	m.accounts[n.ID] = &memAccount{key: n.AccountKey, th: n.TelegramHash, devices: map[string][]byte{n.DeviceID: n.DeviceKey}, lastUse: n.Month}
+}
+
+func (m *memDirectory) Used(_ context.Context, account, month string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.accounts[account]; ok && !a.replaced && !a.deleting && a.lastUse < month {
+		a.lastUse = month
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *memDirectory) UseRecorded(_ context.Context, month string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.useRecorded = max(m.useRecorded, month)
+	return nil
 }
 
 func (m *memDirectory) Create(_ context.Context, n directory.NewAccount) error {
@@ -677,7 +697,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
 		Notices: a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
-		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
+		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers), LastUse: a.lastUse,
 	}, nil
 }
 

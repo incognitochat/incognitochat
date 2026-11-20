@@ -63,6 +63,10 @@ type accountResponse struct {
 	// Deleting says the account is being deleted (DELETE /account has
 	// started): the app carries on with it.
 	Deleting bool `json:"deleting"`
+	// Expired says, with Deleting, that the expiry started it: nobody used
+	// the account for 12 months (expiry.go). The app says so, rather than
+	// that something may be wrong.
+	Expired bool `json:"expired"`
 	// Cleanup says what is left of an account this one replaced is still
 	// to be deleted: the app asks for that (POST /account/cleanup).
 	Cleanup bool `json:"cleanup"`
@@ -90,6 +94,7 @@ func (s *Server) account(ctx context.Context, _ httpapi.Request, c caller) httpa
 		Notices:        c.device.Notices,
 		NoticesRefused: c.device.NoticesRefused,
 		Deleting:       c.device.Deleting,
+		Expired:        c.device.Deleting && c.device.Expired,
 		Cleanup:        len(c.device.Leftovers) > 0,
 	})
 }

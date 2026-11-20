@@ -143,11 +143,13 @@ export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'gene
 /**
  * Why the server no longer takes this device: it refused the login (the
  * device or its account is gone), or says the account was replaced, or is
- * being deleted when this app didn't start that here. Never checked, so
- * asked again at every launch; nothing is deleted for it (a deletion is
- * finished only after the typed confirmation).
+ * being deleted when this app didn't start that here; or expired: its
+ * expiry is deleting the account, or did (nobody used it for 12 months).
+ * Never checked, so asked again at every launch; nothing is deleted for it
+ * (a deletion is finished, or a new setup made, only after the typed
+ * confirmation).
  */
-type SignedOutReason = 'refused' | 'replaced' | 'deleting';
+type SignedOutReason = 'refused' | 'replaced' | 'deleting' | 'expired';
 
 /** A short message on the home screen after an action. */
 export type HomeNotice =
@@ -616,6 +618,11 @@ export function createApp(deps: Deps) {
       // (its marker expires) and then only refuses the device, but the
       // warning stays.
       if (recorded?.state === 'replaced' && err instanceof ApiError && err.code === 'login_refused') return showSignedOut('replaced');
+      // Being deleted for going unused, then gone: deleted, as the server
+      // said, not "something may be wrong".
+      if (recorded?.state === 'refused' && recorded.expired && err instanceof ApiError && err.code === 'login_refused') {
+        return showSignedOut('expired');
+      }
       if (handleGone(err)) return;
       // Couldn't ask, with a deletion the user confirmed here: its own
       // screen (Try again, the chats, deleting here only), whatever the
@@ -624,7 +631,15 @@ export function createApp(deps: Deps) {
       // Couldn't ask: as the server last said, until it can be asked again.
       const last =
         signedOut ??
-        (recorded?.state === 'replaced' ? 'replaced' : recorded?.state === 'refused' ? (recorded.deleting ? 'deleting' : 'refused') : null);
+        (recorded?.state === 'replaced'
+          ? 'replaced'
+          : recorded?.state === 'refused'
+            ? recorded.expired
+              ? 'expired'
+              : recorded.deleting
+                ? 'deleting'
+                : 'refused'
+            : null);
       if (last) return showSignedOut(last, true);
       // Offline or the server is down: the device still works on what it has.
       offline = true;
@@ -1662,7 +1677,7 @@ export function createApp(deps: Deps) {
     if (!isSetUp(account)) return;
     // Not one already under way (confirmed here before, or the server says
     // so): the server may take nothing else for it now.
-    const first = signedOut !== 'deleting' && !(await deletionConfirmed());
+    const first = signedOut !== 'deleting' && signedOut !== 'expired' && !(await deletionConfirmed());
     await putMeta(deps.db, META_DELETING, { accountId: account.accountId });
     signedOut = null;
     readOnly.value = false;
@@ -1870,10 +1885,16 @@ export function createApp(deps: Deps) {
    * deletion, after the same typed confirmation, or ask again. Nothing on
    * the device is deleted for it. Signed out at once, so nothing else starts
    * meanwhile.
+   *
+   * expired: the server says its expiry is deleting it (nobody used it for
+   * 12 months), and the app says that. Undefined when the server didn't say
+   * why (another request's account_deleting): GET /account, which an
+   * account being deleted is still answered on, says; failing that, what it
+   * said before stays.
    */
-  function deletingOnServer(): void {
+  function deletingOnServer(expired?: boolean): void {
     if (deletionRunning) return;
-    showSignedOut('deleting');
+    showSignedOut((expired ?? signedOut === 'expired') ? 'expired' : 'deleting');
     void (async () => {
       if (await deletionConfirmed()) {
         signedOut = null;
@@ -1881,8 +1902,29 @@ export function createApp(deps: Deps) {
         return runDeletion();
       }
       const account = await readAccount(deps.db);
-      if (isSetUp(account)) await markDeletingElsewhere(deps.db, account.accountId);
+      if (!isSetUp(account)) return;
+      const why = expired ?? (await whyDeleting());
+      await markDeletingElsewhere(deps.db, account.accountId, why);
+      if (why ?? account.expired) becomeExpired();
     })();
+  }
+
+  /** Whether the server's expiry is what deletes the account (GET /account); undefined if it can't be asked. */
+  async function whyDeleting(): Promise<boolean | undefined> {
+    try {
+      const info = await session!.call('GET', '/account', undefined, checkAccountInfo);
+      return info.deleting ? info.expired : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Signed out as being deleted, learnt to be the expiry's: says so, on the screen that shows it. */
+  function becomeExpired(): void {
+    if (signedOut !== 'deleting') return;
+    const current = currentScreen();
+    if (current.kind === 'signed-out') showSignedOut('expired', current.offline);
+    else signedOut = 'expired';
   }
 
   /** The cleanup under way (cleanUpReplaced). */
@@ -1929,7 +1971,8 @@ export function createApp(deps: Deps) {
   function handleGone(err: unknown): boolean {
     if (!(err instanceof ApiError)) return false;
     if (err.code === 'account_replaced') showSignedOut('replaced');
-    else if (err.code === 'login_refused') showSignedOut(signedOut === 'replaced' ? 'replaced' : 'refused');
+    // An account the expiry was deleting, now gone, was deleted.
+    else if (err.code === 'login_refused') showSignedOut(signedOut === 'replaced' || signedOut === 'expired' ? signedOut : 'refused');
     // Not taken on trust: the chats stay, and the user may finish it.
     else if (err.code === 'account_deleting') deletingOnServer();
     else if (clock.tooFar(err)) showClockOff(() => start());
@@ -1960,7 +2003,7 @@ export function createApp(deps: Deps) {
         offline = true;
       }
     }
-    if (account?.deleting) return deletingOnServer();
+    if (account?.deleting) return deletingOnServer(account.expired);
     if (account?.cleanup) void cleanUpReplaced();
     const links = await linkViews();
     backButton(false);

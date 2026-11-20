@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/session"
 )
 
@@ -73,5 +76,65 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 	if device.Replaced {
 		return httpapi.Error(http.StatusGone, "account_replaced")
 	}
+	s.recordUse(ctx, route, in.Account, device, now)
 	return s.issue(route, in.Account, in.Device, now)
 }
+
+// recordUse records that the account is used this month (UTC), if its item
+// says an earlier one or none (directory.Store.Used): at a login, which the
+// app makes at each launch and every 15 minutes while open (session.TTL),
+// so an account in use is never taken for unused (expiry.go), and the
+// month is written about once a month per account. Nothing finer than the
+// month is stored. Not for an account being deleted.
+//
+// The first such write of a month in this instance also notes the month on
+// the settings item the expiry's guard reads (directory.Store.UseRecorded),
+// which only a login's write moves on: the expiry deletes nothing unless
+// it's this month's or last month's, so logins that stop recording, for
+// whatever reason, can't make accounts in use look unused a year later.
+//
+// A failure doesn't refuse the login (the next one tries again), but is
+// logged as an error, UseNotRecorded, which an alarm watches
+// (infra/metrics.tf).
+func (s *Server) recordUse(ctx context.Context, route, accountID string, d directory.Device, now time.Time) {
+	month := directory.Month(now)
+	if d.Deleting || d.LastUse >= month {
+		return
+	}
+	written, err := s.Directory.Used(ctx, accountID, month)
+	if err == nil && written && s.noteUse(month) {
+		if err = s.Directory.UseRecorded(ctx, month); err != nil {
+			s.forgetUse(month)
+		}
+	}
+	if err != nil {
+		s.Log.Error(MsgUseNotRecorded, slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
+	}
+}
+
+// noteUse reports whether this instance has yet to note month (useNoted),
+// and takes it.
+func (s *Server) noteUse(month string) bool {
+	s.useNoted.Lock()
+	defer s.useNoted.Unlock()
+	if s.useNoted.month >= month {
+		return false
+	}
+	s.useNoted.month = month
+	return true
+}
+
+// forgetUse lets the next login note month again, after a failed note.
+func (s *Server) forgetUse(month string) {
+	s.useNoted.Lock()
+	defer s.useNoted.Unlock()
+	if s.useNoted.month == month {
+		s.useNoted.month = ""
+	}
+}
+
+// MsgUseNotRecorded is logged, as an error, when a login couldn't record
+// its account's month of use, or note it for the expiry's guard. A metric
+// filter counts it
+// (infra/metrics.tf): keep the two the same.
+const MsgUseNotRecorded = "month of use not recorded"

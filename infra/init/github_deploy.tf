@@ -222,6 +222,39 @@ data "aws_iam_policy_document" "deploy_functions" {
     resources = [local.arns.functions, "${local.arns.functions}:*"]
   }
 
+  # The schedules that invoke a function (../functions.tf: the account
+  # expiry's, which invokes api): EventBridge rules named with their
+  # prefix, which no alert rule (audit.tf) has, aimed at api alone. Nothing
+  # else of EventBridge (deploy_limits).
+  statement {
+    sid = "Schedules"
+    actions = [
+      "events:PutRule",
+      "events:DeleteRule",
+      "events:DescribeRule",
+      "events:EnableRule",
+      "events:DisableRule",
+      "events:ListTargetsByRule",
+      "events:RemoveTargets",
+      "events:ListTagsForResource",
+      "events:TagResource",
+      "events:UntagResource",
+    ]
+    resources = [local.arns.schedules]
+  }
+
+  statement {
+    sid       = "ScheduleTargets"
+    actions   = ["events:PutTargets"]
+    resources = [local.arns.schedules]
+
+    condition {
+      test     = "ForAllValues:ArnEquals"
+      variable = "events:TargetArn"
+      values   = [local.function_arns["api"]]
+    }
+  }
+
   # The deploy invokes bot to set itself up and notify to check it starts
   # (deploy-environment.yml); no other function (deploy_limits).
   statement {
@@ -569,9 +602,10 @@ data "aws_iam_policy_document" "deploy_limits" {
   }
 
   # Whom a function's resource policy may name: anyone ("*") on api and bot
-  # (their URLs), CloudFront on api, the WebSocket API on ws; no account or
-  # role. IAM can't say more: AddPermission has no condition key for the
-  # source ARN (so CloudFront or API Gateway in another account could be
+  # (their URLs), CloudFront on api, the WebSocket API on ws, EventBridge
+  # (the account expiry's schedule) on api; no account or role. IAM can't
+  # say more: AddPermission has no condition key for the source ARN (so
+  # CloudFront, API Gateway or EventBridge in another account could be
   # named), nor for invoking only through the URL (so "*" could be let
   # invoke api or bot directly). The deploy reads the policies after
   # applying and fails on anything else (scripts/check-function-roles.sh
@@ -585,7 +619,64 @@ data "aws_iam_policy_document" "deploy_limits" {
     condition {
       test     = "StringNotEquals"
       variable = "lambda:Principal"
-      values   = ["*", "cloudfront.amazonaws.com", "apigateway.amazonaws.com"]
+      values   = ["*", "cloudfront.amazonaws.com", "apigateway.amazonaws.com", "events.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid           = "EventBridgeOnlyApi"
+    effect        = "Deny"
+    actions       = ["lambda:AddPermission"]
+    not_resources = [local.function_arns["api"]]
+
+    condition {
+      test     = "StringEquals"
+      variable = "lambda:Principal"
+      values   = ["events.amazonaws.com"]
+    }
+  }
+
+  # EventBridge: only the app stack's schedules, aimed at api alone
+  # (deploy_functions). Not the alert rules (audit.tf), nor the event bus,
+  # nor a target elsewhere: a deploy can't quiet the alerts.
+  statement {
+    sid           = "OnlyTheStackSchedules"
+    effect        = "Deny"
+    actions       = ["events:*"]
+    not_resources = [local.arns.schedules]
+  }
+
+  # And schedules, not rules on events: one matching the account's
+  # CloudTrail events would hand api, whose code the deploy controls, a
+  # live copy of the operator's calls. A pattern on other fields (the
+  # account alone, say) can't be refused this way: every rule change is
+  # emailed (audit.tf), and docs/security.md says so.
+  dynamic "statement" {
+    for_each = { SchedulesWithoutSources = "events:source", SchedulesWithoutDetailTypes = "events:detail-type" }
+    content {
+      sid       = statement.key
+      effect    = "Deny"
+      actions   = ["events:PutRule"]
+      resources = ["*"]
+
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+
+  statement {
+    sid       = "SchedulesInvokeOnlyApi"
+    effect    = "Deny"
+    actions   = ["events:PutTargets"]
+    resources = ["*"]
+
+    condition {
+      test     = "ForAnyValue:ArnNotEquals"
+      variable = "events:TargetArn"
+      values   = [local.function_arns["api"]]
     }
   }
 

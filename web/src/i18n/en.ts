@@ -316,8 +316,12 @@ export const en = {
   replacedTitle: 'Your account was replaced',
   replacedBody:
     "The server says your account was replaced by a new setup using your Telegram account. If this wasn't you, your Telegram account was accessed or the app was tampered with.",
+  expiredTitle: 'Your account was deleted',
+  expiredBody:
+    "It wasn't used for 12 months, so the server deleted it, as it does with every account left unused that long. Your old link no longer works. You can set up a new account.",
   signedOutTitle: 'This device is signed out',
-  signedOutBody: "The server didn't accept this device. That happens if its account was deleted, or if something is wrong on the server.",
+  signedOutBody:
+    "The server didn't accept this device. That happens if its account was deleted (the server may delete accounts nobody has used for 12 months), or if something is wrong on the server.",
   signedOutKept: 'Your chats are still on this device, and you can read them. The app asks the server again each time it opens.',
   readChats: 'Read my chats',
   readOnlyNotice: 'This device is signed out, so your chats are read-only.',

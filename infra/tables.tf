@@ -10,7 +10,8 @@
 locals {
   tables = {
     # Accounts, devices, device lists, links and their bundles, the mailbox
-    # registry, invitations.
+    # registry, invitations; and an index of accounts by the month they
+    # were last used (below).
     directory = {}
     # Undelivered ciphertext, one item per message per device, keyed by the
     # recipient's account and device. No sender.
@@ -43,6 +44,44 @@ resource "aws_dynamodb_table" "table" {
   attribute {
     name = "sk"
     type = "S"
+  }
+
+  dynamic "attribute" {
+    for_each = each.key == "directory" ? ["lu"] : []
+    content {
+      name = attribute.value
+      type = "S"
+    }
+  }
+
+  # The directory's account items by the month, UTC, each was last used
+  # (lu, "2026-11"), which only account items have: the index holds their
+  # keys and that month, nothing else. The account expiry reads it from the
+  # oldest month on, so a run reads only the accounts it deletes
+  # (backend/internal/directory, expiry.go; docs/data.md). Keys only, so
+  # only a change of month (about once a month per account in use) writes
+  # to it.
+  dynamic "global_secondary_index" {
+    for_each = each.key == "directory" ? [1] : []
+    content {
+      name            = "lastUse"
+      projection_type = "KEYS_ONLY"
+
+      key_schema {
+        attribute_name = "sk"
+        key_type       = "HASH"
+      }
+
+      key_schema {
+        attribute_name = "lu"
+        key_type       = "RANGE"
+      }
+
+      on_demand_throughput {
+        max_read_request_units  = local.table_max_read_units
+        max_write_request_units = local.table_max_write_units
+      }
+    }
   }
 
   ttl {

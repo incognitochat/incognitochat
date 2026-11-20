@@ -297,12 +297,18 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
       return <Conversation app={app} language={language} screen={screen} />;
     case 'signed-out': {
       // The server's word, never checked: the chats stay, and nothing is deleted without a typed confirmation.
+      // Expired: deleted (or being deleted) by the server for going unused,
+      // which a new setup takes over (the old account goes with it).
       const replaced = screen.reason === 'replaced';
       const deleting = screen.reason === 'deleting';
+      const expired = screen.reason === 'expired';
       return (
-        <Page title={tr(replaced ? 'replacedTitle' : deleting ? 'deletingElsewhereTitle' : 'signedOutTitle')} busy={screen.busy}>
+        <Page
+          title={tr(replaced ? 'replacedTitle' : deleting ? 'deletingElsewhereTitle' : expired ? 'expiredTitle' : 'signedOutTitle')}
+          busy={screen.busy}
+        >
           <p class={replaced ? 'warning' : 'notice'} role="alert">
-            {tr(replaced ? 'replacedBody' : deleting ? 'deletingElsewhereBody' : 'signedOutBody')}
+            {tr(replaced ? 'replacedBody' : deleting ? 'deletingElsewhereBody' : expired ? 'expiredBody' : 'signedOutBody')}
           </p>
           <p>{tr('signedOutKept')}</p>
           {screen.offline && <p class="notice">{tr('offline')}</p>}

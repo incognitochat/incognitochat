@@ -144,6 +144,39 @@ run "deploy_policies" {
     error_message = "A deploy policy allows every action of a service."
   }
 
+  # EventBridge: only the app stack's schedules (rules named
+  # "<prefix>-schedule-*", which no alert rule is), aimed at api alone;
+  # everything else of it denied, the alert rules included.
+  assert {
+    condition = alltrue(flatten([
+      for d in [
+        data.aws_iam_policy_document.deploy,
+        data.aws_iam_policy_document.deploy_functions,
+        data.aws_iam_policy_document.deploy_edge,
+        ] : [
+        for s in jsondecode(d.json).Statement : flatten([s.Resource]) == ["arn:aws:events:eu-west-1:123456789012:rule/incognitochat-production-schedule-*"]
+        if s.Effect == "Allow" && anytrue([for a in flatten([s.Action]) : startswith(a, "events:")])
+      ]
+    ]))
+    error_message = "The deploy role may manage EventBridge rules other than the app stack's schedules."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_functions.json).Statement :
+      flatten([s.Action]) == ["events:PutTargets"] && try(s.Condition["ForAllValues:ArnEquals"]["events:TargetArn"] == "arn:aws:lambda:eu-west-1:123456789012:function:incognitochat-production-api", false)
+    ])
+    error_message = "The deploy role may aim a schedule at something else than api."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_limits.json).Statement :
+      s.Effect == "Deny" && flatten([s.Action]) == ["events:*"] && flatten([try(s.NotResource, [])]) == ["arn:aws:events:eu-west-1:123456789012:rule/incognitochat-production-schedule-*"]
+    ])
+    error_message = "The deploy role isn't denied EventBridge beyond the app stack's schedules (the alert rules)."
+  }
+
   # The audit trail and its bucket stay out of the deploy role's reach.
   assert {
     condition = anytrue([
@@ -411,5 +444,29 @@ run "alarms_elsewhere" {
   assert {
     condition     = length(aws_cloudwatch_metric_alarm.firewall_blocks) == 0
     error_message = "An environment without a firewall has an alarm on its blocks."
+  }
+}
+
+# The account expiry's alarm reads its error lines and dropped runs, and a
+# login's failure to record its month, in the app stack's namespace (whose
+# metric filters are in ../metrics.tf) and api's, and fires on any.
+run "account_expiry_alarm" {
+  command = plan
+
+  plan_options {
+    target = [aws_cloudwatch_metric_alarm.account_expiry]
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.account_expiry.threshold == 0
+      && toset([for q in aws_cloudwatch_metric_alarm.account_expiry.metric_query : "${q.metric[0].namespace} ${q.metric[0].metric_name}" if length(q.metric) > 0]) == toset([
+        "incognitochat-production/api ExpiryProblems",
+        "incognitochat-production/api UseNotRecorded",
+        "AWS/Lambda AsyncEventsDropped",
+      ])
+      && anytrue([for q in aws_cloudwatch_metric_alarm.account_expiry.metric_query : length(q.metric) > 0 && try(q.metric[0].dimensions.FunctionName, "") == "incognitochat-production-api"])
+    )
+    error_message = "The account-expiry alarm doesn't read the expiry's problems, unrecorded months and api's dropped runs."
   }
 }

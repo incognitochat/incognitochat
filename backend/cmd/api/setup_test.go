@@ -14,6 +14,7 @@ import (
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 
+	"github.com/incognitochat/incognitochat/backend/internal/api"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
@@ -136,8 +137,12 @@ func TestNewServer(t *testing.T) {
 	}
 
 	dir := s.Directory.(*directory.Store)
-	if dir.Table != "t-directory" || s.Switches.(*directory.Store) != dir {
-		t.Errorf("directory %q, switches %v", dir.Table, s.Switches)
+	if dir.Table != "t-directory" || s.Switches.(*directory.Store) != dir || s.Unused.(*directory.Store) != dir {
+		t.Errorf("directory %q, switches %v, unused accounts %v", dir.Table, s.Switches, s.Unused)
+	}
+	// Unset, the account expiry only counts.
+	if s.Expiry != api.ExpiryDryRun {
+		t.Errorf("account expiry %q", s.Expiry)
 	}
 	for name, table := range map[string]string{
 		"nonces":  s.Nonces.(*ephemeral.Nonces).Table,
@@ -171,9 +176,10 @@ func TestNewServer(t *testing.T) {
 	// counts no more.
 	env["INVITE_ONLY"] = "false"
 	env["ADMIN_TELEGRAM_IDS"] = "42"
+	env["ACCOUNT_EXPIRY"] = "on"
 	params["/p/admins"] = noAdmins
-	if s, err := newServer(awsv2.Config{Region: "us-east-1"}, getter(env), params); err != nil || s.InviteOnly || len(s.Admins) != 0 {
-		t.Errorf("open, without admins: %v", err)
+	if s, err := newServer(awsv2.Config{Region: "us-east-1"}, getter(env), params); err != nil || s.InviteOnly || len(s.Admins) != 0 || s.Expiry != api.ExpiryOn {
+		t.Errorf("open, without admins, expiry on: %v", err)
 	}
 	// No value is none too, as an unset variable was.
 	delete(params, "/p/admins")

@@ -48,6 +48,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
@@ -114,6 +115,31 @@ type Directory interface {
 	// AccountExists reports whether a Telegram user has an account in use
 	// (not one being deleted).
 	AccountExists(ctx context.Context, telegramHash string) (bool, error)
+	// Used records the month an account was used in, unless it says so
+	// already, and reports whether it wrote it (directory.Store.Used).
+	Used(ctx context.Context, accountID, month string) (bool, error)
+	// UseRecorded notes that a login recorded its month of use in month
+	// (directory.Store.UseRecorded), for the expiry's guard.
+	UseRecorded(ctx context.Context, month string) error
+}
+
+// UnusedAccounts is what the account expiry (expiry.go) needs of the
+// directory besides Directory (directory.Store).
+type UnusedAccounts interface {
+	// Unused lists up to limit accounts last used in lastExpired or
+	// before, the oldest first.
+	Unused(ctx context.Context, lastExpired string, limit int) ([]directory.UnusedAccount, error)
+	// CountUnused counts them, up to about max, and says whether there
+	// are more.
+	CountUnused(ctx context.Context, lastExpired string, max int) (int, bool, error)
+	// RecordedUse is the newest month a login recorded its month of use
+	// in (UseRecorded); "" if none has.
+	RecordedUse(ctx context.Context) (string, error)
+	// AccountState reads what deleting an account needs to know of it.
+	AccountState(ctx context.Context, accountID string) (directory.Device, error)
+	// Expire marks an account as being deleted, as MarkDeleting does, only
+	// while it was last used in lastUse.
+	Expire(ctx context.Context, accountID, lastUse string) error
 }
 
 // Limiter counts uses of a key in fixed windows.
@@ -194,6 +220,22 @@ type Server struct {
 	// paged remembers devices whose inbox needed more than a first read
 	// here lately (listInbox).
 	paged paged
+
+	// Unused, if set, finds the accounts nobody has used for over
+	// directory.ExpireAfter months, which ExpireAccounts deletes, or only
+	// counts, as Expiry says (expiry.go). Expiry's zero value does
+	// nothing, as off does; the function sets it from ACCOUNT_EXPIRY
+	// (ParseExpiryMode: the dry run if unset).
+	Unused UnusedAccounts
+	Expiry ExpiryMode
+	// sleep waits between the account expiry's steps; time's if nil.
+	sleep func(ctx context.Context, d time.Duration) error
+	// useNoted is the month this instance last noted that a login recorded
+	// its month of use in (recordUse), so it notes it once a month.
+	useNoted struct {
+		sync.Mutex
+		month string
+	}
 }
 
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).

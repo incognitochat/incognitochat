@@ -131,13 +131,19 @@ export interface AccountInfo {
   noticesRefused: boolean;
   /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
   deleting: boolean;
+  /**
+   * With deleting: the server's expiry started it, as nobody used the
+   * account for 12 months. The app says so, rather than that something may
+   * be wrong. False from a server that doesn't say.
+   */
+  expired: boolean;
   /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
   cleanup: boolean;
 }
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, notices, noticesRefused, deleting, cleanup } = v;
+  const { canCreateLinks, admin, links, notices, noticesRefused, deleting, expired, cleanup } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
   if (!Number.isSafeInteger(links)) throw new Error('bad account');
   return {
@@ -147,6 +153,7 @@ export function checkAccountInfo(value: unknown): AccountInfo {
     notices: notices === true,
     noticesRefused: noticesRefused === true,
     deleting: deleting === true,
+    expired: deleting === true && expired === true,
     cleanup: cleanup === true,
   };
 }

@@ -62,3 +62,28 @@ resource "aws_cloudwatch_log_metric_filter" "counts" {
     unit      = "Count"
   }
 }
+
+# The account expiry's error lines (backend/internal/api, expiry.go): a run
+# that failed, paused (no account recorded a recent month of use, so it
+# deleted nothing) or passed over stuck accounts; and logins that couldn't
+# record their month (session.go), which a year on would make accounts in
+# use look unused. Each line counts one, for the account-expiry alarm in
+# infra/init/alerts.tf. The lines are constant: backend/internal/api's
+# tests check these still match them.
+resource "aws_cloudwatch_log_metric_filter" "expiry" {
+  for_each = {
+    expiry-problems  = { metric = "ExpiryProblems", pattern = "{ ($.route = \"account expiry\") && ($.level = \"ERROR\") }" }
+    use-not-recorded = { metric = "UseNotRecorded", pattern = "{ ($.msg = \"month of use not recorded\") && ($.level = \"ERROR\") }" }
+  }
+
+  name           = "${local.prefix}-api-${each.key}"
+  log_group_name = aws_cloudwatch_log_group.fn["api"].name
+  pattern        = each.value.pattern
+
+  metric_transformation {
+    namespace = local.counts_namespace
+    name      = each.value.metric
+    value     = "1"
+    unit      = "Count"
+  }
+}

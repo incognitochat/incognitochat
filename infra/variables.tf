@@ -168,6 +168,19 @@ variable "invite_only" {
   default     = true
 }
 
+# Unset in GitHub, the deploy passes dry-run (deploy-environment.yml).
+variable "account_expiry" {
+  description = "Deleting accounts nobody has used for 12 months (functions.tf; docs/deployment.md, Account expiry): off (the schedule is disabled), dry-run (every 15 minutes, counts and logs how many it would delete; deletes nothing) or on. GitHub variable ACCOUNT_EXPIRY"
+  type        = string
+  default     = "dry-run"
+  nullable    = false
+
+  validation {
+    condition     = contains(["off", "dry-run", "on"], var.account_expiry)
+    error_message = "account_expiry must be off, dry-run or on."
+  }
+}
+
 # The admins' IDs reach the api function through SSM alone (parameters.tf),
 # as "none" while there are none: SSM can't store an empty value. The
 # function reads them as it starts and keeps only their keyed hashes. Unset
