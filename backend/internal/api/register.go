@@ -139,15 +139,17 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		return s.internal(route, err)
 	case bytes.Equal(existing.Key, in.AccountKey) && bytes.Equal(existing.DeviceKey, in.DeviceKey):
 		// A retry of a registration that already succeeded, e.g. after its
-		// response was lost.
+		// response was lost. Its month of use isn't recorded here: the app's
+		// next login, within 15 minutes, does that (recordUse).
 		return s.issue(route, existing.ID, in.Device, now)
 	case !in.Replace && !existing.Deleting:
 		return httpapi.Error(http.StatusConflict, "account_exists")
 	default:
 		// Replacing asks the user first (replace), unless the account is
-		// being deleted: only its own signed DELETE /account marks it, and
-		// nothing unmarks it, so it isn't in use, and the user may have
-		// deleted it from their device (the server couldn't finish).
+		// being deleted: only its own signed DELETE /account, or the expiry
+		// of an account unused for 12 months, marks it, and nothing unmarks
+		// it, so it isn't in use, and the user may have deleted it from
+		// their device (the server couldn't finish).
 		// POST /accounts/lookup doesn't count it either.
 		if resp, ok := s.allowRegistration(ctx, route, telegramHash); !ok {
 			return resp

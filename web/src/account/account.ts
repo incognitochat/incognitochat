@@ -53,8 +53,12 @@ type AccountRecord =
    * here). Stored as refused plus this flag, so an older build of the app
    * still open in another window reads a refused account, never "no
    * account" (whose setup wouldn't ask for the typed confirmation).
+   * expired (only with refused): the server said its expiry was deleting
+   * the account (nobody used it for 12 months); kept once the login is
+   * refused too, so the app says the account was deleted, rather than that
+   * something may be wrong.
    */
-  | { state: SetUpState; deviceId: string; fingerprint: string; accountId: string; deleting?: true };
+  | { state: SetUpState; deviceId: string; fingerprint: string; accountId: string; deleting?: true; expired?: true };
 
 /**
  * A device with an account: registered; or, as the server last said (never
@@ -80,7 +84,7 @@ export class SetupMismatch extends Error {
 export async function readAccount(db: Database): Promise<AccountRecord | undefined> {
   const value = await getMeta<Record<string, unknown>>(db, META_ACCOUNT);
   if (!value || typeof value !== 'object') return undefined;
-  const { state, deviceId, fingerprint: fp, accountId, deleting } = value;
+  const { state, deviceId, fingerprint: fp, accountId, deleting, expired } = value;
   if (typeof deviceId !== 'string' || !ID.test(deviceId) || typeof fp !== 'string' || !FINGERPRINT.test(fp)) return undefined;
   if (state === 'pending') return { state, deviceId, fingerprint: fp };
   if (typeof accountId !== 'string' || !ID.test(accountId)) return undefined;
@@ -88,7 +92,14 @@ export async function readAccount(db: Database): Promise<AccountRecord | undefin
   // still an account, so setting up again asks for the typed confirmation.
   if (state === 'deleting') return { state: 'refused', deviceId, fingerprint: fp, accountId, deleting: true };
   if (SET_UP.includes(state)) {
-    return { state: state as SetUpState, deviceId, fingerprint: fp, accountId, ...(state === 'refused' && deleting === true ? { deleting } : {}) };
+    return {
+      state: state as SetUpState,
+      deviceId,
+      fingerprint: fp,
+      accountId,
+      ...(state === 'refused' && deleting === true ? { deleting } : {}),
+      ...(state === 'refused' && expired === true ? { expired } : {}),
+    };
   }
   return undefined;
 }
@@ -281,8 +292,9 @@ export async function recordRefusal(db: Database, accountId: string, err: unknow
   if (!(err instanceof ApiError)) return;
   if (err.code === 'account_replaced') await setState(db, accountId, ['registered', 'refused'], 'replaced');
   // A replaced account stays replaced: its warning matters more. A refused
-  // one said to be being deleted is now only refused.
-  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'refused'], 'refused');
+  // one said to be being deleted is now only refused, but one the expiry
+  // was deleting stays expired: it was deleted for going unused.
+  if (err.code === 'login_refused') await setState(db, accountId, ['registered', 'refused'], 'refused', { keepExpired: true });
 }
 
 /** Records that the server says this account was replaced (it's asked again at the next launch). */
@@ -293,18 +305,32 @@ export function markReplaced(db: Database, accountId: string): Promise<void> {
 /**
  * Records that the server says this account is being deleted, when this
  * device didn't start that (it's asked again at the next launch; nothing is
- * deleted for it): refused, with deleting.
+ * deleted for it): refused, with deleting, and with expired if the server
+ * says its expiry started it (true), or if it said so before (undefined:
+ * the server didn't say why).
  */
-export function markDeletingElsewhere(db: Database, accountId: string): Promise<void> {
-  return setState(db, accountId, ['registered', 'refused'], 'refused', true);
+export function markDeletingElsewhere(db: Database, accountId: string, expired?: boolean): Promise<void> {
+  return setState(db, accountId, ['registered', 'refused'], 'refused', { deleting: true, expired: expired === true, keepExpired: expired === undefined });
 }
 
-function setState(db: Database, accountId: string, from: SetUpState[], to: SetUpState, deleting = false): Promise<void> {
+function setState(
+  db: Database,
+  accountId: string,
+  from: SetUpState[],
+  to: SetUpState,
+  flags: { deleting?: boolean; expired?: boolean; keepExpired?: boolean } = {},
+): Promise<void> {
   return withLock(LOCK, async () => {
     const latest = await readAccount(db);
     if (isSetUp(latest) && from.includes(latest.state) && latest.accountId === accountId) {
-      const { deleting: _, ...rest } = latest;
-      await putMeta(db, META_ACCOUNT, { ...rest, state: to, ...(deleting ? { deleting: true as const } : {}) } satisfies AccountRecord);
+      const { deleting: _, expired: wasExpired, ...rest } = latest;
+      const expired = to === 'refused' && (flags.expired === true || (flags.keepExpired === true && wasExpired === true));
+      await putMeta(db, META_ACCOUNT, {
+        ...rest,
+        state: to,
+        ...(flags.deleting ? { deleting: true as const } : {}),
+        ...(expired ? { expired: true as const } : {}),
+      } satisfies AccountRecord);
     }
   });
 }

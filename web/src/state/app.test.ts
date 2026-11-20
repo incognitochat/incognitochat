@@ -106,8 +106,9 @@ function fakeServer(
     levels: new Map<number, number>(),
     granted: [] as { link: string; invitations: number }[],
     deleted: false,
-    // What GET /account says: being deleted; something of a replaced account left to clean up.
+    // What GET /account says: being deleted (expired: by the server's expiry); something of a replaced account left to clean up.
     deleting: false,
+    expired: false,
     cleanup: false,
     // The account registrations and logins answer with.
     accountId: 'BBBBBBBBBBBBBBBBBBBBBB',
@@ -202,7 +203,15 @@ function fakeServer(
       const canCreateLinks = !state.inviteOnly || state.member || state.admin;
       if (path === '/account') {
         take(outcomes.account);
-        return check({ canCreateLinks, admin: state.admin, links: bundles.size, maxLinks: 5, deleting: state.deleting, cleanup: state.cleanup });
+        return check({
+          canCreateLinks,
+          admin: state.admin,
+          links: bundles.size,
+          maxLinks: 5,
+          deleting: state.deleting,
+          expired: state.deleting && state.expired,
+          cleanup: state.cleanup,
+        });
       }
       if (method === 'GET' && path === '/usage') {
         const item = (used: number, limit: number) => ({ used, limit });
@@ -1290,6 +1299,60 @@ describe('deleting the account', () => {
     expect(server.calls).not.toContain('DELETE /account');
     expect(await readAccount(owner.db)).toMatchObject({ state: 'refused' });
     expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+  });
+
+  it("says the account was deleted, not that something may be wrong, when the server's expiry deletes it", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    // Nobody used it for 12 months: the server's expiry is deleting it.
+    server.state.deleting = true;
+    server.state.expired = true;
+    await owner.app.home();
+    await vi.waitFor(() => expect(owner.app.screen.value).toEqual({ kind: 'signed-out', reason: 'expired', busy: false, offline: false }));
+    await vi.waitFor(async () => expect(await readAccount(owner.db)).toMatchObject({ state: 'refused', deleting: true, expired: true }));
+    expect(server.calls).not.toContain('DELETE /account');
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+    // Once it's gone, the next launch still says it was deleted.
+    server.outcomes.session = [new ApiError(401, 'login_refused')];
+    const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
+    await again.app.start();
+    expect(again.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'expired' });
+    expect(await readAccount(owner.db)).toMatchObject({ state: 'refused', expired: true });
+    expect(await listMessages(owner.db, 'c1')).toHaveLength(1);
+    // Setting up again (a typed confirmation) is what it offers.
+    again.app.askReset();
+    expect(again.app.screen.value).toEqual({ kind: 'confirm-reset', reason: 'expired' });
+    // Let back in (set up again elsewhere, say): that's forgotten.
+    server.outcomes.session = [];
+    server.state.deleting = false;
+    const back = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
+    await back.app.start();
+    expect(back.app.screen.value.kind).not.toBe('signed-out');
+    expect(await readAccount(owner.db)).toEqual(expect.not.objectContaining({ expired: true }));
+  });
+
+  it("learns that the server's expiry deletes the account when another request finds it being deleted first", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    server.state.deleting = true;
+    server.state.expired = true;
+    // The launch's first sync gets account_deleting, which says no more.
+    const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
+    await again.app.start();
+    await vi.waitFor(() => expect(again.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'expired' }));
+    await vi.waitFor(async () => expect(await readAccount(owner.db)).toMatchObject({ state: 'refused', deleting: true, expired: true }));
+    expect(server.calls).not.toContain('DELETE /account');
+    // The user's own deletion elsewhere is still said as before.
+    const other = fakeServer();
+    const user = await registered(other.api);
+    other.state.deleting = true;
+    const launch = await setup({ api: other.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: user.db });
+    await launch.app.start();
+    await vi.waitFor(async () => expect(await readAccount(user.db)).toMatchObject({ state: 'refused', deleting: true }));
+    expect(launch.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'deleting' });
+    expect(await readAccount(user.db)).toEqual(expect.not.objectContaining({ expired: true }));
   });
 
   it("ignores a deletion record that isn't this account's (left by another copy of the app before a new setup)", async () => {

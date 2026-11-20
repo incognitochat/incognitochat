@@ -473,6 +473,51 @@ resource "aws_cloudwatch_metric_alarm" "counts" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
 
+# The account expiry (../functions.tf; docs/deployment.md, Account expiry),
+# over an hour, as it runs every 15 minutes: a run that failed, paused (no
+# account recorded a recent month of use: logins may have stopped recording
+# it, so nothing is deleted) or passed over stuck accounts logs an error
+# (ExpiryProblems); one that crashed or timed out is dropped (api's
+# AsyncEventsDropped: the schedule is its only event, never tried again);
+# and a login that couldn't record its month logs one too (UseNotRecorded),
+# which a year on would make accounts in use look unused. The metric
+# filters are in ../metrics.tf.
+resource "aws_cloudwatch_metric_alarm" "account_expiry" {
+  alarm_name          = "${local.prefix}-account-expiry"
+  alarm_description   = "In the last hour the account expiry failed, paused (no recent month of use: it deletes nothing) or got stuck on accounts, or a login couldn't record its month of use."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "problems"
+    expression  = "FILL(expiry, 0) + FILL(dropped, 0) + FILL(unrecorded, 0)"
+    label       = "Expiry problems"
+    return_data = true
+  }
+
+  dynamic "metric_query" {
+    for_each = {
+      expiry     = { namespace = local.counts_namespace, metric = "ExpiryProblems", dimensions = {} }
+      unrecorded = { namespace = local.counts_namespace, metric = "UseNotRecorded", dimensions = {} }
+      dropped    = { namespace = "AWS/Lambda", metric = "AsyncEventsDropped", dimensions = { FunctionName = "${local.prefix}-api" } }
+    }
+    content {
+      id = metric_query.key
+      metric {
+        namespace   = metric_query.value.namespace
+        metric_name = metric_query.value.metric
+        dimensions  = metric_query.value.dimensions
+        stat        = "Sum"
+        period      = local.counts_period
+      }
+    }
+  }
+}
+
 # Batches of send and media tokens signed, the two together.
 resource "aws_cloudwatch_metric_alarm" "token_requests" {
   alarm_name          = "${local.prefix}-token-requests"

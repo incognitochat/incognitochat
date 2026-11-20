@@ -193,8 +193,9 @@ as its deletion would have, it keeps no marker: its item and devices lose
 their keys (they stay only as stubs, until the cleanup deletes them), so
 its device is refused like a deleted account's (`login_refused`), not told
 it was replaced; the app that confirmed the deletion takes either answer
-as done. Only the account's own signed `DELETE /account` marks it so, and
-nothing undoes that, so this can't take over an account in use.
+as done. Only the account's own signed `DELETE /account`, or the expiry
+of an account unused for 12 months (below), marks it so, and nothing
+undoes that, so this can't take over an account in use.
 
 **Deleting an account:** `DELETE /account`, signed. The server deletes the
 account's waiting envelopes, links (their bundles then answer "not found"),
@@ -273,28 +274,35 @@ deletion; any upload it couldn't delete, or never saw, expires within 30
 days. Afterwards it deletes everything on the device. The other side of
 each conversation isn't told.
 
-**Unused accounts.** An account nobody has used for 12 months is deleted
-by the server, in the steps above, as if its own `DELETE /account` had
-asked. The account records the month, UTC, of its last use (`2026-11`,
-say; nothing finer): registration stores the month it's set up in, and a
-login in a later month replaces it, so it is written about once a month.
-The app logs in at each launch and every 15 minutes while open, so an
-account whose app is opened is never taken for unused. From the first day
-of the 13th month after that month (last used in November 2026: from
-December 2027), a scheduled run of the server, every 15 minutes, finds
-the account and marks it as being deleted, ending its link, only if its
-month is still the one it read (a login since keeps it), then deletes the
-rest in later steps, a few each run, paced as an app deleting its account
-is. From the mark on it is any account being deleted: its link answers
-"not found", so the people who wrote to it can't reach it any more
-(their sends to its mailboxes are dropped, as to any ended mailbox, and
-they aren't told), and its app, if opened meanwhile, finds `deleting:
-true` and offers Finish deleting (above). Once it's gone, a login is
-refused (`401 login_refused`), and the app offers to set up again. Its
-attachments expire within 30 days, as always. Accounts set up before the
-month was stored have none until their next login, and aren't deleted
-meanwhile. The operator can turn this off, or have it only count the
-accounts it would delete ([deployment.md](deployment.md#account-expiry)).
+**Unused accounts.** Where the operator has turned it on (by default the
+server only counts them: [deployment.md](deployment.md#account-expiry)),
+an account nobody has used for 12 months is deleted by the server, in the
+steps above, as if its own `DELETE /account` had asked. The account
+records the month, UTC, of its last use (`2026-11`, say; nothing finer):
+registration stores the month it's set up in, and a login in a later month
+replaces it, so it is written about once a month. The app logs in at each
+launch and every 15 minutes while open, so an account whose app is opened
+is never taken for unused. From the first day of the 13th month after that
+month (last used in November 2026: from December 2027), a scheduled run of
+the server, every 15 minutes, finds the account and marks it as being
+deleted, ending its link, only if its month is still the one it read (a
+login since keeps it), and deletes it in the same step if it's small, or
+over later steps, a few each run, paced as an app deleting its account is.
+A run deletes nothing while no account at all has a month from this month
+or last (logins may have stopped recording it). From the mark on it is any
+account being deleted: its link answers "not found", so the people who
+wrote to it can't reach it any more (their sends to its mailboxes are
+dropped, as to any ended mailbox, and they aren't told), and `GET
+/account` says `deleting: true` and `expired: true` (only the expiry sets
+that). The app then says the account was deleted for going unused (not
+that something may be wrong), remembers it, and says the same once the
+login is refused (`401 login_refused`); it keeps the chats readable and
+offers to set up again, which replaces the account if it isn't gone yet.
+When another request's `409 account_deleting` comes first, which doesn't
+say why, the app asks `GET /account`. A small account deleted in one step
+is only refused, like any deleted account. Its attachments expire within
+30 days, as always. Accounts set up before the month was stored have none
+until their next login, and aren't deleted meanwhile.
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
 (1 byte), sequence number (8), SHA-256 of the previous list (32; zeros for the

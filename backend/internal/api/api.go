@@ -128,6 +128,9 @@ type UnusedAccounts interface {
 	// CountUnused counts them, up to about max, and says whether there
 	// are more.
 	CountUnused(ctx context.Context, lastExpired string, max int) (int, bool, error)
+	// NewestUse is the newest month any account was last used in; "" if
+	// none has one.
+	NewestUse(ctx context.Context) (string, error)
 	// AccountState reads what deleting an account needs to know of it.
 	AccountState(ctx context.Context, accountID string) (directory.Device, error)
 	// Expire marks an account as being deleted, as MarkDeleting does, only

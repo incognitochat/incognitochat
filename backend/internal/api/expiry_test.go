@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,8 @@ func TestExpireAccounts(t *testing.T) {
 	elevenMonths := h.setUpAt(t, userID+1, start.AddDate(0, -11, 0))
 	twelveMonths := h.setUpAt(t, userID+2, start.AddDate(0, -12, 0))
 	noMonth := h.setUpAt(t, userID+3, start.AddDate(-3, 0, 0))
+	// Someone uses the app this month (TestExpiryPausesWithoutRecentUse).
+	h.setUpAt(t, userID+4, start)
 	if _, err := tb.meter.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:        &tb.directory,
 		Key:              map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "A#" + noMonth.d.account}, "sk": &types.AttributeValueMemberS{Value: "A"}},
@@ -286,6 +289,7 @@ func TestExpiryIsBoundedAndResumable(t *testing.T) {
 		small = append(small, h.setUpAt(t, userID+1+int64(i), start.AddDate(0, -14, 0)))
 	}
 	kept := h.setUpAt(t, userID+10, start.AddDate(0, -2, 0))
+	h.setUpAt(t, userID+11, start)
 	store := h.server.Directory.(*directory.Store)
 
 	runs := 0
@@ -343,14 +347,44 @@ func TestExpiryIsBoundedAndResumable(t *testing.T) {
 	}
 }
 
-// An account whose own deletion holds it is left to that; one used since
-// it was listed isn't marked.
+// accountItem reads an account's item as stored.
+func (tb *deliveryTables) accountItem(t *testing.T, accountID string) map[string]types.AttributeValue {
+	t.Helper()
+	out, err := tb.meter.Client.GetItem(context.Background(), &dynamodb.GetItemInput{
+		TableName:      &tb.directory,
+		Key:            map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "A#" + accountID}, "sk": &types.AttributeValueMemberS{Value: "A"}},
+		ConsistentRead: aws.Bool(true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out.Item
+}
+
+// logged returns the log lines with msg, decoded.
+func (h *harness) logged(t *testing.T, msg string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(h.logs.String()), "\n") {
+		var entry map[string]any
+		if line != "" && json.Unmarshal([]byte(line), &entry) == nil && entry["msg"] == msg {
+			lines = append(lines, entry)
+		}
+	}
+	return lines
+}
+
+// An account whose own deletion holds it is left to that. One used after
+// the run read it (a login during the pause before its step) isn't marked,
+// and keeps nothing of the expiry: no lease time on its item.
 func TestExpiryLeavesAccountsAlone(t *testing.T) {
-	h, _ := newExpiryTables(t)
+	h, tb := newExpiryTables(t)
 	ctx := context.Background()
 	h.server.Expiry = ExpiryOn
 	store := h.server.Directory.(*directory.Store)
-	held := h.setUpAt(t, userID, start.AddDate(0, -13, 0))
+	first := h.setUpAt(t, userID, start.AddDate(0, -15, 0))
+	held := h.setUpAt(t, userID+1, start.AddDate(0, -13, 0))
+	h.setUpAt(t, userID+2, start)
 	release, ok, err := store.Lease(ctx, held.d.account, h.now)
 	if err != nil || !ok {
 		t.Fatalf("lease: %v %v", ok, err)
@@ -358,34 +392,223 @@ func TestExpiryLeavesAccountsAlone(t *testing.T) {
 	if err := h.server.ExpireAccounts(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.AccountState(ctx, first.d.account); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("the first account: %v", err)
+	}
 	if d, err := store.AccountState(ctx, held.d.account); err != nil || d.Deleting {
 		t.Fatalf("an account another step holds: %+v, %v", d, err)
 	}
-	if err := release(ctx, h.now, false); err != nil {
+	if err := release(ctx, h.now, true); err != nil {
 		t.Fatal(err)
 	}
 
-	// Listed as unused, then used: not marked, and kept.
-	h.now = h.now.Add(time.Minute)
-	if err := store.Used(ctx, held.d.account, directory.Month(h.now)); err != nil {
+	// Read as unused, then used while the run pauses before its step: kept.
+	another := h.setUpAt(t, userID+3, start.AddDate(0, -14, 0))
+	used := false
+	h.server.sleep = func(ctx context.Context, d time.Duration) error {
+		h.now = h.now.Add(d)
+		if !used {
+			used = true
+			return store.Used(ctx, held.d.account, directory.Month(h.now))
+		}
+		return nil
+	}
+	if err := h.server.ExpireAccounts(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.server.expireStepFor(ctx, held.d.account, "2025-12"); err != nil {
-		t.Fatal(err)
+	if !used {
+		t.Fatal("the run didn't pause before the second account")
 	}
-	if d, err := store.AccountState(ctx, held.d.account); err != nil || d.Deleting || d.LastUse != "2027-01" {
-		t.Fatalf("an account used since: %+v, %v", d, err)
+	if _, err := store.AccountState(ctx, another.d.account); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("the account before it: %v", err)
+	}
+	it := tb.accountItem(t, held.d.account)
+	if _, marked := it["dl"]; marked || it["lu"].(*types.AttributeValueMemberS).Value != "2027-01" {
+		t.Fatalf("an account used since: %v", it)
+	}
+	if _, lease := it["sl"]; lease {
+		t.Fatalf("the expiry left its lease's time on an account in use: %v", it["sl"])
 	}
 }
 
-// expireStepFor takes a step of expiring an account as a run that listed
-// it last used in lastUse would, whatever its item says now.
-func (s *Server) expireStepFor(ctx context.Context, accountID, lastUse string) error {
-	d, err := s.Unused.AccountState(ctx, accountID)
-	if err != nil {
-		return err
+// Logins that stop recording their month would make every account look
+// unused a year later. So a run deletes nothing unless some account was
+// used this month or last: otherwise it logs an error, constant, and
+// fails, for the alarm. Once a login records a month, it carries on.
+func TestExpiryPausesWithoutRecentUse(t *testing.T) {
+	h, _ := newExpiryTables(t)
+	ctx := context.Background()
+	h.server.Expiry = ExpiryOn
+	store := h.server.Directory.(*directory.Store)
+	due := h.setUpAt(t, userID, start.AddDate(0, -13, 0))
+	recent := h.setUpAt(t, userID+1, start.AddDate(0, -2, 0))
+
+	if err := h.server.ExpireAccounts(ctx); !errors.Is(err, errExpiryPaused) {
+		t.Fatalf("a run with no recent month: %v", err)
 	}
-	d.LastUse = lastUse
-	_, err = s.expireStep(ctx, accountID, d)
-	return err
+	if d, err := store.AccountState(ctx, due.d.account); err != nil || d.Deleting {
+		t.Fatalf("deleted while no month is recent: %+v, %v", d, err)
+	}
+	lines := h.logged(t, msgExpiryPaused)
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["route"] != expiryRoute || len(lines[0]) != 5 {
+		t.Fatalf("logged %s", h.logs)
+	}
+
+	// Last month's will do.
+	if err := store.Used(ctx, recent.d.account, directory.MonthsBefore(h.now, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.ExpireAccounts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AccountState(ctx, due.d.account); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("after a recent login: %v", err)
+	}
+}
+
+// failingExpire fails Expire for some accounts, every time.
+type failingExpire struct {
+	*directory.Store
+	fail  map[string]bool
+	tries map[string]int
+}
+
+func (f *failingExpire) Expire(ctx context.Context, accountID, lastUse string) error {
+	if f.fail[accountID] {
+		f.tries[accountID]++
+		return errors.New("expire failed")
+	}
+	return f.Store.Expire(ctx, accountID, lastUse)
+}
+
+// Accounts whose steps always fail don't hold up the rest: each is tried
+// expiryTries times in a run, then passed over (still listed, for the next
+// run), and the run counts them as stuck, in an error line, and fails.
+// Their failed steps leave no lease time on them, and don't count against
+// the run's steps.
+func TestExpiryPassesStuckAccounts(t *testing.T) {
+	h, tb := newExpiryTables(t)
+	ctx := context.Background()
+	h.server.Expiry = ExpiryOn
+	store := h.server.Directory.(*directory.Store)
+	failing := &failingExpire{Store: store, fail: map[string]bool{}, tries: map[string]int{}}
+	h.server.Unused = failing
+	var stuck []member
+	for i := range expirySteps + 1 {
+		m := h.setUpAt(t, userID+int64(i), start.AddDate(0, -20, 0))
+		failing.fail[m.d.account] = true
+		stuck = append(stuck, m)
+	}
+	behind := h.setUpAt(t, userID+20, start.AddDate(0, -14, 0))
+	h.setUpAt(t, userID+21, start)
+
+	if err := h.server.ExpireAccounts(ctx); err == nil {
+		t.Fatal("a run with stuck accounts didn't fail")
+	}
+	if _, err := store.AccountState(ctx, behind.d.account); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("the account behind the stuck ones: %v", err)
+	}
+	for _, m := range stuck {
+		if n := failing.tries[m.d.account]; n != expiryTries {
+			t.Fatalf("a stuck account was tried %d times", n)
+		}
+		it := tb.accountItem(t, m.d.account)
+		if _, lease := it["sl"]; lease {
+			t.Fatalf("a failed step left its lease: %v", it["sl"])
+		}
+	}
+	lines := h.logged(t, msgExpiryStuck)
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["count"] != float64(len(stuck)) {
+		t.Fatalf("logged %s", h.logs)
+	}
+	if n := h.loggedCount(t, msgExpiryDeleted); n != 1 {
+		t.Fatalf("deleted %d", n)
+	}
+
+	// Still listed: once their steps work, a run takes them.
+	clear(failing.fail)
+	h.now = h.now.Add(15 * time.Minute)
+	if err := h.server.ExpireAccounts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := store.CountUnused(ctx, directory.LastExpiredMonth(h.now), 100); err != nil || n > 1 {
+		t.Fatalf("%d left, %v", n, err)
+	}
+}
+
+// The metric filters behind the account-expiry alarm (infra/metrics.tf)
+// read the lines the expiry and logins log as errors: a renamed line would
+// leave the alarm quiet for good.
+func TestExpiryMetricFiltersMatchTheLogs(t *testing.T) {
+	src, err := os.ReadFile("../../../infra/metrics.tf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf := string(src)
+	for _, want := range []string{
+		`expiry-problems  = { metric = "ExpiryProblems", pattern = "{ ($.route = \"` + expiryRoute + `\") && ($.level = \"ERROR\") }" }`,
+		`use-not-recorded = { metric = "UseNotRecorded", pattern = "{ ($.msg = \"` + MsgUseNotRecorded + `\") && ($.level = \"ERROR\") }" }`,
+	} {
+		if !strings.Contains(tf, want) {
+			t.Errorf("infra/metrics.tf doesn't read %s", want)
+		}
+	}
+}
+
+// failingUsed fails every Used.
+type failingUsed struct{ Directory }
+
+func (failingUsed) Used(context.Context, string, string) error { return errors.New("used failed") }
+
+// A login whose month of use can't be recorded still goes through, and
+// logs an error line with a constant message that a metric filter counts
+// (infra/metrics.tf), with the error's kind only.
+func TestMonthOfUseFailureIsLoggedAsAnError(t *testing.T) {
+	h := newHarness(t)
+	m := h.account(t, userID)
+	h.server.Directory = failingUsed{h.server.Directory}
+	h.logs.Reset()
+
+	// The same month: nothing to record, nothing logged.
+	h.token(t, m.d)
+	if h.logs.Len() != 0 {
+		t.Fatalf("logged %s", h.logs)
+	}
+	// The next month's first login can't record it, and still logs in.
+	h.now = time.Date(2027, 2, 1, 0, 0, 1, 0, time.UTC)
+	h.token(t, m.d)
+	lines := h.logged(t, MsgUseNotRecorded)
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["route"] != "POST /session" || lines[0]["error_kind"] != "*errors.errorString" {
+		t.Fatalf("logged %s", h.logs)
+	}
+	if strings.Contains(h.logs.String(), m.d.account) || strings.Contains(h.logs.String(), "2027-02") {
+		t.Fatalf("the log names the account or the month: %s", h.logs)
+	}
+}
+
+// While the expiry deletes an account, the app is told it's that, not its
+// user's own deletion (GET /account: expired), so it doesn't say something
+// may be wrong.
+func TestExpiringAccountSaysSo(t *testing.T) {
+	h, tb := newExpiryTables(t)
+	ctx := context.Background()
+	h.server.Expiry = ExpiryOn
+	old := h.setUpAt(t, userID, start.AddDate(0, -13, 0))
+	tb.mailboxes(t, old.d.account, 400)
+	own := h.account(t, userID+1)
+	tb.mailboxes(t, own.d.account, 400)
+
+	if err := h.server.ExpireAccounts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	again := member{d: old.d, token: h.token(t, old.d)}
+	if status, out := h.as(t, again, http.MethodGet, "/account", nil, false); status != http.StatusOK || out["deleting"] != true || out["expired"] != true {
+		t.Fatalf("an expiring account: %d %v", status, out)
+	}
+	// Its user's own deletion is no expiry.
+	status, out := h.as(t, own, http.MethodDelete, "/account", nil, true)
+	wantError(t, status, out, http.StatusConflict, "in_progress")
+	if status, out := h.as(t, own, http.MethodGet, "/account", nil, false); status != http.StatusOK || out["deleting"] != true || out["expired"] != false {
+		t.Fatalf("an account its user deletes: %d %v", status, out)
+	}
 }

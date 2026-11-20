@@ -446,3 +446,27 @@ run "alarms_elsewhere" {
     error_message = "An environment without a firewall has an alarm on its blocks."
   }
 }
+
+# The account expiry's alarm reads its error lines and dropped runs, and a
+# login's failure to record its month, in the app stack's namespace (whose
+# metric filters are in ../metrics.tf) and api's, and fires on any.
+run "account_expiry_alarm" {
+  command = plan
+
+  plan_options {
+    target = [aws_cloudwatch_metric_alarm.account_expiry]
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_metric_alarm.account_expiry.threshold == 0
+      && toset([for q in aws_cloudwatch_metric_alarm.account_expiry.metric_query : "${q.metric[0].namespace} ${q.metric[0].metric_name}" if length(q.metric) > 0]) == toset([
+        "incognitochat-production/api ExpiryProblems",
+        "incognitochat-production/api UseNotRecorded",
+        "AWS/Lambda AsyncEventsDropped",
+      ])
+      && anytrue([for q in aws_cloudwatch_metric_alarm.account_expiry.metric_query : length(q.metric) > 0 && try(q.metric[0].dimensions.FunctionName, "") == "incognitochat-production-api"])
+    )
+    error_message = "The account-expiry alarm doesn't read the expiry's problems, unrecorded months and api's dropped runs."
+  }
+}

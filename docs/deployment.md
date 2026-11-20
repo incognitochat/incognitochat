@@ -386,9 +386,11 @@ plan would show are closed. What IAM can't close is listed below, and in
 - **Schedules** (EventBridge): it manages only rules named
   `<prefix>-schedule-*` (the [account expiry](#account-expiry)'s), aimed
   at `api` alone, and nothing else of EventBridge, so it can't touch the
-  alert rules. IAM can't limit what a schedule sends or how often: a
-  change shows in the next plan, which undoes it, and is emailed (the
-  alerts on EventBridge changes take the deploy role's calls too).
+  alert rules, nor give a rule an event pattern on events' source or kind.
+  IAM can't limit what a schedule sends, how often, or a pattern on other
+  fields (see [security.md](security.md#other-limits)): a change shows in
+  the next plan, which undoes it, and is emailed (the alerts on
+  EventBridge changes take the deploy role's calls too).
 - **The edge**: it manages CloudFront distributions, origin access controls
   and origin request policies (their IDs are random, so IAM can't tell the
   stack's own from others in the account; creating an origin request
@@ -767,8 +769,8 @@ The switches aren't flipped automatically by the alarms.
 
 ## Account expiry
 
-An account nobody has used for 12 months is deleted, as if its user had
-deleted it ([data.md](data.md#accounts-nobody-uses),
+Where it's on, an account nobody has used for 12 months is deleted, as if
+its user had deleted it ([data.md](data.md#accounts-nobody-uses),
 [protocol.md](protocol.md#registration-and-sessions), Unused accounts).
 Each account keeps the month, UTC, of its last login (the app logs in each
 time it's opened), and is due from the first day of the 13th month after
@@ -782,25 +784,50 @@ as one app deleting its account does, so it never takes more than about a
 quarter of production's write capacity, for a few seconds; a small account
 goes in one step, so a few hundred go a day (up to 480 steps), and one
 with 4,000 mailboxes takes about 160 steps, some 8 hours of runs. Each run carries on where the last
-stopped. Attachments aren't touched: they expire within 30 days, as
-always.
+stopped. A step that fails is tried once more; an account whose steps
+keep failing is passed over for the rest of the run (it stays listed, for
+the next), and the failed steps don't count against the run's five, so
+such accounts can't hold up the others. Attachments aren't touched: they
+expire within 30 days, as always.
+
+**The guard.** Before deleting anything, a run checks that logins still
+record their month: some account must have this month's or last month's.
+If none has, logins may have stopped recording it (a fault in `api`, its
+role, or the table), and in a year accounts in use would look unused; or
+nobody used the deployment for a month. Either way the run deletes
+nothing, logs `account expiry paused: no account has a recent month of
+use` and fails, until a login records a month. A login that can't record
+its month still logs in, and logs `month of use not recorded` as an
+error.
 
 `ACCOUNT_EXPIRY` (a variable of the GitHub environment) is the switch:
 
 | Value | What a run does |
 |---|---|
 | `dry-run` (unset) | Counts the due accounts and logs how many (`account expiry dry run: accounts it would delete`, "(at least)" past 10,000). Deletes nothing. |
-| `on` | Deletes them, and logs how many it deleted (`account expiry: accounts deleted`) and, if any failed, how many and the first error's kind. A failed run isn't tried again; the next carries on. |
+| `on` | Deletes them, and logs how many it deleted (`account expiry: accounts deleted`); as errors, how many it passed over as stuck (`account expiry: accounts stuck`, with the first error's kind), a run that failed (`account expiry failed`) or the guard's pause. A failed run isn't tried again; the next carries on. |
 | `off` | Nothing: the schedule is disabled, and `api` would ignore it. |
 
 The lines have the route `account expiry` and a `count`, never an account
-or a month. In Logs Insights, on the `api` function's log group:
+or a month. The bootstrap's `<prefix>-account-expiry` alarm emails when,
+in an hour, a run logged an error (`ExpiryProblems`), crashed or timed out
+(`api`'s `AsyncEventsDropped`: the schedule is its only event that waits
+for no answer), or a login couldn't record its month (`UseNotRecorded`).
+Find which in Logs Insights, on the `api` function's log group:
 
 ```
-fields @timestamp, msg, count
-| filter route = "account expiry"
+fields @timestamp, level, msg, count, error_kind
+| filter route = "account expiry" or msg = "month of use not recorded"
 | sort @timestamp desc
 ```
+
+**When the alarm fires**: a pause means no account has recorded this
+month or last. In a deployment people use, that's a fault: find why
+logins don't write `lu` (the `month of use not recorded` lines and their
+error kind, `api`'s role and its `Used` condition) before anything else;
+the expiry deletes nothing meanwhile. Stuck accounts are left for the next
+runs: the error kind says what fails. A crash or time-out shows in the
+function's own metrics and logs.
 
 **Turning it on**, in each environment, dev first:
 
@@ -829,8 +856,9 @@ aws events disable-rule --name <prefix>-schedule-expire-accounts
 
 A deletion can't be undone: there is nothing to restore from
 (point-in-time recovery is off). An account whose deletion started (its
-first step marks it) carries on being deleted, by the next runs or by its
-own app if it's opened meanwhile (Finish deleting).
+first step marks it) carries on being deleted by the next runs. Its app,
+if opened meanwhile, says it was deleted for going unused and offers to set
+up again, which replaces it (the new account's cleanup deletes the rest).
 
 **Accounts set up before the month was stored** have none until their app
 next logs in, and until then they aren't due, however long ago they were
@@ -864,12 +892,14 @@ dev first:
 1. Rerun the bootstrap (`infra/init`), while no deploy runs. It gives the
    deploy role the schedule's rights (`events:` calls on
    `<prefix>-schedule-*` rules, aimed at `api`, and EventBridge as a
-   principal on `api`) and denies it the rest of EventBridge; its
-   simulator checks should pass. A deploy from before the change still
-   works with it.
+   principal on `api`) and denies it the rest of EventBridge, and adds the
+   `<prefix>-account-expiry` alarm (its metrics have no data until the
+   deploy adds their filters); its simulator checks should pass. A deploy
+   from before the change still works with it.
 2. Deploy the change. Its plan adds the `lastUse` index to the directory
    (built in minutes, from no items), the schedule, its permission on
-   `api`, and `api`'s right to read the index. The change alerts email the
+   `api`, `api`'s right to read the index, and the metric filters for the
+   alarm. The change alerts email the
    schedule's creation (`PutRule`, `PutTargets`), since they take the
    deploy role's EventBridge calls too; nothing else of the deploy alerts.
    They email again whenever `ACCOUNT_EXPIRY` moves to or from `off`. A
@@ -1027,6 +1057,8 @@ allow-listed fields.
   downloads is uploads parked on purpose. Pausing uploads
   ([emergency switches](#emergency-switches)) stops the growth; what is
   there expires after 30 days.
+- `account-expiry`: see [account expiry](#account-expiry), When the alarm
+  fires.
 - `edge-5xx`: see which of these it comes with. `api-errors`: the function
   failing (its log). A `<table>-table-throttles` alarm: `503 unavailable`
   while a table is at its cap. Paused attachments: `503 uploads_paused` or

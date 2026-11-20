@@ -638,13 +638,33 @@ data "aws_iam_policy_document" "deploy_limits" {
 
   # EventBridge: only the app stack's schedules, aimed at api alone
   # (deploy_functions). Not the alert rules (audit.tf), nor the event bus,
-  # nor a target elsewhere: a deploy can neither quiet the alerts nor send
-  # the account's events out of it.
+  # nor a target elsewhere: a deploy can't quiet the alerts.
   statement {
     sid           = "OnlyTheStackSchedules"
     effect        = "Deny"
     actions       = ["events:*"]
     not_resources = [local.arns.schedules]
+  }
+
+  # And schedules, not rules on events: one matching the account's
+  # CloudTrail events would hand api, whose code the deploy controls, a
+  # live copy of the operator's calls. A pattern on other fields (the
+  # account alone, say) can't be refused this way: every rule change is
+  # emailed (audit.tf), and docs/security.md says so.
+  dynamic "statement" {
+    for_each = { SchedulesWithoutSources = "events:source", SchedulesWithoutDetailTypes = "events:detail-type" }
+    content {
+      sid       = statement.key
+      effect    = "Deny"
+      actions   = ["events:PutRule"]
+      resources = ["*"]
+
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
   }
 
   statement {

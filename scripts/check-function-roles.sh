@@ -220,6 +220,8 @@ deploy-role)
   check explicitDeny "letting EventBridge invoke notify" "$role" lambda:AddPermission "$(fn notify)" \
     --context-entries "$(context lambda:Principal string events.amazonaws.com)"
   check explicitDeny "changing an alert rule" "$role" events:PutRule "$(rule changes)"
+  check explicitDeny "putting a rule on CloudTrail's events under the schedules' prefix" "$role" events:PutRule \
+    "$(rule schedule-check)" --context-entries "$(context events:source string aws.cloudtrail)"
   check explicitDeny "aiming a schedule at another function" "$role" events:PutTargets "$(rule schedule-expire-accounts)" \
     --context-entries "$(context events:TargetArn stringList "$(fn notify)")"
   check explicitDeny "creating another function" "$role" lambda:CreateFunction "$(fn check)"

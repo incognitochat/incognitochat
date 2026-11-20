@@ -563,8 +563,12 @@ it. This is how close it gets.
     schedule sends or how often. So it could have the schedule invoke `api`
     every minute, with any event, such as a request that never went
     through CloudFront or the firewall (which `api` still authenticates as
-    any request). The next plan shows the change and undoes it, and each
-    of these calls is emailed (EventBridge rules alert on any caller).
+    any request). A rule under that prefix may not match events by their
+    source or kind, but it can match them by other fields (the account,
+    say), and so hand `api`, whose code a deploy controls, a live copy of
+    the operator's AWS calls and the IP addresses they came from. The next
+    plan shows the change and undoes it, and each of these calls is emailed
+    (EventBridge rules alert on any caller).
   - The WebSocket API: IAM can't limit which routes, integrations or whole
     APIs it adds, and nothing checks them, so it could add one that no plan
     shows, such as a route that sends each closing socket's IP address

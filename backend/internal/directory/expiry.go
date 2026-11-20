@@ -42,17 +42,29 @@ const ExpireAfter = 12
 // monthLayout is how a month is written (lu).
 const monthLayout = "2006-01"
 
+// What marks an account as being deleted (dl): its own DELETE /account
+// (MarkDeleting), or the expiry, for going unused (Expire).
+const (
+	deletingAsked  = 1
+	deletingUnused = 2
+)
+
 // Month is the month t falls in, UTC, as the account item records it.
 func Month(t time.Time) string {
 	return t.UTC().Format(monthLayout)
+}
+
+// MonthsBefore is the month n months before the one t falls in, UTC.
+func MonthsBefore(t time.Time, n int) string {
+	y, m, _ := t.UTC().Date()
+	return time.Date(y, m-time.Month(n), 1, 0, 0, 0, 0, time.UTC).Format(monthLayout)
 }
 
 // LastExpiredMonth is the newest last-use month whose accounts have gone
 // unused for more than ExpireAfter months at now: ExpireAfter+1 months
 // before now's month.
 func LastExpiredMonth(now time.Time) string {
-	y, m, _ := now.UTC().Date()
-	return time.Date(y, m-ExpireAfter-1, 1, 0, 0, 0, 0, time.UTC).Format(monthLayout)
+	return MonthsBefore(now, ExpireAfter+1)
 }
 
 // Used records that an account was used in month (Month), unless it says
@@ -108,6 +120,28 @@ func (s *Store) Unused(ctx context.Context, lastExpired string, limit int) ([]Un
 		}
 	}
 	return accounts, nil
+}
+
+// NewestUse is the newest last-use month any account has, from the last-use
+// index (one key read, eventually consistent): "" if none has one. While
+// logins record their month (Used), it is this month's or last month's
+// whenever anyone uses the app; the expiry deletes nothing otherwise, so a
+// fault that stops logins recording can't make accounts in use look unused
+// (api.Server.ExpireAccounts).
+func (s *Store) NewestUse(ctx context.Context) (string, error) {
+	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
+		TableName:                 &s.Table,
+		IndexName:                 aws.String(lastUseIndex),
+		KeyConditionExpression:    aws.String("sk = :a"),
+		ExpressionAttributeValues: attrs{":a": sv(skAccount)},
+		ScanIndexForward:          aws.Bool(false),
+		Limit:                     aws.Int32(1),
+	})
+	if err != nil || len(out.Items) == 0 {
+		return "", err
+	}
+	lu, _ := str(out.Items[0], "lu")
+	return lu, nil
 }
 
 // CountUnused counts the accounts last used in lastExpired or before, from

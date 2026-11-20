@@ -189,6 +189,9 @@ type Device struct {
 	// Deleting: DELETE /account has started (MarkDeleting), and the
 	// account takes no other request.
 	Deleting bool
+	// Expired: the deletion was started by the expiry of an account unused
+	// for over ExpireAfter months (Expire), not by DELETE /account.
+	Expired bool
 	// Leftovers are the accounts this one replaced whose items aren't all
 	// deleted yet (CleanUp), sorted.
 	Leftovers []string
@@ -218,7 +221,8 @@ func (s *Store) AccountOf(ctx context.Context, telegramHash string) (string, err
 // AccountExists reports whether a Telegram user has an account in use: one
 // being deleted (MarkDeleting) doesn't count, since setting up again
 // replaces it without asking (it can only be marked by its own signed
-// DELETE /account, and never unmarked). It reads the Telegram user's item,
+// DELETE /account, or by the expiry of an account unused for over
+// ExpireAfter months, and never unmarked). It reads the Telegram user's item,
 // then the account item eventually consistent (half a unit).
 func (s *Store) AccountExists(ctx context.Context, telegramHash string) (bool, error) {
 	id, err := s.AccountOf(ctx, telegramHash)
@@ -341,7 +345,8 @@ const (
 // the Telegram user's account changed since old was read, or one of its
 // links did.
 //
-// An old account being deleted (its own DELETE /account started) keeps no
+// An old account being deleted (its own DELETE /account started, or the
+// expiry of an unused account: Expire) keeps no
 // marker: its item and devices become stubs with no keys (dl), so its device
 // is refused as after a deletion, and CleanUp deletes them with the rest.
 //
@@ -386,7 +391,8 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 	// Only if old's links are as they were when it was read: a link made
 	// meanwhile isn't left behind.
 	unchanged, values := linksUnchanged(old.linkChange)
-	// Being deleted, as its own signed DELETE /account asked, which keeps
+	// Being deleted, as its own signed DELETE /account asked (or the expiry
+	// of an unused account), which keeps
 	// nothing: no marker of the replacement, and its devices lose their
 	// keys, so its device is refused as for any deleted account, not told it
 	// was replaced. Its item and devices stay only as stubs (dl, no keys), so
@@ -564,7 +570,8 @@ func (s *Store) MarkDeleting(ctx context.Context, accountID string) error {
 
 // markDeleting is MarkDeleting, and, if lastUse isn't empty, only while
 // the account's last-use month (lu) is still lastUse (Expire): it returns
-// ErrConflict if it was used since.
+// ErrConflict if it was used since, and marks it as deleted for going
+// unused (dl = deletingUnused, Device.Expired).
 func (s *Store) markDeleting(ctx context.Context, accountID, lastUse string) error {
 	acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
 	if err != nil {
@@ -582,16 +589,16 @@ func (s *Store) markDeleting(ctx context.Context, accountID, lastUse string) err
 		return err
 	}
 	unchanged, values := linksUnchanged(acct["lq"])
-	values[":one"], values[":lq"] = nv(1), newLinkChange()
+	values[":dl"], values[":lq"] = nv(deletingAsked), newLinkChange()
 	cond := "attribute_exists(ak) AND " + unchanged
 	if lastUse != "" {
 		cond += " AND lu = :lu"
-		values[":lu"] = sv(lastUse)
+		values[":lu"], values[":dl"] = sv(lastUse), nv(deletingUnused)
 	}
 	writes := append([]types.TransactWriteItem{{Update: &types.Update{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
-		UpdateExpression:          aws.String("SET dl = :one, " + linkChange),
+		UpdateExpression:          aws.String("SET dl = :dl, " + linkChange),
 		ConditionExpression:       aws.String(cond),
 		ExpressionAttributeValues: values,
 	}}}, links...)
@@ -1010,6 +1017,7 @@ func accountState(acct map[string]types.AttributeValue) Device {
 		NoticesRefused: num(acct, "no") == noticesRefused,
 		NoticesLeft:    off && (chat || language || last),
 		Deleting:       deleting,
+		Expired:        deleting && num(acct, "dl") == deletingUnused,
 		Leftovers:      stringSet(acct, "ro"),
 		LastUse:        lu,
 	}

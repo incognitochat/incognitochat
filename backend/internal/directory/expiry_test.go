@@ -54,6 +54,45 @@ func TestMonths(t *testing.T) {
 			t.Errorf("LastExpiredMonth(%v) = %s, want %s", c.at, got, c.lastExpired)
 		}
 	}
+	// The month before, whatever the day (March 31st less a month is not
+	// March 3rd), across a year.
+	for at, want := range map[time.Time]string{
+		time.Date(2027, 3, 31, 12, 0, 0, 0, time.UTC): "2027-02",
+		time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC):   "2026-12",
+	} {
+		if got := MonthsBefore(at, 1); got != want {
+			t.Errorf("MonthsBefore(%v, 1) = %s, want %s", at, got, want)
+		}
+	}
+}
+
+// NewestUse is the newest month any account has; "" with none. A replaced
+// account's marker, and an account with no month, have none.
+func TestNewestUse(t *testing.T) {
+	s, _ := lastUseStore(t)
+	ctx := context.Background()
+	if got, err := s.NewestUse(ctx); err != nil || got != "" {
+		t.Fatalf("no accounts: %q %v", got, err)
+	}
+	usedIn(t, s, "2026-03")
+	newest := usedIn(t, s, "2026-11")
+	usedIn(t, s, "2025-12")
+	if err := s.Create(ctx, newAccount(t, "th-no-month")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.NewestUse(ctx); err != nil || got != "2026-11" {
+		t.Fatalf("newest: %q %v", got, err)
+	}
+	acct, err := s.ByTelegram(ctx, newest.TelegramHash, newest.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Replace(ctx, acct, newAccount(t, newest.TelegramHash), now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.NewestUse(ctx); err != nil || got != "2026-03" {
+		t.Fatalf("newest once it was replaced: %q %v", got, err)
+	}
 }
 
 // Used moves the month on, never back, and writes nothing to an account
@@ -203,7 +242,7 @@ func TestExpire(t *testing.T) {
 	if err := s.Expire(ctx, n.ID, "2027-01"); err != nil {
 		t.Fatal(err)
 	}
-	if d, err := s.AccountState(ctx, n.ID); err != nil || !d.Deleting || d.LastUse != "2027-01" {
+	if d, err := s.AccountState(ctx, n.ID); err != nil || !d.Deleting || !d.Expired || d.LastUse != "2027-01" {
 		t.Fatalf("expired: %+v, %v", d, err)
 	}
 	if _, err := s.Link(ctx, l.ID); !errors.Is(err, ErrNotFound) {
@@ -221,5 +260,14 @@ func TestExpire(t *testing.T) {
 	}
 	if err := s.Expire(ctx, n.ID, "2027-01"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expire one gone: %v", err)
+	}
+
+	// Its user's own deletion is no expiry.
+	own := usedIn(t, s, "2025-12")
+	if err := s.MarkDeleting(ctx, own.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.AccountState(ctx, own.ID); err != nil || !d.Deleting || d.Expired {
+		t.Fatalf("deleted by its user: %+v, %v", d, err)
 	}
 }
