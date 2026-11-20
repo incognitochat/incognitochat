@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/incognitochat/incognitochat/compare/v2.6.0...v2.6.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **infra:** give a one-route firewall limit an AND, not an OR of one ([#198](https://github.com/incognitochat/incognitochat/issues/198)) ([c81da3d](https://github.com/incognitochat/incognitochat/commit/c81da3db5c5b7a6cf74568f0095b831b89f4ed31))
+
 ## [2.6.0](https://github.com/incognitochat/incognitochat/compare/v2.5.0...v2.6.0) (2026-11-20)
 
 
