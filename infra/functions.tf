@@ -27,7 +27,7 @@ locals {
       tables      = ["directory", "messages", "ephemeral"]
       parameters = [
         "bot-id", "session-key", "telegram-id-pepper", "issuer-key", "media-issuer-key",
-        "previous-issuer-key", "previous-media-issuer-key",
+        "previous-issuer-key", "previous-media-issuer-key", "admin-telegram-ids",
       ]
       environment = {
         TABLE_DIRECTORY                 = aws_dynamodb_table.table["directory"].name
@@ -40,11 +40,11 @@ locals {
         PARAM_MEDIA_ISSUER_KEY          = aws_ssm_parameter.parameter["media-issuer-key"].name
         PARAM_PREVIOUS_ISSUER_KEY       = aws_ssm_parameter.parameter["previous-issuer-key"].name
         PARAM_PREVIOUS_MEDIA_ISSUER_KEY = aws_ssm_parameter.parameter["previous-media-issuer-key"].name
+        PARAM_ADMIN_TELEGRAM_IDS        = aws_ssm_parameter.parameter["admin-telegram-ids"].name
         NOTIFY_FUNCTION                 = "${local.prefix}-notify"
         WS_FUNCTION                     = "${local.prefix}-ws"
         MEDIA_BUCKET                    = aws_s3_bucket.media.id
         INVITE_ONLY                     = tostring(var.invite_only)
-        ADMIN_TELEGRAM_IDS              = var.admin_telegram_ids
       }
     }
     # Telegram webhook: opens the app, cleans up service messages. The deploy

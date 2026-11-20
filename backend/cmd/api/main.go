@@ -45,6 +45,9 @@ const (
 	// about 30 ms. A batch of 50 tokens signs for about 3 s at 256 MB
 	// (estimated), after its last AWS call, so this doesn't cut it off.
 	requestDeadline = 5 * time.Second
+	// noAdmins is what the admins' parameter holds while there are none
+	// (infra/parameters.tf): SSM can't store an empty value.
+	noAdmins = "none"
 )
 
 func main() {
@@ -86,7 +89,7 @@ func invocation(log *slog.Logger, router *httpapi.Router) func(context.Context, 
 var envNames = []string{
 	"TABLE_DIRECTORY", "TABLE_EPHEMERAL", "TABLE_MESSAGES", "NOTIFY_FUNCTION", "WS_FUNCTION", "MEDIA_BUCKET",
 	"PARAM_BOT_ID", "PARAM_SESSION_KEY", "PARAM_TELEGRAM_ID_PEPPER", "PARAM_ISSUER_KEY", "PARAM_MEDIA_ISSUER_KEY",
-	"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY",
+	"PARAM_PREVIOUS_ISSUER_KEY", "PARAM_PREVIOUS_MEDIA_ISSUER_KEY", "PARAM_ADMIN_TELEGRAM_IDS",
 }
 
 func setup(ctx context.Context) (*api.Server, error) {
@@ -100,7 +103,8 @@ func setup(ctx context.Context) (*api.Server, error) {
 	}
 	params, err := config.Load(ctx, ssm.NewFromConfig(aws),
 		env["PARAM_BOT_ID"], env["PARAM_SESSION_KEY"], env["PARAM_TELEGRAM_ID_PEPPER"], env["PARAM_ISSUER_KEY"],
-		env["PARAM_MEDIA_ISSUER_KEY"], env["PARAM_PREVIOUS_ISSUER_KEY"], env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"])
+		env["PARAM_MEDIA_ISSUER_KEY"], env["PARAM_PREVIOUS_ISSUER_KEY"], env["PARAM_PREVIOUS_MEDIA_ISSUER_KEY"],
+		env["PARAM_ADMIN_TELEGRAM_IDS"])
 	if err != nil {
 		return nil, err
 	}
@@ -150,10 +154,16 @@ func newServer(aws awsv2.Config, getenv func(string) string, params map[string]s
 	}
 
 	// Admins are recognised by the keyed hash of their Telegram ID, the same
-	// one their account stores. The plain IDs come from a plain environment
-	// variable, so they are also in Terraform state, and anyone who can read
-	// the function's configuration can read them.
-	adminIDs, err := config.TelegramIDs(getenv("ADMIN_TELEGRAM_IDS"))
+	// one their account stores. The plain IDs come from an encrypted
+	// parameter, written through a write-only argument (infra/parameters.tf),
+	// so they are in neither Terraform state nor the function's
+	// configuration, but whoever may read that parameter can read them. It
+	// holds noAdmins while there are none.
+	adminList := params[env["PARAM_ADMIN_TELEGRAM_IDS"]]
+	if adminList == noAdmins {
+		adminList = ""
+	}
+	adminIDs, err := config.TelegramIDs(adminList)
 	if err != nil {
 		return nil, err
 	}

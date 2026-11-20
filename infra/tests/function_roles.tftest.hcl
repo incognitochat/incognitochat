@@ -4,7 +4,8 @@
 # fields named (finding BOT-5; what IAM can't narrow further is in
 # docs/security.md). Also that notify's timeout stays below the quiet
 # period it holds while sending, and api's below the lease a deletion step
-# holds on its account. Nothing touches AWS: the provider has
+# holds on its account; and that only api gets the admins' Telegram IDs,
+# from their parameter. Nothing touches AWS: the provider has
 # fake credentials and makes no calls (a policy document is rendered
 # locally), and every resource the policy refers to is overridden, so
 # "apply" creates nothing. Run by CI (terraform test).
@@ -29,11 +30,12 @@ variables {
   lambda_builds_bucket           = "test"
   lambda_signing_profile         = "test"
   lambda_code_signing_config_arn = "test"
-  # No previous keys, as the deploy passes them while their secrets are
-  # unset. Given, since an ephemeral variable left to its default fails
-  # terraform test's apply.
+  # No previous keys and no admins, as the deploy passes them while their
+  # secrets are unset. Given, since an ephemeral variable left to its
+  # default fails terraform test's apply.
   previous_issuer_key       = ""
   previous_media_issuer_key = ""
+  admin_telegram_ids        = ""
 }
 
 override_data {
@@ -161,5 +163,27 @@ run "notify_role" {
       "arn:aws:dynamodb:eu-west-1:123456789012:table/incognitochat-test-ephemeral",
     ])
     error_message = "notify's role reaches another table."
+  }
+}
+
+# The admins' Telegram IDs reach api only through their parameter, which
+# its role may read and no other function's may: never as an environment
+# variable, which Terraform state and the function's configuration would
+# hold (findings TF-9, CI-13, ZTI-12).
+run "admins_only_in_their_parameter" {
+  command = apply
+
+  plan_options {
+    target = [data.aws_iam_policy_document.fn["api"]]
+  }
+
+  assert {
+    condition = alltrue([
+      contains(local.functions["api"].parameters, "admin-telegram-ids"),
+      contains(keys(local.functions["api"].environment), "PARAM_ADMIN_TELEGRAM_IDS"),
+      length([for f in local.functions : f if contains(f.parameters, "admin-telegram-ids")]) == 1,
+      length([for f in local.functions : f if contains(keys(f.environment), "ADMIN_TELEGRAM_IDS")]) == 0,
+    ])
+    error_message = "The admins' IDs must reach api alone, through their parameter, and no function's environment."
   }
 }
