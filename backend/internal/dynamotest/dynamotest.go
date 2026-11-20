@@ -43,9 +43,22 @@ func Client(t *testing.T) *dynamodb.Client {
 // deletes it when the test ends.
 func Table(t *testing.T, client *dynamodb.Client) string {
 	t.Helper()
+	return table(t, client, false)
+}
+
+// DirectoryTable is Table with the directory's index of account items by
+// their last-use month, as infra/tables.tf makes it: "lastUse", hash key
+// sk, range key lu, keys only (backend/internal/directory, expiry.go).
+func DirectoryTable(t *testing.T, client *dynamodb.Client) string {
+	t.Helper()
+	return table(t, client, true)
+}
+
+func table(t *testing.T, client *dynamodb.Client, lastUse bool) string {
+	t.Helper()
 	ctx := context.Background()
 	name := "test-" + ids.New()
-	_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
+	in := &dynamodb.CreateTableInput{
 		TableName:   &name,
 		BillingMode: types.BillingModePayPerRequest,
 		AttributeDefinitions: []types.AttributeDefinition{
@@ -56,7 +69,20 @@ func Table(t *testing.T, client *dynamodb.Client) string {
 			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
 			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
 		},
-	})
+	}
+	if lastUse {
+		in.AttributeDefinitions = append(in.AttributeDefinitions,
+			types.AttributeDefinition{AttributeName: aws.String("lu"), AttributeType: types.ScalarAttributeTypeS})
+		in.GlobalSecondaryIndexes = []types.GlobalSecondaryIndex{{
+			IndexName: aws.String("lastUse"),
+			KeySchema: []types.KeySchemaElement{
+				{AttributeName: aws.String("sk"), KeyType: types.KeyTypeHash},
+				{AttributeName: aws.String("lu"), KeyType: types.KeyTypeRange},
+			},
+			Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+		}}
+	}
+	_, err := client.CreateTable(ctx, in)
 	if err != nil {
 		t.Fatalf("create table: %v", err)
 	}

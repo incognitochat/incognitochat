@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -45,6 +46,10 @@ const (
 	// about 30 ms. A batch of 50 tokens signs for about 3 s at 256 MB
 	// (estimated), after its last AWS call, so this doesn't cut it off.
 	requestDeadline = 5 * time.Second
+	// expiryDeadline cuts off a run of the account expiry, under the
+	// function's timeout (10 s); a run stops starting steps 2 s before it
+	// (api.Server.ExpireAccounts).
+	expiryDeadline = 8 * time.Second
 	// noAdmins is what the admins' parameter holds while there are none
 	// (infra/parameters.tf): SSM can't store an empty value.
 	noAdmins = "none"
@@ -75,14 +80,45 @@ func main() {
 		}
 	}
 	// SIGTERM, when the instance shuts down, logs the last minute's counts.
-	lambda.StartWithOptions(invocation(log, router), lambda.WithEnableSIGTERM(counts.Flush))
+	lambda.StartWithOptions(invocation(log, router, server.ExpireAccounts), lambda.WithEnableSIGTERM(counts.Flush))
 }
 
-// invocation is the function's handler: the router, under awsconf.Guard,
-// so Lambda gets no error but awsconf.ErrFailed (Serve returns none) and a
-// panic is logged by its kind.
-func invocation(log *slog.Logger, router *httpapi.Router) func(context.Context, httpapi.Request) (httpapi.Response, error) {
-	return awsconf.Guard(log, awsconf.WithDeadline(requestDeadline, router.Serve))
+// event is what the function is invoked with: a request through its URL,
+// or the account expiry's schedule (infra/functions.tf), whose event is
+// {"expireAccounts":{}}. Lambda builds a URL request's event itself, always
+// with a path and a method, and a caller sets none of its top-level fields
+// (its body, headers and query are strings inside it), so no request can
+// pass for the schedule's.
+type event struct {
+	httpapi.Request
+	ExpireAccounts *struct{} `json:"expireAccounts"`
+}
+
+// scheduled reports whether e is the account expiry's schedule.
+func (e *event) scheduled() bool {
+	return e.ExpireAccounts != nil && e.RawPath == "" && e.RequestContext.HTTP.Method == ""
+}
+
+// invocation is the function's handler: the router for a request, and
+// expire, which runs the account expiry (api.Server.ExpireAccounts), for
+// the schedule's event; under awsconf.Guard, so Lambda gets no error but
+// awsconf.ErrFailed (Serve returns none) and a panic is logged by its kind.
+func invocation(log *slog.Logger, router *httpapi.Router, expire func(context.Context) error) func(context.Context, json.RawMessage) (any, error) {
+	serve := awsconf.WithDeadline(requestDeadline, router.Serve)
+	run := awsconf.WithDeadline(expiryDeadline, func(ctx context.Context, _ struct{}) (any, error) {
+		return nil, expire(ctx)
+	})
+	return awsconf.Guard(log, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var e event
+		if err := json.Unmarshal(raw, &e); err != nil {
+			log.Warn("unreadable event", logx.ErrorKind(err))
+			return nil, err
+		}
+		if e.scheduled() {
+			return run(ctx, struct{}{})
+		}
+		return serve(ctx, e.Request)
+	})
 }
 
 // envNames are the environment variables the function must have.
@@ -204,5 +240,9 @@ func newServer(aws awsv2.Config, getenv func(string) string, params map[string]s
 		Uploads:     &ephemeral.Uploads{DB: db, Table: env["TABLE_EPHEMERAL"], Now: now},
 		Switches:    dir,
 		Sockets:     sockets,
+		Unused:      dir,
+		// Off, dry-run or on; unset, the dry run (docs/deployment.md,
+		// Account expiry).
+		Expiry: api.ParseExpiryMode(getenv("ACCOUNT_EXPIRY")),
 	}, nil
 }

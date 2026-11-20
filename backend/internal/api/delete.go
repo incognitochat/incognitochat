@@ -77,47 +77,62 @@ func (s *Server) deleteAccount(ctx context.Context, _ httpapi.Request, c caller)
 			return s.internal(route, err)
 		}
 	}
-	if len(c.device.Leftovers) > 0 {
-		if _, err := s.cleanUpStep(ctx, c.AccountID, c.device.Leftovers[0], DeleteStep); err != nil {
-			return s.internal(route, err)
-		}
-		return inProgress()
-	}
-	devices, err := s.Directory.Devices(ctx, c.AccountID, s.Now())
-	if err != nil {
-		return s.internal(route, err)
-	}
-	budget := DeleteStep
-	// Envelopes first: once the account is gone, the device can't ask again.
-	for _, d := range devices {
-		spent, more, err := s.Inbox.Clear(ctx, c.AccountID, d, budget)
-		if err != nil {
-			return s.internal(route, err)
-		}
-		if more || spent >= budget {
-			return inProgress()
-		}
-		budget -= spent
-	}
-	done, err := s.Directory.Delete(ctx, c.AccountID, c.device.TelegramHash, budget)
-	if errors.Is(err, directory.ErrNotFound) {
-		done, err = true, nil
-	}
+	done, err := s.deleteStep(ctx, route, c.AccountID, c.device)
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if !done {
 		return inProgress()
 	}
+	return httpapi.JSON(http.StatusOK, map[string]string{})
+}
+
+// deleteStep takes one step of deleting an account already marked as being
+// deleted (directory.Store.MarkDeleting), of about DeleteStep write units,
+// as DELETE /account and the account expiry (expiry.go) both do: what is
+// left of an account it replaced, if anything (d.Leftovers); otherwise its
+// devices' waiting envelopes, then what it owns (directory.Store.Delete),
+// the account and its devices last, and then its socket records. It
+// reports whether the account is gone. The caller holds the account's
+// lease (lease); d is what the account item said before the lease was
+// taken.
+func (s *Server) deleteStep(ctx context.Context, route, accountID string, d directory.Device) (bool, error) {
+	if len(d.Leftovers) > 0 {
+		_, err := s.cleanUpStep(ctx, accountID, d.Leftovers[0], DeleteStep)
+		return false, err
+	}
+	devices, err := s.Directory.Devices(ctx, accountID, s.Now())
+	if err != nil {
+		return false, err
+	}
+	budget := DeleteStep
+	// Envelopes first: once the account is gone, the device can't ask again.
+	for _, device := range devices {
+		spent, more, err := s.Inbox.Clear(ctx, accountID, device, budget)
+		if err != nil {
+			return false, err
+		}
+		if more || spent >= budget {
+			return false, nil
+		}
+		budget -= spent
+	}
+	done, err := s.Directory.Delete(ctx, accountID, d.TelegramHash, budget)
+	if errors.Is(err, directory.ErrNotFound) {
+		done, err = true, nil
+	}
+	if err != nil || !done {
+		return false, err
+	}
 	// The app's sockets don't say when they close (there's no $disconnect
 	// route), so their records go here. If that fails, they expire within
 	// the hour; the account is gone either way.
 	if s.Sockets != nil {
-		if err := s.Sockets.ForgetAll(ctx, c.AccountID); err != nil {
+		if err := s.Sockets.ForgetAll(ctx, accountID); err != nil {
 			s.Log.Warn("socket records not deleted", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
 		}
 	}
-	return httpapi.JSON(http.StatusOK, map[string]string{})
+	return true, nil
 }
 
 // cleanUp deletes, in steps, what is left of the accounts the caller's

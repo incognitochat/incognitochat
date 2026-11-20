@@ -24,10 +24,10 @@
 // sort between them: a new kind of item needs a sort key after "D#~".
 //
 // The account item also counts the account's active links (lc), marks each
-// change to them with a random value (lq, linkChange), and, once it joined
-// through an invitation, records its level (lv), the invitations granted to
-// it on top of its level's allowance (ig) and the uses it has put into
-// codes (ia).
+// change to them with a random value (lq, linkChange), records the month it
+// was last used (lu, expiry.go), and, once it joined through an invitation,
+// records its level (lv), the invitations granted to it on top of its
+// level's allowance (ig) and the uses it has put into codes (ia).
 //
 // The Telegram hash is a keyed hash of the Telegram user ID (TelegramHash),
 // so the table enforces one account per user without holding the ID.
@@ -40,9 +40,9 @@
 //     what happened after checking their signatures; its links and device
 //     list (if it has one) go at once. The account that replaced it lists it (ro) until the
 //     rest is deleted (CleanUp).
-//   - Deleted (DELETE /account): its item is marked (dl) and its link goes
-//     in the first step (MarkDeleting), then everything else (Delete), the
-//     item last.
+//   - Deleted (DELETE /account, or unused for over ExpireAfter months:
+//     Expire): its item is marked (dl) and its link goes in the first step
+//     (MarkDeleting), then everything else (Delete), the item last.
 //
 // Either way, from that first write on, nothing it owns is used: deliveries
 // to its mailboxes find no live owner (Recipients), nor do its invitation
@@ -162,6 +162,9 @@ type NewAccount struct {
 	AccountKey   []byte
 	DeviceID     string
 	DeviceKey    []byte
+	// Month is the month it is set up in (Month), its first month of use
+	// (lu); none if empty.
+	Month string
 }
 
 // Device is a device's signing key, with what requests need to know about
@@ -189,6 +192,9 @@ type Device struct {
 	// Leftovers are the accounts this one replaced whose items aren't all
 	// deleted yet (CleanUp), sorted.
 	Leftovers []string
+	// LastUse is the month the account was last used (Month, Used); ""
+	// for one that has none yet.
+	LastUse string
 }
 
 // AccountOf returns the ID of the account registered for a Telegram hash,
@@ -553,6 +559,13 @@ func (s *Store) expireDevices(ctx context.Context, accountID string, marker map[
 // and ErrConflict if its links changed since it read them (lq): a link made
 // meanwhile isn't left behind; asking again marks it.
 func (s *Store) MarkDeleting(ctx context.Context, accountID string) error {
+	return s.markDeleting(ctx, accountID, "")
+}
+
+// markDeleting is MarkDeleting, and, if lastUse isn't empty, only while
+// the account's last-use month (lu) is still lastUse (Expire): it returns
+// ErrConflict if it was used since.
+func (s *Store) markDeleting(ctx context.Context, accountID, lastUse string) error {
 	acct, err := s.get(ctx, accountPK(accountID), skAccount, time.Time{})
 	if err != nil {
 		return err
@@ -570,11 +583,16 @@ func (s *Store) MarkDeleting(ctx context.Context, accountID string) error {
 	}
 	unchanged, values := linksUnchanged(acct["lq"])
 	values[":one"], values[":lq"] = nv(1), newLinkChange()
+	cond := "attribute_exists(ak) AND " + unchanged
+	if lastUse != "" {
+		cond += " AND lu = :lu"
+		values[":lu"] = sv(lastUse)
+	}
 	writes := append([]types.TransactWriteItem{{Update: &types.Update{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
 		UpdateExpression:          aws.String("SET dl = :one, " + linkChange),
-		ConditionExpression:       aws.String("attribute_exists(ak) AND " + unchanged),
+		ConditionExpression:       aws.String(cond),
 		ExpressionAttributeValues: values,
 	}}}, links...)
 	writes = append(writes, keys...)
@@ -963,8 +981,17 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 	if !ok {
 		return Device{}, ErrNotFound
 	}
+	d := accountState(acct)
+	d.Key = k
+	return d, nil
+}
+
+// accountState is what an account item says about its account (Device,
+// without a device's key).
+func accountState(acct map[string]types.AttributeValue) Device {
 	g, _ := str(acct, "g")
 	th, _ := str(acct, "th")
+	lu, _ := str(acct, "lu")
 	_, member := acct["lv"].(*types.AttributeValueMemberN)
 	_, chat := acct["cid"]
 	_, language := acct["lg"]
@@ -972,7 +999,6 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 	_, off := acct["no"]
 	_, deleting := acct["dl"]
 	return Device{
-		Key:            k,
 		Replaced:       g == goneReplaced,
 		TelegramHash:   th,
 		Member:         member,
@@ -985,17 +1011,22 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 		NoticesLeft:    off && (chat || language || last),
 		Deleting:       deleting,
 		Leftovers:      stringSet(acct, "ro"),
-	}, nil
+		LastUse:        lu,
+	}
 }
 
 // newAccountItems stores a new account: its item, listing leftovers (the
-// accounts it replaced whose items are still to be deleted), and its
-// device. Its device list is checked at registration, and not stored.
+// accounts it replaced whose items are still to be deleted) and the month
+// it is set up in (its first use), and its device. Its device list is
+// checked at registration, and not stored.
 func (s *Store) newAccountItems(n NewAccount, leftovers []string) []types.TransactWriteItem {
 	pk := accountPK(n.ID)
 	account := attrs{"ak": bv(n.AccountKey), "th": sv(n.TelegramHash)}
 	if len(leftovers) > 0 {
 		account["ro"] = &types.AttributeValueMemberSS{Value: leftovers}
+	}
+	if n.Month != "" {
+		account["lu"] = sv(n.Month)
 	}
 	return []types.TransactWriteItem{
 		{Put: &types.Put{

@@ -89,13 +89,14 @@ The keyed hashes and the edits are kept apart from the conversation itself
 |---|---|---|
 | A random account ID, and a keyed hash of the user's Telegram ID (not the ID itself). The hash hides the ID only from someone without the server's key: whoever holds the key, such as the operator, can hash every possible Telegram ID in minutes, and so tell which Telegram user each account belongs to | One account per Telegram account; daily limits | While the account exists |
 | The account's and its device's public keys | To check logins and requests | While the account exists |
+| The month, UTC, the account was last used (`2026-11`, say): nothing finer, not the day, not how often. On the account, and in an index of accounts by that month, which holds the account ID and the month alone | So that accounts nobody uses any more are deleted ([below](#accounts-nobody-uses)) | While the account exists. Replaced at the first login of each month (the app logs in each time it's opened) |
 | Only for accounts set up before the server stopped storing it: the account's first signed device list (its device's ID and public key, and the hour the account was set up). Accounts set up since have their list checked at setup and not stored | Nothing reads it | Until the account is replaced or deleted |
-| The user's Telegram chat ID, encrypted so only the notice service can open it, their language, and the Telegram message ID of the latest notice (so the next one can replace it) | To send "New message" notices, if the user allows them | While notices are on. When Telegram refuses a notice (the user blocked the bot, say), they're marked off, and all three are deleted the next time the app opens (if it never opens again, they stay until the account ends). The app then doesn't turn notices on again by itself: it offers to, and only the user's tap (Turn on notices) stores the chat ID and language anew |
+| The user's Telegram chat ID, encrypted so only the notice service can open it, their language, and the Telegram message ID of the latest notice (so the next one can replace it) | To send "New message" notices, if the user allows them | While notices are on. When Telegram refuses a notice (the user blocked the bot, say), they're marked off, and all three are deleted the next time the app opens (if it never opens again, they stay until the account ends, at the latest when it's deleted for going unused, [below](#accounts-nobody-uses)). The app then doesn't turn notices on again by itself: it offers to, and only the user's tap (Turn on notices) stores the chat ID and language anew |
 | The account's link: its ID, its public keys, its first-contact mailbox | So people can write to the user | Until it's replaced or deleted, or the account ends |
 | The ID of every link that was replaced or deleted, or ended with its account, with nothing else (a few bytes each, naming nobody). Only links that went once the server started keeping these: the IDs of earlier ones weren't kept, and can still be taken | So nobody can make a new link with an old link's ID: whoever opens the old link is told it's gone, not shown someone else's | For good |
 | Each link signing key the account has used: the key's fingerprint and the account ID, kept apart (by fingerprint) and in the account's own records. While its link has the key, the link already says both (its owner, and its signing key, whose fingerprint anyone can work out); after a revocation, or a move to another key, the account keeps the key for a later link | So no two accounts' links ever share a signing key, which would let their owners match a sender who writes to each of them by the tag the sender's app adds | While the account exists. When it ends, the account ID goes from it (at once for its current link's key, the rest with the steps below), and the fingerprint stays for good, as a tombstone naming nobody: one small item for each signing key ever used, so that no account can take the key up later and match its senders' tags with the ones the ended account saw |
 | Mailboxes: random IDs, and which account they belong to | To deliver messages | Until they're ended, or their account is deleted or replaced: they take nothing from that moment, and go in steps while the app is open (below) |
-| Only while a deletion, or the cleanup after a replacement, is under way: that the account is being deleted; or, on the new account, the old account's ID | So the deletion or cleanup carries on where it stopped, and the account is never left half deleted and in use | Until it's done, a few minutes at most while the app is open; it carries on each time the app is opened. If the app is never opened again, it stays, with what isn't deleted yet (below) |
+| Only while a deletion, or the cleanup after a replacement, is under way: that the account is being deleted; or, on the new account, the old account's ID | So the deletion or cleanup carries on where it stopped, and the account is never left half deleted and in use | Until it's done, a few minutes at most while the app is open; it carries on each time the app is opened. If the app is never opened again, it stays, with what isn't deleted yet (below), until the account has gone unused for 12 months ([below](#accounts-nobody-uses)) |
 | On the account: a random value replaced at each change to its link (not a count, so it says nothing about how often it changed), and, while a step of a deletion or cleanup runs, until when that step holds the account (to the millisecond) | So two requests can't undo each other's change to the link, or run the same step twice | The random value while the account exists; the step's time until the work is done (each step replaces it, the last removes it, or it goes with the account) |
 | Messages waiting for the device, encrypted, each with the mailbox it came through | Delivery. The app takes a message in only through the mailbox it belongs to, so another user can't learn whose device opens it by sending it elsewhere | Until the device confirms them, at most 30 days |
 | Placeholders: a device of no account, and at most one waiting message for each size an envelope can have (64 sizes), all zeros, with no mailbox and no time, under an account ID no account has | A send to a mailbox that doesn't exist (or ended) reads and writes them instead, so it costs and takes what a delivery does; each write writes the same item again, so nothing about the send is kept. They only show which envelope sizes were ever sent to such a mailbox | They never change, and stay |
@@ -135,7 +136,8 @@ minutes for the biggest accounts, while the app stays open. If the app
 closes first, it carries on the next time it's opened; meanwhile the server
 keeps that the account is being deleted, and what isn't deleted yet stays,
 unused. If the app is never opened again, that stays too: the account,
-marked and unused, with what is left of it. The same if the server can't
+marked and unused, with what is left of it, until it has gone unused for
+12 months, when the server finishes it ([below](#accounts-nobody-uses)). The same if the server can't
 finish and the user deletes everything from the device only; setting up
 again later replaces that account (without asking: it isn't in use) and
 deletes what is left of it, keeping no marker of it. Besides its old link
@@ -159,7 +161,32 @@ until the cleanup ends; setting up again carries it over, and deleting the
 new account finishes the cleanup first. Those leftovers have no expiry of
 their own, since giving each one an expiry costs as much as deleting it: if
 the new device's app is never opened again, they stay as long as the new
-account does, unused.
+account does, unused, and go when it goes for being unused.
+
+### Accounts nobody uses
+
+An account whose app hasn't been opened for 12 whole months is deleted, as
+if the user had deleted it: from the first day of the 13th month after the
+month of its last login (the app logs in each time it's opened), so one last
+opened in November 2026 goes in December 2027, within hours, or days if
+very many are due at once. Everything the server holds for it goes, in the
+same steps as above: its link (its ID stays as a tombstone, naming nobody),
+mailboxes, the messages waiting for its device, invitation codes, devices,
+keys (the link signing keys' fingerprints stay as tombstones), the
+encrypted chat ID and language for notices, the hash of the Telegram ID,
+the month itself, what is left of an account it replaced, and a deletion
+that stopped halfway. Attachments are left to expire within 30 days, as
+always. Its link stops working, and the people who wrote to it can no
+longer reach it; they aren't told. Opened after that, the app is refused:
+it keeps the chats on the device readable, and the user can set up a new
+account. Opened while the deletion is under way, it offers to finish it.
+
+Only the month is stored for this. Accounts set up before it was stored
+get one at their next login, and aren't deleted until 12 months after that
+(or after the month the operator gives the rest, once:
+[deployment.md](deployment.md#account-expiry)). The operator can turn the
+deletion off, or have it only count; whoever runs a deployment says in
+their policy whether it's on.
 
 **Never stored:** the content of any message or attachment in readable form,
 who sent a message, which conversations belong together, which mailboxes got
@@ -246,6 +273,8 @@ records go in that same request.
   Telegram ID; only its link IDs and link signing keys' fingerprints stay,
   naming nobody), then the app clears everything on the device (see On
   the device for what that leaves). They can set up a new account later.
+- **Leave it unused.** An account whose app isn't opened for 12 months is
+  deleted ([above](#accounts-nobody-uses)).
 - **Set up again on another device** if they can't use theirs any more. This
   replaces the old account: its link goes and its mailboxes stop at once, and
   they're deleted within minutes while the new device's app is open.

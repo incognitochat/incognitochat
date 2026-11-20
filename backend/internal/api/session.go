@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/devicesig"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/session"
 )
 
@@ -73,5 +76,23 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 	if device.Replaced {
 		return httpapi.Error(http.StatusGone, "account_replaced")
 	}
+	s.recordUse(ctx, route, in.Account, device, now)
 	return s.issue(route, in.Account, in.Device, now)
+}
+
+// recordUse records that the account is used this month (UTC), if its item
+// says an earlier one or none (directory.Store.Used): at a login, which the
+// app makes at each launch and every 15 minutes while open (session.TTL),
+// so an account in use is never taken for unused (expiry.go), and the
+// month is written about once a month per account. Nothing finer than the
+// month is stored. Not for an account being deleted. A failure is only
+// logged: the next login tries again.
+func (s *Server) recordUse(ctx context.Context, route, accountID string, d directory.Device, now time.Time) {
+	month := directory.Month(now)
+	if d.Deleting || d.LastUse >= month {
+		return
+	}
+	if err := s.Directory.Used(ctx, accountID, month); err != nil {
+		s.Log.Warn("recording the month of use failed", slog.String(logx.KeyRoute, route), logx.ErrorKind(err))
+	}
 }

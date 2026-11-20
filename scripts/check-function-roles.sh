@@ -18,9 +18,10 @@
 #   deploy-role <deploy-role-ARN> <function-prefix>
 #       Before applying, and after each bootstrap (scripts/bootstrap.sh):
 #       whether the deploy role is denied reading user data, leaving
-#       access behind and touching the audit trail (infra/init,
-#       deploy_limits), and still allowed what the deploy does with the
-#       functions and the edge. A deploy role
+#       access behind and touching the audit trail or its alert rules
+#       (infra/init, deploy_limits), and still allowed what the deploy does
+#       with the functions, the account expiry's schedule and the edge. A
+#       deploy role
 #       older than this code stops the deploy before anything changes.
 #   roles
 #       After applying: every call in the JSON on standard input (Terraform's
@@ -29,7 +30,8 @@
 #   policies <function-prefix>
 #       After applying: each function's resource policy, which says who may
 #       invoke it, must hold only the statements the app stack sets, as it
-#       sets them, with CloudFront and API Gateway limited to the sources
+#       sets them, with CloudFront, API Gateway and EventBridge (the account
+#       expiry's schedule) limited to the sources
 #       in the JSON on standard input (Terraform's invoke_sources output),
 #       and anyone only on bot, and on api while its URL needs no auth (not
 #       api_locked). IAM can't keep the deploy role from adding others (another
@@ -176,6 +178,7 @@ deploy-role)
   mask "$account"
   environment=${prefix#incognitochat-}
   fn() { echo "arn:${partition}:lambda:${region}:${account}:function:${prefix}-$1"; }
+  rule() { echo "arn:${partition}:events:${region}:${account}:rule/${prefix}-$1"; }
   fn_role="arn:${partition}:iam::${account}:role/${prefix}-fn"
   table="arn:${partition}:dynamodb:${region}:${account}:table/${prefix}"
   pepper="arn:${partition}:ssm:${region}:${account}:parameter/incognitochat/${environment}/telegram-id-pepper"
@@ -214,6 +217,11 @@ deploy-role)
     --context-entries "$(context lambda:Principal string '*' lambda:FunctionUrlAuthType string AWS_IAM)"
   check explicitDeny "letting another account invoke api" "$role" lambda:AddPermission "$(fn api)" \
     --context-entries "$(context lambda:Principal string "$outsider")"
+  check explicitDeny "letting EventBridge invoke notify" "$role" lambda:AddPermission "$(fn notify)" \
+    --context-entries "$(context lambda:Principal string events.amazonaws.com)"
+  check explicitDeny "changing an alert rule" "$role" events:PutRule "$(rule changes)"
+  check explicitDeny "aiming a schedule at another function" "$role" events:PutTargets "$(rule schedule-expire-accounts)" \
+    --context-entries "$(context events:TargetArn stringList "$(fn notify)")"
   check explicitDeny "creating another function" "$role" lambda:CreateFunction "$(fn check)"
   check explicitDeny "giving notify a URL" "$role" lambda:CreateFunctionUrlConfig "$(fn notify)"
   check explicitDeny "buying provisioned concurrency" "$role" lambda:PutProvisionedConcurrencyConfig "$(fn api):1"
@@ -240,6 +248,12 @@ deploy-role)
     --context-entries "$(context lambda:Principal string cloudfront.amazonaws.com)"
   check allowed "letting the WebSocket API invoke ws" "$role" lambda:AddPermission "$(fn ws)" \
     --context-entries "$(context lambda:Principal string apigateway.amazonaws.com)"
+  # The account expiry's schedule (../infra/functions.tf).
+  check allowed "letting the account expiry's schedule invoke api" "$role" lambda:AddPermission "$(fn api)" \
+    --context-entries "$(context lambda:Principal string events.amazonaws.com)"
+  check allowed "creating the account expiry's schedule" "$role" events:PutRule "$(rule schedule-expire-accounts)"
+  check allowed "aiming the schedule at api" "$role" events:PutTargets "$(rule schedule-expire-accounts)" \
+    --context-entries "$(context events:TargetArn stringList "$(fn api)")"
   check allowed "reading a function's code signing config" "$role" lambda:GetFunctionCodeSigningConfig "$(fn api)"
   check allowed "writing a function role's policy" "$role" iam:PutRolePolicy "${fn_role}-api" \
     --context-entries "$(context iam:PermissionsBoundary string "$boundary")"
@@ -276,15 +290,16 @@ roles)
 policies)
   prefix=${2:?usage: $0 policies <function-prefix> < invoke_sources.json}
   sources=$(cat)
-  if ! jq -e '(.cloudfront | type == "string") and (.websocket | type == "string") and (.api_locked | type == "boolean")' \
-    <<<"$sources" >/dev/null 2>&1; then
+  if ! jq -e '(.cloudfront | type == "string") and (.websocket | type == "string") and (.schedule | type == "string")
+    and (.api_locked | type == "boolean")' <<<"$sources" >/dev/null 2>&1; then
     echo "::error::The invoke sources are missing or malformed (Terraform output invoke_sources)"
     exit 1
   fi
-  while read -r arn; do mask "$arn"; done <<<"$(jq -r '.cloudfront, .websocket' <<<"$sources")"
+  while read -r arn; do mask "$arn"; done <<<"$(jq -r '.cloudfront, .websocket, .schedule' <<<"$sources")"
   # Each statement the app stack sets (infra/functions.tf, edge.tf,
   # websocket.tf; the provider adds the FunctionURLAllow* pair itself when a
-  # URL is made with no auth), on which functions, and what it must say.
+  # URL is made with no auth), on which functions, and what it must say:
+  # EventBridge only from the account expiry's schedule, on api.
   # Other conditions only narrow a statement, so they may be there too.
   # Anyone may call bot's URL, and api's until it answers CloudFront alone
   # (api_locked): the provider leaves its pair on api then, as a leftover.
@@ -308,6 +323,7 @@ policies)
         elif $f == "api" and .Sid == "CloudFrontUrl" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunctionUrl"; $src.cloudfront)
         elif $f == "api" and .Sid == "CloudFrontInvoke" then from("cloudfront.amazonaws.com"; "lambda:InvokeFunction"; $src.cloudfront)
         elif $f == "ws" and .Sid == "WebSocketApi" then from("apigateway.amazonaws.com"; "lambda:InvokeFunction"; $src.websocket)
+        elif $f == "api" and .Sid == "ExpireAccounts" then from("events.amazonaws.com"; "lambda:InvokeFunction"; $src.schedule)
         else false end);
     [.Statement // [] | if type == "array" then .[] else . end
       | {sid: (.Sid // "(no ID)" | tostring), ok: as_set($f; $src),

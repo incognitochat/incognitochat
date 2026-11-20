@@ -43,7 +43,7 @@ device.
 
 | Who | Can | Gets |
 |---|---|---|
-| A copy of the database (leak, backup, data request) | Read every stored item | Accounts, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when. |
+| A copy of the database (leak, backup, data request) | Read every stored item | Accounts and the month each was last used, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when, beyond that month. |
 | The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also: which Telegram user owns each account, and so each link and mailbox (the stored hash of a Telegram ID is one keyed hash, and with the key, every possible ID can be hashed in minutes), as the sealed chat IDs of accounts that set up notices also say; and which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
 | The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can set, at each login, the clock someone's app dates messages by, anywhere within a minute of the device's: a recipient working with it can read that in what the person sends, as a tag. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | A compromised deploy (a step of the CI job, or a deploy someone got approved) | Deploy code CI signs, change what Terraform manages, read the secrets (older values too), invoke `bot` and `notify` | Through code it deploys, what the functions can reach, until the next deploy replaces it. Can't read the tables, logs or attachments itself. Most ways to leave access behind are denied; some IAM can't deny, and the next deploy finds only some of those (see Other limits). |
@@ -328,6 +328,12 @@ it. This is how close it gets.
   only asks; it's used when the person taps Join.
 - **Activity and volume:** roughly how many mailboxes and messages an account
   has.
+- **The month each account was last used.** The account keeps the month,
+  UTC, of its last login (the app logs in each time it's opened), and an
+  index lists accounts by it, so that accounts nobody has used for 12
+  months can be found and deleted ([data.md](data.md#on-the-server)). A
+  copy of the database shows, for each account, that month and nothing
+  finer: not the day, not how often, not the months before.
 - **A brand-new user's first message** follows their registration closely in
   time.
 - **Attachments can keep metadata.** Photos are redrawn, which drops
@@ -551,6 +557,14 @@ it. This is how close it gets.
     invoke `api` or `bot` directly with any event. Each deploy reads the
     functions' resource policies after applying and fails on any such
     statement, so one lasts until the next deploy, which shows it.
+  - The account expiry's schedule: its EventBridge rights reach only the
+    app stack's schedules (rules named with their prefix, which no alert
+    rule has), aimed at `api` alone, but no condition key limits what a
+    schedule sends or how often. So it could have the schedule invoke `api`
+    every minute, with any event, such as a request that never went
+    through CloudFront or the firewall (which `api` still authenticates as
+    any request). The next plan shows the change and undoes it, and each
+    of these calls is emailed (EventBridge rules alert on any caller).
   - The WebSocket API: IAM can't limit which routes, integrations or whole
     APIs it adds, and nothing checks them, so it could add one that no plan
     shows, such as a route that sends each closing socket's IP address

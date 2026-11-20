@@ -126,7 +126,7 @@ Delivery).
 |---|---|
 | `401 session_expired` | The session token is missing or over; the app logs in again. |
 | `401 clock_skew` | The device's clock is off (above). |
-| `401 login_refused` | The device or its account doesn't exist (deleted, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
+| `401 login_refused` | The device or its account doesn't exist (deleted, by its user or for going unused 12 months, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
 | `409 account_deleting` | The account is being deleted (below): it takes no request but `GET /account` (which says `deleting: true`) and `DELETE /account`. |
 
@@ -272,6 +272,29 @@ under way then can take up to its 15-second timeout), and goes on with the
 deletion; any upload it couldn't delete, or never saw, expires within 30
 days. Afterwards it deletes everything on the device. The other side of
 each conversation isn't told.
+
+**Unused accounts.** An account nobody has used for 12 months is deleted
+by the server, in the steps above, as if its own `DELETE /account` had
+asked. The account records the month, UTC, of its last use (`2026-11`,
+say; nothing finer): registration stores the month it's set up in, and a
+login in a later month replaces it, so it is written about once a month.
+The app logs in at each launch and every 15 minutes while open, so an
+account whose app is opened is never taken for unused. From the first day
+of the 13th month after that month (last used in November 2026: from
+December 2027), a scheduled run of the server, every 15 minutes, finds
+the account and marks it as being deleted, ending its link, only if its
+month is still the one it read (a login since keeps it), then deletes the
+rest in later steps, a few each run, paced as an app deleting its account
+is. From the mark on it is any account being deleted: its link answers
+"not found", so the people who wrote to it can't reach it any more
+(their sends to its mailboxes are dropped, as to any ended mailbox, and
+they aren't told), and its app, if opened meanwhile, finds `deleting:
+true` and offers Finish deleting (above). Once it's gone, a login is
+refused (`401 login_refused`), and the app offers to set up again. Its
+attachments expire within 30 days, as always. Accounts set up before the
+month was stored have none until their next login, and aren't deleted
+meanwhile. The operator can turn this off, or have it only count the
+accounts it would delete ([deployment.md](deployment.md#account-expiry)).
 
 **Device list** (`incognitochat/v2/device-list`), parts in order: suite
 (1 byte), sequence number (8), SHA-256 of the previous list (32; zeros for the

@@ -144,6 +144,39 @@ run "deploy_policies" {
     error_message = "A deploy policy allows every action of a service."
   }
 
+  # EventBridge: only the app stack's schedules (rules named
+  # "<prefix>-schedule-*", which no alert rule is), aimed at api alone;
+  # everything else of it denied, the alert rules included.
+  assert {
+    condition = alltrue(flatten([
+      for d in [
+        data.aws_iam_policy_document.deploy,
+        data.aws_iam_policy_document.deploy_functions,
+        data.aws_iam_policy_document.deploy_edge,
+        ] : [
+        for s in jsondecode(d.json).Statement : flatten([s.Resource]) == ["arn:aws:events:eu-west-1:123456789012:rule/incognitochat-production-schedule-*"]
+        if s.Effect == "Allow" && anytrue([for a in flatten([s.Action]) : startswith(a, "events:")])
+      ]
+    ]))
+    error_message = "The deploy role may manage EventBridge rules other than the app stack's schedules."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_functions.json).Statement :
+      flatten([s.Action]) == ["events:PutTargets"] && try(s.Condition["ForAllValues:ArnEquals"]["events:TargetArn"] == "arn:aws:lambda:eu-west-1:123456789012:function:incognitochat-production-api", false)
+    ])
+    error_message = "The deploy role may aim a schedule at something else than api."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_limits.json).Statement :
+      s.Effect == "Deny" && flatten([s.Action]) == ["events:*"] && flatten([try(s.NotResource, [])]) == ["arn:aws:events:eu-west-1:123456789012:rule/incognitochat-production-schedule-*"]
+    ])
+    error_message = "The deploy role isn't denied EventBridge beyond the app stack's schedules (the alert rules)."
+  }
+
   # The audit trail and its bucket stay out of the deploy role's reach.
   assert {
     condition = anytrue([

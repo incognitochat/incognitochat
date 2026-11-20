@@ -78,21 +78,28 @@ output "permission_checks" {
       action   = "execute-api:ManageConnections"
       resource = "${aws_apigatewayv2_api.ws.execution_arn}/${aws_apigatewayv2_stage.ws.name}/POST/@connections/check"
     }
+    "api reads the last-use index (the account expiry)" = {
+      role     = data.aws_iam_role.fn["api"].arn
+      action   = "dynamodb:Query"
+      resource = "${aws_dynamodb_table.table["directory"].arn}/index/lastUse"
+    }
   }
 }
 
-# The only sources CloudFront and API Gateway may invoke the functions from,
-# as edge.tf and websocket.tf give them, and whether api's URL answers
-# CloudFront alone (then no statement may let anyone call it), for the
-# deploy to check the functions' resource policies against
-# (scripts/check-function-roles.sh policies): IAM can't keep the deploy role
-# from naming others. ARNs name the account.
+# The only sources CloudFront, API Gateway and EventBridge may invoke the
+# functions from, as edge.tf, websocket.tf and functions.tf (the account
+# expiry's schedule) give them, and whether api's URL answers CloudFront
+# alone (then no statement may let anyone call it), for the deploy to check
+# the functions' resource policies against (scripts/check-function-roles.sh
+# policies): IAM can't keep the deploy role from naming others. ARNs name
+# the account.
 output "invoke_sources" {
-  description = "The CloudFront distribution and WebSocket API the functions' resource policies may name, and whether api's URL is locked"
+  description = "The CloudFront distribution, WebSocket API and schedule the functions' resource policies may name, and whether api's URL is locked"
   sensitive   = true
   value = {
     cloudfront = aws_lambda_permission.cloudfront_invoke.source_arn
     websocket  = aws_lambda_permission.ws.source_arn
+    schedule   = aws_lambda_permission.expire_accounts.source_arn
     api_locked = local.api_locked
   }
 }

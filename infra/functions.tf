@@ -3,7 +3,7 @@
 # from infra/init. Only bot and notify can read the bot token. After a send,
 # api invokes ws without waiting; only ws pushes to sockets, and invokes
 # notify for a notice if no open app took the push. api invokes notify only
-# to seal chat IDs.
+# to seal chat IDs. A schedule invokes api for the account expiry (below).
 locals {
   ws_endpoint = "https://${aws_apigatewayv2_api.ws.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_apigatewayv2_stage.ws.name}"
   # Built from names, not the functions' attributes, which would make the
@@ -45,6 +45,7 @@ locals {
         WS_FUNCTION                     = "${local.prefix}-ws"
         MEDIA_BUCKET                    = aws_s3_bucket.media.id
         INVITE_ONLY                     = tostring(var.invite_only)
+        ACCOUNT_EXPIRY                  = var.account_expiry
       }
     }
     # Telegram webhook: opens the app, cleans up service messages. The deploy
@@ -286,6 +287,17 @@ data "aws_iam_policy_document" "fn" {
     }
   }
 
+  # The account expiry reads the directory's index of accounts by their
+  # last-use month (tables.tf): only that index, only to query it.
+  dynamic "statement" {
+    for_each = each.key == "api" ? [1] : []
+    content {
+      sid       = "UnusedAccounts"
+      actions   = ["dynamodb:Query"]
+      resources = ["${aws_dynamodb_table.table["directory"].arn}/index/lastUse"]
+    }
+  }
+
   dynamic "statement" {
     for_each = each.key == "api" ? [1] : []
     content {
@@ -439,6 +451,48 @@ resource "aws_lambda_function_event_invoke_config" "ws" {
   function_name                = aws_lambda_function.fn["ws"].function_name
   maximum_retry_attempts       = 0
   maximum_event_age_in_seconds = 60
+}
+
+# The account expiry (docs/deployment.md, Account expiry): every 15
+# minutes, EventBridge invokes api with {"expireAccounts":{}}, an event no
+# request through its URL can be (backend/cmd/api), and api deletes some of
+# the accounts nobody has used for 12 months, in the steps DELETE /account
+# takes, or, while account_expiry is dry-run, only counts and logs how many
+# there are. A run is bounded by the function's 10 seconds (a few steps,
+# paced as one app deleting its account), so it runs often rather than
+# once a day; one with nothing to do reads one empty page of an index.
+# Off, the rule is disabled too. Its name starts with the prefix the deploy
+# role may manage rules under (infra/init, github_deploy.tf), which no
+# alert rule has.
+resource "aws_cloudwatch_event_rule" "expire_accounts" {
+  name                = "${local.prefix}-schedule-expire-accounts"
+  description         = "Deletes accounts nobody has used for 12 months (the api function)"
+  schedule_expression = "rate(15 minutes)"
+  state               = var.account_expiry == "off" ? "DISABLED" : "ENABLED"
+}
+
+resource "aws_cloudwatch_event_target" "expire_accounts" {
+  rule  = aws_cloudwatch_event_rule.expire_accounts.name
+  arn   = aws_lambda_function.fn["api"].arn
+  input = jsonencode({ expireAccounts = {} })
+}
+
+# The schedule may invoke api: this rule only.
+resource "aws_lambda_permission" "expire_accounts" {
+  statement_id  = "ExpireAccounts"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.fn["api"].function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.expire_accounts.arn
+}
+
+# A run that failed isn't tried again: the next one, 15 minutes later,
+# carries on (it logs the failure, by kind). Only the schedule invokes api
+# without waiting; requests through its URL wait for their answers.
+resource "aws_lambda_function_event_invoke_config" "api" {
+  function_name                = aws_lambda_function.fn["api"].function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 300
 }
 
 # HTTPS endpoints. The functions authenticate requests themselves: session

@@ -113,6 +113,7 @@ func (s *Server) register(ctx context.Context, req httpapi.Request) httpapi.Resp
 		AccountKey:   in.AccountKey,
 		DeviceID:     in.Device,
 		DeviceKey:    in.DeviceKey,
+		Month:        directory.Month(now),
 	}
 
 	// Counted before anything is read, whatever comes of it. Then only the

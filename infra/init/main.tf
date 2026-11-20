@@ -81,5 +81,9 @@ locals {
     media_buckets = "arn:${local.partition}:s3:::${local.prefix}-media-*"
     # The audit trail's bucket (audit.tf), from its name's prefix.
     audit_buckets = "arn:${local.partition}:s3:::${local.prefix}-audit-*"
+    # The app stack's schedules (../functions.tf: the account expiry's),
+    # EventBridge rules named with this prefix, which none of this stack's
+    # alert rules (audit.tf) has.
+    schedules = "arn:${local.partition}:events:${local.region}:${local.account_id}:rule/${local.prefix}-schedule-*"
   }
 }

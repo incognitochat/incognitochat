@@ -252,6 +252,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins; unset for none. They reach only SSM, as an encrypted parameter that of the functions only `api` may read ([secrets at rest](#secrets-at-rest)), never Terraform state or the function's configuration; the API recognises admins by their keyed hashes. Raise `ADMIN_TELEGRAM_IDS_VERSION` (a variable, 1 while unset) whenever you set, change or delete it, or the change doesn't reach SSM. |
 | `CLIENT_ORIGINS` | variable | Origins allowed to call the API from a browser: the app's `https://<org>.github.io`. |
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
+| `ACCOUNT_EXPIRY` | variable | Deleting accounts nobody has used for 12 months ([account expiry](#account-expiry)): `dry-run` by default (counts and logs how many it would delete; deletes nothing), `on`, or `off`. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
 | `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with four rate limits and a list of addresses to block ([below](#the-firewall)). Off by default: about $10 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
@@ -347,15 +348,17 @@ plan would show are closed. What IAM can't close is listed below, and in
   provisioned concurrency.
 - **Function permissions** (who may invoke a function): it may name only
   anyone ("*", on `api` and `bot`, for their URLs, and never for a URL that
-  needs AWS's signature), CloudFront (on `api`) and API Gateway (on `ws`);
-  no account or role. IAM can't check more than that. A permission for anyone can't be
+  needs AWS's signature), CloudFront (on `api`), API Gateway (on `ws`) and
+  EventBridge (on `api`, for the [account expiry](#account-expiry)'s
+  schedule); no account or role. IAM can't check more than that. A permission for anyone can't be
   told from one for calls through the URL alone, so it could let anyone
   invoke `api` or `bot` directly, with any event. And AddPermission has no
   condition key for the source, so it could let another account's
   distribution invoke `api`, or another account's API invoke `ws`. So each
   deploy, after applying, reads every function's resource policy and fails
   on any statement the app stack doesn't set, as it sets it, with
-  CloudFront and API Gateway limited to this stack's distribution and API,
+  CloudFront, API Gateway and EventBridge limited to this stack's
+  distribution, API and schedule,
   and anyone limited to `bot`, and to `api` while its URL needs no auth
   (`scripts/check-function-roles.sh policies`; see also
   [what the AWS provider leaves](#cloudfront-in-front-of-the-api)). Such a
@@ -380,6 +383,12 @@ plan would show are closed. What IAM can't close is listed below, and in
   [delete the parameter](#replacing-a-generated-secret) to drop its history.
 - **The WebSocket API**: it manages it, and IAM can't limit which routes,
   integrations or other APIs it adds. Nothing checks these yet.
+- **Schedules** (EventBridge): it manages only rules named
+  `<prefix>-schedule-*` (the [account expiry](#account-expiry)'s), aimed
+  at `api` alone, and nothing else of EventBridge, so it can't touch the
+  alert rules. IAM can't limit what a schedule sends or how often: a
+  change shows in the next plan, which undoes it, and is emailed (the
+  alerts on EventBridge changes take the deploy role's calls too).
 - **The edge**: it manages CloudFront distributions, origin access controls
   and origin request policies (their IDs are random, so IAM can't tell the
   stack's own from others in the account; creating an origin request
@@ -755,6 +764,119 @@ the deploy role is denied writing table items, so deploys never reset it.
    try; an unsent attachment goes with Send again.
 
 The switches aren't flipped automatically by the alarms.
+
+## Account expiry
+
+An account nobody has used for 12 months is deleted, as if its user had
+deleted it ([data.md](data.md#accounts-nobody-uses),
+[protocol.md](protocol.md#registration-and-sessions), Unused accounts).
+Each account keeps the month, UTC, of its last login (the app logs in each
+time it's opened), and is due from the first day of the 13th month after
+it: last used in November 2026, due in December 2027. Every 15 minutes a
+schedule (the EventBridge rule `<prefix>-schedule-expire-accounts`)
+invokes `api` with an event of its own, which no request can be, and
+`api` reads the due accounts from the directory's `lastUse` index, the
+longest unused first, and deletes them in the steps `DELETE /account`
+takes. A run takes at most 5 steps of about 50 write units, one a second,
+as one app deleting its account does, so it never takes more than about a
+quarter of production's write capacity, for a few seconds; a small account
+goes in one step, so a few hundred go a day (up to 480 steps), and one
+with 4,000 mailboxes takes about 160 steps, some 8 hours of runs. Each run carries on where the last
+stopped. Attachments aren't touched: they expire within 30 days, as
+always.
+
+`ACCOUNT_EXPIRY` (a variable of the GitHub environment) is the switch:
+
+| Value | What a run does |
+|---|---|
+| `dry-run` (unset) | Counts the due accounts and logs how many (`account expiry dry run: accounts it would delete`, "(at least)" past 10,000). Deletes nothing. |
+| `on` | Deletes them, and logs how many it deleted (`account expiry: accounts deleted`) and, if any failed, how many and the first error's kind. A failed run isn't tried again; the next carries on. |
+| `off` | Nothing: the schedule is disabled, and `api` would ignore it. |
+
+The lines have the route `account expiry` and a `count`, never an account
+or a month. In Logs Insights, on the `api` function's log group:
+
+```
+fields @timestamp, msg, count
+| filter route = "account expiry"
+| sort @timestamp desc
+```
+
+**Turning it on**, in each environment, dev first:
+
+1. Leave it at `dry-run` and read the counts for a few days. No account can
+   be due until 13 months after this change first deployed (no earlier
+   month is ever stored), so until then any count but 0 is a bug: leave it
+   off and find out why. After that, the count should be about the number
+   of accounts set up in, or last opened in, the month 13 months back that
+   nobody has opened since.
+2. Set it on, and deploy (as for any variable, above):
+
+   ```shell
+   gh variable set ACCOUNT_EXPIRY --env <env> --body on
+   ```
+
+3. Watch the first runs: the deleted counts should add up to about the dry
+   run's, with no failures.
+
+**Stopping it**: set it to `off` (or back to `dry-run`) and deploy. At once,
+without a deploy, an admin can disable the rule (the change alerts email
+it), which the next deploy enables again unless the variable is `off`:
+
+```shell
+aws events disable-rule --name <prefix>-schedule-expire-accounts
+```
+
+A deletion can't be undone: there is nothing to restore from
+(point-in-time recovery is off). An account whose deletion started (its
+first step marks it) carries on being deleted, by the next runs or by its
+own app if it's opened meanwhile (Finish deleting).
+
+**Accounts set up before the month was stored** have none until their app
+next logs in, and until then they aren't due, however long ago they were
+used: never deleted early, but one never opened again would stay. To give
+those a month, the month you run it (so none is due for 13 months), run
+this once in each environment as an admin, after the change has deployed.
+It reads the whole table once, a small page at a time so the app keeps its
+capacity, and shows no IDs:
+
+```shell
+export AWS_PROFILE=<profile> AWS_REGION=<aws-region>
+table=<prefix>-directory month=$(date -u +%Y-%m)
+aws dynamodb scan --table-name "$table" --page-size 200 --projection-expression pk \
+  --filter-expression 'sk = :a AND attribute_exists(ak) AND attribute_not_exists(lu)' \
+  --expression-attribute-values '{":a":{"S":"A"}}' --query 'Items[].pk.S' --output text |
+  tr '\t' '\n' | while read -r pk; do
+    [ -n "$pk" ] && [ "$pk" != None ] || continue
+    aws dynamodb update-item --table-name "$table" \
+      --key "{\"pk\":{\"S\":\"$pk\"},\"sk\":{\"S\":\"A\"}}" --update-expression 'SET lu = :m' \
+      --condition-expression 'attribute_exists(ak) AND attribute_not_exists(lu)' \
+      --expression-attribute-values "{\":m\":{\"S\":\"$month\"}}" >/dev/null 2>&1 || true
+  done
+```
+
+Accounts being deleted get a month too, so one whose app never finished
+is deleted by the expiry 13 months later.
+
+**Applying the change that brought this**, in each environment in turn,
+dev first:
+
+1. Rerun the bootstrap (`infra/init`), while no deploy runs. It gives the
+   deploy role the schedule's rights (`events:` calls on
+   `<prefix>-schedule-*` rules, aimed at `api`, and EventBridge as a
+   principal on `api`) and denies it the rest of EventBridge; its
+   simulator checks should pass. A deploy from before the change still
+   works with it.
+2. Deploy the change. Its plan adds the `lastUse` index to the directory
+   (built in minutes, from no items), the schedule, its permission on
+   `api`, and `api`'s right to read the index. The change alerts email the
+   schedule's creation (`PutRule`, `PutTargets`), since they take the
+   deploy role's EventBridge calls too; nothing else of the deploy alerts.
+   They email again whenever `ACCOUNT_EXPIRY` moves to or from `off`. A
+   deploy of the change against a bootstrap from before it stops at the
+   deploy role's check, before applying anything.
+3. Then follow Turning it on, above, and run the one-time command for
+   older accounts.
 
 ## Request counts
 
