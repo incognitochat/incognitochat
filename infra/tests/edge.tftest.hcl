@@ -148,10 +148,25 @@ run "firewall" {
         r.statement[0].rate_based_statement[0].limit == 120,
         r.statement[0].rate_based_statement[0].aggregate_key_type == "CONSTANT",
         r.statement[0].rate_based_statement[0].evaluation_window_sec == 60,
-        [for s in r.statement[0].rate_based_statement[0].scope_down_statement[0].or_statement[0].statement : s.and_statement[0].statement[1].regex_match_statement[0].regex_string] == [local.delete_routes.POST],
+        r.statement[0].rate_based_statement[0].scope_down_statement[0].and_statement[0].statement[1].regex_match_statement[0].regex_string == local.delete_routes.POST,
       ])
     ]) == 1
     error_message = "deletes-total must count everyone's POST /media/delete together, over a minute, at 0.6 times the lower of the read and write caps."
+  }
+
+  # WAF refuses an OR of fewer than two statements (production's apply of
+  # 2.6.0 failed on one): a rule's routes are an OR only when there are two
+  # or more, else the one route's AND.
+  assert {
+    condition = alltrue([
+      for r in aws_wafv2_web_acl.api[0].rule : alltrue([
+        for d in r.statement[0].rate_based_statement[0].scope_down_statement :
+        (length(d.or_statement) == 0 || length(d.or_statement[0].statement) >= 2) &&
+        (length(d.or_statement) + length(d.and_statement) == 1)
+      ])
+      if length(r.statement[0].rate_based_statement) > 0
+    ])
+    error_message = "Each rate limit's routes must be one AND, or an OR of two or more: WAF refuses an OR of one statement."
   }
 
   # The batch route counts towards deletes-total and anonymous-per-ip, not
