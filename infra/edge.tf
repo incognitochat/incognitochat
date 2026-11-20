@@ -428,52 +428,103 @@ resource "aws_wafv2_web_acl" "api" {
           aggregate_key_type    = rule.value.key
           evaluation_window_sec = rule.value.window
 
+          # Each route is a method and a path. WAF refuses an OR of one
+          # statement, so a rule with one route (deletes-total) takes its
+          # route's AND directly, and one with more takes an OR of them.
+          # The two blocks below are the same route match.
           scope_down_statement {
-            or_statement {
-              dynamic "statement" {
-                for_each = rule.value.routes
-                iterator = route
+            dynamic "or_statement" {
+              for_each = length(rule.value.routes) > 1 ? [rule.value.routes] : []
 
-                content {
-                  and_statement {
-                    # In any letter case, as the router takes it.
-                    statement {
-                      byte_match_statement {
-                        search_string         = lower(route.key)
-                        positional_constraint = "EXACTLY"
+              content {
+                dynamic "statement" {
+                  for_each = or_statement.value
+                  iterator = route
 
-                        field_to_match {
-                          method {}
+                  content {
+                    and_statement {
+                      # In any letter case, as the router takes it.
+                      statement {
+                        byte_match_statement {
+                          search_string         = lower(route.key)
+                          positional_constraint = "EXACTLY"
+
+                          field_to_match {
+                            method {}
+                          }
+
+                          text_transformation {
+                            priority = 0
+                            type     = "LOWERCASE"
+                          }
                         }
+                      }
 
-                        text_transformation {
-                          priority = 0
-                          type     = "LOWERCASE"
+                      # Decoded and normalised first, so that a path written
+                      # another way that could reach the same route matches
+                      # too ("/%73ession", "//session", "/../session").
+                      statement {
+                        regex_match_statement {
+                          regex_string = route.value
+
+                          field_to_match {
+                            uri_path {}
+                          }
+
+                          text_transformation {
+                            priority = 0
+                            type     = "URL_DECODE"
+                          }
+
+                          text_transformation {
+                            priority = 1
+                            type     = "NORMALIZE_PATH"
+                          }
                         }
                       }
                     }
+                  }
+                }
+              }
+            }
 
-                    # Decoded and normalised first, so that a path written
-                    # another way that could reach the same route matches
-                    # too ("/%73ession", "//session", "/../session").
-                    statement {
-                      regex_match_statement {
-                        regex_string = route.value
+            dynamic "and_statement" {
+              for_each = length(rule.value.routes) == 1 ? rule.value.routes : {}
+              iterator = route
 
-                        field_to_match {
-                          uri_path {}
-                        }
+              content {
+                statement {
+                  byte_match_statement {
+                    search_string         = lower(route.key)
+                    positional_constraint = "EXACTLY"
 
-                        text_transformation {
-                          priority = 0
-                          type     = "URL_DECODE"
-                        }
+                    field_to_match {
+                      method {}
+                    }
 
-                        text_transformation {
-                          priority = 1
-                          type     = "NORMALIZE_PATH"
-                        }
-                      }
+                    text_transformation {
+                      priority = 0
+                      type     = "LOWERCASE"
+                    }
+                  }
+                }
+
+                statement {
+                  regex_match_statement {
+                    regex_string = route.value
+
+                    field_to_match {
+                      uri_path {}
+                    }
+
+                    text_transformation {
+                      priority = 0
+                      type     = "URL_DECODE"
+                    }
+
+                    text_transformation {
+                      priority = 1
+                      type     = "NORMALIZE_PATH"
                     }
                   }
                 }
