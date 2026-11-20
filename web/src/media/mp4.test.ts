@@ -35,6 +35,78 @@ function header(type: string, version: 0 | 1): Uint8Array {
   return box(type, new Uint8Array([version, 0, 0, 0]), times, new Uint8Array([1, 2, 3, 4]));
 }
 
+/** A handler box: version and flags, a QuickTime component type, the handler type, 12 reserved bytes, then the name. */
+function handler(type: string, name: string): Uint8Array<ArrayBuffer> {
+  return box('hdlr', new Uint8Array(4), text('mhlr'), text(type), new Uint8Array(12), text(name));
+}
+
+/**
+ * A visual sample entry (avc1, hvc1...): 6 reserved bytes and a data
+ * reference index, 16 bytes of codec fields (QuickTime's vendor, "appl",
+ * among them), width and height, resolutions, 4 reserved bytes, the frame
+ * count, the encoder's name (a Pascal string in 32 bytes), the depth and
+ * -1, then its own boxes.
+ */
+function visualEntry(type: string, encoder: string, ...children: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const fields = new Uint8Array(78);
+  const view = new DataView(fields.buffer);
+  view.setUint16(6, 1);
+  fields.set(text('appl'), 12);
+  view.setUint16(24, 1920);
+  view.setUint16(26, 1080);
+  view.setUint32(28, 0x480000);
+  view.setUint32(32, 0x480000);
+  view.setUint16(40, 1);
+  fields[42] = encoder.length;
+  fields.set(text(encoder), 43);
+  view.setUint16(74, 0x18);
+  view.setInt16(76, -1);
+  return box(type, fields, ...children);
+}
+
+/** An audio sample entry (mp4a, Opus): reserved, data reference index, 8 reserved, channels, sample size, 4 reserved, the sample rate, then its own boxes. */
+function audioEntry(type: string, ...children: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const fields = new Uint8Array(28);
+  const view = new DataView(fields.buffer);
+  view.setUint16(6, 1);
+  view.setUint16(16, 2);
+  view.setUint16(18, 16);
+  view.setUint32(24, 48_000 * 65_536);
+  return box(type, fields, ...children);
+}
+
+/** A sample description table: version and flags, the number of entries (`count`, if not how many there are), then the entries. */
+function sampleDescriptions(entries: Uint8Array[], count = entries.length): Uint8Array<ArrayBuffer> {
+  const head = new Uint8Array(8);
+  new DataView(head.buffer).setUint32(4, count);
+  return box('stsd', head, ...entries);
+}
+
+/** A movie, track or media header (version 1) as a browser writes it: its clock in both times, then a timescale and a duration. */
+function clocked(type: string, timescale: number, duration: number): Uint8Array<ArrayBuffer> {
+  const body = new Uint8Array(32);
+  const view = new DataView(body.buffer);
+  body[0] = 1;
+  view.setBigUint64(4, 3_877_691_300n); // 2026-11-16 16:28:20 UTC, in seconds since 1904
+  view.setBigUint64(12, 3_877_691_300n);
+  view.setUint32(20, timescale);
+  view.setBigUint64(24, BigInt(duration));
+  return box(type, body);
+}
+
+/** Where each box of this type starts. */
+const starts = (bytes: Uint8Array, type: string) => [...types(bytes).matchAll(new RegExp(type, 'g'))].map((m) => m.index - 4);
+const sizeAt = (bytes: Uint8Array, at: number) => new DataView(bytes.buffer, bytes.byteOffset).getUint32(at);
+
+/** What stripping should leave: `before` with the times in these headers, these handlers' names and these entries' encoder names zeroed. */
+function zeroed(before: Uint8Array, headers: number[], handlers: number[], entries: number[]): Uint8Array {
+  const out = before.slice();
+  for (const at of headers) out.fill(0, at + 12, at + (out[at + 8] === 1 ? 28 : 20));
+  for (const at of handlers) out.fill(0, at + 32, at + sizeAt(before, at));
+  for (const at of entries) out.fill(0, at + 50, at + 82);
+  return out;
+}
+
 const hex = (h: string) => Uint8Array.from(h.match(/../g)!, (x) => parseInt(x, 16));
 /** "uuid" types: Adobe's XMP, Sony's dates (USMT), Canon's EXIF and GPS, Garmin's GPS, and Google's 360° video (which players read). */
 const XMP = hex('be7acfcb97a942e89c71999491e3afac');
@@ -239,6 +311,118 @@ describe('stripVideoMetadata', () => {
     expect(bytes.subarray(-short.length)).toEqual(short);
   });
 
+  it("takes a voice message's clock and handler name out, keeping its timing and codec", () => {
+    // As Chrome records voice: Opus in fragmented MP4, the times from the device's clock.
+    const bytes = concat(
+      box('ftyp', text('isom'), new Uint8Array([0, 0, 2, 0]), text('isomiso6iso2vp09mp41')),
+      box(
+        'moov',
+        clocked('mvhd', 1000, 1132),
+        box(
+          'trak',
+          clocked('tkhd', 1000, 1132),
+          box(
+            'mdia',
+            clocked('mdhd', 48_000, 54_336),
+            handler('soun', 'SoundHandler\0'),
+            box(
+              'minf',
+              box('smhd', new Uint8Array(8)),
+              box('dinf', box('dref', new Uint8Array([0, 0, 0, 0, 0, 0, 0, 1]), box('url ', new Uint8Array([0, 0, 0, 1])))),
+              // The codec's description, long enough to hold a picture's encoder name: it isn't one, so it's kept.
+              box('stbl', sampleDescriptions([audioEntry('Opus', box('dOps', new Uint8Array(11).fill(0x0b)), box('btrt', new Uint8Array(40).fill(0x0c)))]), box('stts', new Uint8Array(8)), chunkTable('stco')),
+            ),
+          ),
+        ),
+        box('mvex', box('trex', new Uint8Array(24))),
+      ),
+      box('moof', box('mfhd', new Uint8Array(8)), box('traf', text('fragment'))),
+      box('mdat', text('sound')),
+    );
+    const before = bytes.slice();
+    expect(stripVideoMetadata(bytes)).toBe(true);
+    expect(types(bytes)).not.toContain('SoundHandler');
+    const mvhd = starts(bytes, 'mvhd')[0]!;
+    expect(bytes.subarray(mvhd + 12, mvhd + 28)).toEqual(new Uint8Array(16));
+    // Nothing else changed: the timescales and durations, the codec, the fragments and the sound are as they were.
+    const headers = ['mvhd', 'tkhd', 'mdhd'].map((type) => starts(before, type)[0]!);
+    expect(bytes).toEqual(zeroed(before, headers, starts(before, 'hdlr'), []));
+  });
+
+  it("blanks a video's handler and encoder names, keeping its sizes, offsets and codec settings", () => {
+    // As an iPhone writes a movie: QuickTime, HEVC with its configuration,
+    // a data handler in each track's media information too, and the frames
+    // after the movie, where its chunk tables point. A depth track (auxv)
+    // names its encoder as well, and one track has its handler after its
+    // media information.
+    const frames = text('frames');
+    const file = (offset: number) => {
+      const stbl = (...entries: Uint8Array[]) => box('stbl', sampleDescriptions(entries), box('stts', new Uint8Array(8)), chunkTable('stco', offset));
+      const track = (kind: string, name: string, info: Uint8Array, last = false) => {
+        const media = handler(kind, name);
+        const minf = box('minf', box(kind === 'soun' ? 'smhd' : 'vmhd', new Uint8Array(8)), handler('alis', 'Core Media Data Handler'), info);
+        return box('trak', header('tkhd', 0), box('mdia', header('mdhd', 0), ...(last ? [minf, media] : [media, minf])));
+      };
+      return concat(
+        box('ftyp', text('qt  '), new Uint8Array(4), text('qt  ')),
+        box('wide'),
+        box(
+          'moov',
+          header('mvhd', 0),
+          track('vide', '\x10Core Media Video', stbl(visualEntry('hvc1', 'HEVC', box('hvcC', new Uint8Array(23).fill(0x0d)), box('colr', text('nclx'), new Uint8Array(7))), visualEntry('avc1', 'AVC Coding'))),
+          track('soun', '\x10Core Media Audio', stbl(audioEntry('mp4a', box('esds', new Uint8Array(60).fill(0x0e))))),
+          track('auxv', 'Core Media Depth', stbl(visualEntry('hvc1', 'HEVC')), true),
+        ),
+        box('mdat', frames),
+      );
+    };
+    const offset = types(file(0)).indexOf('frames');
+    const bytes = file(offset);
+    const before = bytes.slice();
+    expect(stripVideoMetadata(bytes)).toBe(true);
+    const after = types(bytes);
+    for (const gone of ['Core Media', 'HEVC', 'AVC Coding']) expect(after).not.toContain(gone);
+    for (const kept of ['vide', 'soun', 'auxv', 'alis', 'hvc1', 'avc1', 'appl', 'nclx', 'mp4a']) expect(after).toContain(kept);
+    // Only the names and the times changed: every size, offset and setting is as it was, and the chunk offsets still point at the frames.
+    const headers = ['mvhd', 'tkhd', 'mdhd'].flatMap((type) => starts(before, type));
+    const entries = [...starts(before, 'hvc1'), ...starts(before, 'avc1')];
+    expect(entries).toHaveLength(3);
+    expect(bytes).toEqual(zeroed(before, headers, starts(before, 'hdlr'), entries));
+    expect(types(bytes.subarray(offset, offset + frames.length))).toBe('frames');
+  });
+
+  it('leaves sample descriptions it can not follow as they are', () => {
+    const name = visualEntry('avc1', 'AVC Coding');
+    const short = box('avc1', new Uint8Array(70).fill(0x0f));
+    const past = visualEntry('avc1', 'past the end');
+    new DataView(past.buffer).setUint32(0, past.length + 1);
+    const cases: [Uint8Array[], number, number[]][] = [
+      // An entry too short to name its encoder is skipped; the next is blanked.
+      [[short, name], 2, [1]],
+      // From an entry that doesn't fit, or of a size too small, on: left alone.
+      [[name, past], 2, [0]],
+      [[name, box('avc1').subarray(0, 4), name], 3, [0]],
+      // Only as many entries as it says it has, and no more than there are.
+      [[name, name], 1, [0]],
+      [[name], 5, [0]],
+      [[name], 0, []],
+    ];
+    for (const [entries, count, blanked] of cases) {
+      const stsd = sampleDescriptions(entries, count);
+      const bytes = concat(box('ftyp', text('isom')), box('moov', box('trak', box('mdia', handler('vide', ''), box('minf', box('stbl', stsd))))));
+      const before = bytes.slice();
+      expect(stripVideoMetadata(bytes)).toBe(true);
+      const first = starts(before, 'stsd')[0]! + 16;
+      const at = entries.map((_, i) => first + entries.slice(0, i).reduce((sum, e) => sum + e.length, 0));
+      expect(bytes).toEqual(zeroed(before, [], [], blanked.map((i) => at[i]!)));
+    }
+    // An stsd too short to say how many entries it has.
+    const tiny = concat(box('ftyp', text('isom')), box('moov', box('trak', box('mdia', handler('vide', ''), box('minf', box('stbl', box('stsd', new Uint8Array(5))))))));
+    const before = tiny.slice();
+    expect(stripVideoMetadata(tiny)).toBe(true);
+    expect(tiny).toEqual(before);
+  });
+
   it('leaves a sample table it can not read as it is, and strips the rest', () => {
     // An stbl whose contents don't add up (3 bytes too many), with a udta in it.
     const stbl = box('stbl', box('udta', text('kept')), new Uint8Array([1, 2, 3]));
@@ -391,7 +575,28 @@ function strippedFile(top: Node[]): Uint8Array<ArrayBuffer> {
   return writeFile(top.map((node) => stripped(node, 0, empty)));
 }
 
-function stripped(node: Node, depth: number, empty: (node: Node) => boolean): Node {
+/** A track's kind: the handler type of the first hdlr among a media box's children. */
+function handlerIn(mdia: Node): string {
+  const hdlr = mdia.children!.find((child) => child.type === 'hdlr' && child.body!.length >= 12);
+  return hdlr ? types(hdlr.body!.subarray(8, 12)) : '';
+}
+
+/** A sample description table's body with each entry's encoder name zeroed, as far as its entries can be followed. */
+function withoutEncoderNames(body: Uint8Array): Uint8Array {
+  const out = body.slice();
+  if (out.length < 8) return out;
+  const view = new DataView(out.buffer);
+  let at = 8;
+  for (let n = view.getUint32(4); n > 0 && at + 8 <= out.length; n--) {
+    const size = view.getUint32(at);
+    if (size < 8 || at + size > out.length) break;
+    if (size >= 82) out.fill(0, at + 50, at + 82);
+    at += size;
+  }
+  return out;
+}
+
+function stripped(node: Node, depth: number, empty: (node: Node) => boolean, handler = ''): Node {
   const zero = (bytes: Uint8Array, from: number, to = bytes.length) => {
     const out = bytes.slice();
     out.fill(0, Math.min(from, out.length), to);
@@ -405,7 +610,12 @@ function stripped(node: Node, depth: number, empty: (node: Node) => boolean): No
   if (['mvhd', 'tkhd', 'mdhd'].includes(node.type)) return { ...node, body: zero(node.body!, 4, node.body![0] === 1 ? 20 : 12) };
   if (node.type === 'pnot') return { ...node, body: zero(node.body!, 0, 4) };
   if (node.type === 'prft') return { ...node, body: zero(node.body!, 8) };
-  if (CONTAINERS.includes(node.type) && !node.junk) return { ...node, children: node.children!.map((child) => stripped(child, depth + 1, empty)) };
+  if (node.type === 'hdlr') return { ...node, body: zero(node.body!, 24) };
+  if (node.type === 'stsd' && ['vide', 'auxv'].includes(handler)) return { ...node, body: withoutEncoderNames(node.body!) };
+  if (CONTAINERS.includes(node.type) && !node.junk) {
+    const inside = node.type === 'mdia' ? handlerIn(node) : handler;
+    return { ...node, children: node.children!.map((child) => stripped(child, depth + 1, empty, inside)) };
+  }
   return node;
 }
 
@@ -443,9 +653,18 @@ function randomMovie(r: Random): Node[] {
   for (let n = r.int(3); n > 0; n--) {
     const table: Node = { type: r.pick(['stco', 'co64']), offsets: new Array<number>(r.int(4)).fill(0) };
     tables.push(table);
-    const stbl = container('stbl', leaf('stsd'), leaf('stts'), leaf('stsc'), leaf('stsz'), table);
-    const minf = container('minf', leaf(r.pick(['vmhd', 'smhd'])), { type: 'dinf', children: [leaf('dref')] }, stbl);
-    const mdia = container('mdia', timed('mdhd'), leaf('hdlr'), minf);
+    // A handler, now and then too short to say its kind, or with no name.
+    const kind = r.pick(['vide', 'soun', 'auxv', 'tmcd']);
+    const named = (type: string): Node => (r.oneIn(8) ? leaf('hdlr', r.int(13)) : { type: 'hdlr', body: concat(r.bytes(8), text(type), r.bytes(12 + r.int(24))) });
+    // Sample descriptions, now and then miscounted, or with an entry too short or that doesn't add up.
+    const entries = Array.from({ length: r.int(4) }, () => box(r.pick(['avc1', 'hvc1', 'mp4a']), r.bytes(r.oneIn(3) ? r.int(80) : 74 + r.int(40))));
+    if (r.oneIn(8) && entries.length) new DataView(entries[0]!.buffer).setUint32(0, r.pick([0, 7, 1000]));
+    const count = new Uint8Array(8);
+    new DataView(count.buffer).setUint32(4, r.oneIn(8) ? r.int(6) : entries.length);
+    const stsd: Node = { type: 'stsd', body: r.oneIn(16) ? r.bytes(r.int(8)) : concat(count, ...entries, r.oneIn(8) ? r.bytes(1 + r.int(7)) : new Uint8Array(0)) };
+    const stbl = container('stbl', stsd, leaf('stts'), leaf('stsc'), leaf('stsz'), table);
+    const minf = container('minf', leaf(r.pick(['vmhd', 'smhd'])), ...(r.oneIn(3) ? [named('alis')] : []), { type: 'dinf', children: [leaf('dref')] }, stbl);
+    const mdia = container('mdia', timed('mdhd'), ...(r.oneIn(4) ? [minf, named(kind)] : [named(kind), minf]));
     tracks.push(container('trak', timed('tkhd'), ...(r.oneIn(2) ? [container('edts', leaf('elst'))] : []), mdia));
   }
   const top: Node[] = [
@@ -511,7 +730,7 @@ describe('stripVideoMetadata, on random input', () => {
 
   it('never throws on random or changed bytes, changes nothing when it refuses, and only what it should otherwise', () => {
     const r = new Random(0x6d703402);
-    const CHANGEABLE = ['udta', 'meta', 'uuid', 'free', 'skip', 'mvhd', 'tkhd', 'mdhd', 'pnot', 'prft'];
+    const CHANGEABLE = ['udta', 'meta', 'uuid', 'free', 'skip', 'mvhd', 'tkhd', 'mdhd', 'pnot', 'prft', 'hdlr', 'stsd'];
     for (let round = 0; round < 600; round++) {
       const bytes = r.oneIn(4) ? r.bytes(r.int(200)) : r.mutate(writeFile(randomMovie(r)));
       const before = bytes.slice();

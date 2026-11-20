@@ -1081,15 +1081,20 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   recipient's version doesn't know (lowercase letters and `_`, at most 16)
   is accepted and shown as a file.
 - **The name** `n` is any 1–255 UTF-16 units, and taken in as it is: a
-  message refused for it would be acked and lost. Where it's shown, shared
-  or saved (the save page too), the recipient cleans it first: bidi
-  controls (U+200E/F, U+202A–202E, U+2066–2069, U+061C), the byte-order
-  mark and C0/C1 control characters go, line breaks and tabs become a
-  space, and `/` and `\` become `_`; ZWNJ and ZWJ stay. So
+  message refused for it would be acked and lost. The app sends one only
+  with a file or music: the picked file's own name. A photo, video, GIF,
+  voice or video message has none, since a camera's names can tell when and
+  on which phone it was taken; a video sent as one that the app can't open
+  goes as a file named only for its kind and extension (`video.mov`), as
+  does a photo or video picked from the gallery that the app can't show.
+  Where it's shown, shared or saved (the save page too), the recipient
+  cleans it first: bidi controls (U+200E/F, U+202A–202E, U+2066–2069,
+  U+061C), the byte-order mark and C0/C1 control characters go, line breaks
+  and tabs become a space, and `/` and `\` become `_`; ZWNJ and ZWJ stay. So
   `photo<U+202E>gpj.exe` shows and saves as `photogpj.exe`, not as
-  `photoexe.jpg`. A name with nothing left is replaced by one made from
-  the kind and type, as for no name. The save page, whose link anyone can
-  make, also cuts a longer name to 255.
+  `photoexe.jpg`. A name with nothing left is replaced by one made from the
+  kind and type, as for no name. The save page, whose link anyone can make,
+  also cuts a longer name to 255.
 - What each kind is: a photo is redrawn on the sender's device (at most
   1280 px, JPEG), which drops its metadata. A video is sent as recorded (no
   compression), with most location, device and time metadata removed: the
@@ -1101,18 +1106,25 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   offset points into one, or the file is fragmented or has part of a track
   the app can't read); and the times in the movie, track and media
   headers, a QuickTime preview (`pnot`) and producer reference times
-  (`prft`) are zeroed, so nothing else in the file moves. Timed metadata
-  tracks (a camera's GPS or timecode track) are kept, and a video the app
-  can't read is sent as it was. A GIF is sent as it is, with any metadata
-  in it.
+  (`prft`), the handlers' names (`hdlr`: `Core Media Video`, `VideoHandler`)
+  and, in a video track's sample descriptions, the encoder's name
+  (`compressorname`: `HEVC`, `AVC1 Coding`) are zeroed, so nothing else in
+  the file moves. The file type, brands and the encoder's settings are kept.
+  Timed metadata tracks (a camera's GPS or timecode track) are kept, and a
+  video the app can't read is sent as it was. A GIF is sent as it is, with
+  any metadata in it.
   A voice message is recorded in the app (AAC in MP4 where the browser can,
   else Opus in WebM or Ogg; at most 15 minutes), with a waveform taken from
   the microphone level while recording (or from the recording, where the
-  level couldn't be read); it carries no device or place metadata. A video
-  message is recorded in the app too: the camera's picture cropped to a
-  384 × 384 square (mirrored for the front camera, as the sender saw it),
-  with sound, as H.264 in MP4 where the browser can, else WebM; at most a
-  minute, with a preview frame and no device or place metadata. Music is the
+  level couldn't be read). A video message is recorded in the app too: the
+  camera's picture cropped to a 384 × 384 square (mirrored for the front
+  camera, as the sender saw it), with sound, as H.264 in MP4 where the
+  browser can, else WebM; at most a minute, with a preview frame. Neither
+  carries a place. An MP4 recording is stripped as a video is: the browser
+  writes its clock into the headers and its own handler and encoder names
+  (`SoundHandler`, `AVC1 Coding`). A WebM or Ogg recording has no clock, and
+  is sent as it is, naming its muxer (`Chrome`, or Firefox's
+  `QTmuxingAppLibWebM-0.0.1`) or the browser (`Mozilla160.0`). Music is the
   audio file as it is (its tags included), with its length. A file is the
   original bytes, untouched (location included, if it has any).
 - **Fetched by itself.** Photos up to 5 MiB, and voice and video messages

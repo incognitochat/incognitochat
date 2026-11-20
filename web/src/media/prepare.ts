@@ -7,6 +7,14 @@
 // music" sends an audio file as it is, with its length, for the in-chat
 // player. "As file" keeps the original bytes untouched. Voice messages are
 // recorded instead (media/record.ts).
+//
+// Only a file and music go with their own names, which the sender chose or
+// can see. A camera or screenshot names its files with the moment they were
+// taken, or a counter that grows with each photo ("IMG_4821"), so names
+// in two chats could point to one phone: photos, videos and GIFs go
+// without one (the recipient saves them as "photo.jpg" and the like), and
+// a video that can't be sent as one goes as a file named "video.mov" (as
+// does a photo or video from the gallery that can't be shown: app.tsx).
 
 import { toBase64Url } from '../crypto/encoding';
 import type { Outgoing } from '../messaging/engine';
@@ -86,7 +94,7 @@ export async function prepareGif(file: File): Promise<Outgoing> {
 export async function prepareVideo(file: File): Promise<Outgoing> {
   if (file.size > MAX_FILE_BYTES) throw new TooBig();
   const info = await probeVideo(file);
-  if (!info) return prepareFile(file);
+  if (!info) return prepareFile(file, neutralName(file));
   const bytes = new Uint8Array(await file.arrayBuffer());
   stripVideoMetadata(bytes);
   const type = file.type === 'video/x-m4v' ? 'video/mp4' : file.type;
@@ -175,13 +183,24 @@ function happens(target: HTMLMediaElement, event: string, ms: number): Promise<b
   });
 }
 
-/** Any file, untouched. */
-export async function prepareFile(file: File): Promise<Outgoing> {
+/** Any file, untouched, under its own name (or `name`). */
+export async function prepareFile(file: File, name = file.name): Promise<Outgoing> {
   if (file.size > MAX_FILE_BYTES) throw new TooBig();
   if (file.size === 0) throw new Error('empty file');
   const bytes = new Uint8Array(await file.arrayBuffer());
   const type = /^[\w.+-]+\/[\w.+-]+$/.test(file.type) && file.type.length <= 100 ? file.type : null;
-  return { file: bytes, media: { t: 'file', s: bytes.length, n: (file.name || 'file').slice(0, 255), ...(type ? { m: type } : {}) } };
+  return { file: bytes, media: { t: 'file', s: bytes.length, n: (name || 'file').slice(0, 255), ...(type ? { m: type } : {}) } };
+}
+
+/**
+ * A name for a photo or video sent as a file that says only what it is:
+ * "video.mov" for "IMG_4821.MOV", "photo.heic" for "PXL_20261119_103512123.heic".
+ * (Not "photo.12" for "Screenshot 2026-11-19 at 10.35.12": an extension has a letter.)
+ */
+export function neutralName(file: File): string {
+  const base = file.type.startsWith('video/') ? 'video' : file.type.startsWith('image/') ? 'photo' : 'file';
+  const extension = /\.([a-z0-9]{1,5})$/i.exec(file.name)?.[1];
+  return extension && /[a-z]/i.test(extension) ? `${base}.${extension.toLowerCase()}` : base;
 }
 
 /** What a picked file can be sent as, besides a file: a photo, a video, a GIF or music. */

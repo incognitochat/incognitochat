@@ -1,5 +1,6 @@
 // Removes where and when a video was recorded, before it's sent "as video"
-// (photos are redrawn instead, which drops their metadata). Phones keep the
+// (photos are redrawn instead, which drops their metadata), and from voice
+// and video messages recorded as MP4 (media/record.ts). Phones keep the
 // location in MP4/QuickTime metadata boxes: moov/udta ("©xyz", Android and
 // others) and moov/meta ("com.apple.quicktime.location.ISO6709", iPhone),
 // next to the make, model and software; QuickTime allows them deeper too,
@@ -9,16 +10,20 @@
 // also leave data in "free" or "skip" boxes, which players ignore. The
 // recording time is also in the movie, track and media headers (mvhd,
 // tkhd, mdhd), a QuickTime preview's date (pnot) and a fragmented file's
-// wall-clock times (prft).
+// wall-clock times (prft). And whatever wrote the file names itself in
+// each track's handler ("Core Media Video" on an iPhone, "VideoHandler"
+// in Chrome) and in a video track's encoder name ("HEVC", "AVC1 Coding"):
+// hints at the device, the same in every chat.
 //
 // Metadata boxes become "free" boxes full of zeros, free and skip boxes are
-// emptied the same way, and the times are zeroed, all in place: the file
-// keeps its exact length, so every offset in it (the sample tables' chunk
-// offsets, stco and co64) stays right, and players skip "free" boxes. "As
-// file" sends the original bytes, as Telegram does. Still kept: timed
-// metadata tracks (a camera's GPS track, a timecode track; their samples
-// are in mdat), "uuid" boxes inside the movie that aren't known metadata,
-// and handler and encoder names.
+// emptied the same way, and the times and the handler and encoder names
+// are zeroed, all in place: the file keeps its exact length, so every
+// offset in it (the sample tables' chunk offsets, stco and co64) stays
+// right, and players skip "free" boxes. "As file" sends the original
+// bytes, as Telegram does. Still kept: timed metadata tracks (a camera's
+// GPS track, a timecode track; their samples are in mdat), "uuid" boxes
+// inside the movie that aren't known metadata, the file's brands (ftyp)
+// and the encoder's settings.
 
 /** How an MP4 (ftyp) or an older QuickTime file starts. */
 const FIRST = new Set(['ftyp', 'wide', 'free', 'skip', 'mdat', 'moov', 'pnot']);
@@ -50,6 +55,21 @@ const HEADERS = new Set(['mvhd', 'tkhd', 'mdhd']);
 const UNUSED = new Set(['free', 'skip']);
 /** Chunk offset tables, 32-bit and 64-bit: where each chunk of samples is. */
 const CHUNKS = new Set(['stco', 'co64']);
+/** Kinds of track (handler types) whose sample descriptions are pictures, each naming its encoder: video, and auxiliary video (depth, alpha). */
+const VISUAL = new Set(['vide', 'auxv']);
+/**
+ * Where a handler's name starts in its box: after version and flags (4), a
+ * QuickTime component type (4), the handler type (4) and 12 reserved bytes.
+ */
+const HANDLER_NAME = 24;
+/**
+ * Where a visual sample entry's encoder name is in it: after the box header
+ * (8), 6 reserved bytes and a data reference index (2), 16 bytes of codec
+ * fields, width and height (4), resolutions (8), 4 reserved bytes and a
+ * frame count (2). A Pascal string in 32 bytes.
+ */
+const ENCODER_NAME = 50;
+const ENCODER_NAME_LENGTH = 32;
 
 /**
  * How deep boxes may nest, and how many a file may have, before it's taken
@@ -85,8 +105,10 @@ export function stripVideoMetadata(bytes: Uint8Array): boolean {
     throw err;
   }
   // The same walk again, changing the bytes. It reads only box headers,
-  // versions and UUIDs, which no change touches before they're read (a box
-  // is changed after its header is read, and never looked inside after).
+  // versions, UUIDs, handler types and sample entries' sizes, which no
+  // change touches before they're read (a box is changed after its header
+  // is read, and never looked inside after; a handler's name comes after
+  // its type, an encoder's name after its entry's size).
   walk({ ...dry, change: true, count: 0, empty: toEmpty(dry) });
   return true;
 }
@@ -127,12 +149,13 @@ function walk(w: Walk): boolean {
     first = false;
     if (box.type === 'moov') movie = true;
     if (box.type === 'moof') w.fragmented = true;
-    visit(w, box, 0);
+    visit(w, box, 0, '');
   });
   return movie;
 }
 
-function visit(w: Walk, box: Box, depth: number): void {
+/** `handler`: the kind of track the box is in (its handler type, "vide", "soun"...), or '' outside one. */
+function visit(w: Walk, box: Box, depth: number, handler: string): void {
   const { bytes } = w;
   // No top-level "uuid" box is needed to play a file: the ones players read
   // (encryption, streaming, 360° video) sit inside moov, trak or moof.
@@ -158,13 +181,47 @@ function visit(w: Walk, box: Box, depth: number): void {
   } else if (box.type === 'prft') {
     // version and flags (4), the track (4), then the wall-clock (NTP) time and the media time it matches.
     if (w.change) bytes.fill(0, Math.min(box.body + 8, box.end), box.end);
+  } else if (box.type === 'hdlr') {
+    // Its name, a null-terminated string in MP4 and a counted one in
+    // QuickTime: all zeros reads as no name in both.
+    if (w.change && box.body + HANDLER_NAME < box.end) bytes.fill(0, box.body + HANDLER_NAME, box.end);
+  } else if (box.type === 'stsd') {
+    if (w.change && VISUAL.has(handler)) blankEncoderNames(w, box);
   } else if (CONTAINERS.has(box.type) && !w.unread.has(box.start)) {
+    const inside = box.type === 'mdia' ? handlerOf(w, box, depth) : handler;
     try {
-      children(w, box.body, box.end, depth + 1, (child) => visit(w, child, depth + 1));
+      children(w, box.body, box.end, depth + 1, (child) => visit(w, child, depth + 1, inside));
     } catch (err) {
       if (!LENIENT.has(box.type) || !(err instanceof Unreadable) || err instanceof TooComplex) throw err;
       w.unread.add(box.start);
     }
+  }
+}
+
+/** A track's kind: the handler type of the hdlr box among its media's boxes, or '' if there's none. */
+function handlerOf(w: Walk, mdia: Box, depth: number): string {
+  let handler = '';
+  children(w, mdia.body, mdia.end, depth + 1, (box) => {
+    if (!handler && box.type === 'hdlr' && box.body + 12 <= box.end) handler = String.fromCharCode(...w.bytes.subarray(box.body + 8, box.body + 12));
+  });
+  return handler;
+}
+
+/**
+ * Zeroes the encoder name in each of a video track's sample descriptions
+ * (stsd: version and flags, the number of entries, then the entries). An
+ * entry too short to have one is left as it is, and so is the rest from an
+ * entry that doesn't fit.
+ */
+function blankEncoderNames(w: Walk, stsd: Box): void {
+  const { bytes, view } = w;
+  if (stsd.body + 8 > stsd.end) return;
+  let at = stsd.body + 8;
+  for (let n = view.getUint32(stsd.body + 4); n > 0 && at + 8 <= stsd.end; n--) {
+    const size = view.getUint32(at);
+    if (size < 8 || at + size > stsd.end) return;
+    if (ENCODER_NAME + ENCODER_NAME_LENGTH <= size) bytes.fill(0, at + ENCODER_NAME, at + ENCODER_NAME + ENCODER_NAME_LENGTH);
+    at += size;
   }
 }
 
