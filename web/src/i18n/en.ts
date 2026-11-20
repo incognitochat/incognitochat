@@ -190,6 +190,8 @@ export const en = {
   edited: 'edited',
   alsoDeleteFor: 'Also delete for {name}',
   unreadCount: '{count}',
+  unreadMessagesCount: '{count} unread',
+  unreadMessages: 'Unread messages',
   messagePlaceholder: 'Message',
   send: 'Send',
   sending: 'Sending…',

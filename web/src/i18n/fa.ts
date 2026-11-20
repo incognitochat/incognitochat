@@ -191,6 +191,8 @@ export const fa = {
   edited: 'ویرایش‌شده',
   alsoDeleteFor: 'برای {name} هم پاک شود',
   unreadCount: '{count}',
+  unreadMessagesCount: '{count} پیام خوانده‌نشده',
+  unreadMessages: 'پیام‌های خوانده‌نشده',
   messagePlaceholder: 'پیام',
   send: 'ارسال',
   sending: 'در حال ارسال…',

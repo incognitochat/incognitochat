@@ -1,6 +1,8 @@
 // Maps Telegram's theme colours onto the app's own design tokens. Outside
 // Telegram the tokens keep their CSS defaults (light/dark from the system).
 
+import { textOn } from './contrast';
+
 const TOKENS: Record<string, string> = {
   bg_color: '--app-bg',
   text_color: '--app-text',
@@ -24,6 +26,11 @@ export function applyTheme(params: Record<string, string>, root: HTMLElement = d
       applied = true;
     }
   }
+  // Telegram gives no colour for text on its destructive colour (the Delete
+  // buttons): black or white, whichever reads better on it.
+  const danger = params.destructive_text_color;
+  const onDanger = danger && COLOR.test(danger) ? textOn(danger) : null;
+  if (onDanger) root.style.setProperty('--app-on-danger', onDanger);
   if (applied) root.dataset.theme = 'telegram';
 }
 
