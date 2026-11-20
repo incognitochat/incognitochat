@@ -17,7 +17,7 @@ import { countTokens, LOW_WATER, MEDIA_BATCH, MEDIA_LOW_WATER, rememberLeft, ret
 import { editable, MAX_TEXT_BYTES, newId, sealMessage } from '../protocol/message';
 import { deleteMeta, deleteSealed, getKey, getMeta, getSealed, listSealed, openDatabase, putKey, putMeta, putSealed, type Database } from '../storage/db';
 import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
-import { canResend, createMessaging, LINK_KEY_RETRY_MS, MailboxLimit, NoMailboxes, NoTokens, SyncFailed, type MessagingDeps } from './engine';
+import { canResend, createMessaging, LINK_KEY_RETRY_MS, MailboxLimit, NoMailboxes, NoTokens, RESEND_WINDOW_MS, SyncFailed, UPLOAD_REUSE_MS, type MessagingDeps } from './engine';
 import {
   addMessage,
   clearMedia,
@@ -35,6 +35,7 @@ import {
   MAX_EARLY,
   MAX_EARLY_BYTES,
   mediaUsage,
+  patchMessage,
   pendingUploadDeletes,
   putConversation,
   putMedia,
@@ -4513,7 +4514,7 @@ describe('a send refused after its upload', () => {
     const mine = (await listMessages(sender.db, conv)).at(-1)!;
     // Failed, and sent again as a new upload if the user asks.
     expect(mine).toMatchObject({ status: 'failed' });
-    expect(canResend(mine)).toBe(true);
+    expect(canResend(mine, Date.now())).toBe(true);
     await sender.messaging.flushUploadDeletes();
     expect(backend.uploads.size).toBe(0);
   });
@@ -4562,7 +4563,7 @@ describe('a send refused after its upload', () => {
     const { backend, owner, sender, conv } = await failing(new ApiError(400, 'invalid_envelope'));
     const failed = (await listMessages(sender.db, conv)).at(-1)!;
     expect(failed.media!.id).toBeUndefined();
-    expect(canResend(failed)).toBe(true);
+    expect(canResend(failed, Date.now())).toBe(true);
     await sender.messaging.resend(conv, failed.id);
     expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ id: failed.id, status: 'sent', file: 'local' });
     expect(backend.uploads.size).toBe(1);
@@ -4788,7 +4789,7 @@ describe('attachments paused by the operator', () => {
     const failed = await mine();
     expect(failed).toMatchObject({ status: 'failed', file: 'local', text: 'a cat', media: { t: 'photo' } });
     expect(failed.media!.id).toBeUndefined();
-    expect(canResend(failed)).toBe(true);
+    expect(canResend(failed, Date.now())).toBe(true);
 
     // Still paused: the same, once more.
     await expect(sender.messaging.resend(conv, failed.id)).rejects.toMatchObject({ code: 'uploads_paused' });
@@ -4810,7 +4811,7 @@ describe('attachments paused by the operator', () => {
     const sent = await mine();
     expect(sent).toMatchObject({ id: failed.id, status: 'sent', file: 'local', text: 'a cat' });
     expect(sent.at).toBeGreaterThanOrEqual(failed.at);
-    expect(canResend(sent)).toBe(false);
+    expect(canResend(sent, Date.now())).toBe(false);
     expect(await tokensLeft()).toBe(1);
     // Nothing more to send again.
     await sender.messaging.resend(conv, failed.id);
@@ -4838,7 +4839,7 @@ describe('attachments paused by the operator', () => {
     // Its message never went out, so it can be sent again; like an upload
     // whose four tries all failed, that pays again (the app doesn't keep a
     // paid upload it couldn't finish).
-    expect(canResend(await mine())).toBe(true);
+    expect(canResend(await mine(), Date.now())).toBe(true);
   });
 
   it('leaves an attachment to fetch while downloads are paused', async () => {
@@ -4872,6 +4873,27 @@ describe('ours left sending, and sending them again', () => {
     return { backend, owner, sender, conv, local, mine, theirs, photo, out };
   }
 
+  /** The next send (POST /send) fails as given, without reaching the server. */
+  function failNextSend(backend: Awaited<ReturnType<typeof fakeBackend>>, failure: Error): void {
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
+      backend.api.request = request;
+      throw failure;
+    };
+  }
+
+  /** A photo whose message's send failed on the way: it didn't arrive, but may have, so its upload stays. */
+  async function failedPhoto({ backend, sender, conv, out, mine }: Awaited<ReturnType<typeof chat>>) {
+    failNextSend(backend, new NetworkError('out of reach'));
+    await expect(sender.messaging.sendMedia(conv, out, 'a cat')).rejects.toThrow(NetworkError);
+    const failed = await mine();
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'photo' } });
+    expect(failed.media!.id).toBeDefined();
+    expect(failed.uploadedAt).toBeDefined();
+    return failed;
+  }
+
   it('shows one the app closed on as not sent; sent again, it goes once, with its ID, and they keep one copy', async () => {
     const { backend, owner, sender, conv, mine, theirs } = await chat();
     // Delivered, then the app closed before it marked it sent.
@@ -4883,7 +4905,7 @@ describe('ours left sending, and sending them again', () => {
     expect(await failStuck(sender.db)).toEqual([conv]);
     const failed = await mine();
     expect(failed).toMatchObject({ id: left.id, status: 'failed' });
-    expect(canResend(failed)).toBe(true);
+    expect(canResend(failed, Date.now())).toBe(true);
     // Sent again from two copies of the app at once: once, paid like any
     // send, with fresh tokens, and the same ID.
     const sends = backend.sendPayments.length;
@@ -4891,8 +4913,8 @@ describe('ours left sending, and sending them again', () => {
     expect(backend.sendPayments).toHaveLength(sends + 1);
     expect(tiedSends(backend)).toEqual([]);
     const sent = await mine();
-    expect(sent).toMatchObject({ id: failed.id, status: 'sent', text: 'did it go?' });
-    expect(canResend(sent)).toBe(false);
+    expect(sent).toMatchObject({ id: failed.id, status: 'sent', text: 'did it go?', firstAt: failed.at });
+    expect(canResend(sent, Date.now())).toBe(false);
     // They had it: the repeat is dropped (they have a message with its ID).
     expect(await owner.messaging.sync()).toBe(0);
     expect((await theirs()).filter((m) => m.id === failed.id)).toHaveLength(1);
@@ -4934,7 +4956,13 @@ describe('ours left sending, and sending them again', () => {
     ]);
   });
 
-  it('leaves one a copy of the app is sending as it is: a text, or an attachment uploading', async () => {
+  withAndWithoutWebLocks('a send under way', () => {
+    it('leaves one a copy of the app is sending as it is: a text, or an attachment uploading', async () => {
+      await leavesOneUnderWay();
+    });
+  });
+
+  async function leavesOneUnderWay() {
     const { backend, owner, sender, conv, mine, out } = await chat();
     const held = holdSends(backend);
     const sending = sender.messaging.send(conv, 'slow');
@@ -4961,24 +4989,25 @@ describe('ours left sending, and sending them again', () => {
     await uploading;
     expect(await mine()).toMatchObject({ text: 'a cat', status: 'sent' });
     expect(await owner.messaging.sync()).toBe(2);
-  });
+  }
 
-  it('sends an uploaded attachment again with its upload: nothing uploaded or paid for twice', async () => {
-    const { backend, owner, sender, conv, local, mine, theirs, photo, out } = await chat();
-    // Its message's send failed on the way: it may have arrived (it didn't), so its upload stays.
-    const request = backend.api.request;
-    backend.api.request = async (method, path, init, check) => {
-      if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
-      backend.api.request = request;
-      throw new NetworkError('out of reach');
-    };
-    await expect(sender.messaging.sendMedia(conv, out, 'a cat')).rejects.toThrow(NetworkError);
-    const failed = await mine();
-    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'photo' } });
-    expect(failed.media!.id).toBeDefined();
-    expect(canResend(failed)).toBe(true);
+  it('sends an uploaded attachment again with its fresh upload, nothing paid twice; a refusal of that keeps the upload', async () => {
+    const c = await chat();
+    const { backend, owner, sender, conv, local, mine, theirs, photo } = c;
+    const failed = await failedPhoto(c);
+    expect(canResend(failed, Date.now())).toBe(true);
     const mediaCalls = backend.mediaCalls.length;
     const mediaTokens = await countTokens(sender.db, backend.issuer.keyId, undefined, 'media');
+
+    // Refused this time: that says nothing of the first try, which may have
+    // arrived, so the upload stays, for that one and for the next try.
+    failNextSend(backend, new ApiError(429, 'rate_limited'));
+    await expect(sender.messaging.resend(conv, failed.id)).rejects.toMatchObject({ code: 'rate_limited' });
+    expect(await mine()).toMatchObject({ id: failed.id, status: 'failed', media: { id: failed.media!.id }, uploadedAt: failed.uploadedAt });
+    await sender.messaging.flushUploadDeletes();
+    expect(await pendingUploadDeletes(sender.db)).toEqual([]);
+    expect(backend.uploads.size).toBe(1);
+
     await sender.messaging.resend(conv, failed.id);
     expect(backend.mediaCalls).toHaveLength(mediaCalls);
     expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(mediaTokens);
@@ -4988,6 +5017,61 @@ describe('ours left sending, and sending them again', () => {
     expect(there).toMatchObject({ id: failed.id, text: 'a cat', file: 'remote' });
     expect(await owner.messaging.fetchMedia(local, there.id)).toBe('local');
     expect(await getMedia(owner.db, local, there.id)).toEqual(photo);
+  });
+
+  it('uploads anew one whose upload may be gone: kept by an older version (no time kept), or older than 29 days', async () => {
+    for (const uploadedAt of [undefined, Date.now() - UPLOAD_REUSE_MS - 1000]) {
+      const c = await chat();
+      const failed = await failedPhoto(c);
+      // As an older version left it (it deleted some uploads but kept their
+      // IDs), or uploaded long ago: gone from the bucket.
+      expect(await patchMessage(c.sender.db, c.conv, failed.id, 'failed', { media: failed.media!, ...(uploadedAt !== undefined ? { uploadedAt } : {}) })).toBe(true);
+      expect((await c.mine()).uploadedAt).toBe(uploadedAt);
+      c.backend.uploads.clear();
+      await c.sender.messaging.resend(c.conv, failed.id);
+      const sent = await c.mine();
+      expect(sent).toMatchObject({ id: failed.id, status: 'sent', text: 'a cat' });
+      expect(sent.media!.id).not.toBe(failed.media!.id);
+      expect(sent.uploadedAt).toBeGreaterThan(Date.now() - 60_000);
+      expect(c.backend.uploads.size).toBe(1);
+      await c.owner.messaging.sync();
+      const there = (await c.theirs()).at(-1)!;
+      expect(there.id).toBe(failed.id);
+      expect(await c.owner.messaging.fetchMedia(c.local, there.id)).toBe('local');
+      expect(await getMedia(c.owner.db, c.local, there.id)).toEqual(c.photo);
+    }
+  });
+
+  it('offers to send one again only for 30 days after its first try, however often it was tried', async () => {
+    const { backend, sender, conv } = await chat();
+    const now = Date.now();
+    const [old, retried, recent] = [rand(), rand(), rand()];
+    await addMessage(sender.db, { id: old, conv, at: now - RESEND_WINDOW_MS - 1000, out: true, status: 'failed' }, { text: 'too old' });
+    await addMessage(sender.db, { id: retried, conv, at: now - 1000, out: true, status: 'failed' }, { text: 'tried again lately', firstAt: now - RESEND_WINDOW_MS - 1000 });
+    await addMessage(sender.db, { id: recent, conv, at: now - RESEND_WINDOW_MS + 60_000, out: true, status: 'failed' }, { text: 'just in time' });
+    const byId = async (id: string) => (await getMessage(sender.db, conv, id))!;
+    expect(canResend(await byId(old), now)).toBe(false);
+    expect(canResend(await byId(retried), now)).toBe(false);
+    expect(canResend(await byId(recent), now)).toBe(true);
+    const sends = backend.sendPayments.length;
+    await sender.messaging.resend(conv, old);
+    await sender.messaging.resend(conv, retried);
+    expect(backend.sendPayments).toHaveLength(sends);
+    expect([(await byId(old)).status, (await byId(retried)).status]).toEqual(['failed', 'failed']);
+    // Sent again, it keeps when it was first tried.
+    await sender.messaging.resend(conv, recent);
+    expect(await byId(recent)).toMatchObject({ status: 'sent', firstAt: now - RESEND_WINDOW_MS + 60_000 });
+    expect(backend.sendPayments).toHaveLength(sends + 1);
+  });
+
+  it('counts the time to edit one sent again from its first try', async () => {
+    const { sender, conv } = await chat();
+    const id = rand();
+    const first = Date.now() - 2 * 24 * 3600 * 1000;
+    await addMessage(sender.db, { id, conv, at: first, out: true, status: 'failed' }, { text: 'two days ago' });
+    await sender.messaging.resend(conv, id);
+    expect(await getMessage(sender.db, conv, id)).toMatchObject({ status: 'sent', firstAt: first });
+    await expect(sender.messaging.edit(conv, id, 'changed')).rejects.toThrow('too late to edit');
   });
 
   it('shows one taken for not sent as sent, or seen, once they show they had it', async () => {
@@ -5007,7 +5091,7 @@ describe('ours left sending, and sending them again', () => {
     await sender.messaging.sync();
     const seen = await mine();
     expect(seen).toMatchObject({ text: 'arrived', status: 'seen' });
-    expect(canResend(seen)).toBe(false);
+    expect(canResend(seen, Date.now())).toBe(false);
   });
 });
 

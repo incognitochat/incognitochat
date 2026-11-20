@@ -596,12 +596,26 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   // One of ours being edited in the message bar; back cancels it, as in Telegram.
   const editing = useSignal<MessageView | null>(null);
   useBackCloses(!!editing.value, () => (editing.value = null));
+  // The message being answered when an edit started: put aside while it
+  // lasts, and back, with the draft (Composer), once it ends.
+  const replyKept = useRef<MessageView | null>(null);
+  useEffect(() => {
+    if (editing.value) {
+      replyKept.current ??= replying.value;
+      replying.value = null;
+    } else if (replyKept.current) {
+      // Unless another was chosen meanwhile.
+      if (!replying.value) replying.value = replyKept.current;
+      replyKept.current = null;
+    }
+  }, [editing.value?.id]);
   const menu = useSignal<MessageView | null>(null);
   useBackCloses(!!menu.value, () => (menu.value = null));
   const highlight = useSignal<string | null>(null);
   const byId = new Map([...screen.quoted, ...screen.messages].map((m) => [m.id, m]));
   useEffect(() => {
     replying.value = null;
+    replyKept.current = null;
     menu.value = null;
   }, [screen.id]);
   // A quote's message older than those shown: loaded, then jumped to.
@@ -679,7 +693,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             language={language}
             time={time}
             highlighted={highlight.value === m.id}
-            canReply={!screen.blocked && !screen.ended && !screen.readOnly}
+            canReply={canReply(screen, m)}
             canReact={canReact(screen, m)}
             onReact={(e) => void app.react(m.id, e)}
             onDoubleTap={() => {
@@ -734,22 +748,21 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         <MessageMenu
           message={menu.value}
           language={language}
-          canReply={!screen.blocked && !screen.ended && !screen.readOnly}
+          canReply={canReply(screen, menu.value)}
           canReact={canReact(screen, menu.value)}
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
           canEdit={canEdit(screen, menu.value, app.messageNow())}
-          canResend={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value)}
+          canResend={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value, app.messageNow())}
           onResend={(m) => void app.resend(m.id)}
-          onEdit={(m) => {
-            replying.value = null;
-            editing.value = m;
-          }}
+          // The reply being written, if any, is put aside (replyKept).
+          onEdit={(m) => (editing.value = m)}
           onClose={() => (menu.value = null)}
           onReact={(m, e) => void app.react(m.id, e)}
           onReply={(m) => (replying.value = m)}
           onDelete={(m, both) => {
             if (replying.value?.id === m.id) replying.value = null;
+            if (replyKept.current?.id === m.id) replyKept.current = null;
             void (both ? app.deleteForEveryone(m.id) : app.deleteMessage(m.id));
           }}
         />
@@ -3073,13 +3086,21 @@ function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageV
 }
 
 /**
+ * Whether one can answer a message: in an open conversation, and not one of
+ * ours still on its way or not sent (the answer could arrive before it).
+ */
+function canReply(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
+  return canReact(screen, m);
+}
+
+/**
  * Whether one of ours can be edited: sent, in an open conversation, with
  * text or a caption to edit (not a sticker, voice or video message), and
- * not more than a day ago, as the engine counts it (now: the clock messages
- * are dated by).
+ * not more than a day after it was first tried, as the engine counts it
+ * (now: the clock messages are dated by).
  */
 function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView, now: number): boolean {
-  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.at, now)) return false;
+  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.firstAt ?? m.at, now)) return false;
   return m.text !== '' || (!!m.media && !['voice', 'round'].includes(shownAs(m.media)));
 }
 

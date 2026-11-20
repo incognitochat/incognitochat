@@ -971,7 +971,7 @@ describe('an open chat', () => {
     const now = Date.now();
     // The app closed while sending one; another copy of the app is sending the other.
     await addMessage(db, { id: 'closed', conv: 'c1', at: now - 1000, out: true, status: 'sending' }, { text: 'closed' });
-    await addMessage(db, { id: 'live', conv: 'c1', at: now - STUCK_MS / 2, out: true, status: 'sending' }, { text: 'live' });
+    await addMessage(db, { id: 'live', conv: 'c1', at: now - STUCK_MS + 2000, out: true, status: 'sending' }, { text: 'live' });
     let taken!: () => void;
     let release!: () => void;
     const holding = new Promise<void>((resolve) => (taken = resolve));
@@ -988,20 +988,28 @@ describe('an open chat', () => {
     expect(broadcasts).toContainEqual({ type: 'data-changed' });
 
     // That copy closes too. In the open chat, it shows as sending until it's
-    // been so for a while, then as not sent.
+    // been so for a minute, then as not sent, with nothing else redrawing it.
     release();
     await sending;
     await app.openConversation('c1');
     expect(await statuses()).toEqual(['live sending', 'closed failed']);
-    const later = vi.spyOn(Date, 'now').mockImplementation(() => now + STUCK_MS / 2 + 5000);
-    try {
-      await app.refresh();
-    } finally {
-      later.mockRestore();
-    }
+    await vi.waitFor(
+      () => expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'live', status: 'failed' }, { id: 'closed', status: 'failed' }] }),
+      { timeout: 8_000, interval: 100 },
+    );
     expect(await statuses()).toEqual(['live failed', 'closed failed']);
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'live', status: 'failed' }, { id: 'closed', status: 'failed' }] });
-  });
+
+    // Once the chat is left, it isn't looked at again: only when it opens.
+    await addMessage(db, { id: 'left', conv: 'c1', at: Date.now() - STUCK_MS + 1000, out: true, status: 'sending' }, { text: 'left' });
+    await app.refresh();
+    const shown = app.screen.value;
+    expect(shown.kind === 'conversation' && shown.messages.find((m) => m.id === 'left')).toMatchObject({ status: 'sending' });
+    await app.home();
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(await statuses()).toEqual(['live failed', 'left sending', 'closed failed']);
+    await app.openConversation('c1');
+    expect(await statuses()).toEqual(['live failed', 'left failed', 'closed failed']);
+  }, 20_000);
 });
 
 describe('links', () => {

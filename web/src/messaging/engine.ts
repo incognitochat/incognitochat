@@ -379,11 +379,44 @@ function refusedOutright(err: unknown): boolean {
 }
 
 /**
- * Whether one of ours that wasn't sent can be sent again (resend): a
- * message or a sticker; an attachment while its file is on this device.
+ * How long after it was first tried one of ours that wasn't sent can be
+ * sent again: a day less than the other side remembers the IDs of messages
+ * it took in or deleted (MAX_AGE, by the first one's time), so one that did
+ * arrive and was deleted there can't come back.
  */
-export function canResend(m: Pick<MessageView, 'out' | 'status' | 'file' | 'media' | 'legacyFile'>): boolean {
-  return m.out && m.status === 'failed' && (!m.media || (m.file === 'local' && !m.legacyFile));
+export const RESEND_WINDOW_MS = MAX_AGE - DAY;
+
+/** How long an upload is used again with its message sent again (resend): a day less than uploads last (30 days). */
+export const UPLOAD_REUSE_MS = 29 * DAY;
+
+/**
+ * Whether one of ours that wasn't sent can be sent again (resend), at `now`
+ * (the clock messages are dated by): a message or a sticker, or an
+ * attachment while its file is on this device, within RESEND_WINDOW_MS of
+ * its first try.
+ */
+export function canResend(m: Pick<MessageView, 'out' | 'status' | 'file' | 'media' | 'legacyFile' | 'at' | 'firstAt'>, now: number): boolean {
+  return m.out && m.status === 'failed' && now - (m.firstAt ?? m.at) < RESEND_WINDOW_MS && (!m.media || (m.file === 'local' && !m.legacyFile));
+}
+
+/**
+ * The upload one of ours sent again goes with: one kept for it (it may have
+ * arrived), made less than UPLOAD_REUSE_MS ago. Undefined for any other,
+ * which is uploaded anew: its upload may be gone (refused, expired, or kept
+ * by an older version, which deleted some on a refusal but kept their IDs).
+ */
+function uploadToReuse(m: Pick<MessageView, 'media' | 'uploadedAt'>, now: number): Media | undefined {
+  return m.media?.id && m.uploadedAt !== undefined && now - m.uploadedAt < UPLOAD_REUSE_MS ? (m.media as Media) : undefined;
+}
+
+/** Whether one of ours sent again (resend) at `now` is uploaded then: an attachment without an upload to go with. */
+export function resendUploads(m: Pick<MessageView, 'media' | 'uploadedAt'>, now: number): boolean {
+  return !!m.media && !uploadToReuse(m, now);
+}
+
+/** An attachment without its upload's fields: to be uploaded (anew). */
+function withoutUpload({ id: _id, k: _k, d: _d, ...media }: LocalMedia): LocalMedia {
+  return media;
 }
 
 function mediaBody(text: string, replyTo: string | undefined, media: LocalMedia): MessageBody {
@@ -606,7 +639,8 @@ export function createMessaging(deps: MessagingDeps) {
       await setMessageStatus(db, conv, fields.id, 'sent', 'sending');
     } catch (err) {
       if (err instanceof Cancelled) return;
-      await setMessageStatus(db, conv, fields.id, 'failed');
+      // Unless their receipt came in meanwhile.
+      await setMessageStatus(db, conv, fields.id, 'failed', 'sending');
       throw err;
     }
   }
@@ -644,31 +678,33 @@ export function createMessaging(deps: MessagingDeps) {
    * Sends one of ours again that wasn't sent (Send again; canResend): the
    * same message, with the same ID, now, at the end of the conversation,
    * paid like a new one. If it did go out before (its answer was lost, or
-   * the app closed mid-send), the other side drops it as one it has. An
-   * attachment never uploaded (attachments were paused, say, or its upload
-   * failed) is uploaded now from its file on this device; one uploaded goes
-   * with that upload, kept for it (deliverMedia), so it isn't paid for
-   * twice. Under the message's sendingLock, so two copies of the app don't
-   * both send (and pay for) it; one that another copy sent meanwhile (or
-   * deleted) is quietly left as it is.
+   * the app closed mid-send), the other side drops it as one it has, or
+   * deleted. When it was first tried is kept (firstAt): sending it again,
+   * and editing it, count from then. An attachment goes with the upload
+   * kept for it, if that's fresh (uploadToReuse), so it isn't paid for
+   * twice; any other is uploaded now from its file on this device. Under the
+   * message's sendingLock, so two copies of the app don't both send (and pay
+   * for) it; one that another copy sent meanwhile (or deleted) is quietly
+   * left as it is.
    */
   function resend(conv: string, id: string, onStored?: () => void | Promise<void>, onProgress?: (fraction: number) => void): Promise<void> {
     return withLock(sendingLock(conv, id), async () => {
       const message = await getMessage(db, conv, id);
-      if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
+      if (!message || !canResend(message, messageNow()) || !(await getConversation(db, conv))) return;
       const { text, replyTo, media, sticker } = message;
-      const uploaded = media?.id ? (media as Media) : undefined;
+      const uploaded = uploadToReuse(message, messageNow());
       const file = media && !uploaded ? await getMedia(db, conv, id) : undefined;
       if (media && !uploaded && !file) throw new Error('attachment missing');
       const at = await stampIn(conv, id);
       // Unless it was deleted meanwhile.
-      if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at }))) return;
+      if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at, firstAt: message.firstAt ?? message.at }))) return;
       await onStored?.();
       // Only these two change, on the chat as it is then (under the send
       // lock), so a message that arrived meanwhile isn't undone.
       await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
-      if (file) return deliverMedia(conv, id, at, { file, media: media! }, text, replyTo, onProgress);
-      // A failure now says nothing of the first send: its upload stays, for
+      // A former upload, if any, stays: it may serve the first try.
+      if (file) return deliverMedia(conv, id, at, { file, media: withoutUpload(media!) }, text, replyTo, onProgress);
+      // A failure now says nothing of the first try: its upload stays, for
       // the other side to fetch if that one arrived.
       const content = sticker ? { sticker } : uploaded ? { ...(text ? { text } : {}), media: uploaded } : { text };
       await deliverMessage(conv, { kind: 'message', id, at, ...content, ...(replyTo ? { replyTo } : {}) });
@@ -683,7 +719,7 @@ export function createMessaging(deps: MessagingDeps) {
    * that was made is then deleted from the server. So is one whose message
    * failed before it could go out, or was refused outright
    * (refusedOutright); after any other failure it may have arrived, and its
-   * upload stays.
+   * upload stays, kept with its message and when it was made (uploadedAt).
    */
   async function deliverMedia(
     conv: string,
@@ -694,30 +730,42 @@ export function createMessaging(deps: MessagingDeps) {
     replyTo: string | undefined,
     onProgress?: (fraction: number) => void,
   ): Promise<void> {
-    /** The upload, once paid for: deleted if the message is. */
+    /** The upload, once paid for, and when: deleted if the message is. */
     let made: Media | undefined;
+    let madeAt: number | undefined;
     /** Set once the message, naming the upload, may go out: from then on, only a refusal says it didn't. */
     let going = false;
     try {
-      const media = await upload(out, () => stillSending(db, conv, id), (m) => (made = m), onProgress);
+      const media = await upload(
+        out,
+        () => stillSending(db, conv, id),
+        (m) => {
+          made = m;
+          madeAt = messageNow();
+        },
+        onProgress,
+      );
       // Checked and stored under the chat's send lock, which deleting it
       // takes too: it's either deleted before this, and not sent, or after
       // it was sent.
       await transmit(conv, { kind: 'message', id, at, ...(caption ? { text: caption } : {}), ...(replyTo ? { replyTo } : {}), media }, {
-        still: async () => (going = await patchMessage(db, conv, id, 'sending', { media })),
+        still: async () => (going = await patchMessage(db, conv, id, 'sending', { media, uploadedAt: madeAt ?? messageNow() })),
       });
       await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
-      if (err instanceof Cancelled || !(await stillSending(db, conv, id))) return deleteUploadsLater([made], true);
-      // The upload is of use to no one if its message surely didn't go out:
-      // it failed before it could, or was refused. Its message then names it
-      // no more, before it's deleted: sent again, it's uploaded anew. One
-      // that may have arrived (no answer, the server failing) stays, for the
-      // other side to fetch, and goes with its message if that's sent again.
+      // Stopped before it went out with this upload, or deleted since (here,
+      // or with its chat): the upload serves nothing.
+      if (err instanceof Cancelled || !(await hasMessage(db, conv, id))) return deleteUploadsLater([made], true);
+      // Nor if its message surely didn't go out: it failed before it could,
+      // or was refused. Its message then names it no more, before it's
+      // deleted: sent again, it's uploaded anew. One that may have arrived
+      // (no answer, the server failing) stays, for the other side to fetch,
+      // and goes with its message if that's sent again soon enough.
       const surely = !going || refusedOutright(err);
-      if (going && surely) await patchMessage(db, conv, id, 'sending', { status: 'failed', media: out.media });
-      await setMessageStatus(db, conv, id, 'failed');
-      if (surely) await deleteUploadsLater([made], true);
+      const unnamed = !going || (surely && (await patchMessage(db, conv, id, 'sending', { status: 'failed', media: out.media })));
+      if (surely && unnamed) await deleteUploadsLater([made], true);
+      // Unless something marked it meanwhile (their receipt, another copy).
+      await setMessageStatus(db, conv, id, 'failed', 'sending');
       throw err;
     }
   }
@@ -1046,7 +1094,7 @@ export function createMessaging(deps: MessagingDeps) {
     if ((text.trim() === '' && !m.media) || utf8(text).length > MAX_TEXT_BYTES) throw new Error('not a valid text');
     if (text === m.text) return;
     // As the app's menu counts it.
-    if (!editable(m.at, messageNow())) throw new Error('too late to edit');
+    if (!editable(m.firstAt ?? m.at, messageNow())) throw new Error('too late to edit');
     const envelope = newId();
     const at = await stampIn(conv, envelope);
     await transmit(conv, { kind: 'edit', id: envelope, at, edit: { to: id, text } });

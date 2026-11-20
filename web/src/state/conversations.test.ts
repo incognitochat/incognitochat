@@ -831,7 +831,7 @@ describe('conversations in the app', () => {
     expect(conv.error).toBe('media-paused');
     const failed = conv.messages.at(-1)!;
     expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'voice' } });
-    expect(canResend(failed)).toBe(true);
+    expect(canResend(failed, Date.now())).toBe(true);
     expect(sender.preparing.value).toEqual([]);
     // Asked once, and every media token fetched is still in the wallet.
     expect(b.mediaCalls).toEqual(['POST /media']);
@@ -862,7 +862,7 @@ describe('conversations in the app', () => {
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
     const failed = conv.messages[0]!;
-    expect(canResend(failed)).toBe(true);
+    expect(canResend(failed, Date.now())).toBe(true);
 
     // The next day: Send again sends it, with its ID, once.
     b.state.tokensLeft = Infinity;

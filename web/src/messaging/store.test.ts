@@ -38,13 +38,16 @@ import {
   noteHad,
   noteSeenBefore,
   PAGE,
+  patchMessage,
   pageMessages,
   putConversation,
   putMedia,
   putSweep,
   saveConversation,
   sendingLock,
+  setReaction,
   setStatuses,
+  setText,
   strayConversations,
   strayFiles,
   unread,
@@ -258,6 +261,25 @@ describe('seen', () => {
       ['read', 'seen'],
       ['not named', 'failed'],
     ]);
+  });
+});
+
+describe('one of ours that was not sent', () => {
+  it('keeps when its upload was made and when it was first tried through reactions and edits; a new attachment brings its own', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await addMessage(db, { id: 'm', conv: 'c', at: 5, out: true, status: 'failed' }, { text: 'a cat', media: { t: 'photo', s: 1 } });
+    expect(await patchMessage(db, 'c', 'm', 'failed', { media: { t: 'photo', s: 1, id: 'U', k: 'K', d: 'D' }, uploadedAt: 7, firstAt: 3 })).toBe(true);
+    await setReaction(db, 'c', 'm', 'theirs', '👍', 9);
+    await setText(db, 'c', 'm', 'a dog', 10);
+    expect(await getMessage(db, 'c', 'm')).toMatchObject({ text: 'a dog', media: { id: 'U' }, uploadedAt: 7, firstAt: 3, edited: 10, reactions: { theirs: { e: '👍' } } });
+    // Its upload's fields gone (it's to be uploaded anew), and their time with them.
+    expect(await patchMessage(db, 'c', 'm', 'failed', { media: { t: 'photo', s: 1 } })).toBe(true);
+    const m = (await getMessage(db, 'c', 'm'))!;
+    expect([m.media!.id, m.uploadedAt, m.firstAt, m.text]).toEqual([undefined, undefined, 3, 'a dog']);
+    // Only from the status given.
+    expect(await patchMessage(db, 'c', 'm', 'sending', { firstAt: 1 })).toBe(false);
+    expect((await getMessage(db, 'c', 'm'))!.firstAt).toBe(3);
   });
 });
 
