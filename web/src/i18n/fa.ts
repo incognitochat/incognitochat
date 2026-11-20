@@ -198,6 +198,7 @@ export const fa = {
   send: 'ارسال',
   sending: 'در حال ارسال…',
   notSent: 'ارسال نشد',
+  resend: 'ارسال دوباره',
   firstMessageHint: 'اولین پیام را بنویسید. او نمی‌داند شما چه کسی هستید.',
   aboutOwnerConversation: 'از طریق لینک شما می‌نویسد. شما نمی‌دانید او کیست.',
   aboutSenderConversation: 'از طریق لینک او می‌نویسید. او نمی‌داند شما چه کسی هستید.',

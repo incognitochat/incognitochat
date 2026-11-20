@@ -5,9 +5,9 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
+import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
-import type { SyncEvent } from '../sync/locks';
+import { withLock, type SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
@@ -963,6 +963,53 @@ describe('an open chat', () => {
     await app.refresh();
     expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'first' }, { id: 'second' }], more: false });
   });
+
+  it('shows ours left sending as not sent: at start, and in the open chat after a while, but not while a copy sends them', async () => {
+    const server = fakeServer();
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+    const now = Date.now();
+    // The app closed while sending one; another copy of the app is sending the other.
+    await addMessage(db, { id: 'closed', conv: 'c1', at: now - 1000, out: true, status: 'sending' }, { text: 'closed' });
+    await addMessage(db, { id: 'live', conv: 'c1', at: now - STUCK_MS + 2000, out: true, status: 'sending' }, { text: 'live' });
+    let taken!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (taken = resolve));
+    const sending = withLock(sendingLock('c1', 'live'), async () => {
+      taken();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await holding;
+    const statuses = async () => (await listMessages(db, 'c1')).filter((m) => m.out).map((m) => `${m.id} ${m.status}`);
+
+    const { app, broadcasts } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(await statuses()).toEqual(['live sending', 'closed failed']);
+    expect(broadcasts).toContainEqual({ type: 'data-changed' });
+
+    // That copy closes too. In the open chat, it shows as sending until it's
+    // been so for a minute, then as not sent, with nothing else redrawing it.
+    release();
+    await sending;
+    await app.openConversation('c1');
+    expect(await statuses()).toEqual(['live sending', 'closed failed']);
+    await vi.waitFor(
+      () => expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'live', status: 'failed' }, { id: 'closed', status: 'failed' }] }),
+      { timeout: 8_000, interval: 100 },
+    );
+    expect(await statuses()).toEqual(['live failed', 'closed failed']);
+
+    // Once the chat is left, it isn't looked at again: only when it opens.
+    await addMessage(db, { id: 'left', conv: 'c1', at: Date.now() - STUCK_MS + 1000, out: true, status: 'sending' }, { text: 'left' });
+    await app.refresh();
+    const shown = app.screen.value;
+    expect(shown.kind === 'conversation' && shown.messages.find((m) => m.id === 'left')).toMatchObject({ status: 'sending' });
+    await app.home();
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(await statuses()).toEqual(['live failed', 'left sending', 'closed failed']);
+    await app.openConversation('c1');
+    expect(await statuses()).toEqual(['live failed', 'left failed', 'closed failed']);
+  }, 20_000);
 });
 
 describe('links', () => {
