@@ -232,6 +232,9 @@ records go in that same request.
   attachments forever, for a month or for a week; clear a chat's or all of
   them; and choose which kinds download by themselves. A cleared attachment
   can be fetched again only while the server still holds it.
+- **Choose the app's language** (Data and storage): English, Persian, or the
+  same as Telegram, the default. The choice stays on the device and isn't
+  sent; notices keep the language Telegram gives the server.
 - **Delete their account** in the app (on the Link tab). First the app
   deletes from the server the attachments they received: those of the
   messages on the device, and of those still waiting for it, which it
