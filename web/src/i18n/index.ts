@@ -1,13 +1,25 @@
 // Strings and formatting in English and Persian. Hand-written and typed, so
 // both languages always have every string; numbers, dates and relative times
-// come from Intl (Persian digits and calendar included).
+// come from Intl (Persian digits and calendar included), and so does which
+// form a counted string takes.
 
 import { en, type Key } from './en';
 import { fa } from './fa';
 
 export type Language = 'en' | 'fa';
 
-const strings: Record<Language, Record<Key, string>> = { en, fa };
+/**
+ * A string that reads differently by its {count}: a form for each plural
+ * category the language uses (Intl.PluralRules: "one" and "other" in
+ * English), "other" for any it leaves out. Persian needs none: a noun after
+ * a number stays singular («۲ پیام»), so its strings stay plain.
+ */
+export type Plural = Partial<Record<Intl.LDMLPluralRule, string>> & { other: string };
+
+/** A string as written in en.ts and fa.ts. */
+export type Text = string | Plural;
+
+const strings: Record<Language, Record<Key, Text>> = { en, fa };
 
 export const DIRECTION: Record<Language, 'ltr' | 'rtl'> = { en: 'ltr', fa: 'rtl' };
 
@@ -26,11 +38,22 @@ export function pickLanguage(...candidates: (string | null | undefined)[]): Lang
   return 'en';
 }
 
-/** Translates a key, filling {placeholders}. */
+/** Translates a key, filling {placeholders}; a counted string takes the form its {count} needs. */
 export function t(language: Language, key: Key, values: Record<string, string | number> = {}): string {
-  return strings[language][key].replace(/\{(\w+)\}/g, (match, name: string) =>
+  return form(language, strings[language][key], values.count).replace(/\{(\w+)\}/g, (match, name: string) =>
     name in values ? formatValue(language, values[name]!) : match,
   );
+}
+
+const pluralRules = new Map<Language, Intl.PluralRules>();
+
+/** The form of a string for a count: "1 new message", "2 new messages". Without a count, "other". */
+function form(language: Language, text: Text, count: string | number | undefined): string {
+  if (typeof text === 'string') return text;
+  if (typeof count !== 'number') return text.other;
+  let rules = pluralRules.get(language);
+  if (!rules) pluralRules.set(language, (rules = new Intl.PluralRules(locale(language))));
+  return text[rules.select(count)] ?? text.other;
 }
 
 function formatValue(language: Language, value: string | number): string {

@@ -10,6 +10,7 @@ import { applyInsets, applyTheme } from './platform/theme';
 import { readTicket, SAVE_PREFIX } from './media/save';
 import { SavePage } from './save';
 import { createApp } from './state/app';
+import { loadLanguageSetting } from './state/language';
 import { openDatabase, requestPersistence, StorageError, type Database } from './storage/db';
 import { StorageScreen } from './storage-screen';
 import { databaseName, profileFor } from './storage/profile';
@@ -24,6 +25,7 @@ if (saving !== undefined) history.replaceState(null, '', location.pathname + loc
 // Launch data is read once: a reload can lose the URL fragment.
 const launch = parseLaunch(location.hash, location.search);
 const telegram = connectTelegram(isTelegramLaunch(launch));
+// Telegram's language until the storage, which may hold another choice, is open.
 const language = pickLanguage(launch.userLanguage, navigator.language);
 applyLanguage(language);
 applyTheme(launch.themeParams);
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
     clearTimeout(blocked);
   }
   void requestPersistence();
+  const setting = await loadLanguageSetting(db, [launch.userLanguage, navigator.language]);
 
   let restart = (): void => {};
   const channel = openChannel((event) => {
@@ -95,7 +98,7 @@ async function main(): Promise<void> {
   });
   // The message box's focus ring is for keyboard users only.
   trackKeyboard();
-  render(<App app={app} language={language} />, root);
+  render(<App app={app} setting={setting} />, root);
   await app.start();
 }
 

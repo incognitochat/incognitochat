@@ -5,6 +5,7 @@ import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
 import { menuKeyDown, moveInMenu } from './a11y/keys';
 import { clockTime, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
+import { LANGUAGE_CHOICES, type LanguageSetting } from './state/language';
 import type { MessageView } from './messaging/store';
 import { canResend } from './messaging/engine';
 import type { KeepMedia, MediaSettings } from './messaging/settings';
@@ -27,6 +28,7 @@ import { editable, MAX_FILE_BYTES, mediaName, shownAs, type Sticker } from './pr
 import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, type StickerInfo } from './stickers/catalog';
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
+import { switchEdit, type Box } from './state/draft';
 import {
   confirmationMatches,
   messageKey,
@@ -139,10 +141,12 @@ function useBackCloses(open: boolean, close: () => void): void {
   useEffect(() => (open ? register(() => latest.current()) : undefined), [open]);
 }
 
-export function App({ app, language }: { app: AppState; language: Language }) {
+export function App({ app, setting }: { app: AppState; setting: LanguageSetting }) {
+  // A new choice redraws everything in it.
+  const language = setting.language.value;
   return (
     <BackStack.Provider value={app.onBack}>
-      <Screen app={app} language={language} />
+      <Screen app={app} language={language} setting={setting} />
       <DeleteDialog app={app} language={language} />
       {toast.value && (
         <p class="toast" role="status">
@@ -153,7 +157,7 @@ export function App({ app, language }: { app: AppState; language: Language }) {
   );
 }
 
-function Screen({ app, language }: { app: AppState; language: Language }) {
+function Screen({ app, language, setting }: { app: AppState; language: Language; setting: LanguageSetting }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const screen = app.screen.value;
 
@@ -233,7 +237,7 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
     case 'blocked':
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
-      return <Storage app={app} language={language} screen={screen} />;
+      return <Storage app={app} language={language} screen={screen} setting={setting} />;
     case 'usage':
       return <Usage language={language} screen={screen} />;
     case 'home':
@@ -592,12 +596,26 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   // One of ours being edited in the message bar; back cancels it, as in Telegram.
   const editing = useSignal<MessageView | null>(null);
   useBackCloses(!!editing.value, () => (editing.value = null));
+  // The message being answered when an edit started: put aside while it
+  // lasts, and back, with the draft (Composer), once it ends.
+  const replyKept = useRef<MessageView | null>(null);
+  useEffect(() => {
+    if (editing.value) {
+      replyKept.current ??= replying.value;
+      replying.value = null;
+    } else if (replyKept.current) {
+      // Unless another was chosen meanwhile.
+      if (!replying.value) replying.value = replyKept.current;
+      replyKept.current = null;
+    }
+  }, [editing.value?.id]);
   const menu = useSignal<MessageView | null>(null);
   useBackCloses(!!menu.value, () => (menu.value = null));
   const highlight = useSignal<string | null>(null);
   const byId = new Map([...screen.quoted, ...screen.messages].map((m) => [m.id, m]));
   useEffect(() => {
     replying.value = null;
+    replyKept.current = null;
     menu.value = null;
   }, [screen.id]);
   // A quote's message older than those shown: loaded, then jumped to.
@@ -675,7 +693,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             language={language}
             time={time}
             highlighted={highlight.value === m.id}
-            canReply={!screen.blocked && !screen.ended && !screen.readOnly}
+            canReply={canReply(screen, m)}
             canReact={canReact(screen, m)}
             onReact={(e) => void app.react(m.id, e)}
             onDoubleTap={() => {
@@ -730,22 +748,21 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
         <MessageMenu
           message={menu.value}
           language={language}
-          canReply={!screen.blocked && !screen.ended && !screen.readOnly}
+          canReply={canReply(screen, menu.value)}
           canReact={canReact(screen, menu.value)}
           peer={screen.label}
           canDeleteForBoth={canReact(screen, menu.value) && menu.value.out}
           canEdit={canEdit(screen, menu.value, app.messageNow())}
-          canRetry={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value)}
-          onRetry={(m) => void app.resendMedia(m.id)}
-          onEdit={(m) => {
-            replying.value = null;
-            editing.value = m;
-          }}
+          canResend={!screen.blocked && !screen.ended && !screen.readOnly && canResend(menu.value, app.messageNow())}
+          onResend={(m) => void app.resend(m.id)}
+          // The reply being written, if any, is put aside (replyKept).
+          onEdit={(m) => (editing.value = m)}
           onClose={() => (menu.value = null)}
           onReact={(m, e) => void app.react(m.id, e)}
           onReply={(m) => (replying.value = m)}
           onDelete={(m, both) => {
             if (replying.value?.id === m.id) replying.value = null;
+            if (replyKept.current?.id === m.id) replyKept.current = null;
             void (both ? app.deleteForEveryone(m.id) : app.deleteMessage(m.id));
           }}
         />
@@ -1031,7 +1048,7 @@ function UsageRow({
 }
 
 /** Data and storage: what stays on this device, and what's fetched by itself. */
-function Storage({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }> }) {
+function Storage({ app, language, screen, setting }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }>; setting: LanguageSetting }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const { settings, usage, busy, cleared } = screen;
   const size = (bytes: number) => formatSize(language, bytes);
@@ -1069,6 +1086,16 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
           <label class="option" key={kind}>
             <input type="checkbox" checked={settings.auto[kind]} onChange={(e) => void app.setAutoDownload(kind, e.currentTarget.checked)} />
             {tr(AUTO_TEXT[kind])}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset class="settings">
+        <legend>{tr('languageTitle')}</legend>
+        {LANGUAGE_CHOICES.map((choice) => (
+          <label class="option" key={choice}>
+            <input type="radio" name="language" checked={setting.choice.value === choice} onChange={() => void setting.choose(choice)} />
+            {/* Each language named in itself. */}
+            {choice === 'telegram' ? tr('languageTelegram') : <bdi lang={choice}>{t(choice, 'languageName')}</bdi>}
           </label>
         ))}
       </fieldset>
@@ -1412,14 +1439,23 @@ function Composer({
   useEffect(() => {
     if (reply) input.current?.focus();
   }, [reply?.text]);
-  // Editing: the box starts from the message's text, with the cursor at its end.
+  // What was typed before an edit, put aside while it lasts.
+  const kept = useRef<Box | null>(null);
+  // Editing: the box starts from the message's text, with the cursor at its
+  // end. Once the edit ends, saved or cancelled, what was typed before comes
+  // back, with its cursor, as in Telegram.
   useEffect(() => {
-    text.value = editing?.text ?? '';
-    caret.current = { start: text.value.length, end: text.value.length };
-    if (editing) requestAnimationFrame(() => {
+    const next = switchEdit({ text: text.value, caret: caret.current }, kept.current, editing?.text ?? null);
+    kept.current = next.kept;
+    text.value = next.box.text;
+    caret.current = next.box.caret;
+    const { start, end } = next.box.caret;
+    requestAnimationFrame(() => {
       const box = input.current;
-      box?.focus();
-      box?.setSelectionRange(box.value.length, box.value.length);
+      if (!box) return;
+      if (editing) box.focus();
+      // Not focused otherwise: that would bring the keyboard up.
+      if (document.activeElement === box) box.setSelectionRange(start, end);
     });
   }, [editing?.id]);
   const send = async (e: MouseEvent) => {
@@ -1457,7 +1493,18 @@ function Composer({
       {editing && (
         <div class="reply-bar">
           <Quote name={t(language, 'editingMessage')} text={editing.preview} />
-          <button type="button" class="reply-cancel" aria-label={t(language, 'cancelEdit')} onClick={onCancelEdit}>
+          <button
+            type="button"
+            class="reply-cancel"
+            aria-label={t(language, 'cancelEdit')}
+            // Keeps the focus (and the keyboard) in the message box, where the draft comes back.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              // From the keyboard, back to the box: the button goes.
+              if (document.activeElement === e.currentTarget) input.current?.focus();
+              onCancelEdit?.();
+            }}
+          >
             ×
           </button>
         </div>
@@ -3039,13 +3086,21 @@ function canReact(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageV
 }
 
 /**
+ * Whether one can answer a message: in an open conversation, and not one of
+ * ours still on its way or not sent (the answer could arrive before it).
+ */
+function canReply(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView): boolean {
+  return canReact(screen, m);
+}
+
+/**
  * Whether one of ours can be edited: sent, in an open conversation, with
  * text or a caption to edit (not a sticker, voice or video message), and
- * not more than a day ago, as the engine counts it (now: the clock messages
- * are dated by).
+ * not more than a day after it was first tried, as the engine counts it
+ * (now: the clock messages are dated by).
  */
 function canEdit(screen: Extract<Screen, { kind: 'conversation' }>, m: MessageView, now: number): boolean {
-  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.at, now)) return false;
+  if (!canReact(screen, m) || !m.out || m.sticker || !editable(m.firstAt ?? m.at, now)) return false;
   return m.text !== '' || (!!m.media && !['voice', 'round'].includes(shownAs(m.media)));
 }
 
@@ -3090,8 +3145,8 @@ function MessageMenu({
   peer,
   canDeleteForBoth,
   canEdit,
-  canRetry,
-  onRetry,
+  canResend,
+  onResend,
   onEdit,
   onClose,
   onReact,
@@ -3107,9 +3162,9 @@ function MessageMenu({
   /** One of ours, sent, in an open conversation: it can be deleted on their side too. */
   canDeleteForBoth: boolean;
   canEdit: boolean;
-  /** One of our attachments that wasn't sent (never uploaded): it can be sent again. */
-  canRetry: boolean;
-  onRetry: (m: MessageView) => void;
+  /** One of ours that wasn't sent: it can be sent again. */
+  canResend: boolean;
+  onResend: (m: MessageView) => void;
   onEdit: (m: MessageView) => void;
   onClose: () => void;
   onReact: (m: MessageView, emoji: string) => void;
@@ -3184,9 +3239,9 @@ function MessageMenu({
               </div>
             )}
             <div class="menu-items" role="menu" aria-label={tr('messageActions')}>
-              {canRetry && (
-                <button type="button" role="menuitem" class="menu-item" onClick={act(() => onRetry(message))}>
-                  {tr('tryAgain')}
+              {canResend && (
+                <button type="button" role="menuitem" class="menu-item" onClick={act(() => onResend(message))}>
+                  {tr('resend')}
                 </button>
               )}
               {canReply && (

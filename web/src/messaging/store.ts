@@ -32,7 +32,7 @@ import {
   type PendingEdit,
   unanswered,
 } from '../storage/db';
-import { withLock } from '../sync/locks';
+import { withLock, withLockIfFree } from '../sync/locks';
 
 const STORAGE_KEY = 'storage-key';
 const IV = 12;
@@ -57,10 +57,33 @@ export interface MessageBody {
   reactions?: { mine?: ReactionMark; theirs?: ReactionMark };
   /** When the text was last edited (the sender's clock), if it was. */
   edited?: number;
+  /**
+   * Ours, uploaded: when the upload was made (the clock messages are dated
+   * by). Kept with an upload that may serve it, so sent again it goes with
+   * that upload while it's fresh (engine.ts, resend); one without this (kept
+   * by an older version, which deleted some) is uploaded anew.
+   */
+  uploadedAt?: number;
+  /** Ours, sent again: when it was first tried (its first `at`), which sending it again and editing it count from. */
+  firstAt?: number;
 }
 
 /** A message with its text, for showing. */
 export interface MessageView extends Omit<MessageRecord, 'sealed'>, MessageBody {}
+
+/** What of a message is kept sealed (MessageBody), as it's stored now. */
+function bodyOf(m: MessageView): MessageBody {
+  return {
+    text: m.text,
+    ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+    ...(m.media ? { media: m.media } : {}),
+    ...(m.uploadedAt !== undefined ? { uploadedAt: m.uploadedAt } : {}),
+    ...(m.firstAt !== undefined ? { firstAt: m.firstAt } : {}),
+    ...(m.sticker ? { sticker: m.sticker } : {}),
+    ...(m.reactions ? { reactions: m.reactions } : {}),
+    ...(m.edited ? { edited: m.edited } : {}),
+  };
+}
 
 async function storageKey(db: Database): Promise<CryptoKey> {
   return withLock(STORAGE_KEY, async () => {
@@ -416,7 +439,8 @@ export async function stillSending(db: Database, conv: string, id: string): Prom
 /**
  * Changes one of our messages that's going out, only if it's still here
  * with status `from`: its status, its time (then it goes after any with the
- * same time), or its attachment (with the upload's fields, once uploaded).
+ * same time), when it was first tried, or its attachment (with the upload's
+ * fields and time, once uploaded; without them, it names no upload).
  * Returns whether it did. A message deleted meanwhile isn't brought back,
  * and one another copy of the app sent or marked meanwhile is left as it is.
  */
@@ -425,22 +449,21 @@ export async function patchMessage(
   conv: string,
   id: string,
   from: MessageRecord['status'],
-  patch: { status?: MessageRecord['status']; at?: number; media?: LocalMedia },
+  patch: { status?: MessageRecord['status']; at?: number; firstAt?: number; media?: LocalMedia; uploadedAt?: number },
 ): Promise<boolean> {
   // The lock reactions and edits take, so the body isn't written back stale.
   return withLock(`message:${conv}:${id}`, async () => {
     let sealed: Uint8Array<ArrayBuffer> | undefined;
-    if (patch.media) {
+    if (patch.media || patch.firstAt !== undefined) {
       const message = await getMessage(db, conv, id);
       if (!message || message.status !== from) return false;
-      const body: MessageBody = {
-        text: message.text,
-        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
-        media: patch.media,
-        ...(message.sticker ? { sticker: message.sticker } : {}),
-        ...(message.reactions ? { reactions: message.reactions } : {}),
-        ...(message.edited ? { edited: message.edited } : {}),
-      };
+      const body = bodyOf(message);
+      if (patch.firstAt !== undefined) body.firstAt = patch.firstAt;
+      if (patch.media) {
+        body.media = patch.media;
+        if (patch.uploadedAt !== undefined) body.uploadedAt = patch.uploadedAt;
+        else delete body.uploadedAt;
+      }
       sealed = await sealBody(db, id, body);
     }
     return updateMessage(db, conv, id, (record) =>
@@ -454,6 +477,56 @@ export async function patchMessage(
         : null,
     );
   });
+}
+
+/**
+ * The lock one of our messages is sent under, by whichever copy of the app
+ * sends it: taken before it's stored as sending (or, sent again, before it
+ * shows as sending again), and held until it's sent or failed. One that
+ * shows as sending with this lock free was left by a copy that closed
+ * halfway (failStuck).
+ */
+export function sendingLock(conv: string, id: string): string {
+  return `sending:${conv}:${id}`;
+}
+
+/**
+ * How long one of ours may show as sending, with no copy of the app sending
+ * it, before an open chat shows it as not sent (failStuck): more than most
+ * sends take. A copy that holds no such lock (one of an older version, or
+ * one on an engine without Web Locks, sync/locks.ts, where locks are seen
+ * by their own copy only) isn't seen to be sending: its send of a text is
+ * left alone for this long, but a longer one (a big upload) isn't, and at
+ * start there's no wait at all, since one found then was most likely left
+ * by this app, closed mid-send. Such a send then shows as not sent: a text
+ * that went out anyway shows as sent once they show they had it, and an
+ * upload not yet sent stops, and is deleted.
+ */
+export const STUCK_MS = 60_000;
+
+/**
+ * Marks our messages that show as sending, but that no copy of the app is
+ * sending (their sendingLock is free), as failed: the copy that sent them
+ * closed halfway (the app was killed mid-send, say). They show as not sent,
+ * to be sent again or deleted. In one conversation or all; with `before`,
+ * only those dated before it. Only the index is read, but for those it
+ * marks. Returns the conversations it changed.
+ */
+export async function failStuck(db: Database, which: { conv?: string; before?: number } = {}): Promise<string[]> {
+  const convs = which.conv !== undefined ? [which.conv] : await db.getAllKeys('conversations');
+  const tx = db.transaction('messages');
+  const index = tx.store.index('byStatus');
+  // Asked for all at once: one by one, thousands of chats take long.
+  const keys = (await Promise.all(convs.map((conv) => index.getAllKeys(withStatus(conv, 'sending', (which.before ?? Infinity) - 1))))).flat();
+  await tx.done;
+  const changed = new Set<string>();
+  for (const [conv, id] of keys) {
+    const marked = await withLockIfFree(sendingLock(conv, id), () =>
+      updateMessage(db, conv, id, (record) => (record.out && record.status === 'sending' ? { ...record, status: 'failed' } : null)),
+    );
+    if (marked?.value) changed.add(conv);
+  }
+  return [...changed];
 }
 
 /** Sets a message's status; with from, only if it has that status now. */
@@ -610,14 +683,7 @@ export async function setReaction(db: Database, conv: string, id: string, side: 
     if (!message) return false;
     const current = message.reactions?.[side];
     if (current && (current.at > at || (current.at === at && current.e === e))) return false;
-    const body: MessageBody = {
-      text: message.text,
-      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
-      ...(message.media ? { media: message.media } : {}),
-      ...(message.sticker ? { sticker: message.sticker } : {}),
-      ...(message.edited ? { edited: message.edited } : {}),
-      reactions: { ...message.reactions, [side]: { e, at } },
-    };
+    const body: MessageBody = { ...bodyOf(message), reactions: { ...message.reactions, [side]: { e, at } } };
     const sealed = await sealBody(db, id, body);
     const tx = db.transaction('messages', 'readwrite');
     const record = await tx.store.get([conv, id]);
@@ -637,14 +703,7 @@ export async function setText(db: Database, conv: string, id: string, text: stri
   return withLock(`message:${conv}:${id}`, async () => {
     const message = await getMessage(db, conv, id);
     if (!message || (message.edited ?? 0) > at || (message.edited === at && message.text === text)) return false;
-    const body: MessageBody = {
-      text,
-      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
-      ...(message.media ? { media: message.media } : {}),
-      ...(message.sticker ? { sticker: message.sticker } : {}),
-      ...(message.reactions ? { reactions: message.reactions } : {}),
-      edited: at,
-    };
+    const body: MessageBody = { ...bodyOf(message), text, edited: at };
     const sealed = await sealBody(db, id, body);
     const tx = db.transaction('messages', 'readwrite');
     const record = await tx.store.get([conv, id]);
@@ -674,11 +733,12 @@ export async function openPendingReaction(db: Database, tag: string, sealed: Uin
 
 /**
  * Notes that the other side had these messages of ours by `at` (their
- * clock): a receipt, a reaction or a reply named them, or `last` did. Those
- * in `read` they have read, so a sent one shows as seen (and stays so: a
- * receipt only ever marks). Their messages, and IDs not here, change
- * nothing. Returns how many now show as seen, and whether any named is one
- * of ours that's here.
+ * clock): a receipt, a reaction or a reply named them, or `last` did. One
+ * that showed as not sent did go out (its answer was lost, say): it shows as
+ * sent. Those in `read` they have read, so a sent one shows as seen (and
+ * stays so: a receipt only ever marks). Their messages, and IDs not here,
+ * change nothing. Returns how many now show as seen, and whether any named
+ * is one of ours that's here.
  */
 export async function noteHad(db: Database, conv: string, ids: string[], at: number, read: ReadonlySet<string>): Promise<{ seen: number; here: boolean }> {
   if (ids.length === 0) return { seen: 0, here: false };
@@ -691,7 +751,8 @@ export async function noteHad(db: Database, conv: string, ids: string[], at: num
     here = true;
     let next = record;
     if (record.had === undefined || at < record.had) next = { ...next, had: at };
-    if (read.has(id) && (record.status === 'sent' || record.status === 'sending')) {
+    if (record.status === 'failed') next = { ...next, status: 'sent' };
+    if (read.has(id) && (record.status === 'sent' || record.status === 'sending' || record.status === 'failed')) {
       next = { ...next, status: 'seen' };
       seen++;
     }

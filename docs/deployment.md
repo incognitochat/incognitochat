@@ -685,9 +685,9 @@ counted. `POST /media/{id}/upload` still checks the bucket first, so an
 upload that was written (only its answer lost) is still done, and refuses
 only the fresh URL, which counts as one of the upload's three. The one loss:
 a pause that lands between paying for an upload and a PUT that fails costs
-those tokens, since the app's Try again pays again. Messages, reactions and
+those tokens, since the app's Send again pays again. Messages, reactions and
 everything else keep working. The app says "Attachments are paused for now; try again later",
-keeps an unsent attachment as Not sent with Try again in its menu, and stops
+keeps an unsent attachment as Not sent with Send again in its menu, and stops
 fetching attachments by itself for two minutes at a time.
 
 They are one item in the directory table, pk `S#switches`, sk `S`, with BOOL
@@ -752,7 +752,7 @@ the deploy role is denied writing table items, so deploys never reset it.
 5. Undo the same way, with `false` (or Resume in the app), once the cause is
    dealt with or the alarm has stayed quiet. Apps fetch by themselves again
    the next time a chat opens, at most two minutes after their last refused
-   try; an unsent attachment goes with Try again.
+   try; an unsent attachment goes with Send again.
 
 The switches aren't flipped automatically by the alarms.
 
@@ -1239,7 +1239,7 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   seconds after a short burst). Links don't open (the app says to try
   later); attachments don't download (fetching by itself pauses); an upload
   whose first PUT failed can't get a fresh URL, so it shows as not sent and
-  Try again pays for it again.
+  Send again pays for it again.
   Logins, sends and everything with a session go on.
 - **`deletes-total`**: everyone's batches of uploads to delete
   (`POST /media/delete`, up to 50 uploads each), over one minute. A batch

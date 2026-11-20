@@ -30,7 +30,9 @@ if [ "$declared" != "$passed" ]; then
 fi
 for name in $declared; do
   want="TF_VAR_${name}: \${{ vars.${name^^} || '1' }}"
-  if ! sed -E 's/^ +//' "$workflow" | grep -qxF "$want"; then
+  # Not a pipe into grep -q: it exits at the first match, sed then dies of
+  # SIGPIPE, and under pipefail the pipe fails though the line is there.
+  if ! grep -qxF "$want" < <(sed -E 's/^ +//' "$workflow"); then
     echo "::error::$workflow must pass $name as: $want"
     status=1
   fi

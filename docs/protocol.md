@@ -890,6 +890,29 @@ each mailbox's owner, to deliver, but not who writes to it.
   link's cap on first messages (60 an hour, which everyone writing to it
   shares) `429 link_busy`, with `Retry-After` until the hour (UTC) ends,
   which the app tells the user as a time.
+- **Not sent, and sent again.** The app stores a message of ours as
+  sending before it sends it, under a lock of the message's own that the
+  copy of the app sending it holds until it's sent or failed. One still
+  sending with that lock free was left by a copy that closed mid-send: it
+  shows as not sent, at start, and in an open chat once it has been sending
+  for a minute. (A copy of an older version, or one on an engine without
+  Web Locks, holds no lock another copy can see: a send of its that takes
+  longer than that, or is under way when another copy starts, shows as not
+  sent there too.) Send again, in a not-sent message's menu, sends the same
+  message with the same ID, sealed anew, dated now (it moves to the end of
+  the chat) and paid with fresh tokens, like any send. If the first did
+  arrive, the other side drops the second, as one it has taken in or
+  deleted; their server still sends them a notice for it, as for any
+  message. They remember those IDs for 31 days after the first one's time
+  (Replays and order), so Send again is offered only for 30 days after a
+  message was first tried; after that it can only be deleted. Editing it
+  counts from its first try too (a day), so an edit never shows on one side
+  only. An attachment goes with the upload kept for it (Media, Failed after
+  the upload) if that's less than 29 days old (uploads last 30); any other
+  is uploaded anew from the file on this device: one never uploaded, one
+  whose upload is older, or one whose upload this version didn't keep (an
+  older one deleted some it kept the ID of). One the other side shows it
+  had (a receipt, a reply or a reaction naming it) shows as sent.
 - `GET /inbox` returns a page of a device's undelivered envelopes in no
   meaningful order, each with the mailbox it came through
   (`{id, mailbox, envelope}`): the app takes an envelope in only through the
@@ -1082,8 +1105,13 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
 - **Failed after the upload.** If its message surely didn't go out (it
   failed before it could, or the server refused it with a `4xx`, or there
   were no tokens or no mailbox to send it with), the upload is deleted the
-  same way. After any other failure (no answer, a `5xx`) the message may
-  have arrived, and the upload stays for the other side to fetch.
+  same way, and the message no longer names it: sent again, it's uploaded
+  anew. After any other failure (no answer, a `5xx`, the app closed
+  mid-send) the message may have arrived, and the upload stays for the
+  other side to fetch, kept with the message with the time it was made:
+  sent again within 29 days of that, the message goes with it (later, it's
+  uploaded anew, and the first stays to expire), and deleted on this device
+  instead, it stays too.
 - The message carries the attachment in `media`, inside the encrypted
   envelope: kind `t` (`photo`, `video`, `gif`, `voice`, `audio` (music),
   `round` (a video message) or `file`), upload ID `id` (16 bytes),
@@ -1261,8 +1289,8 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   the download. A change reaches every server within about 30 seconds, and
   a server that hasn't yet read the switches counts both as paused. The
   app doesn't try again by itself: it puts the tokens back in its wallet and
-  marks the message not sent, saying why; Try again in its menu sends it,
-  as a new attachment, if it was never uploaded. A paused download stays to
+  marks the message not sent, saying why; Send again in its menu sends it,
+  uploading it then if it was never uploaded. A paused download stays to
   fetch: the app fetches nothing by itself for two minutes, then tries again
   when the chat next opens or a message arrives, and a tap says it's paused.
 

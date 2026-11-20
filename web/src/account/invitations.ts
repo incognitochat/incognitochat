@@ -80,10 +80,13 @@ export function checkRedeemed(value: unknown): number {
 /**
  * Accepts what people paste (any case, spaces, a missing dash, the start
  * parameter or the whole invitation link) and returns "abcd-efgh", or null.
- * Matches the backend's invitations.Normalize.
+ * Matches the backend's invitations.Normalize, and also takes the numbers
+ * typed on a Persian or Arabic keyboard (۲ or ٢ for 2): the app sends the
+ * code it returns, so the backend only ever sees ASCII.
  */
 export function normalizeCode(input: string): string | null {
-  let s = input.trim();
+  // Both runs of numerals start at a code point ending in 0.
+  let s = input.trim().replace(/[\u06F0-\u06F9\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) & 0xf));
   try {
     const url = new URL(s);
     s = url.searchParams.get('startapp') ?? '';

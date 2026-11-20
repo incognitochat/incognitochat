@@ -10,9 +10,12 @@ describe('invitation codes', () => {
       abcdefgh: 'abcd-efgh',
       invabcdefgh: 'abcd-efgh',
       'https://t.me/some_bot/app?startapp=invabcdefgh': 'abcd-efgh',
+      // Typed on a Persian or an Arabic keyboard's number row.
+      'abcd-۲۳۴۵': 'abcd-2345',
+      'abcd-٦٧٨٩': 'abcd-6789',
     };
     for (const [input, want] of Object.entries(valid)) expect(normalizeCode(input)).toBe(want);
-    for (const input of ['', 'abc-def', 'abcd-efgh-jk', 'abcd-efg0', 'abcd-efgl', 'hello there', 'https://t.me/some_bot/app?startapp=1abc']) {
+    for (const input of ['', 'abc-def', 'abcd-efgh-jk', 'abcd-efg0', 'abcd-efgl', 'abcd-efg۰', 'abcd-efg١', 'hello there', 'https://t.me/some_bot/app?startapp=1abc']) {
       expect(normalizeCode(input)).toBeNull();
     }
   });
