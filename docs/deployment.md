@@ -1162,7 +1162,7 @@ looks at, blocked ones included: $10 a month plus requests.
 | `rate-per-ip` | every request, per IP address | 2,000 in 5 minutes | `FIREWALL_RATE_LIMIT` |
 | `anonymous-per-ip` | requests to the routes that need no login, per IP address | 500 in 5 minutes | `FIREWALL_ANONYMOUS_RATE_LIMIT` |
 | `lookups-total` | lookups of links and uploads by ID, everyone together | 12,000 in 1 minute (30 times the read cap) | `FIREWALL_LOOKUPS_TOTAL_LIMIT` |
-| `deletes-total` | batches of uploads to delete, everyone together | 120 in 1 minute (0.3 times the read cap) | none: it follows the read cap |
+| `deletes-total` | batches of uploads to delete, everyone together | 120 in 1 minute (0.6 times the lower of the read and write caps) | none: it follows the caps |
 
 The routes that need no login, which `anonymous-per-ip` counts, are
 `POST /session`, `POST /register`, `POST /accounts/lookup`, `POST /send`,
@@ -1195,7 +1195,7 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   receipt is one, and the server takes at most 30 a minute for one mailbox.
   Someone chatting fast sends about 25 a minute, so at most about 150 to 200
   in 5 minutes all told; most people send under 30. Deleting a chat sends
-  one batch for every 100 attachments, two seconds apart: a chat with
+  one batch for every 50 attachments, two seconds apart: a chat with
   thousands adds at most about 130 in 5 minutes while it goes. 500 leaves
   room for two or three people that busy, or fifteen or so ordinary ones,
   behind one address. Past it, only these routes are blocked for that
@@ -1229,9 +1229,10 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   `rate-per-ip`, 400 a minute). But AWS WAF checks rates only about every 10
   seconds and usually takes up to 30 to act, and until an address is
   blocked, everything it sends counts here, so a burst from a single host
-  can set it off alone. The app's own deletes no longer count here: it
-  deletes in batches (`deletes-total`), and sends single deletes only to a
-  server without them.
+  can set it off alone. Current apps' deletes no longer count here: they
+  delete in batches (`deletes-total`), and send single deletes only to a
+  server without them. Older apps' single deletes still count, and still
+  wait for the app's next start or upkeep while it blocks.
 
   While it blocks, only lookups by ID are refused, for everyone, until the
   rate falls: usually a minute or two after the flood stops (60 to 90
@@ -1241,20 +1242,33 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   Try again pays for it again.
   Logins, sends and everything with a session go on.
 - **`deletes-total`**: everyone's batches of uploads to delete
-  (`POST /media/delete`, up to 100 uploads each), over one minute. A batch
-  reads half a unit for each upload it names, found or not, so up to 50
-  units: at 0.3 times the read cap a minute (120 in production, 2 a
-  second) a flood of them uses at most a quarter of the ephemeral table's
-  reads. They write only for uploads paid for with media tokens, one unit
-  each. Separate from `lookups-total`, which counts each request once
-  whatever it reads, so that a flood of batches can't use up the reads, and
-  people deleting big chats can't stop links opening or attachments
-  downloading for everyone. The app sends one batch at a time, two seconds
-  apart: about 26 a minute while it deletes a chat with thousands of
-  attachments (one for a chat with fewer than 100), so four or five such
-  chats can be deleted at once. Like `lookups-total`, a burst from a single
-  host can set it off, and held up for minutes it takes two addresses
+  (`POST /media/delete`, up to 50 uploads each), over one minute. A batch
+  reads half a unit for each distinct, well-formed upload it names, found
+  or not, so up to 25 units, and writes one unit for each it deletes (of
+  uploads paid for with media tokens), so up to 50, on the ephemeral table,
+  where sends and logins write too. At 0.6 times the lower of the read and
+  write caps a minute (120 in production, 2 a second) batches use at most
+  half of the table's writes and a quarter of its reads (an eighth with the
+  default caps), and everything else keeps the rest. Separate from
+  `lookups-total`, which counts each request once whatever it reads, so that
+  a flood of batches can't use up the reads, and people deleting big chats
+  can't stop links opening or attachments downloading for everyone. The app
+  sends one batch at a time, two seconds apart: about 26 a minute while it
+  deletes a chat with thousands of attachments (one for a chat with fewer
+  than 50), so four or so such chats can be deleted at once in production
+  (two elsewhere). Like `lookups-total`, a burst from a single host can set
+  it off, and held up for minutes it takes two addresses in production
   (each limited by `anonymous-per-ip` to 500 in 5 minutes).
+
+  These bounds hold once the firewall acts. A batch of random IDs costs
+  what 50 lookups do, so until it acts (10 to 40 seconds, as above) one
+  host sending some 16 batches a second can use all of production's
+  ephemeral reads (8 a second elsewhere), and push hints, downloads and
+  fresh upload URLs fail meanwhile (messages still arrive by polling).
+  Without the firewall nothing bounds it at all, as nothing bounds the
+  other routes but the tables' caps. Batches are kept at 50 for this
+  reason; IDs the server could check without reading, or upload records in
+  a table of their own, would remove it.
 
   While it blocks, only batches of deletes are refused, for everyone: the
   uploads wait on each device for the app's next start or upkeep (or expire
@@ -1294,8 +1308,8 @@ metrics are free; no alarm watches them yet.
   limit follows).
 - `deletes-total` blocking now and then is many people deleting big chats
   at once; deletes wait and nothing else is refused. Blocking often, with
-  the ephemeral table's reads far below its cap, is growth: raise the read
-  cap (the limit follows).
+  the ephemeral table's reads and writes far below their caps, is growth:
+  raise both caps (the limit follows the lower).
 - `rate-per-ip` as before.
 
 ### Blocking addresses

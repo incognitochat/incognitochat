@@ -43,6 +43,13 @@ const (
 	batchTries = 4
 )
 
+// leftUndone is the error once every try left part of a batch undone: the
+// table is throttled, and it is answered as throttling is
+// (awsconf.Unavailable: 503, try again shortly).
+func leftUndone(what string) error {
+	return &types.ProvisionedThroughputExceededException{Message: aws.String("ephemeral: batch " + what + " left uploads undone")}
+}
+
 // Upload is a recorded upload. Get also fills in when it expires and how
 // many fresh upload URLs it was given; Put takes those as they are (expires,
 // and none).
@@ -138,7 +145,7 @@ func (u *Uploads) LookupAll(ctx context.Context, ids []string) (map[string]Uploa
 	request := map[string]types.KeysAndAttributes{u.Table: {Keys: keys, ConsistentRead: aws.Bool(false)}}
 	for try := 0; len(request) > 0; try++ {
 		if try == batchTries {
-			return nil, errors.New("ephemeral: batch read left uploads unread")
+			return nil, leftUndone("read")
 		}
 		if err := backOff(ctx, try); err != nil {
 			return nil, err
@@ -175,7 +182,7 @@ func (u *Uploads) DeleteAll(ctx context.Context, ids []string) error {
 		pending := map[string][]types.WriteRequest{u.Table: requests}
 		for try := 0; len(pending[u.Table]) > 0; try++ {
 			if try == batchTries {
-				return errors.New("ephemeral: batch delete left uploads undeleted")
+				return leftUndone("delete")
 			}
 			if err := backOff(ctx, try); err != nil {
 				return err

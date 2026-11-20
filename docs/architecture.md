@@ -350,7 +350,7 @@ the server never sees a key, name or type.
   address, which is never sent to a server.
 - The upload is deleted when the recipient deletes the message or the
   conversation, and in any case after 30 days. Deleting is done in the
-  background, so a chat with many attachments disappears at once: up to 100
+  background, so a chat with many attachments disappears at once: up to 50
   uploads a request, one request at a time, two seconds apart, which keeps
   a big chat's deletes to a few dozen requests that don't crowd out anyone
   else's (an older server without that route is asked one upload at a

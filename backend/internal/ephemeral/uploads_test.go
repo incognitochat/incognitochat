@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 )
 
@@ -303,13 +304,14 @@ func TestUploadsBatchesLeftUndone(t *testing.T) {
 		t.Fatalf("after DeleteAll: %v, %v", found, err)
 	}
 
-	// Never all of it: an error, after a few tries.
+	// Never all of it: an error after a few tries, which the api answers as
+	// throttling (503, try again shortly).
 	db.rounds, db.batches = -1, 0
-	if _, err := u.LookupAll(ctx, ids); err == nil || db.batches != batchTries {
+	if _, err := u.LookupAll(ctx, ids); !awsconf.Unavailable(err) || db.batches != batchTries {
 		t.Fatalf("LookupAll = %v, after %d batches", err, db.batches)
 	}
 	db.batches = 0
-	if err := u.DeleteAll(ctx, ids); err == nil || db.batches != batchTries {
+	if err := u.DeleteAll(ctx, ids); !awsconf.Unavailable(err) || db.batches != batchTries {
 		t.Fatalf("DeleteAll = %v, after %d batches", err, db.batches)
 	}
 }

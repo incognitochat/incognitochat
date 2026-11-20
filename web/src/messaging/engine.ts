@@ -126,12 +126,13 @@ import { httpTransfer, TransferError, WrongSize, type Transfer } from '../net/tr
 
 /** The most reactions to messages not here yet that a conversation keeps. */
 const MAX_PENDING_REACTIONS = 100;
-/** How many uploads one request deletes from the server (POST /media/delete takes at most 100). */
-const UPLOAD_DELETE_BATCH = 100;
+/** How many uploads one request deletes from the server (POST /media/delete takes at most 50). */
+const UPLOAD_DELETE_BATCH = 50;
 /**
- * The pause between two such requests, one at a time: a chat with thousands
- * of attachments goes at about 40 uploads a second, as an account's
- * deletion steps do, leaving the database's capacity to everyone else.
+ * The pause before each such request after the first, one at a time: a chat
+ * with thousands of attachments goes at about 20 uploads a second (some 26
+ * requests a minute), a fraction of the database's capacity and of the
+ * firewall's limit on everyone's batches together (deletes-total).
  */
 const UPLOAD_DELETE_PAUSE_MS = 2_000;
 /** How many uploads are deleted at once, one per request, from an older server without POST /media/delete. */
@@ -852,11 +853,12 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Works through the uploads waiting to be deleted, up to
    * UPLOAD_DELETE_BATCH with each request (POST /media/delete), one request
-   * at a time, pausing UPLOAD_DELETE_PAUSE_MS between them. One already gone
-   * counts as done; with the server unreachable, busy or failing (or the
-   * bucket failing to delete some), the rest wait for the next try (each
-   * start, and upkeep). A server without that route (older than this app)
-   * is asked one upload at a time, several at once, as before it.
+   * at a time, pausing UPLOAD_DELETE_PAUSE_MS before each after the first.
+   * One already gone counts as done; with the server unreachable, busy or
+   * failing (or the bucket failing to delete some), the rest wait for the
+   * next try (each start, and upkeep). A server without that route (older
+   * than this app: it answers 405) is asked one upload at a time, several at
+   * once, as before it. Once stopped (stop()), no more requests start.
    */
   function flushUploadDeletes(): Promise<void> {
     if (flushing) {
@@ -867,8 +869,10 @@ export function createMessaging(deps: MessagingDeps) {
       // Our own uploads, just made, that the server said it didn't know:
       // asked again later, not in this run.
       const deferred = new Set<string>();
-      // Whether the server has POST /media/delete, until it says otherwise.
-      const server = { batches: true };
+      // What this flush learned of the server: whether it has POST
+      // /media/delete, how many a request it takes, and whether a request
+      // went already (the next waits first).
+      const server: BatchServer = { batches: true, size: UPLOAD_DELETE_BATCH, sent: false };
       try {
         let reached: boolean;
         do {
@@ -894,25 +898,45 @@ export function createMessaging(deps: MessagingDeps) {
     stop: boolean;
   }
 
+  /** What one flush has learned of the server's POST /media/delete (flushUploadDeletes). */
+  interface BatchServer {
+    /** Whether it has the route: false once it answered 405. */
+    batches: boolean;
+    /** How many uploads to send in a request: halved after a 400. */
+    size: number;
+    /** Whether a request went already: the next waits UPLOAD_DELETE_PAUSE_MS first. */
+    sent: boolean;
+  }
+
   /**
    * One run of flushUploadDeletes, holding its lock; returns false if it
    * stopped because the server couldn't be reached, was busy or failed, or
-   * the app stopped (stop()) between two requests.
+   * the app stopped (stop()).
    */
-  async function flushOnce(deferred: Set<string>, server: { batches: boolean }): Promise<boolean> {
-    let sent = false;
+  async function flushOnce(deferred: Set<string>, server: BatchServer): Promise<boolean> {
+    const pending = async () => (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
     for (;;) {
-      const items = (await pendingUploadDeletes(db)).filter((u) => !deferred.has(u.id));
+      if (stopped) return false;
+      let items = await pending();
       if (items.length === 0) return true;
       let tried: DeleteTry | null = null;
       if (server.batches) {
-        if (sent) {
+        // After the pause, the list as it is then.
+        if (server.sent) {
           await wait(UPLOAD_DELETE_PAUSE_MS);
           if (stopped) return false;
+          items = await pending();
+          if (items.length === 0) return true;
         }
-        sent = true;
-        tried = await deleteBatch(items.slice(0, UPLOAD_DELETE_BATCH));
-        server.batches = tried !== null;
+        server.sent = true;
+        const batch = items.slice(0, server.size);
+        const answer = await deleteBatch(batch);
+        if (answer === 'too-many') {
+          server.size = Math.max(1, Math.floor(batch.length / 2));
+          continue;
+        }
+        if (answer === 'older') server.batches = false;
+        else tried = answer;
       }
       tried ??= await deleteEach(items);
       await forgetUploadDeletes(db, tried.done);
@@ -925,16 +949,21 @@ export function createMessaging(deps: MessagingDeps) {
   /**
    * Deletes uploads with one request (POST /media/delete), which answers for
    * each: deleted, not_found (gone, as the single route answers it), or
-   * failed (kept, for the next try). Returns null if the server doesn't have
-   * the route: an older one answers 404 or 405 for it.
+   * failed (kept, for the next try). A 404 for the whole request is the
+   * single route's not_found for each: the server has no attachments.
+   * Returns 'older' for a server older than the route (405: GET /media/{id}
+   * has its path), and 'too-many' when the server refuses that many at once
+   * (400; it never has, but a later one might take fewer).
    */
-  async function deleteBatch(batch: UploadDelete[]): Promise<DeleteTry | null> {
+  async function deleteBatch(batch: UploadDelete[]): Promise<DeleteTry | 'older' | 'too-many'> {
     let results: string[];
     try {
       results = await api.post('/media/delete', { items: batch.map((u) => ({ id: u.id, secret: u.d })) }, (v) => checkDeleteResults(v, batch.length));
     } catch (err) {
-      if (err instanceof ApiError && (err.status === 404 || err.status === 405)) return null;
-      return { done: [], again: [], stop: true };
+      if (err instanceof ApiError && err.status === 405) return 'older';
+      if (err instanceof ApiError && err.status === 400 && batch.length > 1) return 'too-many';
+      if (err instanceof ApiError && err.status === 404 && err.code === 'not_found') results = batch.map(() => 'not_found');
+      else return { done: [], again: [], stop: true };
     }
     const tried: DeleteTry = { done: [], again: [], stop: false };
     batch.forEach((item, i) => {
@@ -2510,14 +2539,13 @@ export function createMessaging(deps: MessagingDeps) {
    * deletes messages and files left with nothing to show them (sweep);
    * settles a link change whose answer was lost; fills in what older
    * versions didn't keep (links' intro mailboxes and keys); gives the link
-   * a new key when due.
+   * a new key when due; and, last, deletes uploads still to delete.
    */
   async function maintain(): Promise<void> {
     const steps = [
       forgetExpired,
       forgetEmpty,
       sweep,
-      flushUploadDeletes,
       healMailboxes,
       topUpPool,
       topUp,
@@ -2538,6 +2566,9 @@ export function createMessaging(deps: MessagingDeps) {
       async () => {
         if ((await rotateLinkKey(db, session, Math.floor(now() / 1000))) === 'new-link') deps.onNewLink?.();
       },
+      // Last: a big list takes minutes (its requests are paced), and the
+      // top-ups above shouldn't wait for it.
+      flushUploadDeletes,
     ];
     // Each on its own: one that fails (out of reach, or a daily limit
     // reached) doesn't keep the others from running. The first failure is

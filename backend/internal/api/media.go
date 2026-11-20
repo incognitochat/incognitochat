@@ -276,13 +276,15 @@ func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.
 }
 
 // DeleteBatch is the most uploads one POST /media/delete takes. Looking
-// them up reads half a unit each (eventually consistent, as for one
-// delete), found or not, and each whose secret matches takes one write unit
-// to forget: at most 50 read and 100 write units a request, about two steps
-// of deleting an account (DeleteStep). The app sends one batch at a time
-// and pauses between them, so a chat with thousands of attachments is
-// deleted at about 40 a second, as an account's steps are.
-const DeleteBatch = 100
+// them up reads half a unit for each distinct well-formed one (eventually
+// consistent, as for one delete), found or not, and each whose secret
+// matches takes one write unit to forget: at most 25 read and 50 write
+// units a request, about one step of deleting an account (DeleteStep).
+// Anyone can send random IDs, so a request can cost what 50 lookups do;
+// the batch is kept that small for it. The app sends one batch at a time,
+// two seconds apart, so a chat with thousands of attachments is deleted at
+// about 20 a second (infra/edge.tf, deletes-total, bounds everyone's).
+const DeleteBatch = 50
 
 // What POST /media/delete answers for each upload.
 const (
@@ -310,7 +312,9 @@ type uploadToDelete struct {
 //
 // The bucket's objects go in one request, then the records of those that
 // went, so one the bucket kept can still be deleted by its secret, as with
-// deleteUpload. If the table fails, the whole request does.
+// deleteUpload. If the table fails, the whole request does. A server
+// without attachments (no Media) answers 404 not_found, as deleteUpload
+// does: none of them is there.
 func (s *Server) deleteUploads(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/delete"
 	var in struct {

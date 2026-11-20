@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -73,9 +74,26 @@ func (f *fakeS3) DeleteObjects(_ context.Context, in *s3.DeleteObjectsInput, _ .
 type batchDeletes struct {
 	h       *harness
 	meter   *dynamotest.Meter
+	reads   *readKinds
 	table   string
 	uploads *ephemeral.Uploads
 	s3      *fakeS3
+}
+
+// readKinds records, for each batch read, whether it asked for a strongly
+// consistent read: DynamoDB Local charges nothing for keys it doesn't find
+// in a batch, where DynamoDB charges half a unit each read eventually
+// consistent, and one strongly.
+type readKinds struct {
+	*dynamotest.Meter
+	consistent []bool
+}
+
+func (r *readKinds) BatchGetItem(ctx context.Context, in *dynamodb.BatchGetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	for _, ka := range in.RequestItems {
+		r.consistent = append(r.consistent, aws.ToBool(ka.ConsistentRead))
+	}
+	return r.Meter.BatchGetItem(ctx, in, opts...)
 }
 
 func newBatchDeletes(t *testing.T) *batchDeletes {
@@ -83,7 +101,8 @@ func newBatchDeletes(t *testing.T) *batchDeletes {
 	client := dynamotest.Client(t)
 	b := &batchDeletes{h: newHarness(t), meter: dynamotest.NewMeter(client), table: dynamotest.Table(t, client),
 		s3: &fakeS3{objects: map[string]bool{}, fail: map[string]bool{}}}
-	b.uploads = &ephemeral.Uploads{DB: b.meter, Table: b.table, Now: func() time.Time { return b.h.now }}
+	b.reads = &readKinds{Meter: b.meter}
+	b.uploads = &ephemeral.Uploads{DB: b.reads, Table: b.table, Now: func() time.Time { return b.h.now }}
 	b.h.server.Uploads = b.uploads
 	b.h.server.Media = &media.Bucket{S3: b.s3, Name: "media"}
 	return b
@@ -224,10 +243,13 @@ func TestDeleteUploadsInBatches(t *testing.T) {
 	wantResults(t, b.del(t, item(one.id, one.secret)), "not_found")
 }
 
-// A batch is at most 100 uploads, and costs the table no more than 100
-// single deletes would: half a read unit each, and one write unit for each
-// upload deleted.
+// A batch is at most 50 uploads, and costs the table no more than 50 single
+// deletes would: an eventually consistent read (half a unit each, found or
+// not), and one write unit for each upload deleted.
 func TestDeleteUploadsBatchLimits(t *testing.T) {
+	if DeleteBatch != 50 {
+		t.Fatalf("DeleteBatch is %d: the firewall's deletes-total (infra/edge.tf) and the docs are sized for 50", DeleteBatch)
+	}
 	b := newBatchDeletes(t)
 	ups := b.put(t, DeleteBatch+1, media.Retention)
 	items := make([]map[string]any, len(ups))
@@ -243,7 +265,7 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 			t.Fatalf("a refused batch read %v and asked the bucket %v", calls, b.s3.asked)
 		}
 	}
-	// None, or more than 100: refused before anything is read.
+	// None, or more than 50: refused before anything is read.
 	refused(map[string]any{"items": []any{}})
 	refused(map[string]any{})
 	refused(map[string]any{"items": items})
@@ -251,7 +273,7 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 	refused(map[string]any{"items": []any{map[string]any{"id": ups[0].id, "secret": ups[0].secret, "size": 1}}})
 	refused(map[string]any{"items": []any{map[string]any{"id": 7, "secret": ups[0].secret}}})
 	// Over the body limit (64 KiB), whatever it holds.
-	long := strings.Repeat("A", 700)
+	long := strings.Repeat("A", 1400)
 	big := make([]map[string]any, DeleteBatch)
 	for i := range big {
 		big[i] = item(ups[i].id, long)
@@ -263,13 +285,15 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 		}
 	}
 
-	// 100 unknown uploads: one read of at most 50 units, nothing written,
-	// nothing asked of the bucket.
+	// 50 unknown uploads: one eventually consistent read (25 units in
+	// DynamoDB; Local charges nothing for keys it doesn't find), nothing
+	// written, nothing asked of the bucket.
 	unknown := make([]map[string]any, DeleteBatch)
 	for i := range unknown {
 		unknown[i] = item(ids.New(), ups[0].secret)
 	}
 	b.meter.Reset()
+	b.reads.consistent = nil
 	results := b.del(t, unknown...)
 	for _, r := range results {
 		if r != "not_found" {
@@ -277,13 +301,14 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 		}
 	}
 	cost := b.meter.Units(b.table)
-	t.Logf("100 unknown uploads: R %.1f W %.1f, %v", cost.Read, cost.Write, b.meter.Calls())
-	if cost.Read > 50 || cost.Write != 0 || len(b.s3.asked) != 0 || !slices.Equal(b.meter.Calls(), []string{"BatchGetItem " + b.table}) {
-		t.Fatalf("100 unknown uploads: %+v, %v, bucket %v", cost, b.meter.Calls(), b.s3.asked)
+	t.Logf("50 unknown uploads: R %.1f W %.1f, %v", cost.Read, cost.Write, b.meter.Calls())
+	if cost.Read > DeleteBatch/2 || cost.Write != 0 || len(b.s3.asked) != 0 ||
+		!slices.Equal(b.meter.Calls(), []string{"BatchGetItem " + b.table}) || !slices.Equal(b.reads.consistent, []bool{false}) {
+		t.Fatalf("50 unknown uploads: %+v, %v, consistent %v, bucket %v", cost, b.meter.Calls(), b.reads.consistent, b.s3.asked)
 	}
 
-	// 100 that are there: one read, 100 write units in four writes, and
-	// one request to the bucket.
+	// 50 that are there: one read of 25 units, 50 write units in two
+	// writes, and one request to the bucket.
 	b.meter.Reset()
 	results = b.del(t, items[:DeleteBatch]...)
 	for _, r := range results {
@@ -292,11 +317,11 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 		}
 	}
 	cost = b.meter.Units(b.table)
-	t.Logf("100 uploads deleted: R %.1f W %.1f, %v", cost.Read, cost.Write, b.meter.Calls())
-	writes := slices.Repeat([]string{"BatchWriteItem " + b.table}, 4)
-	if cost.Read > 50 || cost.Write != DeleteBatch || len(b.s3.asked) != 1 || len(b.s3.asked[0]) != DeleteBatch ||
+	t.Logf("50 uploads deleted: R %.1f W %.1f, %v", cost.Read, cost.Write, b.meter.Calls())
+	writes := slices.Repeat([]string{"BatchWriteItem " + b.table}, 2)
+	if cost.Read != DeleteBatch/2 || cost.Write != DeleteBatch || len(b.s3.asked) != 1 || len(b.s3.asked[0]) != DeleteBatch ||
 		!slices.Equal(b.meter.Calls(), append([]string{"BatchGetItem " + b.table}, writes...)) {
-		t.Fatalf("100 uploads: %+v, %v, bucket asked %d times", cost, b.meter.Calls(), len(b.s3.asked))
+		t.Fatalf("50 uploads: %+v, %v, bucket asked %d times", cost, b.meter.Calls(), len(b.s3.asked))
 	}
 	for _, up := range ups[:DeleteBatch] {
 		if b.there(t, up.id) {
@@ -304,10 +329,12 @@ func TestDeleteUploadsBatchLimits(t *testing.T) {
 		}
 	}
 	if !b.there(t, ups[DeleteBatch].id) {
-		t.Fatal("the 101st went too")
+		t.Fatal("the 51st went too")
 	}
 
-	// Without attachments, the route answers as for a server without it.
+	// Without attachments none of them is there: 404, as the single route
+	// answers (an older server answers 405, which TestDeleteUploadsRoute
+	// checks).
 	b.h.server.Media = nil
 	status, out := b.h.post(t, "/media/delete", map[string]any{"items": []any{item(ups[DeleteBatch].id, ups[DeleteBatch].secret)}})
 	wantError(t, status, out, http.StatusNotFound, "not_found")
