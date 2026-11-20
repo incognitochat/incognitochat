@@ -207,7 +207,11 @@ could link people by timing: a message arriving, then a notice, then a reply
 or a "seen". So could whoever holds the server's keys, from the short-lived
 records above that the database hasn't deleted yet (a few minutes to about a
 day, and DynamoDB's lag). A copy of the database alone can't. This is
-explained in [security.md](security.md#what-still-leaks).
+explained in [security.md](security.md#what-still-leaks). Deleting a chat's
+attachments names their uploads together, up to 50 in a request, so someone
+watching live would see which uploads one device deleted at once, as the
+address and timing of one request per upload showed before; the uploads'
+records go in that same request.
 
 ## What users can do
 

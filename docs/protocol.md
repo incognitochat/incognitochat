@@ -262,10 +262,12 @@ never left half deleted and in use, and nothing on the device is deleted on
 the server's word. Before its first request, the app fetches the messages
 still waiting for the device (best effort, and only then: the server takes
 no other request once the deletion has started), then deletes the uploads
-of the attachments it received (`POST /media/{id}/delete`, which needs no
-login), trying those that fail again a few times, waiting about 7 seconds
-in all between tries (not while the device says it's offline). It starts
-no more fetching or trying again 10 seconds after it began (a request
+of the attachments it received (`POST /media/delete`, in batches, which
+needs no login: [Media](#media)) until none is left or a request fails
+(5,000 take about four minutes), then tries those left
+again a few times, waiting about 7 seconds in all between tries (not
+while the device says it's offline). It starts no more fetching or trying
+again 10 seconds after it began (a request
 under way then can take up to its 15-second timeout), and goes on with the
 deletion; any upload it couldn't delete, or never saw, expires within 30
 days. Afterwards it deletes everything on the device. The other side of
@@ -1072,8 +1074,8 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   stops before taking a mailbox or showing any token to the server. An
   attachment deleted before its upload starts isn't uploaded or paid for;
   one deleted while it uploads is deleted from the server once the upload
-  is done, or has failed (`POST /media/{id}/delete`, as for a received
-  one), and no error is shown for it. The server looks uploads up from a
+  is done, or has failed (as a received one is: **Deleting uploads**,
+  below), and no error is shown for it. The server looks uploads up from a
   copy that can lag a moment behind, so for these the app takes a first
   `not_found` as "not yet" and asks once more about 30 seconds later (or
   on the next start).
@@ -1170,7 +1172,8 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   on a download that gets no answer, or no more bytes, for 30 seconds. The
   upload stays, downloaded or saved, until the
   message or conversation is deleted on the recipient's device (then it's
-  deleted with `POST /media/{id}/delete {secret}`) or it expires.
+  deleted with its delete secret: **Deleting uploads**, below) or it
+  expires.
 - **A download that fails.** One of another size, one that doesn't decrypt
   with `k`, and one the bucket refuses (S3 answers 403 or 404 for a file
   never uploaded, but also for a download URL that expired before it was
@@ -1186,6 +1189,55 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   isn't fetched by itself again in that run, and the others aren't held
   up; a tap on it, and the save page, say from what time it can be
   fetched again.
+- **Deleting uploads.** Whoever holds an upload's delete secret (the
+  sender, and the recipient, whose message carries it) can delete it, with
+  no login. The app asks `POST /media/delete {items: [{id, secret}, ...]}`
+  (base64url, as elsewhere), 1 to 50 items. The server checks each
+  item's secret against its upload's `deleteHash`, as the single route
+  below does, deletes the bucket's objects of those that match with one
+  request, then their records, and answers `200 {results}`, one for each
+  item in order:
+  `deleted`; `not_found` for no such upload (never made, expired, or
+  deleted already), a wrong secret, or an item that can't name one (a
+  malformed ID or secret), which it doesn't tell apart; or `failed`, an
+  upload the bucket couldn't delete this time, which stays, to ask about
+  again. An item named twice is deleted once. No items, more than 50, or a
+  malformed body (the body limit is 64 KiB) is `400 bad_request`, and a
+  body not sent as `application/json` is `415 unsupported_media_type`,
+  before anything is read; `404 not_found` for the whole request means
+  the server has no attachments, so none of them is there. If the table or
+  the bucket fails as a whole, it answers `5xx` (`503 unavailable` when the
+  table is throttled), and some may have gone all the same: asking again is
+  safe, and those gone are then `not_found`. A request reads half a unit
+  for each distinct, well-formed upload it names, found or not (malformed
+  items aren't read, and an ID named twice is read once), and writes one
+  for each it deletes: up to 25 and 50. A batch of random IDs so costs what
+  50 lookups do, which is why it is kept that small; the firewall bounds
+  everyone's batches together only once it acts ([deployment.md](deployment.md#the-firewall)).
+  The single route, `POST /media/{id}/delete {secret}`, still answers
+  `200 {}` or `404 not_found` (for all of `not_found`'s cases), for apps
+  from before batches.
+
+  The app keeps a list of uploads to delete (sealed under its storage key),
+  so a chat with many attachments disappears at once and the rest is
+  finished on the next start if it closes halfway. It works through the
+  list 50 to a request, one request at a time, two seconds apart (about 20
+  uploads a second), so a chat with 5,000 attachments takes 100 requests
+  over about four minutes. Upkeep does it last, after its top-ups. Once
+  the app stops (signed out, say), it sends no more. `deleted` and
+  `not_found` take an upload off the list (but the first `not_found` for
+  one of ours just made, as above, is asked again later); a `404` for the
+  whole request is `not_found` for each. `failed`, or any other error,
+  leaves the rest of the list for the next try (each start, and upkeep). A
+  `400` makes it send half as many at once for the rest of that run (a
+  later server might take fewer); one alone refused leaves the list for
+  the next try. A server that answers `405` for the route itself (one
+  older than batches: `GET /media/{id}` has its path) is asked one upload
+  at a time instead, six at once, for the rest of that run; the next run
+  tries batches again, so the app and the server can be updated in either
+  order. The firewall, where there is one, counts each batch as one
+  request, in a total of its own (`deletes-total`), apart from lookups by
+  ID.
 - **Saving outside Telegram.** A Mini App can't hand a file to the device
   (Telegram's download needs a public HTTPS URL, which would mean a decrypted
   copy on a server). Where the app has a share sheet, it uses that.

@@ -7,12 +7,15 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/media"
 	"github.com/incognitochat/incognitochat/backend/internal/tokens"
 )
@@ -39,6 +42,8 @@ type Media interface {
 	DownloadURL(ctx context.Context, id string) (string, error)
 	Stored(ctx context.Context, id string) (bool, error)
 	Delete(ctx context.Context, id string) error
+	// DeleteAll deletes several at once, and returns those that failed.
+	DeleteAll(ctx context.Context, ids []string) (failed []string, err error)
 }
 
 // Uploads records uploads until they're deleted (ephemeral.Uploads).
@@ -51,6 +56,9 @@ type Uploads interface {
 	Lookup(ctx context.Context, id string) (ephemeral.Upload, bool, error)
 	Renew(ctx context.Context, id string, most int, expiresAfter time.Time) (bool, error)
 	Delete(ctx context.Context, id string) error
+	// LookupAll is Lookup for several at once: those there are, by ID.
+	LookupAll(ctx context.Context, ids []string) (map[string]ephemeral.Upload, error)
+	DeleteAll(ctx context.Context, ids []string) error
 }
 
 type uploadRequest struct {
@@ -231,7 +239,9 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 
 // deleteUpload deletes an upload for whoever holds its delete secret (the
 // sender, and the recipient, whose message carries it): the app asks when
-// the upload's message is deleted.
+// the upload's message is deleted. The app deletes uploads in batches
+// (deleteUploads), and asks here one at a time only of a server without
+// that route; this stays for older apps.
 func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media/{id}/delete"
 	id := httpapi.Param(ctx, "id")
@@ -263,4 +273,119 @@ func (s *Server) deleteUpload(ctx context.Context, req httpapi.Request) httpapi.
 		return s.internal(route, err)
 	}
 	return httpapi.JSON(http.StatusOK, map[string]string{})
+}
+
+// DeleteBatch is the most uploads one POST /media/delete takes. Looking
+// them up reads half a unit for each distinct well-formed one (eventually
+// consistent, as for one delete), found or not, and each whose secret
+// matches takes one write unit to forget: at most 25 read and 50 write
+// units a request, about one step of deleting an account (DeleteStep).
+// Anyone can send random IDs, so a request can cost what 50 lookups do;
+// the batch is kept that small for it. The app sends one batch at a time,
+// two seconds apart, so a chat with thousands of attachments is deleted at
+// about 20 a second (infra/edge.tf, deletes-total, bounds everyone's).
+const DeleteBatch = 50
+
+// What POST /media/delete answers for each upload.
+const (
+	uploadDeleted  = "deleted"
+	uploadNotFound = "not_found"
+	uploadFailed   = "failed"
+)
+
+type uploadToDelete struct {
+	ID     string `json:"id"`
+	Secret string `json:"secret"` // base64url, as deleteUpload takes it
+}
+
+// deleteUploads is deleteUpload for up to DeleteBatch uploads at once, so
+// that deleting a chat with many attachments takes a few requests rather
+// than one per attachment. It needs no login either: each upload is
+// deleted for its own delete secret, checked as deleteUpload checks it. It
+// answers {results}, one for each item, in their order:
+//
+//	deleted    deleted now
+//	not_found  what deleteUpload answers not_found: no such upload (never
+//	           made, expired, or deleted already), a wrong secret, or an
+//	           item that can't name one (a malformed ID or secret)
+//	failed     the bucket couldn't delete it this time; ask again later
+//
+// The bucket's objects go in one request, then the records of those that
+// went, so one the bucket kept can still be deleted by its secret, as with
+// deleteUpload. If the table fails, the whole request does. A server
+// without attachments (no Media) answers 404 not_found, as deleteUpload
+// does: none of them is there.
+func (s *Server) deleteUploads(ctx context.Context, req httpapi.Request) httpapi.Response {
+	const route = "POST /media/delete"
+	var in struct {
+		Items []uploadToDelete `json:"items"`
+	}
+	if err := httpapi.DecodeJSON(req, &in); err != nil {
+		return httpapi.DecodeError(err)
+	}
+	if s.Media == nil {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	if len(in.Items) == 0 || len(in.Items) > DeleteBatch {
+		return httpapi.Error(http.StatusBadRequest, "bad_request")
+	}
+	// Each item that can name an upload: the hash of its secret. One that
+	// can't is answered not_found, as deleteUpload answers it, and doesn't
+	// hold up the others.
+	hashes := make([][]byte, len(in.Items))
+	lookup := make([]string, 0, len(in.Items))
+	for i, it := range in.Items {
+		secret, err := base64.RawURLEncoding.Strict().DecodeString(it.Secret)
+		if err != nil || len(secret) == 0 || !ids.Valid(it.ID) {
+			continue
+		}
+		hash := sha256.Sum256(secret)
+		hashes[i] = hash[:]
+		lookup = append(lookup, it.ID)
+	}
+	// Eventually consistent, as deleteUpload's Lookup, and safe for the
+	// same reasons.
+	found, err := s.Uploads.LookupAll(ctx, lookup)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	matched := make([]bool, len(in.Items))
+	var doomed []string
+	for i, it := range in.Items {
+		up, ok := found[it.ID]
+		if hashes[i] == nil || !ok || subtle.ConstantTimeCompare(hashes[i], up.DeleteHash) != 1 {
+			continue
+		}
+		matched[i] = true
+		if !slices.Contains(doomed, it.ID) {
+			doomed = append(doomed, it.ID)
+		}
+	}
+	failed, err := s.Media.DeleteAll(ctx, doomed)
+	if err != nil {
+		return s.internal(route, err)
+	}
+	kept := make(map[string]bool, len(failed))
+	for _, id := range failed {
+		kept[id] = true
+	}
+	gone := slices.DeleteFunc(slices.Clone(doomed), func(id string) bool { return kept[id] })
+	if err := s.Uploads.DeleteAll(ctx, gone); err != nil {
+		return s.internal(route, err)
+	}
+	if len(failed) > 0 {
+		s.Log.Warn("uploads not deleted", slog.String(logx.KeyRoute, route), slog.Int(logx.KeyCount, len(failed)))
+	}
+	results := make([]string, len(in.Items))
+	for i, it := range in.Items {
+		switch {
+		case !matched[i]:
+			results[i] = uploadNotFound
+		case kept[it.ID]:
+			results[i] = uploadFailed
+		default:
+			results[i] = uploadDeleted
+		}
+	}
+	return httpapi.JSON(http.StatusOK, map[string][]string{"results": results})
 }

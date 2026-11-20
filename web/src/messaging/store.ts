@@ -1156,7 +1156,7 @@ export async function dropStrayFiles(db: Database, keys: [string, string][]): Pr
 const UPLOAD_DELETES = 'upload-deletes';
 
 /** An upload to delete, with its delete secret. */
-interface UploadDelete {
+export interface UploadDelete {
   id: string;
   d: string;
   /**

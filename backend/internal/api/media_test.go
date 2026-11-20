@@ -44,6 +44,11 @@ func (m *memMedia) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *memMedia) DeleteAll(_ context.Context, ids []string) ([]string, error) {
+	m.deleted = append(m.deleted, ids...)
+	return nil, nil
+}
+
 type memUploads struct {
 	mu       sync.Mutex
 	ups      map[string]ephemeral.Upload
@@ -98,6 +103,23 @@ func (m *memUploads) Delete(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.ups, id)
+	return nil
+}
+
+func (m *memUploads) LookupAll(ctx context.Context, ids []string) (map[string]ephemeral.Upload, error) {
+	found := map[string]ephemeral.Upload{}
+	for _, id := range ids {
+		if up, ok, _ := m.Get(ctx, id); ok {
+			found[id] = up
+		}
+	}
+	return found, nil
+}
+
+func (m *memUploads) DeleteAll(ctx context.Context, ids []string) error {
+	for _, id := range ids {
+		_ = m.Delete(ctx, id)
+	}
 	return nil
 }
 

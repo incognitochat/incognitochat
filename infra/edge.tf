@@ -178,19 +178,33 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
 #
 #   anonymous_routes  the routes that need no login and read a table before
 #                     any limit of their own (a login with a random device,
-#                     a link or upload with a random ID), or are paid with a
-#                     token but have no login (sends). Not here, though they
-#                     need no login either: POST /media, which spends no
-#                     table capacity on forged media tokens, and
-#                     POST /media/{id}/delete, which the app sends for every
-#                     received attachment of a deleted chat, six at a time
-#                     without a pause; both stay under rate-per-ip.
-#   lookup_routes     lookups of links and uploads by ID, which anyone can
-#                     make with random IDs: a link's bundle, a download URL,
-#                     a fresh upload URL, a delete. Never logins,
-#                     registrations, account lookups or sends, so blocking
-#                     these for everyone can't stop anyone logging in or
-#                     sending.
+#                     a link or upload with a random ID, a batch of uploads
+#                     to delete), or are paid with a token but have no login
+#                     (sends). Not here, though they need no login either:
+#                     POST /media, which spends no table capacity on forged
+#                     media tokens, and POST /media/{id}/delete, which apps
+#                     before batches sent for every received attachment of
+#                     a deleted chat, six at a time without a pause (so a
+#                     chat with a few thousand set off rate-per-ip); the app
+#                     now asks it only of a server without the batch route.
+#   lookup_routes     lookups of links and uploads by ID, one a request,
+#                     which anyone can make with random IDs: a link's bundle,
+#                     a download URL, a fresh upload URL, a delete. Never
+#                     logins, registrations, account lookups or sends, so
+#                     blocking these for everyone can't stop anyone logging
+#                     in or sending.
+#   delete_routes     POST /media/delete: up to 50 uploads to delete in one
+#                     request. The app sends one at a time, two seconds
+#                     apart (about 26 a minute), so a chat with 5,000
+#                     attachments is 100 requests over four minutes or so.
+#                     Not counted with the lookups: a request reads up to 50
+#                     times what a lookup does, and writes up to 50 units,
+#                     so it has its own total, and people deleting big chats
+#                     can't stop links opening or attachments downloading
+#                     for everyone. That total holds only once the firewall
+#                     acts: before then (10 to 40 seconds) one host sending
+#                     some 16 a second can use all of a production table's
+#                     reads, and without the firewall nothing bounds it.
 #
 # The patterns are anchored at the end, and at the start only to a slash:
 # NORMALIZE_PATH (below) keeps back-references at the start of a path, so
@@ -199,11 +213,14 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
 locals {
   anonymous_routes = {
     GET  = "(^|/)(links|media)/[^/]+$"
-    POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload)$"
+    POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload|media/delete)$"
   }
   lookup_routes = {
     GET  = "(^|/)(links|media)/[^/]+$"
     POST = "(^|/)media/[^/]+/(upload|delete)$"
+  }
+  delete_routes = {
+    POST = "(^|/)media/delete$"
   }
 
   # Unset, 30 times the tables' read cap. A lookup with a random ID writes
@@ -213,15 +230,28 @@ locals {
   # uploads paid for with media tokens, a few times each.
   lookups_total_limit = coalesce(var.firewall_lookups_total_limit, 30 * local.table_max_read_units)
 
+  # 0.6 times the tables' read or write cap a minute, whichever is lower
+  # (120 in production, 60 elsewhere). A batch of uploads to delete reads at
+  # most 25 units (50 uploads, half a unit each, found or not) and writes at
+  # most 50 (one for each it deletes, of uploads paid for with media
+  # tokens), so at this rate batches use at most half of the ephemeral
+  # table's writes, which sends and logins share, and an eighth of its reads
+  # (a quarter where the read cap is the lower). The app sends about 26 a
+  # minute while it deletes a big chat (a chat with fewer than 50
+  # attachments takes one), so four or so such chats can be deleted at once
+  # in production; past it, deletes wait for the app's next try.
+  deletes_total_limit = max(10, floor(6 * min(local.table_max_read_units, local.table_max_write_units) / 10))
+
   # Rules run in priority order and a block ends the run, so what an earlier
   # rule already blocks doesn't count towards a later one. But WAF checks
   # rates only about every 10 seconds and usually acts within 30, so until
   # an address is blocked its burst counts in full: one host alone can set
-  # lookups-total off, and lookups are then refused for everyone for a
-  # minute or two.
+  # lookups-total or deletes-total off, and lookups, or deletes, are then
+  # refused for everyone for a minute or two.
   limits = {
     anonymous-per-ip = { priority = 2, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300, routes = local.anonymous_routes }
     lookups-total    = { priority = 3, key = "CONSTANT", limit = local.lookups_total_limit, window = 60, routes = local.lookup_routes }
+    deletes-total    = { priority = 4, key = "CONSTANT", limit = local.deletes_total_limit, window = 60, routes = local.delete_routes }
   }
 
   # A blocked request gets 429 and the API's own error, with CORS for the
@@ -251,7 +281,7 @@ resource "aws_wafv2_ip_set" "blocked" {
   }
 }
 
-# The firewall: a block list and three rate limits. $5 a month, plus $1 per
+# The firewall: a block list and four rate limits. $5 a month, plus $1 per
 # rule and $0.60 per million requests, so it is optional.
 #
 #   blocked           the addresses in the block list (above), first, so
@@ -269,6 +299,12 @@ resource "aws_wafv2_ip_set" "blocked" {
 #                     flood of random IDs can't use up the capacity
 #                     everything else needs. While it blocks, only these
 #                     lookups are refused, for everyone.
+#   deletes-total     batches of uploads to delete, everyone together, over
+#                     one minute: at most half a table's writes and a
+#                     quarter of its reads, once it acts (a burst before
+#                     then can use all of the reads). While it blocks, only
+#                     these batches are refused, and the uploads wait on
+#                     the devices for the next try.
 resource "aws_wafv2_web_acl" "api" {
   count    = var.firewall ? 1 : 0
   provider = aws.global

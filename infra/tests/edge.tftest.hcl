@@ -108,6 +108,10 @@ run "firewall" {
 
   variables {
     firewall = true
+    # Caps that differ in each direction from the environment's own, so
+    # deletes-total must take the lower.
+    table_max_read_units  = 1000
+    table_max_write_units = 200
   }
 
   # Empty (the plan has an empty set as null), IPv4 (the API answers over
@@ -129,8 +133,40 @@ run "firewall" {
       "1" = "rate-per-ip"
       "2" = "anonymous-per-ip"
       "3" = "lookups-total"
+      "4" = "deletes-total"
     })
-    error_message = "The firewall's rules must be the block list (priority 0), then rate-per-ip, anonymous-per-ip and lookups-total."
+    error_message = "The firewall's rules must be the block list (priority 0), then rate-per-ip, anonymous-per-ip, lookups-total and deletes-total."
+  }
+
+  # Batches of uploads to delete have their own total, sized by the lower
+  # of the read and write caps (here 1,000 and 200: 120 a minute), over
+  # POST /media/delete alone.
+  assert {
+    condition = length([
+      for r in aws_wafv2_web_acl.api[0].rule : r.name
+      if r.name == "deletes-total" && alltrue([
+        r.statement[0].rate_based_statement[0].limit == 120,
+        r.statement[0].rate_based_statement[0].aggregate_key_type == "CONSTANT",
+        r.statement[0].rate_based_statement[0].evaluation_window_sec == 60,
+        [for s in r.statement[0].rate_based_statement[0].scope_down_statement[0].or_statement[0].statement : s.and_statement[0].statement[1].regex_match_statement[0].regex_string] == [local.delete_routes.POST],
+      ])
+    ]) == 1
+    error_message = "deletes-total must count everyone's POST /media/delete together, over a minute, at 0.6 times the lower of the read and write caps."
+  }
+
+  # The batch route counts towards deletes-total and anonymous-per-ip, not
+  # lookups-total; the single delete counts towards lookups-total alone.
+  assert {
+    condition = alltrue([
+      can(regex(local.delete_routes.POST, "/media/delete")),
+      can(regex(local.delete_routes.POST, "/../media/delete")),
+      can(regex(local.anonymous_routes.POST, "/media/delete")),
+      !can(regex(local.lookup_routes.POST, "/media/delete")),
+      !can(regex(local.delete_routes.POST, "/media/AAAAAAAAAAAAAAAAAAAAAA/delete")),
+      !can(regex(local.anonymous_routes.POST, "/media/AAAAAAAAAAAAAAAAAAAAAA/delete")),
+      can(regex(local.lookup_routes.POST, "/media/AAAAAAAAAAAAAAAAAAAAAA/delete")),
+    ])
+    error_message = "POST /media/delete must count towards deletes-total and anonymous-per-ip, not lookups-total; POST /media/{id}/delete towards lookups-total alone."
   }
 
   # Priority 0 blocks what the IP set holds.

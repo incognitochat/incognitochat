@@ -120,8 +120,9 @@ function fakeServer(
     inboxGate: null as Promise<void> | null,
     // Run when the inbox is fetched: what arrives with it.
     onInbox: null as (() => Promise<void>) | null,
-    // Run when an upload is deleted, before it answers.
+    // Run when uploads are deleted, before it answers; the IDs deleted.
     onMediaDelete: null as (() => Promise<void>) | null,
+    deletedUploads: [] as string[],
     // How GET /media/{id} answers: with this download URL, or failing so, or
     // (neither set) not_found, no such upload.
     mediaUrl: null as string | null,
@@ -181,11 +182,14 @@ function fakeServer(
         bundles.clear();
         return check({});
       }
-      // By the upload's own secret, without logging in.
-      if (method === 'POST' && /^\/media\/[^/]+\/delete$/.test(path)) {
+      // By the uploads' own secrets, without logging in: each outcome is
+      // one request's.
+      if (method === 'POST' && path === '/media/delete') {
         await state.onMediaDelete?.();
         take(outcomes.mediaDelete);
-        return check({});
+        const items = body.items as { id: string }[];
+        state.deletedUploads.push(...items.map((i) => i.id));
+        return check({ results: items.map(() => 'deleted') });
       }
       // Like the backend: an account being deleted takes no other request.
       if (state.deleting && !state.deleted && path !== '/account') throw new ApiError(409, 'account_deleting');
@@ -1284,8 +1288,9 @@ describe('deleting the account', () => {
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
     const at = (call: string) => server.calls.indexOf(call);
     expect(at('GET /inbox')).toBeGreaterThanOrEqual(0);
-    expect(at('POST /media/upload-p1/delete')).toBeGreaterThan(at('GET /inbox'));
-    expect(at('DELETE /account')).toBeGreaterThan(at('POST /media/upload-p1/delete'));
+    expect(at('POST /media/delete')).toBeGreaterThan(at('GET /inbox'));
+    expect(at('DELETE /account')).toBeGreaterThan(at('POST /media/delete'));
+    expect(server.state.deletedUploads).toEqual(['upload-p1']);
   });
 
   it('fetches nothing more once the deletion has started: carrying on, or confirming it again, asks only for the deletion', async () => {
@@ -1338,9 +1343,9 @@ describe('deleting the account', () => {
     } finally {
       timeouts.mockRestore();
     }
-    const deletes = server.calls.filter((c) => c === 'POST /media/upload-p1/delete');
+    const deletes = server.calls.filter((c) => c === 'POST /media/delete');
     expect(deletes).toHaveLength(3);
-    expect(server.calls.indexOf('DELETE /account')).toBeGreaterThan(server.calls.lastIndexOf('POST /media/upload-p1/delete'));
+    expect(server.calls.indexOf('DELETE /account')).toBeGreaterThan(server.calls.lastIndexOf('POST /media/delete'));
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
@@ -1357,10 +1362,10 @@ describe('deleting the account', () => {
     expect(server.calls).not.toContain('DELETE /account');
     // Not tried again: it stopped, and looked again from the start (whose
     // login and usual flush come after).
-    const first = server.calls.indexOf('POST /media/upload-p1/delete');
+    const first = server.calls.indexOf('POST /media/delete');
     const login = server.calls.indexOf('POST /session', first);
     expect(login).toBeGreaterThan(first);
-    expect(server.calls.slice(first + 1, login)).not.toContain('POST /media/upload-p1/delete');
+    expect(server.calls.slice(first + 1, login)).not.toContain('POST /media/delete');
   });
 
   it('stops trying them again once its time is up, and goes on with the deletion', async () => {
@@ -1379,7 +1384,7 @@ describe('deleting the account', () => {
     } finally {
       clock.mockRestore();
     }
-    expect(server.calls.filter((c) => c === 'POST /media/upload-p1/delete')).toHaveLength(1);
+    expect(server.calls.filter((c) => c === 'POST /media/delete')).toHaveLength(1);
     expect(server.state.deleted).toBe(true);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
@@ -1392,7 +1397,7 @@ describe('deleting the account', () => {
     await photo(owner.db);
     owner.app.askDeleteAccount();
     await owner.app.deleteAccount();
-    expect(server.calls.filter((c) => c === 'POST /media/upload-p1/delete')).toHaveLength(4);
+    expect(server.calls.filter((c) => c === 'POST /media/delete')).toHaveLength(4);
     expect(server.state.deleted).toBe(true);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });

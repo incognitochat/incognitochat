@@ -22,6 +22,7 @@ import {
   addMessage,
   clearMedia,
   earlyFor,
+  forgetUploadDeletes,
   getConversation,
   getIds,
   getMedia,
@@ -211,12 +212,20 @@ async function fakeBackend() {
    * answers so before looking at anything else). bundles: link bundles are
    * out of reach, refused (rate limited), or another link's comes back.
    * acks: confirmations can't reach the server. deleteLag: how many of the
-   * next upload deletes find nothing, as the server's lookup does for an
+   * next uploads to delete find nothing, as the server's lookup does for an
    * upload made a moment before (it reads a copy that can lag behind).
+   * deletes: the delete routes are out of reach, or (busy) rate limited.
+   * failDeletes: uploads the bucket fails to delete, which a batch answers
+   * failed. batchDeletes: 405, as an older server, which has no POST
+   * /media/delete, answers it; 404, as a server without attachments does.
+   * batchMost: the most uploads POST /media/delete takes (more is 400).
    */
   const down = {
-    deletes: false,
+    deletes: false as boolean | 'busy',
     deleteLag: 0,
+    failDeletes: new Set<string>(),
+    batchDeletes: null as null | 404 | 405,
+    batchMost: 50,
     bundles: null as null | 'unreachable' | 'busy' | 'wrong',
     puts: [] as ('unreachable' | 'lost' | 'expired' | 'conflict' | 'there')[],
     renewals: [] as ('ok' | 'refused' | 'unreachable' | 'failing' | 'paused')[],
@@ -226,6 +235,9 @@ async function fakeBackend() {
   };
   /** Requests to the media routes, as "METHOD path". */
   const mediaCalls: string[] = [];
+  /** The upload IDs each POST /media/delete named, and the most of those requests under way at once. */
+  const deleteBatches: string[][] = [];
+  const deleting = { now: 0, most: 0 };
   const quietSends: boolean[] = [];
   /** Every send the server saw, refused or not: where to, what, and with which tokens. */
   const sendAttempts: { mailbox: string; envelope: string; tokens: string[] }[] = [];
@@ -338,17 +350,45 @@ async function fakeBackend() {
         if (!uploads.has(path.split('/')[2]!)) throw new ApiError(404, 'not_found');
         return check({ url: `https://bucket.example/m/${path.split('/')[2]!}` });
       }
-      if (method === 'POST' && path.startsWith('/media/') && path.endsWith('/delete')) {
-        if (down.deletes) throw new NetworkError('down');
+      // An upload is deleted for its delete secret: 'deleted', 'not_found'
+      // (unknown, gone, or a wrong secret), or 'failed' (the bucket failed).
+      const deleteOne = async (id: string, secret: string): Promise<'deleted' | 'not_found' | 'failed'> => {
         if (down.deleteLag > 0) {
           down.deleteLag--;
-          throw new ApiError(404, 'not_found');
+          return 'not_found';
         }
-        const id = path.split('/')[2]!;
-        const { secret } = JSON.parse(init.body!) as { secret: string };
         const hash = toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', fromBase64Url(secret))));
-        if (uploads.get(id)?.deleteHash !== hash) throw new ApiError(404, 'not_found');
+        if (uploads.get(id)?.deleteHash !== hash) return 'not_found';
+        if (down.failDeletes.has(id)) return 'failed';
         uploads.delete(id);
+        return 'deleted';
+      };
+      if (method === 'POST' && path === '/media/delete') {
+        if (down.batchDeletes === 405) throw new ApiError(405, 'method_not_allowed');
+        if (down.batchDeletes === 404) throw new ApiError(404, 'not_found');
+        if (down.deletes === 'busy') throw new ApiError(429, 'rate_limited');
+        if (down.deletes) throw new NetworkError('down');
+        const { items } = JSON.parse(init.body!) as { items: { id: string; secret: string }[] };
+        // As the server: at most 50 a request (or batchMost).
+        if (items.length === 0 || items.length > down.batchMost) throw new ApiError(400, 'bad_request');
+        deleteBatches.push(items.map((i) => i.id));
+        deleting.most = Math.max(deleting.most, ++deleting.now);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          const results: string[] = [];
+          for (const { id, secret } of items) results.push(await deleteOne(id, secret));
+          return check({ results });
+        } finally {
+          deleting.now--;
+        }
+      }
+      if (method === 'POST' && path.startsWith('/media/') && path.endsWith('/delete')) {
+        if (down.deletes === 'busy') throw new ApiError(429, 'rate_limited');
+        if (down.deletes) throw new NetworkError('down');
+        const { secret } = JSON.parse(init.body!) as { secret: string };
+        const result = await deleteOne(path.split('/')[2]!, secret);
+        if (result === 'not_found') throw new ApiError(404, 'not_found');
+        if (result === 'failed') throw new ApiError(500, 'internal');
         return check({});
       }
       if (method === 'GET' && path.startsWith('/links/')) {
@@ -452,7 +492,7 @@ async function fakeBackend() {
     };
   }
 
-  return { api, session, issuer, spent, sendPayments, sendShapes, sendAttempts, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, linkOwners, linkRules, accountIds, keyOwners, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, mediaSigned: () => mediaSigned };
+  return { api, session, issuer, spent, sendPayments, sendShapes, sendAttempts, pricing, later, schedule, signed: () => signed, seenEnvelopes, sendHeaders, inboxes, quietSends, mailboxes, bundles, linkOwners, linkRules, accountIds, keyOwners, bundleFetches, paging, inboxFetches, uploads, uploadUrls, puts, waits, transfer, down, mediaCalls, deleteBatches, deleting, mediaSigned: () => mediaSigned };
 }
 
 async function person(backend: Awaited<ReturnType<typeof fakeBackend>>, account: string, now?: () => number) {
@@ -2491,8 +2531,187 @@ withAndWithoutWebLocks('deleting uploads in the background', () => {
     expect(owner.messaging.flushUploadDeletes()).toBe(running);
     finishing.release();
     await running;
-    expect(backend.mediaCalls).toEqual([`POST /media/${a.id}/delete`, `POST /media/${b.id}/delete`]);
+    expect(backend.mediaCalls).toEqual(['POST /media/delete', 'POST /media/delete']);
+    expect(backend.deleteBatches).toEqual([[a.id], [b.id]]);
     expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+  });
+
+  /** n uploads on the server, queued to delete on the owner's device, as a deleted chat's are. */
+  async function queued(backend: Awaited<ReturnType<typeof fakeBackend>>, db: Database, n: number) {
+    const items: { id: string; d: string }[] = [];
+    for (let i = 0; i < n; i++) {
+      const secret = crypto.getRandomValues(new Uint8Array(16));
+      const id = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+      backend.uploads.set(id, { size: 16384, deleteHash: toBase64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', secret))), body: null, renewals: 0 });
+      items.push({ id, d: toBase64Url(secret) });
+    }
+    await queueUploadDeletes(db, items);
+    return items;
+  }
+
+  it('deletes them 50 to a request, one request at a time, pausing between requests', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const items = await queued(backend, owner.db, 120);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([50, 50, 20]);
+    expect(backend.deleteBatches.flat()).toEqual(items.map((i) => i.id));
+    expect(backend.deleting.most).toBe(1);
+    // Two seconds between requests, none before the first or after the last.
+    expect(backend.waits).toEqual([2000, 2000]);
+    expect(backend.uploads.size).toBe(0);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+    expect(backend.mediaCalls.every((c) => c === 'POST /media/delete')).toBe(true);
+  });
+
+  it('pauses before the next request when a flush runs again for uploads queued meanwhile', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    await queued(backend, owner.db, 1);
+    // Queued while the run's only request is under way, and asked for.
+    const request = backend.api.request.bind(backend.api);
+    backend.api.request = async function (...args) {
+      const answer = await request(...args);
+      if (args[1] === '/media/delete' && backend.deleteBatches.length === 1) {
+        await queued(backend, owner.db, 1);
+        void owner.messaging.flushUploadDeletes();
+      }
+      return answer;
+    } as typeof request;
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([1, 1]);
+    expect(backend.waits).toEqual([2000]);
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it('sends fewer at once to a server that refuses so many (400)', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    backend.down.batchMost = 20;
+    await queued(backend, owner.db, 40);
+    await owner.messaging.flushUploadDeletes();
+    // 40 refused, then 20 at a time for the rest of the run.
+    expect(backend.mediaCalls.filter((c) => c === 'POST /media/delete')).toHaveLength(3);
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([20, 20]);
+    expect(backend.uploads.size).toBe(0);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+    // Even one at a time refused: it stops, keeping the list.
+    backend.down.batchMost = 0;
+    await queued(backend, owner.db, 2);
+    const calls = backend.mediaCalls.length;
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.mediaCalls.length - calls).toBe(2);
+    expect((await pendingUploadDeletes(owner.db)).length).toBe(2);
+  });
+
+  it("drops those the server doesn't know, and keeps those it failed to delete for the next try", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const [deleted, failing, other] = await queued(backend, owner.db, 3);
+    // Not on the server: deleted already, or a wrong secret.
+    const unknown = { id: toBase64Url(crypto.getRandomValues(new Uint8Array(16))), d: deleted!.d };
+    const wrong = { id: other!.id, d: deleted!.d };
+    await forgetUploadDeletes(owner.db, [other!.id]);
+    await queueUploadDeletes(owner.db, [unknown, wrong]);
+    backend.down.failDeletes.add(failing!.id);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches).toEqual([[deleted!.id, failing!.id, unknown.id, wrong.id]]);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([failing]);
+    expect([...backend.uploads.keys()].sort()).toEqual([failing!.id, other!.id].sort());
+    // The bucket can again: the next try deletes it.
+    backend.down.failDeletes.clear();
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.at(-1)).toEqual([failing!.id]);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+    expect([...backend.uploads.keys()]).toEqual([other!.id]);
+  });
+
+  it('stops at a failure, leaving the rest for the next try, and when rate limited', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const items = await queued(backend, owner.db, 80);
+    // The first request's last upload fails: the second isn't sent.
+    backend.down.failDeletes.add(items[49]!.id);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([50]);
+    expect((await pendingUploadDeletes(owner.db)).length).toBe(31);
+    // Turned away by the firewall: all wait.
+    backend.down.failDeletes.clear();
+    backend.down.deletes = 'busy';
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches).toHaveLength(1);
+    expect((await pendingUploadDeletes(owner.db)).length).toBe(31);
+    backend.down.deletes = false;
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.slice(1).map((b) => b.length)).toEqual([31]);
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it('starts no more requests once the app stops', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    await queued(backend, owner.db, 80);
+    // Stopped (signed out, say) while the first request is under way.
+    const request = backend.api.request.bind(backend.api);
+    backend.api.request = async function (...args) {
+      const answer = await request(...args);
+      if (args[1] === '/media/delete') owner.messaging.stop();
+      return answer;
+    } as typeof request;
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([50]);
+    expect((await pendingUploadDeletes(owner.db)).length).toBe(30);
+    // Nor does a flush asked for afterwards.
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches).toHaveLength(1);
+  });
+
+  it('deletes them one at a time from an older server, which answers 405 for the batch route', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    backend.down.batchDeletes = 405;
+    const items = await queued(backend, owner.db, 8);
+    // One of them it doesn't know: gone, as the batch route would say.
+    await queueUploadDeletes(owner.db, [{ id: toBase64Url(crypto.getRandomValues(new Uint8Array(16))), d: items[0]!.d }]);
+    await owner.messaging.flushUploadDeletes();
+    // Asked once in the run, then one request per upload.
+    expect(backend.mediaCalls.filter((c) => c === 'POST /media/delete')).toHaveLength(1);
+    expect(backend.mediaCalls.filter((c) => /^POST \/media\/[^/]+\/delete$/.test(c))).toHaveLength(9);
+    expect(backend.uploads.size).toBe(0);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
+    // Updated: the next run asks with the batch route again.
+    backend.down.batchDeletes = null;
+    await queued(backend, owner.db, 2);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.deleteBatches.map((b) => b.length)).toEqual([2]);
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it('runs last in upkeep, so a long list never holds up the top-ups', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    await queued(backend, owner.db, 1);
+    let signedFirst = -1;
+    const request = backend.api.request.bind(backend.api);
+    backend.api.request = async function (...args) {
+      if (args[1] === '/media/delete') signedFirst = backend.signed() + backend.mediaSigned();
+      return request(...args);
+    } as typeof request;
+    await owner.messaging.maintain();
+    expect(signedFirst).toBeGreaterThan(0);
+    expect(backend.uploads.size).toBe(0);
+  });
+
+  it('drops them when the server answers 404 for a batch (it has no attachments), never asking one at a time', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    backend.down.batchDeletes = 404;
+    await queued(backend, owner.db, 60);
+    // One of ours just made: not yet, as for a not_found.
+    await queueUploadDeletes(owner.db, [{ id: rand(), d: rand(), recent: true }]);
+    await owner.messaging.flushUploadDeletes();
+    expect(backend.mediaCalls).toEqual(['POST /media/delete', 'POST /media/delete']);
+    expect((await pendingUploadDeletes(owner.db)).map((u) => !!u.recent)).toEqual([false]);
   });
 
   it('asks again later for one just made, unless the app stopped meanwhile', async () => {
@@ -4486,20 +4705,25 @@ describe('upkeep and stop()', () => {
     const owner = await person(backend, 'owner');
     const calls: string[] = [];
     const call = owner.session.call;
+    let stopAt: string | null = '/mailboxes';
     owner.session.call = async function (method, path, ...rest) {
       calls.push(`${method} ${path}`);
+      // Stopped while it tops up the mailbox pool, a step of its own.
+      if (path === stopAt) owner.messaging.stop();
       return call(method, path, ...rest);
     } as Session['call'];
-    // Stopped while it works through the uploads to delete, a step of its own.
-    pause.listed = async () => owner.messaging.stop();
+    await queueUploadDeletes(owner.db, [{ id: rand(), d: rand() }]);
     await owner.messaging.maintain();
-    // Nothing after it: no mailboxes or tokens fetched.
-    expect(calls).toEqual([]);
-    expect(await poolSize(owner.db)).toBe(0);
+    // Nothing after it: no tokens fetched, no uploads deleted (the last step).
+    expect(calls).toEqual(['POST /mailboxes']);
+    expect(backend.mediaCalls).toEqual([]);
+    expect(await pendingUploadDeletes(owner.db)).toHaveLength(1);
     // The next start's upkeep runs them all.
-    pause.listed = null;
+    stopAt = null;
     await owner.open().maintain();
-    expect(calls).toContain('POST /mailboxes');
+    expect(calls).toContain('POST /tokens');
+    expect(backend.mediaCalls).toEqual(['POST /media/delete']);
+    expect(await pendingUploadDeletes(owner.db)).toEqual([]);
     expect(await poolSize(owner.db)).toBeGreaterThanOrEqual(POOL_LOW);
   });
 });
