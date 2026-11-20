@@ -7,7 +7,7 @@ import type { MessageView } from './messaging/store';
 import { canResend } from './messaging/engine';
 import type { KeepMedia, MediaSettings } from './messaging/settings';
 import { fromBase64Url } from './crypto/encoding';
-import { showableAs } from './media/prepare';
+import { neutralName, showableAs } from './media/prepare';
 import {
   canRecord,
   hasCamera,
@@ -1616,10 +1616,10 @@ function Composer({
           language={language}
           picked={picked.value}
           onCancel={() => (picked.value = null)}
-          onSend={(as, caption) => {
+          onSend={(as, caption, name) => {
             const { file } = picked.value!;
             picked.value = null;
-            void onAttach(file, as, caption);
+            void onAttach(name === file.name ? file : new File([file], name, { type: file.type }), as, caption);
           }}
         />
       )}
@@ -2103,7 +2103,8 @@ function AttachDialog({
   language: Language;
   picked: Picked;
   onCancel: () => void;
-  onSend: (as: SendAs, caption: string) => void;
+  /** `name`: what to send the file as (media/prepare.ts, neutralName). */
+  onSend: (as: SendAs, caption: string, name: string) => void;
 }) {
   useBackCloses(true, onCancel);
   const tr = (key: Key) => t(language, key);
@@ -2122,6 +2123,8 @@ function AttachDialog({
   }, [picked.file]);
   const showable = kind === 'video' && unplayable.value ? null : kind;
   const as: SendAs = showable && shown.value ? showable : 'file';
+  // From the gallery, a photo or video that can't be shown as one still goes without its own name ("video.mov").
+  const name = picked.shown && !showable ? neutralName(picked.file) : picked.file.name;
   const tooBig = picked.file.size > MAX_FILE_BYTES && as !== 'photo';
   return (
     <div class="overlay" onKeyDown={(e) => e.key === 'Escape' && onCancel()}>
@@ -2132,10 +2135,10 @@ function AttachDialog({
           <img class="attach-preview" src={preview.value} alt="" />
         ) : (
           <div class="file">
-            <span class="file-icon">{extension(picked.file.name) || '📄'}</span>
+            <span class="file-icon">{extension(name) || '📄'}</span>
             <span class="file-info">
               <span class="file-name" dir="auto">
-                {picked.file.name}
+                {name}
               </span>
               <span class="file-size">{formatSize(language, picked.file.size)}</span>
             </span>
@@ -2158,7 +2161,7 @@ function AttachDialog({
           onInput={(e) => (caption.value = e.currentTarget.value)}
         />
         <div class="row">
-          <Button disabled={tooBig} onClick={() => onSend(as, caption.value)}>
+          <Button disabled={tooBig} onClick={() => onSend(as, caption.value, name)}>
             {tr('send')}
           </Button>
           <Button kind="secondary" onClick={onCancel}>

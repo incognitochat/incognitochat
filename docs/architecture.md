@@ -327,11 +327,12 @@ the server never sees a key, name or type.
   message (size or key), or that the bucket refuses (403 or 404), marks the
   attachment broken: fetched again, with a fresh URL, only on a tap.
 - Photos are redrawn on the device (up to 1280 px), which drops their
-  metadata; videos keep their pictures but lose most location and time
-  metadata (not a camera's GPS or timecode track, nor anything in a video
-  the app can't read); voice and video messages are recorded in the app
-  and carry none. Music, GIFs and files are sent as they are, metadata
-  included.
+  metadata; videos keep their pictures but lose most location, time and
+  device metadata (not a camera's GPS or timecode track, nor anything in a
+  video the app can't read); voice and video messages are recorded in the
+  app, with no place in them, and an MP4 one loses the clock and names the
+  browser writes into it, as a video does. Music, GIFs and files are sent
+  as they are, metadata included. Only files and music keep their names.
 - The recipient fetches the upload by its unguessable ID, decrypts it and
   keeps it on the device, encrypted under the device's storage key. Photos
   up to 5 MB, and voice and video messages and GIFs up to 10 MB (by the size

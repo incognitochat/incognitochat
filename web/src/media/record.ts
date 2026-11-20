@@ -4,8 +4,13 @@
 // while recording, so nothing has to decode the result. Video: the camera's
 // picture is cropped to a square on a canvas (mirrored for the front camera,
 // as the person saw it) and that canvas is recorded with the microphone, as
-// H.264 in MP4 where the browser can. A recording carries no metadata about
-// the device or place.
+// H.264 in MP4 where the browser can. A recording carries no place. In MP4,
+// the browser writes its clock into the headers and its own names for the
+// tracks' handlers and the video's encoder: those are zeroed (media/mp4.ts).
+// WebM and Ogg recordings have no clock in them (Chrome's and Firefox's),
+// but name the muxer ("Chrome", Firefox's "QTmuxingAppLibWebM-0.0.1") or
+// the browser ("Mozilla160.0"): kept, like the format itself, which tells
+// the browser too.
 
 import { stripVideoMetadata } from './mp4';
 import { preview } from './prepare';
@@ -148,7 +153,16 @@ function capture(stream: MediaStream, types: readonly string[], bitrates: MediaR
           release();
           if (ms < MIN_VOICE_MS || chunks.length === 0) return resolve(null);
           const mime = (recorder.mimeType || type || (stream.getVideoTracks().length ? 'video/webm' : 'audio/webm')).split(';')[0]!.trim();
-          void new Blob(chunks, { type: mime }).arrayBuffer().then((buffer) => resolve({ file: new Uint8Array(buffer), type: mime, ms }), reject);
+          void new Blob(chunks, { type: mime })
+            .arrayBuffer()
+            .then((buffer) => {
+              const file = new Uint8Array(buffer);
+              // An MP4 loses the device's clock and the browser's handler and
+              // encoder names; anything else (WebM, Ogg) is left as it is.
+              stripVideoMetadata(file);
+              return { file, type: mime, ms };
+            })
+            .then(resolve, reject);
         };
         if (recorder.state === 'inactive') recorder.onstop(new Event('stop'));
         else recorder.stop();
@@ -407,7 +421,6 @@ export async function startRound(): Promise<RoundRecorder> {
       }
       const result = await recorded.stop();
       if (!result) return null;
-      if (result.type === 'video/mp4') stripVideoMetadata(result.file);
       const side = canvas && context ? ROUND_SIDE : Math.min(video.videoWidth, video.videoHeight) || ROUND_SIDE;
       return { file: result.file, type: result.type, length: seconds(result.ms), side, ...(tiny.p ? { preview: tiny.p } : {}) };
     },

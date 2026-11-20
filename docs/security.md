@@ -52,7 +52,7 @@ device.
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times), and except voice messages: the recording's own header still carries the device's clock, to the second (not fixed yet). |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times). |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
 
@@ -178,21 +178,26 @@ it. This is how close it gets.
     clock, what it sends next carries on from that time, a second apart, so
     as not to go back: for as long as its clock was ahead, a minute at
     most;
-  - voice messages: the recording's own header still carries the device's
-    clock, to the second (not fixed yet);
   - anyone still on a version before this one sends the device's clock, to
     the millisecond.
-- **File names and the kind of device, to other users.** A file, an audio
-  file sent as music, or a video the app can't open goes with its own name.
-  Phones often name photos, screenshots and recordings with their brand,
-  the moment they were taken (to the second, some to the millisecond), or
-  a counter that grows with each photo (`IMG_4821`), so close numbers or
-  times in two chats can point to one phone. And attachments can show what
-  kind of device sent them, the same in every conversation: a video keeps
-  its file type (an iPhone's is `video/quicktime`) and its encoder's names
-  and settings; photos, previews and recordings are made by the app's web
-  view, whose output differs between iPhones, Android and computers; and a
-  photo keeps its camera's proportions.
+- **File names and the kind of device, to other users.** Phones often name
+  photos, screenshots and recordings with their brand, the moment they were
+  taken (to the second, some to the millisecond), or a counter that grows
+  with each photo (`IMG_4821`), so close numbers or times in two chats can
+  point to one phone. So photos, videos and GIFs go without their names; a
+  video the app can't open goes as a file named only for its type
+  (`video.mov`), and so does a photo or video picked from the gallery that
+  the app can't show. A file, an audio file sent as music, and a photo or
+  video the sender chose to send "as a file" go with their own names. And
+  attachments can show what kind of device sent them, the same in every
+  conversation: a video keeps its file type (an iPhone's is
+  `video/quicktime`), its brands and its encoder's settings (the names its
+  recorder gives the tracks and the encoder are blanked, but some encoders
+  also name themselves inside the picture data); photos, previews and
+  recordings are made by the app's web view, whose output differs between
+  iPhones, Android and computers (a voice or video message's format alone
+  tells the browser: MP4 from Chrome and Safari, WebM from Firefox, which
+  names its muxer); and a photo keeps its camera's proportions.
 - **Not to other users: whether someone's app is open, or whether a mailbox
   still exists.** A send is answered after the same steps whatever the
   mailbox. Pushing to the recipient's open apps (and the notice, if none is
@@ -329,13 +334,16 @@ it. This is how close it gets.
   theirs. A video sent "as video" has the usual location, device and time
   tags removed: the MP4/QuickTime metadata boxes, XMP, the boxes Sony,
   Canon and Garmin cameras add, data some cameras leave in unused space
-  (`free` and `skip` boxes), and the recording times in its headers. Not
-  everything goes, though:
+  (`free` and `skip` boxes), the recording times in its headers, and the
+  names its recorder gives its tracks (`Core Media Video`) and encoder
+  (`HEVC`). Voice and video messages recorded as MP4 lose the same (the
+  browser writes its clock and names into them); WebM and Ogg ones have no
+  clock to lose. Not everything goes, though:
   - a GPS or other sensor track recorded alongside the picture, as action
     cameras, drones and dashcams often write;
   - a timecode track, which cameras often set to the time of day;
-  - other makers' own data the app doesn't know, and the names of the
-    encoder and handlers, which hint at the device;
+  - other makers' own data the app doesn't know, the file type and brands,
+    and the encoder's settings, which hint at the device;
   - data in unused space, in a fragmented recording (some dashcams and
     recording apps, and every MP4 a browser records) or in a video with
     part of a track the app can't read;

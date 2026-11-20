@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { toBase64Url } from '../crypto/encoding';
-import { preparePhoto } from './prepare';
+import { concat, toBase64Url } from '../crypto/encoding';
+import { neutralName, prepareAudio, prepareFile, prepareGif, preparePhoto, prepareVideo } from './prepare';
 
-// Tests run without a browser: the decoder (createImageBitmap) and the
-// canvas are stand-ins. The canvas "encodes" a JPEG made only of what was
-// drawn on it, so the file's own bytes can reach the output only if
-// preparePhoto passed them on.
+// Tests run without a browser: the decoder (createImageBitmap), the canvas
+// and the video and audio elements are stand-ins. The canvas "encodes" a
+// JPEG made only of what was drawn on it, so the file's own bytes can reach
+// the output only if preparePhoto passed them on.
 
 const encoder = new TextEncoder();
 
@@ -55,8 +55,51 @@ class FakeCanvas {
   }
 }
 
+/**
+ * A stand-in <video> or <audio>: given a source, it opens at once (or fails
+ * to, as for a format the browser can't play), and it seeks at once.
+ */
+class FakeMedia extends EventTarget {
+  videoWidth = 1920;
+  videoHeight = 1080;
+  duration = 3.4;
+  readyState = 4;
+  muted = false;
+  playsInline = false;
+  preload = '';
+  #src = '';
+
+  constructor(readonly opens: boolean) {
+    super();
+  }
+
+  get src() {
+    return this.#src;
+  }
+
+  set src(url: string) {
+    this.#src = url;
+    queueMicrotask(() => this.dispatchEvent(new Event(this.opens ? 'loadedmetadata' : 'error')));
+  }
+
+  get currentTime() {
+    return 0;
+  }
+
+  set currentTime(_seconds: number) {
+    queueMicrotask(() => this.dispatchEvent(new Event('seeked')));
+  }
+
+  removeAttribute() {}
+  load() {}
+  async play() {}
+  pause() {}
+}
+
 let canvases: FakeCanvas[];
 let failNext: boolean;
+/** Whether the video and audio elements open what they're given. */
+let mediaOpens: boolean;
 
 function bitmap(width: number, height: number) {
   return { width, height, close: vi.fn() };
@@ -65,9 +108,11 @@ function bitmap(width: number, height: number) {
 beforeEach(() => {
   canvases = [];
   failNext = false;
-  vi.stubGlobal('HTMLVideoElement', class {});
+  mediaOpens = true;
+  vi.stubGlobal('HTMLVideoElement', FakeMedia);
   vi.stubGlobal('document', {
     createElement(tag: string) {
+      if (tag === 'video' || tag === 'audio') return new FakeMedia(mediaOpens);
       if (tag !== 'canvas') throw new Error(`created a ${tag}`);
       const canvas = new FakeCanvas();
       canvas.fails = failNext;
@@ -141,5 +186,67 @@ describe('preparePhoto', () => {
 
     await expect(preparePhoto(new Blob([original], { type: 'image/jpeg' }))).rejects.toThrow('encode');
     expect(image.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe('names', () => {
+  const types = (bytes: Uint8Array) => new TextDecoder('latin1').decode(bytes);
+  /** As phones name what they take: the moment (to the millisecond), or a counter that grows with each photo. */
+  const named = (name: string, type: string, bytes: Uint8Array<ArrayBuffer> = original) => new File([bytes], name, { type });
+  function box(type: string, ...children: Uint8Array[]): Uint8Array<ArrayBuffer> {
+    const body = concat(...children);
+    const out = new Uint8Array(8 + body.length);
+    new DataView(out.buffer).setUint32(0, out.length);
+    out.set(encoder.encode(type), 4);
+    out.set(body, 8);
+    return out;
+  }
+  /** An iPhone's movie, as far as it matters here: its video track's handler names the phone's media framework. */
+  const movie = concat(
+    box('ftyp', encoder.encode('qt  ')),
+    box('moov', box('trak', box('mdia', box('hdlr', new Uint8Array(8), encoder.encode('vide'), new Uint8Array(12), encoder.encode('Core Media Video'))))),
+    box('mdat', encoder.encode('frames')),
+  );
+
+  it('sends photos, videos and GIFs without their own names', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap(4000, 3000)));
+    const photo = await preparePhoto(named('PXL_20261119_103512123.jpg', 'image/jpeg'));
+    const gif = await prepareGif(named('Screenshot_20261119-103512_Chrome.gif', 'image/gif'));
+    const video = await prepareVideo(named('IMG_4821.MOV', 'video/quicktime', movie));
+    for (const out of [photo, gif, video]) expect(out.media.n).toBeUndefined();
+    expect(photo.media.t).toBe('photo');
+    expect(gif.media.t).toBe('gif');
+    expect(video.media).toMatchObject({ t: 'video', s: movie.length, m: 'video/quicktime', w: 1920, h: 1080, l: 3 });
+    // Nor the name of the phone's media framework, inside the video.
+    expect(types(video.file)).not.toContain('Core Media');
+    expect(types(video.file)).toContain('frames');
+  });
+
+  it('sends a video it can not open as a file named only for what it is', async () => {
+    mediaOpens = false;
+    const out = await prepareVideo(named('IMG_4821.MOV', 'video/quicktime', movie));
+    expect(out.media).toEqual({ t: 'file', s: movie.length, n: 'video.mov', m: 'video/quicktime' });
+    // As a file: untouched.
+    expect(out.file).toEqual(movie);
+  });
+
+  it('keeps the names of files and music, which the sender chose or sees', async () => {
+    expect((await prepareFile(named('IMG_4821.JPG', 'image/jpeg'))).media).toMatchObject({ t: 'file', n: 'IMG_4821.JPG' });
+    expect((await prepareAudio(named('Song of the day.mp3', 'audio/mpeg'))).media).toMatchObject({ t: 'audio', n: 'Song of the day.mp3', l: 3 });
+    // Music this browser can't play goes as a file, under its name too.
+    mediaOpens = false;
+    expect((await prepareAudio(named('Song of the day.flac', 'audio/flac'))).media).toMatchObject({ t: 'file', n: 'Song of the day.flac' });
+  });
+});
+
+describe('neutralName', () => {
+  it('names a photo or video by its kind, keeping only the extension', () => {
+    const name = (name: string, type: string) => neutralName(new File([], name, { type }));
+    expect(name('IMG_4821.MOV', 'video/quicktime')).toBe('video.mov');
+    expect(name('PXL_20261119_103512123.heic', 'image/heic')).toBe('photo.heic');
+    expect(name('VID_20261119_103512.3gp', 'video/3gpp')).toBe('video.3gp');
+    expect(name('Screenshot 2026-11-19 at 10.35.12', 'image/png')).toBe('photo');
+    expect(name('IMG_4821', '')).toBe('file');
+    expect(name('scan.tiff', 'image/tiff')).toBe('photo.tiff');
   });
 });
