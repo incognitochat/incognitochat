@@ -41,7 +41,7 @@ describe('i18n', () => {
     expect(t('en', 'errorLinkBusy', { time: '3:30 PM' })).toBe('Too many messages through this link right now. Try again at 3:30 PM.');
     expect(t('fa', 'errorLinkBusy', { time: '۱۵:۳۰' })).toBe('فعلاً پیام زیادی از طریق این لینک فرستاده شده است. از ساعت ۱۵:۳۰ دوباره امتحان کنید.');
     expect(t('en', 'errorDownloadLimit', { time: '3:30 AM' })).toBe('This file has been downloaded too many times today. Try again at 3:30 AM.');
-    expect(t('fa', 'errorDownloadLimit', { time: '۳:۳۰' })).toBe('این فایل امروز دفعات زیادی دریافت شده است. از ساعت ۳:۳۰ دوباره امتحان کنید.');
+    expect(t('fa', 'errorDownloadLimit', { time: '۳:۳۰' })).toBe('این فایل امروز به سقف دفعات دریافت رسیده است. از ساعت ۳:۳۰ دوباره امتحان کنید.');
     // A time of day, in the reader's numerals.
     expect(clockTime('fa', at)).toMatch(/^[۰-۹]{1,2}:[۰-۹]{2}/);
     expect(clockTime('en', at)).toMatch(/^\d{1,2}:\d{2}/);

@@ -175,6 +175,17 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 	if err := notify.NoticeSent(ctx, a.ID, 77); err != nil {
 		t.Fatal(err)
 	}
+	// A chat ID that no longer opens turns them off, but not as a refusal.
+	if err := notify.NoticesStale(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := notify.Notices(ctx, a.ID); err != nil || n.LastMessage != 77 || !n.Off {
+		t.Fatalf("after NoticesStale: %+v, %v", n, err)
+	}
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices || d.NoticesRefused || !d.NoticesLeft {
+		t.Fatalf("device read after NoticesStale: %+v, %v", d, err)
+	}
+	// Telegram refusing one does.
 	if err := notify.NoticesOff(ctx, a.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +193,15 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 		t.Fatalf("after writing: %+v, %v", n, err)
 	}
 	// The account item's other attributes are still there.
-	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices {
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices || !d.NoticesRefused {
 		t.Fatalf("device read: %+v, %v", d, err)
+	}
+	// Set up again, they're neither off nor refused.
+	if err := s.SetNotices(ctx, a.ID, []byte("sealed2"), "fa"); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || !d.Notices || d.NoticesRefused || d.NoticesLeft {
+		t.Fatalf("device read after setting up again: %+v, %v", d, err)
 	}
 
 	gone := ids.New()
@@ -194,6 +212,9 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := notify.NoticesOff(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.NoticesStale(ctx, gone); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(gone), skAccount)}); err != nil || out.Item != nil {

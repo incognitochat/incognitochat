@@ -50,6 +50,8 @@ async function backend() {
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
   const noticesOn = new Set<string>();
+  // Accounts whose notices Telegram refused (the user blocked the bot), not set up since.
+  const noticesRefused = new Set<string>();
 
   const api: Api = {
     post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
@@ -64,10 +66,13 @@ async function backend() {
         return check(token(a));
       }
       if (path === '/session') return check(token(body.account as string));
-      if (path === '/account') return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account) });
+      if (path === '/account') {
+        return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account), noticesRefused: noticesRefused.has(account) });
+      }
       if (path === '/notices') {
         noticeSetups.push(body.initData as string);
         noticesOn.add(account);
+        noticesRefused.delete(account);
         return check({});
       }
       if (path === '/invitations') {
@@ -130,7 +135,12 @@ async function backend() {
       throw new ApiError(404, 'not_found');
     },
   };
-  return { api, issuer, state, noticeSetups, sends, mediaCalls };
+  /** Telegram refuses a notice to an account (its user blocked the bot): notify turns them off, as refused. */
+  const refuseNotices = (account: string) => {
+    noticesOn.delete(account);
+    noticesRefused.add(account);
+  };
+  return { api, issuer, state, noticeSetups, sends, mediaCalls, refuseNotices };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
@@ -318,6 +328,50 @@ describe('conversations in the app', () => {
     for (let i = 0; i < 20 && b.noticeSetups.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
     expect(b.noticeSetups).toHaveLength(1);
     expect(screenOf(app.screen.value, 'home').askNotices).toBe(false);
+  });
+
+  it("doesn't set notices up again by itself once Telegram refused one, only on the user's tap", async () => {
+    const b = await backend();
+    const db = await openDatabase(`conv-test-${n++}`);
+    const handlers: Record<string, (data: unknown) => void> = {};
+    const posted: string[] = [];
+    const tg: Bridge = {
+      transport: 'webview-proxy',
+      post: (type: string) => void posted.push(type),
+      on: (type: string, handler: (data: never) => void) => {
+        handlers[type] = handler as (data: unknown) => void;
+        return () => {};
+      },
+    } as Bridge;
+    const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+    // Set up, with the bot allowed to write: notices are set up by themselves, as at first.
+    await createApp({ ...deps, launch: launchWith('') }).setUp();
+    const code = 'reg' + (await readAccount(db))!.fingerprint;
+    await createApp({ ...deps, launch: launchWith(code) }).start();
+    expect(b.noticeSetups).toHaveLength(1);
+
+    // The user blocks the bot, and the next notice is refused. Telegram's
+    // launch data may still say the bot may write: a plain launch only offers.
+    const record = await readAccount(db);
+    if (!record || !('accountId' in record)) throw new Error('not set up');
+    b.refuseNotices(record.accountId);
+    const app = createApp({ ...deps, launch: launchWith('') });
+    await app.start();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(b.noticeSetups).toHaveLength(1);
+    expect(screenOf(app.screen.value, 'home')).toMatchObject({ askNotices: true, account: { notices: false, noticesRefused: true } });
+    await app.home();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(b.noticeSetups).toHaveLength(1);
+
+    // The user taps Turn on notices: Telegram is asked, and once it allows, they're set up.
+    const asked = posted.length;
+    app.allowNotices();
+    expect(posted.slice(asked)).toEqual(['web_app_request_write_access']);
+    handlers.write_access_requested!({ status: 'allowed' });
+    for (let i = 0; i < 20 && b.noticeSetups.length === 1; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(b.noticeSetups).toHaveLength(2);
+    expect(screenOf(app.screen.value, 'home')).toMatchObject({ askNotices: false, account: { notices: true, noticesRefused: false } });
   });
 
   it('deletes a conversation from the list, and brings it back when they write again', async () => {

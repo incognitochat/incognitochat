@@ -123,6 +123,12 @@ export interface AccountInfo {
   links: number;
   /** Whether Telegram notices are set up and not turned off. */
   notices: boolean;
+  /**
+   * They're off because Telegram refused one (the user blocked the bot,
+   * say): the app doesn't set them up again by itself, only on the user's
+   * tap. False from a server that doesn't say.
+   */
+  noticesRefused: boolean;
   /** The account is being deleted (the app carries on only with a deletion confirmed on this device; otherwise it keeps the chats, read-only). */
   deleting: boolean;
   /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
@@ -131,7 +137,7 @@ export interface AccountInfo {
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, notices, deleting, cleanup } = v;
+  const { canCreateLinks, admin, links, notices, noticesRefused, deleting, cleanup } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
   if (!Number.isSafeInteger(links)) throw new Error('bad account');
   return {
@@ -139,6 +145,7 @@ export function checkAccountInfo(value: unknown): AccountInfo {
     admin,
     links: links as number,
     notices: notices === true,
+    noticesRefused: noticesRefused === true,
     deleting: deleting === true,
     cleanup: cleanup === true,
   };

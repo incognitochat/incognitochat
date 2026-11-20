@@ -822,14 +822,19 @@ about $2 a month per environment, at most about $6.50.
    | stats sum(`routes.post_register_200`) as registrations,
            sum(`routes.post_tokens_200`) as send_batches,
            sum(`routes.post_send_200`) as sends,
-           sum(`errors.rate_limited`) as limited
+           sum(`errors.rate_limited`) as rate_limited,
+           sum(`errors.daily_limit`) as daily_limit,
+           sum(`errors.link_busy`) as link_busy,
+           sum(`errors.download_limit`) as download_limit
      by bin(1h)
    ```
 
    `bin(1h)` goes by `@timestamp`, when each line was written, not by the
    minute in its `time`, so a few counts can land in the next hour. Or read
    the lines of the minutes that matter (`filter msg = "request counts" and
-   errors.rate_limited > 0`): `routes` shows where.
+   (errors.rate_limited > 0 or errors.daily_limit > 0 or errors.link_busy > 0
+   or errors.download_limit > 0)`): `routes` shows where. The four codes are
+   every `429` the `api` answers, which `Limited` adds up.
 2. `registrations`, `token-requests`: real growth (a post that shares the
    bot, say) comes with more of everything, sends and inbox fetches
    included. A campaign of many accounts, each within its own limits, shows

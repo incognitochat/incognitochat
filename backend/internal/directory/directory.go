@@ -176,6 +176,9 @@ type Device struct {
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
 	Notices      bool   // Telegram notices are set up and not turned off
+	// NoticesRefused: notices are off because Telegram refused one (the
+	// user blocked the bot, say), not set up again since.
+	NoticesRefused bool
 	// NoticesLeft: notices are off, but what they need (the sealed chat
 	// ID, the language or the last notice's ID) is still stored, for
 	// ForgetNotices.
@@ -538,9 +541,10 @@ func (s *Store) expireDevices(ctx context.Context, accountID string, marker map[
 	return s.batchWrite(ctx, requests)
 }
 
-// MarkDeleting marks an account as being deleted (dl), deletes its link
-// (its bundle then answers "not found") and turns the items of the signing
-// keys it has into tombstones (endKeys), in one transaction of a few
+// MarkDeleting marks an account as being deleted (dl), ends its link,
+// leaving the ID's tombstone (endLinks: its bundle then answers "not
+// found"), and turns the items of the signing keys it has into tombstones
+// (endKeys), in one transaction of a few
 // writes: the first thing DELETE /account does. From then on nothing is
 // delivered to it (Recipients), its invitation codes stop working
 // (Redeem), nothing new joins its partition (live), and it takes no request
@@ -968,18 +972,19 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 	_, off := acct["no"]
 	_, deleting := acct["dl"]
 	return Device{
-		Key:          k,
-		Replaced:     g == goneReplaced,
-		TelegramHash: th,
-		Member:       member,
-		Level:        int(num(acct, "lv")),
-		Granted:      int(num(acct, "ig")),
-		Allocated:    int(num(acct, "ia")),
-		Links:        int(num(acct, "lc")),
-		Notices:      chat && !off,
-		NoticesLeft:  off && (chat || language || last),
-		Deleting:     deleting,
-		Leftovers:    stringSet(acct, "ro"),
+		Key:            k,
+		Replaced:       g == goneReplaced,
+		TelegramHash:   th,
+		Member:         member,
+		Level:          int(num(acct, "lv")),
+		Granted:        int(num(acct, "ig")),
+		Allocated:      int(num(acct, "ia")),
+		Links:          int(num(acct, "lc")),
+		Notices:        chat && !off,
+		NoticesRefused: num(acct, "no") == noticesRefused,
+		NoticesLeft:    off && (chat || language || last),
+		Deleting:       deleting,
+		Leftovers:      stringSet(acct, "ro"),
 	}, nil
 }
 
@@ -1151,16 +1156,26 @@ func roundUp(t time.Time) int64 {
 // Notices are the Telegram "New message" notices (docs/protocol.md, Notices).
 // The account item keeps the chat ID sealed by the notify function (cid),
 // which nobody else can read; the language for the notice (lg); the last
-// notice's message ID, to delete it when a new one is sent (nm); and whether
-// Telegram refused the last notice, meaning notices are off for this user
-// (no). cid, lg and nm are kept only while notices are on: once they are
-// off, the api removes them (ForgetNotices) the next time the app asks
-// about the account, and turning notices on again stores cid and lg anew.
+// notice's message ID, to delete it when a new one is sent (nm); and, once
+// notices are off, why (no): Telegram refused one (noticesRefused: the user
+// blocked the bot, say), or the sealed chat ID no longer opens
+// (noticesStale: the chat key was replaced). After a refusal the app offers
+// to set notices up again rather than doing it by itself, so a block holds;
+// after a new chat key it sets them up by itself, as at first. cid, lg and
+// nm are kept only while notices are on: once they are off, the api removes
+// them (ForgetNotices) the next time the app asks about the account, and
+// setting notices up again stores cid and lg anew.
 //
 // The notify function may touch nothing else (infra/functions.tf): it reads
 // cid, lg, nm and no, naming them, and writes nm and no, with conditions on
-// the key alone and nothing returned. Notices, NoticeSent and NoticesOff are
-// its calls, and must stay within that.
+// the key alone and nothing returned. Notices, NoticeSent, NoticesOff and
+// NoticesStale are its calls, and must stay within that.
+
+// Why notices are off (no).
+const (
+	noticesRefused = 1
+	noticesStale   = 2
+)
 
 // NoticeTarget is what the notify function needs about an account.
 type NoticeTarget struct {
@@ -1229,16 +1244,29 @@ func (s *Store) NoticeSent(ctx context.Context, accountID string, messageID int6
 }
 
 // NoticesOff records that Telegram refused a notice (the user blocked the
-// bot or never let it write), so none are tried until the app turns them on
-// again. Like NoticeSent, it writes nothing for an account that is gone.
+// bot or never let it write), so none are tried until the user turns them
+// on again in the app. Like NoticeSent, it writes nothing for an account
+// that is gone.
 func (s *Store) NoticesOff(ctx context.Context, accountID string) error {
+	return s.noticesOff(ctx, accountID, noticesRefused)
+}
+
+// NoticesStale records that an account's sealed chat ID no longer opens
+// (sealed under a chat key since replaced), so none are tried until the
+// app sets them up again, which it does by itself. Like NoticesOff, it
+// writes nothing for an account that is gone.
+func (s *Store) NoticesStale(ctx context.Context, accountID string) error {
+	return s.noticesOff(ctx, accountID, noticesStale)
+}
+
+func (s *Store) noticesOff(ctx context.Context, accountID string, why int64) error {
 	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
-		UpdateExpression:          aws.String("SET #no = :one"),
+		UpdateExpression:          aws.String("SET #no = :why"),
 		ConditionExpression:       aws.String("attribute_exists(pk)"),
 		ExpressionAttributeNames:  map[string]string{"#no": "no"},
-		ExpressionAttributeValues: attrs{":one": nv(1)},
+		ExpressionAttributeValues: attrs{":why": nv(why)},
 	})
 	var failed *types.ConditionalCheckFailedException
 	if errors.As(err, &failed) {

@@ -494,7 +494,9 @@ export function createApp(deps: Deps) {
   // Telegram notices (docs/protocol.md, Notices) are set up with this launch's
   // signed data, and only from a plain or registration launch: never one that
   // names a link or an invitation, which would tell the server whose link this
-  // is.
+  // is. By themselves only while Telegram never refused one: once it did (the
+  // user blocked the bot, say), the launch data may still say the bot may
+  // write, so the app only offers to (askNotices), and sets them up on a tap.
   const signedStart = new URLSearchParams(deps.launch.initData).get('start_param') ?? '';
   const noticeLaunch = deps.launch.initData !== '' && (signedStart === '' || isRegistrationLaunch(signedStart));
   let writeAllowed = deps.launch.allowsWriteToPm;
@@ -1919,18 +1921,23 @@ export function createApp(deps: Deps) {
       links,
       busy: false,
       notice: withNewKey(options.notice ?? null, await newKeyToTell(db)),
-      askNotices: noticeLaunch && !!account && !account.notices && !writeAllowed,
+      // Offered while the bot may not write yet, and after Telegram refused
+      // a notice: then only the user's tap sets them up again.
+      askNotices: noticeLaunch && !!account && !account.notices && (!writeAllowed || account.noticesRefused),
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
       deletionPaused,
     };
     if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
-    if (account && !account.notices && writeAllowed && !noticesTried) void setUpNotices();
+    // By itself only if Telegram never refused one (never set up, or a new
+    // chat key): a block holds until the user taps Turn on notices.
+    if (account && !account.notices && !account.noticesRefused && writeAllowed && !noticesTried) void setUpNotices();
   }
 
   /**
    * Turns on Telegram notices for this account. Failures are left alone:
-   * a later launch tries again while the account says they're off.
+   * while the account says they're off, a later launch tries again, or,
+   * after a refusal, offers to again.
    */
   async function setUpNotices(): Promise<void> {
     if (!noticeLaunch || !session) return;
@@ -1942,7 +1949,7 @@ export function createApp(deps: Deps) {
     }
     const current = screen.value;
     if (current.kind === 'home' && current.account) {
-      screen.value = { ...current, account: { ...current.account, notices: true }, askNotices: false };
+      screen.value = { ...current, account: { ...current.account, notices: true, noticesRefused: false }, askNotices: false };
     }
   }
 

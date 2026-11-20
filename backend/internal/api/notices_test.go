@@ -112,9 +112,11 @@ func TestSetNoticesRejects(t *testing.T) {
 
 // On the real tables (PRV-5): what notices need is kept only while they're
 // on. Once Telegram refused one and notify marked them off, the next
-// GET /account says they're off and removes the sealed chat ID, the
-// language and the last notice's ID; the app then sets them up again
-// (POST /notices), which stores them anew, as at first.
+// GET /account says they're off, and refused, and removes the sealed chat
+// ID, the language and the last notice's ID. Set up again (POST /notices,
+// after the user's tap), they're stored anew, as at first. Off because the
+// chat ID no longer opens (a new chat key), they're forgotten the same
+// way, but not refused: the app sets them up again by itself.
 func TestAccountForgetsNoticesOnceOff(t *testing.T) {
 	client := dynamotest.Client(t)
 	store := &directory.Store{DB: client, Table: dynamotest.Table(t, client)}
@@ -132,13 +134,23 @@ func TestAccountForgetsNoticesOnceOff(t *testing.T) {
 			t.Fatalf("notices: %d %v", status, out)
 		}
 	}
-	noticesOn := func() bool {
+	// notices is what GET /account says: "on", "off", or "refused".
+	notices := func() string {
 		t.Helper()
 		status, out := h.as(t, m, http.MethodGet, "/account", nil, false)
 		if status != http.StatusOK {
 			t.Fatalf("account: %d %v", status, out)
 		}
-		return out["notices"] == true
+		switch {
+		case out["notices"] == true && out["noticesRefused"] == false:
+			return "on"
+		case out["notices"] == false && out["noticesRefused"] == false:
+			return "off"
+		case out["notices"] == false && out["noticesRefused"] == true:
+			return "refused"
+		}
+		t.Fatalf("account: %v", out)
+		return ""
 	}
 	stored := func() []string {
 		t.Helper()
@@ -159,32 +171,44 @@ func TestAccountForgetsNoticesOnceOff(t *testing.T) {
 		return have
 	}
 
+	if got := notices(); got != "off" {
+		t.Fatalf("before setting up: %s", got)
+	}
 	turnOn()
 	if err := store.NoticeSent(ctx, m.d.account, 42); err != nil {
 		t.Fatal(err)
 	}
-	if !noticesOn() || !slices.Equal(stored(), []string{"cid", "lg", "nm"}) {
-		t.Fatalf("on: %v", stored())
+	if got := notices(); got != "on" || !slices.Equal(stored(), []string{"cid", "lg", "nm"}) {
+		t.Fatalf("on: %s %v", got, stored())
 	}
 	// Telegram refuses a notice (the user blocked the bot): notify marks
 	// them off, and may write nothing else.
 	if err := store.NoticesOff(ctx, m.d.account); err != nil {
 		t.Fatal(err)
 	}
-	if noticesOn() || !slices.Equal(stored(), []string{"no"}) {
-		t.Fatalf("off, after GET /account: %v", stored())
+	if got := notices(); got != "refused" || !slices.Equal(stored(), []string{"no"}) {
+		t.Fatalf("refused, after GET /account: %s %v", got, stored())
 	}
 	if _, err := store.Notices(ctx, m.d.account); !errors.Is(err, directory.ErrNotFound) {
 		t.Fatalf("notify still finds a chat: %v", err)
 	}
-	// The app sets them up again, as it does whenever the account says
-	// they're off: as at first.
+	// Still refused at the next look, until they're set up again.
+	if got := notices(); got != "refused" {
+		t.Fatalf("refused, later: %s", got)
+	}
 	turnOn()
-	if !noticesOn() || !slices.Equal(stored(), []string{"cid", "lg"}) {
-		t.Fatalf("on again: %v", stored())
+	if got := notices(); got != "on" || !slices.Equal(stored(), []string{"cid", "lg"}) {
+		t.Fatalf("on again: %s %v", got, stored())
 	}
 	if n, err := store.Notices(ctx, m.d.account); err != nil || string(n.SealedChat) != "sealed:"+strconv.FormatInt(userID, 10) || n.Language != "fa" || n.Off {
 		t.Fatalf("on again: %+v, %v", n, err)
+	}
+	// A chat ID that no longer opens: forgotten too, but not refused.
+	if err := store.NoticesStale(ctx, m.d.account); err != nil {
+		t.Fatal(err)
+	}
+	if got := notices(); got != "off" || !slices.Equal(stored(), []string{"no"}) {
+		t.Fatalf("stale, after GET /account: %s %v", got, stored())
 	}
 }
 

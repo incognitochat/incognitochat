@@ -56,6 +56,10 @@ type accountResponse struct {
 	MaxLinks       int  `json:"maxLinks"`
 	// Notices says whether Telegram notices are set up and not turned off.
 	Notices bool `json:"notices"`
+	// NoticesRefused says they're off because Telegram refused one (the
+	// user blocked the bot, say): the app doesn't set them up again by
+	// itself, but offers to.
+	NoticesRefused bool `json:"noticesRefused"`
 	// Deleting says the account is being deleted (DELETE /account has
 	// started): the app carries on with it.
 	Deleting bool `json:"deleting"`
@@ -84,6 +88,7 @@ func (s *Server) account(ctx context.Context, _ httpapi.Request, c caller) httpa
 		Links:          c.device.Links,
 		MaxLinks:       links.MaxActive,
 		Notices:        c.device.Notices,
+		NoticesRefused: c.device.NoticesRefused,
 		Deleting:       c.device.Deleting,
 		Cleanup:        len(c.device.Leftovers) > 0,
 	})

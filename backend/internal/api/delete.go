@@ -32,15 +32,15 @@ const DeleteStep = 50
 // account itself, and the Telegram item, so the same Telegram user can set
 // up again (DELETE /account, signed). Nothing is kept, not even a marker,
 // but the tombstones of its link IDs and link signing keys, which name
-// nobody (directory). Short-lived records (rate counters, socket records) expire on their own
-// within a day.
+// nobody (directory). Short-lived records (rate counters, socket records)
+// expire on their own within a day.
 //
 // It works in steps: while more is left, it answers 409 in_progress and the
 // app repeats the request; the last step answers 200. The first step marks
-// the account as being deleted and deletes its link
-// (directory.Store.MarkDeleting), in one transaction, so from then on
-// nothing is delivered to it, its codes stop working, and it takes no
-// request but GET /account, which says so, and this one: the app carries on
+// the account as being deleted and ends its link, leaving the ID's
+// tombstone (directory.Store.MarkDeleting), in one transaction, so from
+// then on nothing is delivered to it, its codes stop working, and it takes
+// no request but GET /account, which says so, and this one: the app carries on
 // at its next launch, and the account is never left in use with part of it
 // gone. What is left of accounts it replaced goes next, since deleting its
 // item would forget them; then the rest of what it owns; the account and

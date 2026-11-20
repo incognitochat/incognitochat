@@ -676,7 +676,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 	return directory.Device{
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
-		Notices: a.chat != nil && !a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
+		Notices: a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
 		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
 	}, nil
 }

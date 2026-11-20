@@ -305,7 +305,9 @@ account), the server keeps its ID, with nothing else, for good: a new link
 with that ID is refused (`409 conflict`, as for an ID in use), and
 `GET /links/{id}` answers `404 not_found`, as for one that never existed. So
 nobody can put their own keys up under an old link's ID, and whoever opens
-the old link is told it's gone, not that its keys don't match it.
+the old link is told it's gone, not that its keys don't match it. This holds
+only for links that went once the server kept their IDs: those that went
+before were deleted outright, so their IDs can still be taken.
 The new link has a new ID and new encryption keys but the **same signing
 key**, so its fingerprint stays the same. Sender tags are made from that
 fingerprint, so the same people keep the same tags across replacements, which
@@ -1230,19 +1232,27 @@ deploy sets the bot up (its webhook, menu button and command).
   invitation, and only for the account's own Telegram user. It keeps the chat
   ID sealed (AES-256-GCM under a key only `notify` has) and the notice
   language, nothing else. The bot needs permission to write first; the app
-  asks Telegram for it. `GET /account` says whether notices are on, and the
-  app sets them up again when they're off.
+  asks Telegram for it. `GET /account` says whether notices are on
+  (`notices`), and whether they're off because Telegram refused one
+  (`noticesRefused`). When they're off, the app sets them up again by itself
+  only if none was refused (never set up, or the chat key was replaced):
+  after a refusal, Telegram's launch data may still say the bot may write,
+  so the app only offers to (Turn on notices), and sets them up when the
+  user taps it.
 - After each delivery that isn't `quiet` and that no open app took (Delivery,
   Push), `ws` asks `notify` to send the owner a notice, without waiting.
   `notify` sends at most one every 3 minutes per account (its quiet period is
   stored under a keyed hash of the account, with a key derived from the chat
   key), and deletes the previous one, so the chat holds one notice at most,
-  besides older ones Telegram no longer let it delete (below).
+  besides older ones Telegram no longer let it delete (below) and, after
+  notices were off and set up again, the last one from before.
   If Telegram refuses (the bot is blocked), notices turn off: `notify` marks
-  them off, and the next `GET /account` removes the sealed chat ID, the
-  language and the last notice's message ID (`notify` may write only the
-  mark and that ID), so they're kept only while notices are on. Setting
-  notices up again stores them anew.
+  them refused. If the sealed chat ID doesn't open (the chat key was
+  replaced), it marks them off, not refused. Either way, the next
+  `GET /account` removes the sealed chat ID, the language and the last
+  notice's message ID (`notify` may write only the mark and that ID), so
+  they're kept only while notices are on. Setting notices up again stores
+  them anew.
 - In order: `notify` reads the account's notice settings, then starts its
   quiet period for 30 seconds (rounded up to the minute), longer than it
   can run, with a conditional write, so of two deliveries at once only one
