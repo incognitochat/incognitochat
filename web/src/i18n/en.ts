@@ -1,3 +1,5 @@
+import type { Text } from './index';
+
 export const en = {
   appName: 'Incognito Chat',
   languageName: 'English',
@@ -49,7 +51,7 @@ export const en = {
   noticeRateLimited: 'Too many tries. Try again tomorrow.',
 
   invitationsTitle: 'Invitations',
-  invitationsRemaining: 'You can invite {count} more people.',
+  invitationsRemaining: { one: 'You can invite {count} more person.', other: 'You can invite {count} more people.' },
   invitationsUnlimited: 'You can invite as many people as you like.',
   invitationsNone: "You don't have invitations to give right now.",
   invitationUses: 'How many people this code can invite',
@@ -211,7 +213,7 @@ export const en = {
   errorMediaPaused: 'Attachments are paused for now; try again later.',
   errorOutdated: 'This version of the app is out of date. Close it and open it again to send.',
   seen: 'Seen',
-  newMessages: '{count} new messages',
+  newMessages: { one: '{count} new message', other: '{count} new messages' },
   toLatest: 'Go to the latest message',
   earlierMessages: 'Earlier messages',
   sent: 'Sent',
@@ -253,6 +255,8 @@ export const en = {
   autoPhotos: 'Photos',
   autoVoice: 'Voice and video messages',
   autoGifs: 'GIFs',
+  languageTitle: 'Language',
+  languageTelegram: 'Same as Telegram',
   storageChats: 'Media by chat',
   noStoredMedia: 'No media on this device.',
   clearMedia: 'Clear',
@@ -338,6 +342,6 @@ export const en = {
   storageNewer: 'A newer version of this app has been used on this device. Reload to continue.',
   storageBlocked: 'If this app is also open somewhere else, close it there to continue.',
   reload: 'Reload',
-} as const;
+} as const satisfies Record<string, Text>;
 
 export type Key = keyof typeof en;

@@ -1,12 +1,63 @@
 import { describe, expect, it } from 'vitest';
-import { en } from './en';
+import { en, type Key } from './en';
 import { fa } from './fa';
-import { clockTime, DIRECTION, nextUtc, pickLanguage, relativeTime, t } from './index';
+import { clockTime, DIRECTION, nextUtc, pickLanguage, relativeTime, t, type Language, type Text } from './index';
+
+const STRINGS: Record<Language, Record<Key, Text>> = { en, fa };
+const KEYS = Object.keys(en) as Key[];
+
+/** Every form of a string: itself, or each of its plural forms. */
+const forms = (text: Text): string[] => (typeof text === 'string' ? [text] : Object.values(text));
+
+/** The {placeholders} in a string's forms, sorted. */
+const placeholders = (text: Text): string[] => [...new Set(forms(text).flatMap((f) => [...f.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!)))].sort();
 
 describe('i18n', () => {
-  it('has every string in both languages, none empty', () => {
+  it('has every string in both languages, none empty, with the same placeholders', () => {
     expect(Object.keys(fa).sort()).toEqual(Object.keys(en).sort());
-    for (const value of [...Object.values(en), ...Object.values(fa)]) expect(value.trim()).not.toBe('');
+    for (const language of ['en', 'fa'] as const) {
+      for (const key of KEYS) {
+        const text = STRINGS[language][key];
+        for (const f of forms(text)) expect(f.trim(), `${language} ${key}`).not.toBe('');
+        expect(placeholders(text), `${language} ${key}`).toEqual(placeholders(STRINGS.en[key]));
+        // Each form of a counted string says the same things.
+        for (const f of forms(text)) expect(placeholders(f), `${language} ${key}`).toEqual(placeholders(text));
+        if (typeof text !== 'string') expect(placeholders(text), `${language} ${key}`).toContain('count');
+      }
+    }
+  });
+
+  it('takes the form a count needs: English has one and other', () => {
+    expect([0, 1, 2, 5, 1000].map((count) => t('en', 'newMessages', { count }))).toEqual([
+      '0 new messages',
+      '1 new message',
+      '2 new messages',
+      '5 new messages',
+      '1,000 new messages',
+    ]);
+    expect(t('en', 'invitationsRemaining', { count: 1 })).toBe('You can invite 1 more person.');
+    expect(t('en', 'invitationsRemaining', { count: 2 })).toBe('You can invite 2 more people.');
+    // Without a count, the general form.
+    expect(t('en', 'newMessages')).toBe('{count} new messages');
+  });
+
+  it('keeps a noun after a number singular in Persian', () => {
+    expect([0, 1, 2, 1000].map((count) => t('fa', 'newMessages', { count }))).toEqual(['۰ پیام جدید', '۱ پیام جدید', '۲ پیام جدید', '۱٬۰۰۰ پیام جدید']);
+    expect(t('fa', 'invitationsRemaining', { count: 1 })).toBe('می‌توانید ۱ نفر دیگر را دعوت کنید.');
+    expect(t('fa', 'invitationsRemaining', { count: 3 })).toBe('می‌توانید ۳ نفر دیگر را دعوت کنید.');
+  });
+
+  it('fills every counted string, for any count, in both languages', () => {
+    const counted = KEYS.filter((key) => placeholders(en[key]).includes('count'));
+    expect(counted).toEqual(expect.arrayContaining(['newMessages', 'invitationsRemaining', 'unreadMessagesCount', 'messagesLeftToday', 'blockedCount']));
+    for (const language of ['en', 'fa'] as const) {
+      for (const key of counted) {
+        for (const count of [0, 1, 2, 3, 5, 11, 21, 101, 1000]) {
+          const values = Object.fromEntries(placeholders(en[key]).map((name) => [name, name === 'count' ? count : 'x']));
+          expect(t(language, key, values), `${language} ${key} ${count}`).not.toMatch(/[{}]/);
+        }
+      }
+    }
   });
 
   it('picks the first known language, defaulting to English', () => {

@@ -5,6 +5,7 @@ import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
 import { menuKeyDown, moveInMenu } from './a11y/keys';
 import { clockTime, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
+import { LANGUAGE_CHOICES, type LanguageSetting } from './state/language';
 import type { MessageView } from './messaging/store';
 import { canResend } from './messaging/engine';
 import type { KeepMedia, MediaSettings } from './messaging/settings';
@@ -139,10 +140,12 @@ function useBackCloses(open: boolean, close: () => void): void {
   useEffect(() => (open ? register(() => latest.current()) : undefined), [open]);
 }
 
-export function App({ app, language }: { app: AppState; language: Language }) {
+export function App({ app, setting }: { app: AppState; setting: LanguageSetting }) {
+  // A new choice redraws everything in it.
+  const language = setting.language.value;
   return (
     <BackStack.Provider value={app.onBack}>
-      <Screen app={app} language={language} />
+      <Screen app={app} language={language} setting={setting} />
       <DeleteDialog app={app} language={language} />
       {toast.value && (
         <p class="toast" role="status">
@@ -153,7 +156,7 @@ export function App({ app, language }: { app: AppState; language: Language }) {
   );
 }
 
-function Screen({ app, language }: { app: AppState; language: Language }) {
+function Screen({ app, language, setting }: { app: AppState; language: Language; setting: LanguageSetting }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const screen = app.screen.value;
 
@@ -233,7 +236,7 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
     case 'blocked':
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
-      return <Storage app={app} language={language} screen={screen} />;
+      return <Storage app={app} language={language} screen={screen} setting={setting} />;
     case 'usage':
       return <Usage language={language} screen={screen} />;
     case 'home':
@@ -1031,7 +1034,7 @@ function UsageRow({
 }
 
 /** Data and storage: what stays on this device, and what's fetched by itself. */
-function Storage({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }> }) {
+function Storage({ app, language, screen, setting }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }>; setting: LanguageSetting }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const { settings, usage, busy, cleared } = screen;
   const size = (bytes: number) => formatSize(language, bytes);
@@ -1069,6 +1072,16 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
           <label class="option" key={kind}>
             <input type="checkbox" checked={settings.auto[kind]} onChange={(e) => void app.setAutoDownload(kind, e.currentTarget.checked)} />
             {tr(AUTO_TEXT[kind])}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset class="settings">
+        <legend>{tr('languageTitle')}</legend>
+        {LANGUAGE_CHOICES.map((choice) => (
+          <label class="option" key={choice}>
+            <input type="radio" name="language" checked={setting.choice.value === choice} onChange={() => void setting.choose(choice)} />
+            {/* Each language named in itself. */}
+            {choice === 'telegram' ? tr('languageTelegram') : <bdi lang={choice}>{t(choice, 'languageName')}</bdi>}
           </label>
         ))}
       </fieldset>
