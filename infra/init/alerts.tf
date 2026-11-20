@@ -436,7 +436,7 @@ locals {
     limit-hits = {
       metric      = "Limited"
       threshold   = var.limit_hits_alarm
-      description = "The api function answered 429 (rate_limited or daily_limit) more than ${var.limit_hits_alarm} times in an hour."
+      description = "The api function answered 429 (a limit refused the request) more than ${var.limit_hits_alarm} times in an hour."
     }
     invalid-tokens = {
       metric      = "InvalidToken"

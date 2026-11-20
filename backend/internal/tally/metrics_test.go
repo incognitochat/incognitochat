@@ -75,8 +75,9 @@ func TestMetricFiltersReadNamesTheAPILogs(t *testing.T) {
 }
 
 // apiAnswers reads the api package's source for the error codes its
-// handlers write (httpapi.Error(status, "code"), or "error": "code" in a
-// JSON answer) and the statuses it names (http.StatusXxx).
+// handlers write (httpapi.Error(status, "code"), limitReached("code", now,
+// window), or "error": "code" in a JSON answer) and the statuses it names
+// (http.StatusXxx).
 func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
 	t.Helper()
 	byName := map[string]int{}
@@ -106,6 +107,11 @@ func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
 			case *ast.CallExpr:
 				if isSelector(n.Fun, "httpapi", "Error") && len(n.Args) == 2 {
 					if code, ok := stringLit(n.Args[1]); ok {
+						codes[code] = true
+					}
+				}
+				if fn, ok := n.Fun.(*ast.Ident); ok && fn.Name == "limitReached" && len(n.Args) == 3 {
+					if code, ok := stringLit(n.Args[0]); ok {
 						codes[code] = true
 					}
 				}

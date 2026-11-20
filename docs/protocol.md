@@ -300,6 +300,12 @@ An account has one link at a time (`POST /links`). Replacing it
 (`POST /links` with `replaces: <old ID>`) swaps the old link and its intro
 mailbox for the new one in one step: the old link stops working at once.
 Creating and replacing count together: at most 5 a day (UTC).
+The app picks the link ID. Once a link goes (revoked, replaced, or with its
+account), the server keeps its ID, with nothing else, for good: a new link
+with that ID is refused (`409 conflict`, as for an ID in use), and
+`GET /links/{id}` answers `404 not_found`, as for one that never existed. So
+nobody can put their own keys up under an old link's ID, and whoever opens
+the old link is told it's gone, not that its keys don't match it.
 The new link has a new ID and new encryption keys but the **same signing
 key**, so its fingerprint stays the same. Sender tags are made from that
 fingerprint, so the same people keep the same tags across replacements, which
@@ -875,7 +881,11 @@ each mailbox's owner, to deliver, but not who writes to it.
   way when the database does. Only a link's intro mailbox also counts the
   link's first messages; the sender knows whether it writes to one, and a
   link that is gone says so itself. `quiet` sends (seen receipts,
-  reactions, edits, deletes and key updates) trigger no notice.
+  reactions, edits, deletes and key updates) trigger no notice. Past a
+  mailbox's cap (30 a minute) a send is refused `429 rate_limited`; past a
+  link's cap on first messages (60 an hour, which everyone writing to it
+  shares) `429 link_busy`, with `Retry-After` until the hour (UTC) ends,
+  which the app tells the user as a time.
 - `GET /inbox` returns a page of a device's undelivered envelopes in no
   meaningful order, each with the mailbox it came through
   (`{id, mailbox, envelope}`): the app takes an envelope in only through the
@@ -1133,8 +1143,9 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   to 1 MiB, then to the next whole MiB.
 - The recipient gets a download URL with `GET /media/{id}` (no login; the ID
   is the permission; at most 5 a day per file, counted when the URL is
-  given, so a download that then fails uses one up), fetches and decrypts
-  the file and keeps it on the device. The URL starts a download within a
+  given, so a download that then fails uses one up; past them,
+  `429 download_limit` with `Retry-After` until the UTC day ends), fetches
+  and decrypts the file and keeps it on the device. The URL starts a download within a
   minute, and S3 answers it with `Content-Encoding: identity` and type
   `application/octet-stream` whatever the upload claimed, so no browser
   unpacks a compressed upload, and with `Cache-Control: no-store`, so no
@@ -1156,7 +1167,11 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   reach, failing, busy or refusing, or the device too full to keep the
   file) leaves it to fetch: after each, fetching by itself waits one to two
   minutes, and it tries one attachment at most three times in a run of the
-  app; then a tap. Paused downloads don't count toward the three.
+  app; then a tap. Paused downloads don't count toward the three. One past
+  its downloads for the day (`download_limit`) stays to fetch too, but
+  isn't fetched by itself again in that run, and the others aren't held
+  up; a tap on it, and the save page, say from what time it can be
+  fetched again.
 - **Saving outside Telegram.** A Mini App can't hand a file to the device
   (Telegram's download needs a public HTTPS URL, which would mean a decrypted
   copy on a server). Where the app has a share sheet, it uses that.
@@ -1223,7 +1238,11 @@ deploy sets the bot up (its webhook, menu button and command).
   stored under a keyed hash of the account, with a key derived from the chat
   key), and deletes the previous one, so the chat holds one notice at most,
   besides older ones Telegram no longer let it delete (below).
-  If Telegram refuses (the bot is blocked), notices turn off.
+  If Telegram refuses (the bot is blocked), notices turn off: `notify` marks
+  them off, and the next `GET /account` removes the sealed chat ID, the
+  language and the last notice's message ID (`notify` may write only the
+  mark and that ID), so they're kept only while notices are on. Setting
+  notices up again stores them anew.
 - In order: `notify` reads the account's notice settings, then starts its
   quiet period for 30 seconds (rounded up to the minute), longer than it
   can run, with a conditional write, so of two deliveries at once only one
@@ -1399,11 +1418,10 @@ the app asks for just those.
 
 A token is accepted in its own week and the next, and only once: the server
 remembers spent nonces until then. A send refused by a mailbox's cap (30 a
-minute) doesn't spend its tokens, the first time: each token is given back
-only once, so one refused there again may stay spent. A send refused by a
-link's cap on first messages (60 an hour) spends its tokens. The app can't
-tell the two apart (both are `rate_limited`), and drops the tokens either
-way (A token goes with one send, above). Clients only accept the issuer keys their build names
+minute, `rate_limited`) or a link's cap on first messages (60 an hour,
+`link_busy`) doesn't spend its tokens, the first time: each token is given
+back only once, so one refused there again may stay spent. The app drops
+the tokens either way (A token goes with one send, above). Clients only accept the issuer keys their build names
 (`VITE_ISSUER_KEY`: an entry of `web/issuer-keys.json`, with the send key
 and, under `media`, the media key), so the
 server can't hand different users different keys to tell them apart.

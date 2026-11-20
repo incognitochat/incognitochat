@@ -1,7 +1,7 @@
 import { signal, useSignal } from '@preact/signals';
 import { createContext, createPortal, type ComponentChildren } from 'preact';
 import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
-import { locale, relativeTime, t, type Language } from './i18n';
+import { clockTime, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import type { MessageView } from './messaging/store';
 import { canResend } from './messaging/engine';
@@ -84,7 +84,7 @@ const INVITATIONS_NOTICE_TEXT: Record<InvitationsNotice, Key> = {
   generic: 'errorGeneric',
 };
 
-const SEND_ERROR_TEXT: Record<SendError, Key> = {
+const SEND_ERROR_TEXT: Record<Extract<SendError, string>, Key> = {
   'no-tokens': 'errorNoTokens',
   'no-mailboxes': 'errorNoMailboxes',
   'mailbox-limit': 'errorMailboxLimit',
@@ -96,6 +96,21 @@ const SEND_ERROR_TEXT: Record<SendError, Key> = {
   unreadable: 'errorUnreadable',
   generic: 'errorGeneric',
 };
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * What a send error says. A limit that starts over at a set time says
+ * when, as the server said, or else when its window (an hour, the UTC day)
+ * ends.
+ */
+function sendErrorText(language: Language, error: SendError): string {
+  if (typeof error === 'string') return t(language, SEND_ERROR_TEXT[error]);
+  const busy = error.kind === 'link-busy';
+  const at = error.until ?? nextUtc(busy ? HOUR_MS : DAY_MS);
+  return t(language, busy ? 'errorLinkBusy' : 'errorDownloadLimit', { time: clockTime(language, at) });
+}
 
 const ADMIN_NOTICE_TEXT: Record<AdminNotice, Key> = {
   saved: 'noticeSaved',
@@ -236,7 +251,7 @@ function Screen({ app, language }: { app: AppState; language: Language }) {
               <p class="muted">{tr('firstMessageHint')}</p>
               {screen.error && (
                 <p class="notice" role="alert">
-                  {tr(SEND_ERROR_TEXT[screen.error])}
+                  {sendErrorText(language, screen.error)}
                 </p>
               )}
               <Composer language={language} busy={screen.busy} onSend={app.writeToLink} />
@@ -749,7 +764,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             <p class="notice">{tr('blockedConversation')}</p>
             {screen.error && (
               <p class="notice" role="alert">
-                {tr(SEND_ERROR_TEXT[screen.error])}
+                {sendErrorText(language, screen.error)}
               </p>
             )}
             <Button disabled={screen.busy} onClick={() => app.unblock(screen.id)}>
@@ -762,7 +777,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           <>
             {screen.error && (
               <p class="notice" role="alert">
-                {tr(SEND_ERROR_TEXT[screen.error])}
+                {sendErrorText(language, screen.error)}
               </p>
             )}
             <LowBalance language={language} left={app.messagesLeft.value} />
@@ -921,23 +936,12 @@ const AUTO_TEXT: Record<keyof MediaSettings['auto'], Key> = { photos: 'autoPhoto
 /** Below this many messages left today, the chat says so. */
 const LOW_BALANCE = 50;
 
-/** When today's limits start over (00:00 UTC), in the reader's own time. */
-function resetClock(language: Language, at: number): string {
-  return new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' }).format(new Date(at));
-}
-
-/** Next 00:00 UTC, in Unix ms. */
-function nextUtcMidnight(now = Date.now()): number {
-  const day = 24 * 60 * 60 * 1000;
-  return Math.floor(now / day) * day + day;
-}
-
 /** A quiet line above the message box when few messages are left today. */
 function LowBalance({ language, left }: { language: Language; left: number | null }) {
   if (left === null || left > LOW_BALANCE) return null;
   return (
     <p class="notice low-balance" role="status">
-      {t(language, 'messagesLeftToday', { count: left, time: resetClock(language, nextUtcMidnight()) })}
+      {t(language, 'messagesLeftToday', { count: left, time: clockTime(language, nextUtc(DAY_MS)) })}
     </p>
   );
 }
@@ -958,7 +962,7 @@ function Usage({ language, screen }: { language: Language; screen: Extract<Scree
         <>
           <section class="usage-section">
             <h2>{tr('usageDaily')}</h2>
-            <p class="muted">{tr('usageResets', { time: resetClock(language, usage.resetsAt), in: relativeTime(language, new Date(usage.resetsAt)) })}</p>
+            <p class="muted">{tr('usageResets', { time: clockTime(language, usage.resetsAt), in: relativeTime(language, new Date(usage.resetsAt)) })}</p>
             <ul class="usage">
               <UsageRow label={tr('usageMessages')} left={usage.messages} text={(n) => t(language, 'usageCount', { count: n })} note={tr('usageMessagesNote')} language={language} />
               <UsageRow label={tr('usageFiles')} left={usage.files} text={size} note={tr('usageFilesNote')} language={language} />

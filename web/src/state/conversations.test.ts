@@ -12,7 +12,7 @@ import { listConversations, listMessages, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
-import { createApp, MAX_SHOWN, type Screen } from './app';
+import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -42,8 +42,8 @@ async function backend() {
   // uploadsPaused: the operator has paused uploads; mediaSigned: media
   // tokens signed; keyRetired: the issuer keys the apps' build names are
   // replaced, and no longer held; mailboxesFull: accounts hold all the
-  // mailboxes they may (4,000).
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false };
+  // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false, sendRefused: null as ApiError | null };
   /** Requests to the media routes. */
   const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
@@ -110,6 +110,7 @@ async function backend() {
         if (auth) throw new Error('sends must not carry a login');
         // The tokens of a retired key, told apart from bad ones.
         if (state.keyRetired) throw new ApiError(401, 'unknown_issuer_key');
+        if (state.sendRefused) throw state.sendRefused;
         sends.push(body);
         const owner = owners.get(body.mailbox as string);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: body.mailbox as string, envelope: body.envelope as string });
@@ -806,6 +807,35 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it('says when a link takes no more first messages for now, and from when it does, apart from a busy mailbox', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    // The link's hourly cap, 29 minutes before the hour ends.
+    b.state.sendRefused = new ApiError(429, 'link_busy', undefined, undefined, 29 * 60);
+    const before = Date.now();
+    await sender.writeToLink('hello');
+    let conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+    expect(conv.error).toMatchObject({ kind: 'link-busy' });
+    const { until } = conv.error as LimitError;
+    expect(until).toBeGreaterThanOrEqual(before + 29 * 60_000);
+    expect(until).toBeLessThanOrEqual(Date.now() + 29 * 60_000);
+
+    // The mailbox's own cap is still "too fast": a minute.
+    b.state.sendRefused = new ApiError(429, 'rate_limited');
+    await sender.sendMessage('again');
+    conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('rate-limited');
+    // Without a Retry-After, until when isn't known (the message then says
+    // when the hour ends).
+    b.state.sendRefused = new ApiError(429, 'link_busy');
+    await sender.sendMessage('and again');
+    expect(screenOf(sender.screen.value, 'conversation').error).toEqual({ kind: 'link-busy', until: null });
   });
 
   it("doesn't take the user back to where an action failed once they've gone elsewhere", async () => {

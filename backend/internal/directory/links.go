@@ -43,6 +43,25 @@ type Link struct {
 
 func linkPK(id string) string { return "L#" + id }
 
+// Link IDs are the client's choice, so a link that goes (revoked, replaced,
+// or with its account) leaves a tombstone: its item stripped to its ID, with
+// no owner, keys or mailbox, that never expires. A new link is put only
+// where there is no item (attribute_not_exists), so nobody can take up the
+// ID later: people opening the old link would get another account's keys,
+// and a warning that someone may be intercepting their messages, instead
+// of being told the link is gone. Whatever reads a link takes a tombstone
+// for none (link: no signing key; Grant and endLinks: no owner).
+
+// endLinkWrite turns a link into its tombstone, only while accountID owns it.
+func (s *Store) endLinkWrite(accountID, id string) types.TransactWriteItem {
+	return types.TransactWriteItem{Put: &types.Put{
+		TableName:                 &s.Table,
+		Item:                      item(linkPK(id), skLink, attrs{}),
+		ConditionExpression:       aws.String("a = :a"),
+		ExpressionAttributeValues: attrs{":a": sv(accountID)},
+	}}
+}
+
 // Signing keys. A sender's tag is the same on every link with one signing
 // key (docs/protocol.md, the tag field), so two accounts whose links shared
 // a key could compare the tags they get and match a sender who writes to
@@ -156,9 +175,10 @@ func (s *Store) endKeys(ctx context.Context, accountID string, first []string) (
 }
 
 // CreateLink stores a new link for an account, counting it against max. It
-// returns ErrConflict if the link ID is taken, ErrKeyTaken if another
-// account's link has its signing key, and ErrLimit if the account has max
-// links already (or no longer exists, or is being deleted).
+// returns ErrConflict if the link ID is taken (or was: a tombstone),
+// ErrKeyTaken if another account's link has its signing key, and ErrLimit
+// if the account has max links already (or no longer exists, or is being
+// deleted).
 //
 // A count that says more links than the account has (left by a deletion
 // cut short before deletions were marked, which took the link but not the
@@ -280,16 +300,12 @@ func (s *Store) newLinkWrites(accountID string, l Link) []types.TransactWriteIte
 	}
 }
 
-// oldLinkWrites deletes an account's link, its listing and its intro mailbox.
-// The first write fails its condition unless the account owns the link.
+// oldLinkWrites ends an account's link, leaving its tombstone, and deletes
+// its listing and its intro mailbox. The first write fails its condition
+// unless the account owns the link.
 func (s *Store) oldLinkWrites(accountID string, old Link) []types.TransactWriteItem {
 	return []types.TransactWriteItem{
-		{Delete: &types.Delete{
-			TableName:                 &s.Table,
-			Key:                       key(linkPK(old.ID), skLink),
-			ConditionExpression:       aws.String("a = :a"),
-			ExpressionAttributeValues: attrs{":a": sv(accountID)},
-		}},
+		s.endLinkWrite(accountID, old.ID),
 		{Delete: &types.Delete{TableName: &s.Table, Key: key(accountPK(accountID), linkPrefix+old.ID)}},
 		{Delete: &types.Delete{TableName: &s.Table, Key: key(mailboxPK(old.Mailbox), skMailbox)}},
 		{Delete: &types.Delete{TableName: &s.Table, Key: key(accountPK(accountID), mailboxPrefix+old.Mailbox)}},
@@ -299,10 +315,11 @@ func (s *Store) oldLinkWrites(accountID string, old Link) []types.TransactWriteI
 // ReplaceLink swaps an account's link for a new one in one step: the old
 // link and its intro mailbox go, the new one takes its place, and the link
 // count stays the same. The new link's signing key is claimed for the
-// account; the old one's stays the account's. It returns ErrNotFound unless
-// the account (still there, neither replaced nor being deleted) owns oldID,
-// ErrKeyTaken if another account has (or had) the new signing key, and
-// ErrConflict if the new ID is taken.
+// account; the old one's stays the account's, and the old ID keeps its
+// tombstone. It returns ErrNotFound unless the account (still there,
+// neither replaced nor being deleted) owns oldID, ErrKeyTaken if another
+// account has (or had) the new signing key, and ErrConflict if the new ID
+// is taken (or was).
 func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link) error {
 	if oldID == l.ID {
 		return ErrConflict
@@ -339,7 +356,8 @@ func (s *Store) ReplaceLink(ctx context.Context, accountID, oldID string, l Link
 	return err
 }
 
-// Link returns a link's bundle. Revoked and unknown links are both ErrNotFound.
+// Link returns a link's bundle. Revoked and unknown links (a tombstone, or
+// no item) are both ErrNotFound.
 func (s *Store) Link(ctx context.Context, id string) (Link, error) {
 	l, _, err := s.link(ctx, id, true)
 	return l, err
@@ -428,8 +446,9 @@ func (s *Store) SetLinkKeys(ctx context.Context, accountID, id string, keys []li
 }
 
 // DeleteLink revokes a link and its intro mailbox; its signing key stays the
-// account's, for its next link. It returns ErrNotFound unless the account
-// owns it, and ErrConflict if a concurrent change won.
+// account's, for its next link, and its ID keeps a tombstone. It returns
+// ErrNotFound unless the account owns it, and ErrConflict if a concurrent
+// change won.
 func (s *Store) DeleteLink(ctx context.Context, accountID, id string) error {
 	l, err := s.Link(ctx, id)
 	if err != nil {

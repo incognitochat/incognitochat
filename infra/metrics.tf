@@ -10,21 +10,25 @@ locals {
   counts_namespace = "${local.prefix}/api"
 
   # Filter => the metric it adds to, and the count it adds, as a path in
-  # the line. Two filters add to Limited: every 429 answer.
+  # the line. Four filters add to Limited, one for each code a 429 answer
+  # has.
   count_metrics = {
     registrations      = { metric = "Registrations", count = "routes.post_register_200" }
     send-tokens        = { metric = "SendTokenRequests", count = "routes.post_tokens_200" }
     media-tokens       = { metric = "MediaTokenRequests", count = "routes.post_tokens_media_200" }
     rate-limited       = { metric = "Limited", count = "errors.rate_limited" }
     daily-limit        = { metric = "Limited", count = "errors.daily_limit" }
+    link-busy          = { metric = "Limited", count = "errors.link_busy" }
+    download-limit     = { metric = "Limited", count = "errors.download_limit" }
     invalid-token      = { metric = "InvalidToken", count = "errors.invalid_token" }
     init-data-rejected = { metric = "InitDataRejected", count = "errors.init_data_rejected" }
     signature-rejected = { metric = "SignatureRejected", count = "errors.signature_rejected" }
   }
 
-  # The routes that answer 429 (rate_limited or daily_limit), as the line
-  # names them: each gets Limited.<route>, to tell which limit is being hit.
-  # A route missing here still counts in Limited, and shows in the line.
+  # The routes that answer 429 (rate_limited, daily_limit, link_busy or
+  # download_limit), as the line names them: each gets Limited.<route>, to
+  # tell which limit is being hit. A route missing here still counts in
+  # Limited, and shows in the line.
   limited_routes = [
     "post_register",
     "post_accounts_lookup",

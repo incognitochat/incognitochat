@@ -75,6 +75,23 @@ func (s *Server) setNotices(ctx context.Context, req httpapi.Request, c caller) 
 	return accepted()
 }
 
+// forgetNotices removes the sealed chat ID, the language and the last
+// notice's ID from an account whose notices are off (Telegram refused one:
+// the user blocked the bot, say), so they're kept only while notices are
+// on. The notify function marks them off but may not remove these, so the
+// api does when the app next asks about the account (GET /account); the
+// app then sets notices up again if it may (POST /notices), which stores
+// them anew. A failure is only logged: the next GET /account tries again.
+// An account being deleted loses them anyway.
+func (s *Server) forgetNotices(ctx context.Context, c caller) {
+	if !c.device.NoticesLeft || c.device.Deleting {
+		return
+	}
+	if err := s.Directory.ForgetNotices(ctx, c.AccountID); err != nil {
+		s.Log.Warn("forgetting notices failed", slog.String(logx.KeyRoute, "GET /account"), logx.ErrorKind(err))
+	}
+}
+
 // PlainLaunch reports whether launch data with this start_param may be sent
 // to the server outside registration (notices, account lookups): a plain
 // launch or a registration, never one that names a link or an invitation,

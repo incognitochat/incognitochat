@@ -188,7 +188,7 @@ topics.
 | `firewall-blocks` (us-east-1) | The firewall blocked more than 3,000 requests in 5 minutes (10 a second; `firewall_blocks_alarm`). Only where `firewall` is true: by default in production alone. |
 | `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
 | `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
-| `limit-hits` | The `api` function answered `429` (`rate_limited` or `daily_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
+| `limit-hits` | The `api` function answered `429` (`rate_limited`, `daily_limit`, `link_busy` or `download_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
 | `invalid-tokens`, `init-data-rejected`, `signature-rejected` | More than 50 requests in an hour were refused for that reason (`refusals_alarm`, each alarm on its own): a send or media token that isn't valid (`POST /send`, `POST /media`), Telegram data that doesn't check out (`POST /register`, `POST /accounts/lookup`, `POST /notices`), or a device signature that doesn't (registrations and every signed request). |
 
 The last six read the `api` function's [request counts](#request-counts).
@@ -799,7 +799,7 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 |---|---|
 | `Registrations` | Successful `POST /register`: new accounts, accounts set up again, and registrations retried after a lost answer. |
 | `SendTokenRequests`, `MediaTokenRequests` | Successful `POST /tokens` and `POST /tokens/media`: batches of tokens signed. |
-| `Limited` | Every `429` (`rate_limited`, `daily_limit`). |
+| `Limited` | Every `429` (`rate_limited`, `daily_limit`, `link_busy`, `download_limit`). |
 | `Limited.<route>` | One route's `429`s, e.g. `Limited.post_send`, for each route with a limit (`local.limited_routes`). |
 | `InvalidToken`, `InitDataRejected`, `SignatureRejected` | Answers with that error code. |
 

@@ -10,6 +10,8 @@
 //	conflict                              a concurrent change won; try again
 //	rate_limited                          too many attempts; try later
 //	daily_limit                           429: a daily limit is used up; try after Retry-After, when the UTC day ends
+//	link_busy                             429: POST /send to a link's intro mailbox, past the link's first messages for the hour; try after Retry-After, when the hour ends
+//	download_limit                        429: GET /media/{id}, past the file's downloads for the day; try after Retry-After, when the UTC day ends
 //	clock_skew                            401: a timestamp, or a new account's device list, is too far from the server's clock, which "now" gives; sign again
 //	login_refused                         the device can't log in
 //	account_replaced                      the account was replaced by a new registration
@@ -72,6 +74,9 @@ type Directory interface {
 	ReplaceLink(ctx context.Context, accountID, oldID string, l directory.Link) error
 	SetLinkKeys(ctx context.Context, accountID, id string, keys []links.Key) error
 	SetNotices(ctx context.Context, accountID string, sealedChat []byte, language string) error
+	// ForgetNotices removes what notices need from an account whose
+	// notices are off, only while they still are.
+	ForgetNotices(ctx context.Context, accountID string) error
 	DeleteLink(ctx context.Context, accountID, id string) error
 	Levels(ctx context.Context) (map[int]int, error)
 	SetLevel(ctx context.Context, level, allowance int) error

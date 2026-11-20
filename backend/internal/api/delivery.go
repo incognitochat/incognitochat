@@ -273,16 +273,18 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 		return s.internal(route, err)
 	}
 	if mailbox.Link != "" {
-		ok, err := s.allow(ctx, "intro", IntroSendsPerHour, time.Hour, mailbox.Link)
+		ok, err := s.Limits.AllowNAt(ctx, s.rateName("intro", now, time.Hour, mailbox.Link), 1, IntroSendsPerHour, time.Hour, now)
 		if err != nil {
 			return s.internal(route, err)
 		}
 		if !ok {
-			// As at the mailbox's cap, the sender gets the tokens back.
+			// As at the mailbox's cap, the sender gets the tokens back. The
+			// link is busy for the rest of the hour, not just a minute: its
+			// own code says so, and until when.
 			if err := s.unspendAll(ctx, tokens); err != nil {
 				return s.internal(route, err)
 			}
-			return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+			return limitReached("link_busy", now, time.Hour)
 		}
 	}
 	// A mailbox that doesn't exist takes the same steps for an account
@@ -566,8 +568,15 @@ func (p *paged) forget(device string) {
 // from rate_limited, with when the day ends (UTC), so the app waits until
 // then rather than trying again within the minute.
 func dailyLimited(now time.Time) httpapi.Response {
-	resp := httpapi.Error(http.StatusTooManyRequests, "daily_limit")
-	end := now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+	return limitReached("daily_limit", now, 24*time.Hour)
+}
+
+// limitReached answers a request refused by a limit counted in fixed
+// windows (rateName), with its code and, in Retry-After, the seconds until
+// the window that holds now ends, when the limit starts over.
+func limitReached(code string, now time.Time, window time.Duration) httpapi.Response {
+	resp := httpapi.Error(http.StatusTooManyRequests, code)
+	end := now.Truncate(window).Add(window)
 	resp.Headers["retry-after"] = strconv.FormatInt(int64(math.Ceil(end.Sub(now).Seconds())), 10)
 	return resp
 }

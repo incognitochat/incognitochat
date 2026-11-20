@@ -190,10 +190,11 @@ export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not
 /**
  * Why a message couldn't be sent. mailbox-limit: the account has as many
  * chats as it may (4,000), so no new one can be started or answered.
+ * rate-limited: too many messages to this mailbox this minute.
  * media-paused: the operator has paused attachments for now (also said
  * when a tapped download is refused for it). outdated: the server no longer
  * holds the issuer key this build names (it was replaced), so the app must
- * be opened again.
+ * be opened again. A LimitError says until when.
  */
 export type SendError =
   | 'no-tokens'
@@ -205,7 +206,30 @@ export type SendError =
   | 'network'
   | 'too-big'
   | 'unreadable'
-  | 'generic';
+  | 'generic'
+  | LimitError;
+
+/**
+ * Refused by a limit that starts over at a set time: link-busy, the link's
+ * first messages for this hour, which everyone writing to it shares (a
+ * send); download-limit, a file's downloads for today (a tapped download).
+ * until: when it starts over (Unix ms), as the server said (Retry-After),
+ * or null if it didn't.
+ */
+export interface LimitError {
+  kind: 'link-busy' | 'download-limit';
+  until: number | null;
+}
+
+/** The LimitError of a refusal, until when the server said. */
+function limitError(kind: LimitError['kind'], err: ApiError): LimitError {
+  return { kind, until: err.retryAfter === undefined ? null : Date.now() + err.retryAfter * 1000 };
+}
+
+/** Whether an error is one a tapped download shows, which the next tap's outcome replaces. */
+function downloadError(error: SendError | null): boolean {
+  return error === 'media-paused' || (typeof error === 'object' && error?.kind === 'download-limit');
+}
 
 /** A conversation in the list. */
 interface ConversationView {
@@ -1208,6 +1232,8 @@ export function createApp(deps: Deps) {
    * Fetches a received attachment: on a tap, or by itself (auto) for
    * photos, GIFs, voice and video messages. If downloads are paused, a tap
    * says so; fetching by itself stops quietly for a while (PAUSED_WAIT_MS).
+   * If this file was downloaded as often as a day allows, a tap says until
+   * when, and it isn't fetched by itself again in this run.
    * One that's gone or broken is marked so (messaging.fetchMedia), and isn't
    * fetched by itself again.
    */
@@ -1216,6 +1242,7 @@ export function createApp(deps: Deps) {
     if (!messaging || transfers.value[key] !== undefined) return;
     setProgress(key, 0);
     let paused = false;
+    let limited: LimitError | null = null;
     try {
       await messaging.fetchMedia(m.conv, m.id, (f) => setProgress(key, f), auto);
       // Answered: downloads aren't paused (any more).
@@ -1225,6 +1252,10 @@ export function createApp(deps: Deps) {
       if (isPaused(err)) {
         paused = true;
         downloadsPausedUntil = Date.now() + PAUSED_WAIT_MS;
+      } else if (err instanceof ApiError && err.code === 'download_limit') {
+        // This file's limit, until the day ends: the others aren't held up.
+        limited = limitError('download-limit', err);
+        autoFailures.set(key, AUTO_TRIES);
       } else if (auto) {
         // However it failed: not again at once, for this one or the rest;
         // and this one only a few times in all.
@@ -1236,9 +1267,10 @@ export function createApp(deps: Deps) {
     }
     const now = currentScreen();
     if (now.kind === 'conversation') {
-      // A tap says it's paused, or that it no longer is.
+      // A tap says it's paused or past the day's downloads, or that it no
+      // longer is.
       let error = now.error;
-      if (!auto && now.id === m.conv) error = paused ? 'media-paused' : error === 'media-paused' ? null : error;
+      if (!auto && now.id === m.conv) error = paused ? 'media-paused' : (limited ?? (downloadError(error) ? null : error));
       await showChat(now.id, { error });
     }
   }
@@ -1458,6 +1490,7 @@ export function createApp(deps: Deps) {
     if (err instanceof NoTokens) return 'no-tokens';
     if (err instanceof NoMailboxes) return 'no-mailboxes';
     if (err instanceof MailboxLimit) return 'mailbox-limit';
+    if (err instanceof ApiError && err.code === 'link_busy') return limitError('link-busy', err);
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
     if (isPaused(err)) return 'media-paused';
     // The server no longer holds the issuer key this build names (it was

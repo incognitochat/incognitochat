@@ -79,6 +79,19 @@ describe('save tickets', () => {
     await expect(fetchForSaving(api, transfer, { ...ticket, id: 'CCCCCCCCCCCCCCCCCCCCCA' })).rejects.toBeInstanceOf(Gone);
   });
 
+  it("passes on a refusal for the day's downloads, with until when, for the page to say", async () => {
+    const limited = new ApiError(429, 'download_limit', undefined, undefined, 7200);
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      async request() {
+        throw limited;
+      },
+    };
+    const transfer = { put: async () => {}, get: async () => new Uint8Array() };
+    const ticket = readTicket(new URL(saveUrl('https://x/', media)).hash)!;
+    await expect(fetchForSaving(api, transfer, ticket)).rejects.toMatchObject({ code: 'download_limit', retryAfter: 7200 });
+  });
+
   it("never hands the browser an active type the sender claims: it's plain bytes", async () => {
     const upload = await encryptFile(new TextEncoder().encode('hello'), key);
     const api: Api = {

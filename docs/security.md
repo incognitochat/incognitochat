@@ -397,6 +397,12 @@ it. This is how close it gets.
   the same person through the same link, using a tag the sender's app adds. A
   modified app could send a random tag and appear as someone new. Per-link
   caps, budgets and replacing the link bound this.
+- **Labels can repeat on busy links.** A sender's label (`🦊 K3F9`) is one
+  of about 67 million (64 emoji and four characters), from a keyed hash of
+  their tag. On a link with thousands of senders, two of them can get the
+  same label (about a one in ten chance among 3,700), so a label alone
+  doesn't prove it's the same person. Nobody can aim for one, since the
+  hash needs the owner's secret, and blocks go by the tag, not the label.
 - **Distinct sender tags rely on the server.** A sender's tag is the same on
   every link with one signing key. The server gives each signing key to the
   first account that proves it holds it (a signature by the key over the

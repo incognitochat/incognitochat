@@ -212,12 +212,15 @@ func (s *Server) download(ctx context.Context, _ httpapi.Request) httpapi.Respon
 	} else if !ok {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
-	ok, err := s.allow(ctx, "dl", DownloadsPerDay, 24*time.Hour, id)
+	now := s.Now()
+	ok, err := s.Limits.AllowNAt(ctx, s.rateName("dl", now, 24*time.Hour, id), 1, DownloadsPerDay, 24*time.Hour, now)
 	if err != nil {
 		return s.internal(route, err)
 	}
 	if !ok {
-		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+		// Its own code, and when the UTC day ends, so the app can say why a
+		// tap did nothing and when the file can be fetched again.
+		return limitReached("download_limit", now, 24*time.Hour)
 	}
 	url, err := s.Media.DownloadURL(ctx, id)
 	if err != nil {

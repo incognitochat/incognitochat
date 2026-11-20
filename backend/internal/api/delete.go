@@ -30,8 +30,9 @@ const DeleteStep = 50
 // deleteAccount deletes what the server holds for the caller's account: its
 // waiting envelopes, links, mailboxes, invitation codes, devices and the
 // account itself, and the Telegram item, so the same Telegram user can set
-// up again (DELETE /account, signed). Nothing is kept, not even a marker.
-// Short-lived records (rate counters, socket records) expire on their own
+// up again (DELETE /account, signed). Nothing is kept, not even a marker,
+// but the tombstones of its link IDs and link signing keys, which name
+// nobody (directory). Short-lived records (rate counters, socket records) expire on their own
 // within a day.
 //
 // It works in steps: while more is left, it answers 409 in_progress and the

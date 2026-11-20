@@ -179,7 +179,7 @@ func TestPausedDownloads(t *testing.T) {
 		}
 	}
 	status, out = h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false)
-	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	wantError(t, status, out, http.StatusTooManyRequests, "download_limit")
 }
 
 func TestSwitchesCache(t *testing.T) {

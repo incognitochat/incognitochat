@@ -74,8 +74,10 @@ func (s *Server) isAdmin(d directory.Device) bool {
 	return d.TelegramHash != "" && s.Admins[d.TelegramHash]
 }
 
-// account describes the logged-in account to its own device.
-func (s *Server) account(_ context.Context, _ httpapi.Request, c caller) httpapi.Response {
+// account describes the logged-in account to its own device, and forgets
+// what notices need once they are off (forgetNotices).
+func (s *Server) account(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
+	s.forgetNotices(ctx, c)
 	return httpapi.JSON(http.StatusOK, accountResponse{
 		CanCreateLinks: s.mayOwnLinks(c.device),
 		Admin:          s.isAdmin(c.device),

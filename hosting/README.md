@@ -60,15 +60,20 @@ Before building, it checks what it checked out, and stops on anything else:
    repository in the organization may have Pages, owners' included (the
    setting doesn't bind them): its pages would share the app's origin and
    keys. `verify-site.sh` fails if one does.
+6. Protect `main` with a ruleset: changes only through pull requests, and
+   no force-pushes or deletion.
 
 ## Updating the workflow
 
 The hosting repositories' copies are updated by hand from this one, byte for
 byte. `verify-site.sh` accepts a site signed by any copy that was on `main`,
-so merge a change to `deploy.yml` here first, then copy it. A request with an
-input the hosting workflow doesn't declare fails, so when CI starts sending a
-new input, change `deploy.yml` in one pull request, copy it into both hosting
-repositories, and only then merge the change to CI.
+so merge a change to `deploy.yml` here first, then copy it. Both hosting
+repositories protect `main` with a ruleset (changes only through pull
+requests, no force-pushes or deletion), so the copy goes in with a small
+pull request in each. A request with an input the hosting workflow doesn't
+declare fails, so when CI starts sending a new input, change `deploy.yml` in
+one pull request, copy it into both hosting repositories, and only then
+merge the change to CI.
 
 That request is the last step of a deploy, after the backend is live. So
 before deploying anything, CI reads the hosting repository's `deploy.yml` and

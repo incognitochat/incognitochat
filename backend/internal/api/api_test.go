@@ -60,8 +60,10 @@ type memAccount struct {
 	links     int
 	chat      []byte // sealed chat ID for notices
 	language  string
-	deleting  bool
-	leftovers []string // accounts it replaced, still to clean up
+	// noticesOff: Telegram refused a notice (directory.Store.NoticesOff).
+	noticesOff bool
+	deleting   bool
+	leftovers  []string // accounts it replaced, still to clean up
 }
 
 type memCode struct {
@@ -80,6 +82,9 @@ type memDirectory struct {
 	telegram map[string]string
 	accounts map[string]*memAccount
 	links    map[string]*memLink
+	// gone are the IDs of links that went (tombstones): never taken again,
+	// as the store does.
+	gone map[string]bool
 	// keys gives each link signing key (by fingerprint) to the account
 	// that first used it, for good: "" once that account ended (a
 	// tombstone), as the store does.
@@ -102,6 +107,7 @@ func newMemDirectory() *memDirectory {
 		telegram: map[string]string{},
 		accounts: map[string]*memAccount{},
 		links:    map[string]*memLink{},
+		gone:     map[string]bool{},
 		keys:     map[string]string{},
 		codes:    map[string]*memCode{},
 		levels:   map[int]int{},
@@ -211,7 +217,7 @@ func (m *memDirectory) MarkDeleting(_ context.Context, account string) error {
 	// Its link goes with the mark, as in the store.
 	for id, l := range m.links {
 		if l.owner == account {
-			delete(m.links, id)
+			m.endLink(id)
 			delete(m.boxes, l.link.Mailbox)
 		}
 	}
@@ -443,13 +449,25 @@ func (m *memDirectory) burnKeys(account string) {
 	}
 }
 
+// endLink ends a link, leaving its ID's tombstone.
+func (m *memDirectory) endLink(id string) {
+	delete(m.links, id)
+	m.gone[id] = true
+}
+
+// idTaken reports whether a link ID is taken, or was (a tombstone).
+func (m *memDirectory) idTaken(id string) bool {
+	_, taken := m.links[id]
+	return taken || m.gone[id]
+}
+
 func (m *memDirectory) CreateLink(_ context.Context, account string, l directory.Link, max int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.keyTaken(account, l.SigningKey) {
 		return directory.ErrKeyTaken
 	}
-	if _, taken := m.links[l.ID]; taken {
+	if m.idTaken(l.ID) {
 		return directory.ErrConflict
 	}
 	a, ok := m.accounts[account]
@@ -473,11 +491,11 @@ func (m *memDirectory) ReplaceLink(_ context.Context, account, oldID string, l d
 	if m.keyTaken(account, l.SigningKey) {
 		return directory.ErrKeyTaken
 	}
-	if _, taken := m.links[l.ID]; taken {
+	if m.idTaken(l.ID) {
 		return directory.ErrConflict
 	}
 	m.keys[devicesig.Fingerprint(l.SigningKey)] = account
-	delete(m.links, oldID)
+	m.endLink(oldID)
 	delete(m.boxes, old.link.Mailbox)
 	m.links[l.ID] = &memLink{owner: account, link: l}
 	m.boxes[l.Mailbox] = directory.Mailbox{ID: l.Mailbox, Owner: account, Link: l.ID}
@@ -520,7 +538,7 @@ func (m *memDirectory) DeleteLink(_ context.Context, account, id string) error {
 	if !ok || l.owner != account {
 		return directory.ErrNotFound
 	}
-	delete(m.links, id)
+	m.endLink(id)
 	delete(m.boxes, l.link.Mailbox)
 	m.accounts[account].links--
 	return nil
@@ -576,7 +594,7 @@ func (m *memDirectory) Delete(_ context.Context, account, th string, max int) (b
 	left := max / 2
 	for id, l := range m.links {
 		if l.owner == account && left > 0 {
-			delete(m.links, id)
+			m.endLink(id)
 			left--
 		}
 	}
@@ -630,7 +648,7 @@ func (m *memDirectory) Replace(_ context.Context, old directory.Account, n direc
 	m.burnKeys(old.ID)
 	for id, l := range m.links {
 		if l.owner == old.ID {
-			delete(m.links, id)
+			m.endLink(id)
 		}
 	}
 	m.put(n)
@@ -658,7 +676,8 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 	return directory.Device{
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
-		Notices: a.chat != nil, Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
+		Notices: a.chat != nil && !a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
+		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers),
 	}, nil
 }
 
@@ -669,7 +688,16 @@ func (m *memDirectory) SetNotices(_ context.Context, account string, sealed []by
 	if !ok {
 		return directory.ErrNotFound
 	}
-	a.chat, a.language = sealed, language
+	a.chat, a.language, a.noticesOff = sealed, language, false
+	return nil
+}
+
+func (m *memDirectory) ForgetNotices(_ context.Context, account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.accounts[account]; ok && a.noticesOff {
+		a.chat, a.language = nil, ""
+	}
 	return nil
 }
 
@@ -968,24 +996,34 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) post(t *testing.T, path string, body any) (int, map[string]any) {
 	t.Helper()
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var req httpapi.Request
-	req.RawPath = path
-	req.RequestContext.HTTP.Method = http.MethodPost
-	req.Headers = map[string]string{"content-type": "application/json"}
-	req.Body = string(raw)
-	resp, err := h.router.Serve(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := h.serve(t, http.MethodPost, path, body)
 	var out map[string]any
 	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
 		t.Fatalf("response body %q: %v", resp.Body, err)
 	}
 	return resp.StatusCode, out
+}
+
+// serve sends a request without a login (and, with a nil body, without a
+// body) and returns the whole answer, headers included.
+func (h *harness) serve(t *testing.T, method, path string, body any) httpapi.Response {
+	t.Helper()
+	var req httpapi.Request
+	req.RawPath = path
+	req.RequestContext.HTTP.Method = method
+	req.Headers = map[string]string{"content-type": "application/json"}
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Body = string(raw)
+	}
+	resp, err := h.router.Serve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }
 
 // device is a client install: its keys, as the web client creates them.
