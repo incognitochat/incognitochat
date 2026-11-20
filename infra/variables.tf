@@ -168,16 +168,29 @@ variable "invite_only" {
   default     = true
 }
 
+# The admins' IDs reach the api function through SSM alone (parameters.tf),
+# as "none" while there are none: SSM can't store an empty value. The
+# function reads them as it starts and keeps only their keyed hashes. Unset
+# (or empty, as an unset GitHub secret is), there are none.
 variable "admin_telegram_ids" {
-  description = "Comma-separated Telegram user IDs of admins. A plain environment variable of the api function (so also in Terraform state), which recognises admins by their keyed hashes"
+  description = "Comma-separated Telegram user IDs of admins; unset or empty for none. Ephemeral: written to SSM, never stored in Terraform state, plan files or the function's configuration. The api function recognises admins by their keyed hashes"
   type        = string
-  default     = ""
   sensitive   = true
+  ephemeral   = true
+  default     = ""
+  nullable    = false
 
   validation {
     condition     = can(regex("^[0-9, ]*$", var.admin_telegram_ids))
     error_message = "admin_telegram_ids must be comma-separated numeric Telegram user IDs."
   }
+}
+
+variable "admin_telegram_ids_version" {
+  description = "Increase to push changed admin Telegram IDs into SSM: whenever ADMIN_TELEGRAM_IDS is set, changed or deleted (write-only values can't be compared with what's stored)"
+  type        = number
+  default     = 1
+  nullable    = false
 }
 
 variable "lambda_dir" {

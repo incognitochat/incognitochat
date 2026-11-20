@@ -249,7 +249,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `MEDIA_ISSUER_KEY` | secret | The media-token issuer's private key (below), a different key. Raise `MEDIA_ISSUER_KEY_VERSION` when it changes. |
 | `PREVIOUS_ISSUER_KEY`, `PREVIOUS_MEDIA_ISSUER_KEY` | secrets | Unset except while an issuer key is being replaced: the key it replaces, still held so that open apps keep working ([rotating an issuer key](#rotating-an-issuer-key)). Raise `PREVIOUS_ISSUER_KEY_VERSION` or `PREVIOUS_MEDIA_ISSUER_KEY_VERSION` (variables, 1 while unset) whenever one is set or deleted. |
 | `DROP_LIVE_ISSUER_KEY` | variable | Unset except for the deploy after a key leaks: `true` lets it drop a key the live site still names ([rotating an issuer key](#rotating-an-issuer-key)). |
-| `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins. A secret, so the IDs stay out of the public deploy logs. They reach the `api` function as a plain environment variable, so they're also in Terraform state, and anyone who can read the function's configuration can read them; the API recognises admins by their keyed hashes. |
+| `ADMIN_TELEGRAM_IDS` | secret | Comma-separated Telegram user IDs of admins; unset for none. They reach only SSM, as an encrypted parameter that of the functions only `api` may read ([secrets at rest](#secrets-at-rest)), never Terraform state or the function's configuration; the API recognises admins by their keyed hashes. Raise `ADMIN_TELEGRAM_IDS_VERSION` (a variable, 1 while unset) whenever you set, change or delete it, or the change doesn't reach SSM. |
 | `CLIENT_ORIGINS` | variable | Origins allowed to call the API from a browser: the app's `https://<org>.github.io`. |
 | `INVITE_ONLY` | variable | `true` by default: only accounts that joined through an invitation, and admins, can own links. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
@@ -420,14 +420,18 @@ arguments, so they never land in Terraform state or plans: the bot token and
 the two issuer keys (and, while a rotation lasts, the keys they replaced;
 otherwise those parameters hold `none`), from the environment's secrets, and four that Terraform
 generates, the session key, the webhook secret, the chat key (which seals
-chat IDs) and the Telegram-ID pepper. Each function's role can read only the
-parameters it needs: only `bot` and `notify` can read the bot token.
+chat IDs) and the Telegram-ID pepper. The admins' Telegram IDs are kept the
+same way (`none` while there are none), not in the `api` function's
+configuration. Each function's role can read only the parameters it needs:
+only `bot` and `notify` can read the bot token, and only `api` the admins'
+IDs.
 
 They do pass through CI. Every deploy hands the bot token and the issuer
-keys to its checks and to Terraform's plan and apply, though Terraform
-writes each to SSM only when its version rises, and Terraform makes the
-generated secrets on the runner. The deploy role can also read each of
-them from SSM ([what it may do](#what-the-deploy-role-may-do)).
+keys to its checks, and those and the admins' IDs to Terraform's plan and
+apply, though Terraform writes each to SSM only when its version rises, and
+Terraform makes the generated secrets on the runner. The deploy role can
+also read each of them from SSM
+([what it may do](#what-the-deploy-role-may-do)).
 
 Each new instance of a function reads its parameters once, as it starts.
 SSM serves an account 40 such calls a second by default, so when many

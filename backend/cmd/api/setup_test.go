@@ -67,7 +67,7 @@ func testConfig(t *testing.T) (env, params map[string]string) {
 		"PARAM_MEDIA_ISSUER_KEY":          "/p/media-issuer",
 		"PARAM_PREVIOUS_ISSUER_KEY":       "/p/previous-issuer",
 		"PARAM_PREVIOUS_MEDIA_ISSUER_KEY": "/p/previous-media-issuer",
-		"ADMIN_TELEGRAM_IDS":              "42, 7",
+		"PARAM_ADMIN_TELEGRAM_IDS":        "/p/admins",
 	}
 	params = map[string]string{
 		"/p/bot-id":                "123456",
@@ -77,6 +77,7 @@ func testConfig(t *testing.T) (env, params map[string]string) {
 		"/p/media-issuer":          keys[1],
 		"/p/previous-issuer":       tokens.NoKey,
 		"/p/previous-media-issuer": tokens.NoKey,
+		"/p/admins":                "42, 7",
 	}
 	return env, params
 }
@@ -165,10 +166,19 @@ func TestNewServer(t *testing.T) {
 		t.Errorf("media bucket %q", b.Name)
 	}
 
+	// The parameter holds "none" while there are no admins (SSM can't store
+	// an empty value); the environment variable that held the IDs before
+	// counts no more.
 	env["INVITE_ONLY"] = "false"
-	delete(env, "ADMIN_TELEGRAM_IDS")
+	env["ADMIN_TELEGRAM_IDS"] = "42"
+	params["/p/admins"] = noAdmins
 	if s, err := newServer(awsv2.Config{Region: "us-east-1"}, getter(env), params); err != nil || s.InviteOnly || len(s.Admins) != 0 {
 		t.Errorf("open, without admins: %v", err)
+	}
+	// No value is none too, as an unset variable was.
+	delete(params, "/p/admins")
+	if s, err := newServer(awsv2.Config{Region: "us-east-1"}, getter(env), params); err != nil || len(s.Admins) != 0 {
+		t.Errorf("no admins' value: %v", err)
 	}
 }
 
@@ -188,7 +198,9 @@ func TestNewServerRefuses(t *testing.T) {
 		"one key for both kinds":                    func(_, p map[string]string) { p["/p/media-issuer"] = keys[0] },
 		"a previous send key that is the media key": func(_, p map[string]string) { p["/p/previous-issuer"] = keys[1] },
 		"a previous media key that is the send key": func(_, p map[string]string) { p["/p/previous-media-issuer"] = keys[0] },
-		"an admin ID that isn't":                    func(env, _ map[string]string) { env["ADMIN_TELEGRAM_IDS"] = "42,@admin" },
+		"no admins' parameter":                      func(env, _ map[string]string) { delete(env, "PARAM_ADMIN_TELEGRAM_IDS") },
+		"an admin ID that isn't":                    func(_, p map[string]string) { p["/p/admins"] = "42,@admin" },
+		"none and an admin":                         func(_, p map[string]string) { p["/p/admins"] = "none,42" },
 	} {
 		env, params := testConfig(t)
 		change(env, params)

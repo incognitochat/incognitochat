@@ -349,8 +349,11 @@ jobs:
           TF_VAR_reserve_concurrency: ${{ vars.RESERVE_CONCURRENCY || 'false' }}
           TF_VAR_api_access: ${{ vars.API_ACCESS || 'direct' }}
           TF_VAR_firewall: ${{ vars.FIREWALL || 'false' }}
-          # A secret only so that it is masked in these public logs.
+          # A secret, so that it is masked in these public logs; unset, empty,
+          # which is no admins. It goes to SSM alone, written like the keys
+          # above only when its version rises.
           TF_VAR_admin_telegram_ids: ${{ secrets.ADMIN_TELEGRAM_IDS }}
+          TF_VAR_admin_telegram_ids_version: ${{ vars.ADMIN_TELEGRAM_IDS_VERSION || '1' }}
           # Code signing, from infra/init.
           TF_VAR_lambda_builds_bucket: ${{ secrets.LAMBDA_BUILDS_BUCKET }}
           TF_VAR_lambda_signing_profile: ${{ secrets.LAMBDA_SIGNING_PROFILE }}
@@ -388,6 +391,7 @@ jobs:
           TF_VAR_media_issuer_key: ${{ secrets.MEDIA_ISSUER_KEY }}
           TF_VAR_previous_issuer_key: ${{ secrets.PREVIOUS_ISSUER_KEY }}
           TF_VAR_previous_media_issuer_key: ${{ secrets.PREVIOUS_MEDIA_ISSUER_KEY }}
+          TF_VAR_admin_telegram_ids: ${{ secrets.ADMIN_TELEGRAM_IDS }}
         # Resource IDs (such as the WebSocket API's) are printed on creation.
         # pipefail: without it, a failed apply would pass through sed as a success.
         run: |

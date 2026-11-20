@@ -57,6 +57,7 @@ run "nothing_set_replaces_nothing" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -85,6 +86,7 @@ run "session_key_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -113,6 +115,7 @@ run "webhook_secret_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -141,6 +144,7 @@ run "chat_key_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 2
@@ -169,6 +173,7 @@ run "telegram_id_pepper_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -204,6 +209,7 @@ run "previous_issuer_key_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -233,6 +239,7 @@ run "previous_media_issuer_key_alone" {
 
   assert {
     condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 1
       "bot-id"                    = 1
       "bot-token"                 = 1
       "chat-key"                  = 1
@@ -260,4 +267,53 @@ run "previous_issuer_key_must_be_a_key" {
   }
 
   expect_failures = [var.previous_issuer_key]
+}
+
+# The admins' Telegram IDs came last, from the api function's environment:
+# with nothing set, a parameter at 1 that holds "none", which the deploy
+# that adds it writes once, as it creates it; and no other version changes
+# (above). Changing them, with the version raised, changes that version
+# alone. An unset GitHub secret comes as an empty value, which is none.
+run "admin_telegram_ids_alone" {
+  command = plan
+
+  plan_options {
+    target = [aws_ssm_parameter.parameter]
+  }
+
+  variables {
+    admin_telegram_ids         = "1, 2"
+    admin_telegram_ids_version = 2
+  }
+
+  assert {
+    condition = jsonencode({ for k, p in aws_ssm_parameter.parameter : k => p.value_wo_version }) == jsonencode({
+      "admin-telegram-ids"        = 2
+      "bot-id"                    = 1
+      "bot-token"                 = 1
+      "chat-key"                  = 1
+      "issuer-key"                = 1
+      "media-issuer-key"          = 1
+      "previous-issuer-key"       = 1
+      "previous-media-issuer-key" = 1
+      "session-key"               = 1
+      "telegram-id-pepper"        = 1
+      "webhook-secret"            = 1
+    })
+    error_message = "admin_telegram_ids_version must change the admins' version alone."
+  }
+}
+
+run "admin_telegram_ids_must_be_ids" {
+  command = plan
+
+  plan_options {
+    target = [aws_ssm_parameter.parameter]
+  }
+
+  variables {
+    admin_telegram_ids = "42,@admin"
+  }
+
+  expect_failures = [var.admin_telegram_ids]
 }

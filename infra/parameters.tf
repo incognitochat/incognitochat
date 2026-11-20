@@ -69,6 +69,7 @@ locals {
     # (docs/deployment.md, Rotating an issuer key).
     "previous-issuer-key"       = var.previous_issuer_key_version
     "previous-media-issuer-key" = var.previous_media_issuer_key_version
+    "admin-telegram-ids"        = var.admin_telegram_ids_version
   }
 
   # The bot ID is the token's numeric prefix. Writing it here means nobody
@@ -87,6 +88,11 @@ locals {
     # SSM can't store an empty value.
     "previous-issuer-key"       = coalesce(var.previous_issuer_key, "none")
     "previous-media-issuer-key" = coalesce(var.previous_media_issuer_key, "none")
+    # Only api reads them; "none" while there are none (noAdmins in
+    # backend/cmd/api). Kept here rather than in the function's environment,
+    # where Terraform state and anyone who can read its configuration would
+    # see them.
+    "admin-telegram-ids" = coalesce(var.admin_telegram_ids, "none")
   }
 }
 
