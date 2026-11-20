@@ -123,5 +123,7 @@ export default defineConfig(({ mode }) => ({
   },
   test: {
     include: ['src/**/*.test.ts'],
+    // The stylesheet as text, for the test that checks its colours' contrast.
+    css: { include: [/app\.css/] },
   },
 }));

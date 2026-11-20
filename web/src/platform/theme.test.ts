@@ -15,6 +15,18 @@ describe('applyTheme', () => {
     expect(dataset.theme).toBe('telegram');
   });
 
+  it('picks black or white text for the destructive colour, whichever reads better', () => {
+    const light = fakeRoot();
+    applyTheme({ destructive_text_color: '#ff595a' }, light.root);
+    expect(light.props).toEqual({ '--app-danger': '#ff595a', '--app-on-danger': '#000000' });
+    const dark = fakeRoot();
+    applyTheme({ destructive_text_color: '#cc2929' }, dark.root);
+    expect(dark.props).toEqual({ '--app-danger': '#cc2929', '--app-on-danger': '#ffffff' });
+    const none = fakeRoot();
+    applyTheme({ destructive_text_color: 'red', bg_color: '#ffffff' }, none.root);
+    expect(none.props).toEqual({ '--app-bg': '#ffffff' });
+  });
+
   it('ignores values that are not colours', () => {
     const { root, props, dataset } = fakeRoot();
     applyTheme({ bg_color: 'red; background: url(x)', text_color: 'expression(1)' }, root);

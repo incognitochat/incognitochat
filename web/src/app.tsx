@@ -1,6 +1,8 @@
 import { signal, useSignal } from '@preact/signals';
-import { createContext, createPortal, type ComponentChildren } from 'preact';
+import { createContext, createPortal, type ComponentChildren, type RefObject } from 'preact';
 import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
+import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
+import { menuKeyDown, moveInMenu } from './a11y/keys';
 import { clockTime, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import type { MessageView } from './messaging/store';
@@ -372,7 +374,12 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
           onClick={() => void app.showTab(tabName)}
         >
           {tr(tabName === 'chats' ? 'tabChats' : 'tabLinks')}
-          {tabName === 'chats' && screen.conversations.some((c) => c.unread > 0) && <span class="dot" aria-hidden="true" />}
+          {tabName === 'chats' && screen.conversations.some((c) => c.unread > 0) && (
+            <>
+              <span class="dot" aria-hidden="true" />
+              <span class="visually-hidden">{tr('unreadMessages')}</span>
+            </>
+          )}
         </button>
       ))}
     </div>
@@ -848,20 +855,17 @@ function confirmDelete(id: string, label: string, active: boolean): void {
 }
 
 function DeleteDialog({ app, language }: { app: AppState; language: Language }) {
+  const target = deleting.value;
+  // Keyed, so each conversation's dialog opens afresh: unticked, and taking the focus.
+  return target ? <DeleteConversation key={target.id} app={app} language={language} target={target} /> : null;
+}
+
+function DeleteConversation({ app, language, target }: { app: AppState; language: Language; target: NonNullable<typeof deleting.value> }) {
   const alsoBlock = useSignal(false);
   const forBoth = useSignal(false);
-  const first = useRef<HTMLButtonElement>(null);
-  const target = deleting.value;
-  const close = () => {
-    deleting.value = null;
-    alsoBlock.value = false;
-    forBoth.value = false;
-  };
-  useBackCloses(!!target, close);
-  useEffect(() => {
-    if (target) first.current?.focus();
-  }, [target?.id]);
-  if (!target) return null;
+  const close = () => (deleting.value = null);
+  useBackCloses(true, close);
+  const focus = useDialogFocus<HTMLDivElement>();
   const confirm = () => {
     const block = alsoBlock.value;
     const both = target.active && forBoth.value;
@@ -870,7 +874,16 @@ function DeleteDialog({ app, language }: { app: AppState; language: Language }) 
   };
   return (
     <div class="overlay" onClick={close} onKeyDown={(e) => e.key === 'Escape' && close()}>
-      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-text" onClick={(e) => e.stopPropagation()}>
+      <div
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-text"
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={focus.onKeyDown}
+        onClick={(e) => e.stopPropagation()}
+      >
         <p id="delete-text">{t(language, target.active && forBoth.value ? 'deleteConfirmBoth' : 'deleteConfirm')}</p>
         {target.active && (
           <label class="check">
@@ -883,7 +896,7 @@ function DeleteDialog({ app, language }: { app: AppState; language: Language }) 
           <span>{t(language, 'alsoBlock')}</span>
         </label>
         <div class="row">
-          <button type="button" class="button danger" ref={first} onClick={confirm}>
+          <button type="button" class="button danger" onClick={confirm}>
             {t(language, 'delete')}
           </button>
           <Button kind="secondary" onClick={close}>
@@ -1149,30 +1162,42 @@ function Ticks({ status, language }: { status: MessageView['status']; language: 
   switch (status) {
     case 'sending':
       return (
-        <svg class="tick" viewBox="0 0 12 12" role="img" aria-label={t(language, 'sending')}>
-          <circle cx="6" cy="6" r="4.75" />
-          <path d="M6 3.5V6l1.75 1.25" />
-        </svg>
+        <>
+          <svg class="tick" viewBox="0 0 12 12" aria-hidden="true">
+            <circle cx="6" cy="6" r="4.75" />
+            <path d="M6 3.5V6l1.75 1.25" />
+          </svg>
+          <span class="visually-hidden">{t(language, 'sending')}</span>
+        </>
       );
     case 'sent':
       return (
-        <svg class="tick" viewBox="0 0 16 12" role="img" aria-label={t(language, 'sent')}>
-          <path d="M1.5 6.5l3.5 3.5L14.5 1.5" />
-        </svg>
+        <>
+          <svg class="tick" viewBox="0 0 16 12" aria-hidden="true">
+            <path d="M1.5 6.5l3.5 3.5L14.5 1.5" />
+          </svg>
+          <span class="visually-hidden">{t(language, 'sent')}</span>
+        </>
       );
     case 'seen':
       return (
-        <svg class="tick" viewBox="0 0 20 12" role="img" aria-label={t(language, 'seen')}>
-          <path d="M1.5 6.5l3.5 3.5L14.5 1.5" />
-          <path d="M9.5 9.5l.5.5L18.5 1.5" />
-        </svg>
+        <>
+          <svg class="tick" viewBox="0 0 20 12" aria-hidden="true">
+            <path d="M1.5 6.5l3.5 3.5L14.5 1.5" />
+            <path d="M9.5 9.5l.5.5L18.5 1.5" />
+          </svg>
+          <span class="visually-hidden">{t(language, 'seen')}</span>
+        </>
       );
     case 'failed':
       return (
-        <svg class="tick failed" viewBox="0 0 12 12" role="img" aria-label={t(language, 'notSent')}>
-          <circle cx="6" cy="6" r="4.75" />
-          <path d="M6 3.5v3M6 8.5v.01" />
-        </svg>
+        <>
+          <svg class="tick failed" viewBox="0 0 12 12" aria-hidden="true">
+            <circle cx="6" cy="6" r="4.75" />
+            <path d="M6 3.5v3M6 8.5v.01" />
+          </svg>
+          <span class="visually-hidden">{t(language, 'notSent')}</span>
+        </>
       );
     default:
       return null;
@@ -1296,6 +1321,8 @@ function ChatRow({
           e.preventDefault();
           longPress();
         }}
+        // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does.
+        onKeyDown={(e) => menuKeyDown(e, longPress, { enter: false })}
         onClick={onClick}
       >
         <span class="chat-top">
@@ -1314,7 +1341,12 @@ function ChatRow({
           <span class="preview" dir="auto">
             {c.last ? (c.last.out ? tr('youWrote', { text: contentLine(language, c.last) }) : contentLine(language, c.last)) : ''}
           </span>
-          {c.unread > 0 && <span class="badge">{t(language, 'unreadCount', { count: c.unread })}</span>}
+          {c.unread > 0 && (
+            <span class="badge">
+              <span aria-hidden="true">{t(language, 'unreadCount', { count: c.unread })}</span>
+              <span class="visually-hidden">{tr('unreadMessagesCount', { count: c.unread })}</span>
+            </span>
+          )}
         </span>
       </button>
     </li>
@@ -1590,30 +1622,16 @@ function Composer({
       )}
       {rec.mode === 'round' && recording && <RoundStage live={rec.live} elapsed={rec.elapsed} locked={locked} language={language} />}
       {attachMenu.value && (
-        <div class="overlay" onClick={() => (attachMenu.value = false)} onKeyDown={(e) => e.key === 'Escape' && (attachMenu.value = false)}>
-          <div class="dialog menu" role="dialog" aria-modal="true" aria-label={t(language, 'attach')} onClick={(e) => e.stopPropagation()}>
-            <button
-              type="button"
-              class="menu-item"
-              onClick={() => {
-                attachMenu.value = false;
-                photoInput.current?.click();
-              }}
-            >
-              {t(language, 'attachPhoto')}
-            </button>
-            <button
-              type="button"
-              class="menu-item"
-              onClick={() => {
-                attachMenu.value = false;
-                fileInput.current?.click();
-              }}
-            >
-              {t(language, 'attachFile')}
-            </button>
-          </div>
-        </div>
+        <AttachMenu
+          language={language}
+          onClose={() => (attachMenu.value = false)}
+          onPick={(input) => {
+            attachMenu.value = false;
+            input.current?.click();
+          }}
+          photoInput={photoInput}
+          fileInput={fileInput}
+        />
       )}
       {picked.value && onAttach && (
         <AttachDialog
@@ -2097,6 +2115,50 @@ interface Picked {
 /** The choice for each kind a file can be shown as: compress a photo, or send a video or GIF as one. */
 const SHOW_AS: Record<'photo' | 'video' | 'gif' | 'audio', Key> = { photo: 'compressImage', video: 'sendAsVideo', gif: 'sendAsGif', audio: 'sendAsMusic' };
 
+/** The attach button's sheet: from the gallery, or any file. */
+function AttachMenu({
+  language,
+  onClose,
+  onPick,
+  photoInput,
+  fileInput,
+}: {
+  language: Language;
+  onClose: () => void;
+  /** Opens the picker behind the given file input. */
+  onPick: (input: RefObject<HTMLInputElement | null>) => void;
+  photoInput: RefObject<HTMLInputElement | null>;
+  fileInput: RefObject<HTMLInputElement | null>;
+}) {
+  const focus = useDialogFocus<HTMLDivElement>();
+  return (
+    <div class="overlay" onClick={onClose} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+      <div
+        class="dialog menu"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t(language, 'attach')}
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={(e) => {
+          focus.onKeyDown(e);
+          moveInMenu(e);
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div class="menu-items" role="menu" aria-label={t(language, 'attach')}>
+          <button type="button" role="menuitem" class="menu-item" onClick={() => onPick(photoInput)}>
+            {t(language, 'attachPhoto')}
+          </button>
+          <button type="button" role="menuitem" class="menu-item" onClick={() => onPick(fileInput)}>
+            {t(language, 'attachFile')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Before sending a picked file: a preview, a caption, and (for photos, videos and GIFs) whether to send it as one. */
 function AttachDialog({
   language,
@@ -2130,9 +2192,11 @@ function AttachDialog({
   // From the gallery, a photo or video that can't be shown as one still goes without its own name ("video.mov").
   const name = picked.shown && !showable ? neutralName(picked.file) : picked.file.name;
   const tooBig = picked.file.size > MAX_FILE_BYTES && as !== 'photo';
+  // The dialog takes the focus, not the caption box: on a phone that would bring up the keyboard.
+  const focus = useDialogFocus<HTMLDivElement>();
   return (
     <div class="overlay" onKeyDown={(e) => e.key === 'Escape' && onCancel()}>
-      <div class="dialog" role="dialog" aria-modal="true" aria-label={tr('attach')}>
+      <div class="dialog" role="dialog" aria-modal="true" aria-label={tr('attach')} tabIndex={-1} ref={focus.ref} onKeyDown={focus.onKeyDown}>
         {preview.value && kind === 'video' && !unplayable.value ? (
           <video class="attach-preview" src={preview.value} muted playsInline autoPlay loop onError={() => (unplayable.value = true)} />
         ) : preview.value && (kind === 'photo' || kind === 'gif') ? (
@@ -2673,17 +2737,27 @@ function formatLength(language: Language, seconds: number): string {
  * swipe the message (moving the viewer with it) and a long press open its menu.
  */
 function Viewer({ language, onClose, onSave, children }: { language: Language; onClose: () => void; onSave: () => void; children: ComponentChildren }) {
-  const close = useRef<HTMLButtonElement>(null);
   useBackCloses(true, onClose);
-  useEffect(() => close.current?.focus(), []);
+  const focus = useDialogFocus<HTMLDivElement>();
   return createPortal(
-    <div class="viewer" role="dialog" aria-modal="true" onClick={onClose} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+    <div
+      class="viewer"
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+      ref={focus.ref}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose();
+        focus.onKeyDown(e);
+      }}
+    >
       {children}
       <div class="viewer-bar" onClick={(e) => e.stopPropagation()}>
         <button type="button" class="viewer-button" onClick={onSave}>
           {t(language, 'save')}
         </button>
-        <button type="button" class="viewer-button close" ref={close} aria-label={t(language, 'closeApp')} onClick={onClose}>
+        <button type="button" class="viewer-button close" aria-label={t(language, 'closeApp')} onClick={onClose}>
           ×
         </button>
       </div>
@@ -2896,12 +2970,17 @@ function Bubble({
   // A sticker or video message stands on its own, without a bubble, as in Telegram.
   const bare = !!m.sticker || (!!m.media && shownAs(m.media) === 'round' && !m.text);
   // The whole row is the message, as in Telegram: a long press, a double-tap
-  // or a swipe in the empty space beside the bubble acts on it too.
+  // or a swipe in the empty space beside the bubble acts on it too. From the
+  // keyboard, Tab reaches it, and Enter, the Menu key or Shift+F10 opens its
+  // menu; a press doesn't focus it.
   return (
     <li
       ref={item}
       id={`m-${m.id}`}
       class="message-row"
+      tabIndex={0}
+      onMouseDown={pressWithoutFocus}
+      onKeyDown={(e) => menuKeyDown(e, onMenu, { enter: true })}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerEnd}
@@ -3043,18 +3122,31 @@ function MessageMenu({
   // As in Telegram, deleting one of ours deletes it for them too unless unticked.
   const forBoth = useSignal(true);
   const mine = message.reactions?.mine?.e ?? '';
-  const first = useRef<HTMLButtonElement>(null);
-  useEffect(() => first.current?.focus(), [confirming.value]);
+  // Focus on a part of the menu that's gone (Delete, or More reactions) comes back to the dialog.
+  const focus = useDialogFocus<HTMLDivElement>(confirming.value ? 'confirm' : picking.value ? 'pick' : 'menu');
   const act = (f: () => void) => () => {
     f();
     onClose();
   };
   return (
     <div class="overlay" onClick={onClose} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
-      <div class="dialog menu" role="dialog" aria-modal="true" aria-label={tr('messageActions')} onClick={(e) => e.stopPropagation()}>
+      <div
+        class="dialog menu"
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr('messageActions')}
+        aria-describedby={confirming.value ? 'delete-message-text' : undefined}
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={(e) => {
+          focus.onKeyDown(e);
+          moveInMenu(e);
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
         {confirming.value ? (
           <>
-            <p>{tr(canDeleteForBoth ? 'deleteOwnMessageConfirm' : 'deleteMessageConfirm')}</p>
+            <p id="delete-message-text">{tr(canDeleteForBoth ? 'deleteOwnMessageConfirm' : 'deleteMessageConfirm')}</p>
             {canDeleteForBoth && (
               <label class="check">
                 <input type="checkbox" checked={forBoth.value} onChange={(e) => (forBoth.value = e.currentTarget.checked)} />
@@ -3063,7 +3155,7 @@ function MessageMenu({
               </label>
             )}
             <div class="row">
-              <button type="button" class="button danger" ref={first} onClick={act(() => onDelete(message, canDeleteForBoth && forBoth.value))}>
+              <button type="button" class="button danger" onClick={act(() => onDelete(message, canDeleteForBoth && forBoth.value))}>
                 {tr(canDeleteForBoth ? 'delete' : 'deleteForMe')}
               </button>
               <Button kind="secondary" onClick={onClose}>
@@ -3091,34 +3183,36 @@ function MessageMenu({
                 </button>
               </div>
             )}
-            {canRetry && (
-              <button type="button" class="menu-item" ref={first} onClick={act(() => onRetry(message))}>
-                {tr('tryAgain')}
+            <div class="menu-items" role="menu" aria-label={tr('messageActions')}>
+              {canRetry && (
+                <button type="button" role="menuitem" class="menu-item" onClick={act(() => onRetry(message))}>
+                  {tr('tryAgain')}
+                </button>
+              )}
+              {canReply && (
+                <button type="button" role="menuitem" class="menu-item" onClick={act(() => onReply(message))}>
+                  {tr('reply')}
+                </button>
+              )}
+              {message.text && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={act(() => void navigator.clipboard?.writeText(message.text).catch(() => {}))}
+                >
+                  {tr('copy')}
+                </button>
+              )}
+              {canEdit && (
+                <button type="button" role="menuitem" class="menu-item" onClick={act(() => onEdit(message))}>
+                  {tr('edit')}
+                </button>
+              )}
+              <button type="button" role="menuitem" class="menu-item danger" onClick={() => (confirming.value = true)}>
+                {tr(canDeleteForBoth ? 'delete' : 'deleteForMe')}
               </button>
-            )}
-            {canReply && (
-              <button type="button" class="menu-item" {...(canRetry ? {} : { ref: first })} onClick={act(() => onReply(message))}>
-                {tr('reply')}
-              </button>
-            )}
-            {message.text && (
-              <button
-                type="button"
-                class="menu-item"
-                {...(canReply || canRetry ? {} : { ref: first })}
-                onClick={act(() => void navigator.clipboard?.writeText(message.text).catch(() => {}))}
-              >
-                {tr('copy')}
-              </button>
-            )}
-            {canEdit && (
-              <button type="button" class="menu-item" onClick={act(() => onEdit(message))}>
-                {tr('edit')}
-              </button>
-            )}
-            <button type="button" class="menu-item danger" {...(!canReply && !canRetry && !message.text ? { ref: first } : {})} onClick={() => (confirming.value = true)}>
-              {tr(canDeleteForBoth ? 'delete' : 'deleteForMe')}
-            </button>
+            </div>
           </>
         )}
       </div>

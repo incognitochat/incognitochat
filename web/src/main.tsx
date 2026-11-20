@@ -1,4 +1,5 @@
 import { render } from 'preact';
+import { trackKeyboard } from './a11y/keys';
 import { App } from './app';
 import { config } from './config';
 import { applyLanguage, pickLanguage } from './i18n';
@@ -92,6 +93,8 @@ async function main(): Promise<void> {
   document.addEventListener('contextmenu', (e) => {
     if (!(e.target instanceof Element && e.target.closest('input, textarea'))) e.preventDefault();
   });
+  // The message box's focus ring is for keyboard users only.
+  trackKeyboard();
   render(<App app={app} language={language} />, root);
   await app.start();
 }

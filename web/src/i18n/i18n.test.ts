@@ -25,6 +25,13 @@ describe('i18n', () => {
     expect(t('fa', 'replaceType', { phrase: 3 })).toBe('برای ادامه، عبارت ۳ را بنویسید');
   });
 
+  it('says what the unread count and the delivery marks show', () => {
+    expect(t('en', 'unreadMessagesCount', { count: 3 })).toBe('3 unread');
+    expect(t('fa', 'unreadMessagesCount', { count: 3 })).toBe('۳ پیام خوانده‌نشده');
+    expect(t('en', 'unreadMessages')).toBe('Unread messages');
+    expect([t('en', 'sending'), t('en', 'sent'), t('en', 'seen'), t('en', 'notSent')]).toEqual(['Sending…', 'Sent', 'Seen', 'Not sent']);
+  });
+
   it('formats relative times', () => {
     const now = new Date('2026-11-10T12:00:00Z');
     expect(relativeTime('en', new Date('2026-11-10T11:57:00Z'), now)).toBe('3 minutes ago');
