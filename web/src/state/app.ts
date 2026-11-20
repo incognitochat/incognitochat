@@ -43,6 +43,7 @@ import { createMessaging, isPaused, MailboxLimit, NoMailboxes, NoTokens, SyncFai
 import {
   attachmentsOf,
   clearMedia,
+  failStuck,
   getConversation,
   getMedia,
   getMessage,
@@ -53,6 +54,7 @@ import {
   PAGE,
   pageMessages,
   pendingUploadDeletes,
+  STUCK_MS,
   unsentBefore,
   type MessageView,
 } from '../messaging/store';
@@ -727,6 +729,9 @@ export function createApp(deps: Deps) {
     // "Keep media" applies at every start, whether or not this build can send.
     mediaSettings = await getMediaSettings(deps.db);
     await tidyMedia();
+    // Ours left sending by a copy that closed mid-send show as not sent, to
+    // send again; one another copy is sending stays as it is.
+    if ((await failStuck(deps.db)).length > 0) deps.broadcast({ type: 'data-changed' });
     // Without a usable issuer key the app still works, but can't send.
     if (!(await createEngine())) return;
     if (online) {
@@ -953,6 +958,13 @@ export function createApp(deps: Deps) {
     }
     const first = page.messages[0];
     if (first) page = { ...page, messages: [...(await unsentBefore(deps.db, conv, first.at, new Set(page.messages.map((m) => m.id)))), ...page.messages] };
+    // Ours still sending after STUCK_MS that no copy of the app is sending
+    // (one that sent them closed halfway) show as not sent, to send again.
+    const stuckBefore = clock.messageNow() - STUCK_MS;
+    if (page.messages.some((m) => m.out && m.status === 'sending' && m.at < stuckBefore) && (await failStuck(deps.db, { conv, before: stuckBefore })).length > 0) {
+      deps.broadcast({ type: 'data-changed' });
+      return chatPage(conv, shown, older);
+    }
     const here = new Set(page.messages.map((m) => m.id));
     const quoted: MessageView[] = [];
     for (const id of new Set(page.messages.flatMap((m) => (m.replyTo && !here.has(m.replyTo) ? [m.replyTo] : [])))) {
@@ -1196,27 +1208,30 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Sends again one of our attachments in the open conversation that
-   * failed before it was uploaded (Try again in its menu): attachments were
-   * paused, say. It goes to the end of the conversation, as a new one would.
+   * Sends again one of ours in the open conversation that wasn't sent
+   * (Send again in its menu): the same message, at the end of the
+   * conversation, as a new one would go. An attachment never uploaded shows
+   * its upload's progress.
    */
-  async function resendMedia(id: string): Promise<void> {
+  async function resend(id: string): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'conversation' || current.busy || !messaging) return;
     const conv = current.id;
     const key = messageKey({ conv, id });
     if (transfers.value[key] !== undefined) return;
+    const media = current.messages.find((m) => m.id === id)?.media;
+    const uploads = !!media && !media.id;
     screen.value = { ...current, error: null };
     let error: SendError | null = null;
     const show = () => showChat(conv, { error });
-    setProgress(key, 0);
+    if (uploads) setProgress(key, 0);
     try {
-      await messaging.resendMedia(conv, id, show, (f) => setProgress(key, f));
+      await messaging.resend(conv, id, show, (f) => setProgress(key, f));
     } catch (err) {
       if (handleGone(err)) return;
       error = sendError(err);
     } finally {
-      setProgress(key, null);
+      if (uploads) setProgress(key, null);
     }
     deps.broadcast({ type: 'data-changed' });
     await show();
@@ -2269,7 +2284,7 @@ export function createApp(deps: Deps) {
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,
     sendMedia,
-    resendMedia,
+    resend,
     sendVoice,
     sendRound,
     /** Fetches an attachment on a tap. */

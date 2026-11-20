@@ -5,9 +5,9 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia } from '../messaging/store';
+import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
-import type { SyncEvent } from '../sync/locks';
+import { withLock, type SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
@@ -962,6 +962,45 @@ describe('an open chat', () => {
     await addMessage(db, { id: 'first', conv: 'c1', at: S, out: false, status: 'received' }, { text: 'first' });
     await app.refresh();
     expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'first' }, { id: 'second' }], more: false });
+  });
+
+  it('shows ours left sending as not sent: at start, and in the open chat after a while, but not while a copy sends them', async () => {
+    const server = fakeServer();
+    const { db } = await registered(server.api);
+    await chatOnDevice(db);
+    const now = Date.now();
+    // The app closed while sending one; another copy of the app is sending the other.
+    await addMessage(db, { id: 'closed', conv: 'c1', at: now - 1000, out: true, status: 'sending' }, { text: 'closed' });
+    await addMessage(db, { id: 'live', conv: 'c1', at: now - STUCK_MS / 2, out: true, status: 'sending' }, { text: 'live' });
+    let taken!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (taken = resolve));
+    const sending = withLock(sendingLock('c1', 'live'), async () => {
+      taken();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await holding;
+    const statuses = async () => (await listMessages(db, 'c1')).filter((m) => m.out).map((m) => `${m.id} ${m.status}`);
+
+    const { app, broadcasts } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(await statuses()).toEqual(['live sending', 'closed failed']);
+    expect(broadcasts).toContainEqual({ type: 'data-changed' });
+
+    // That copy closes too. In the open chat, it shows as sending until it's
+    // been so for a while, then as not sent.
+    release();
+    await sending;
+    await app.openConversation('c1');
+    expect(await statuses()).toEqual(['live sending', 'closed failed']);
+    const later = vi.spyOn(Date, 'now').mockImplementation(() => now + STUCK_MS / 2 + 5000);
+    try {
+      await app.refresh();
+    } finally {
+      later.mockRestore();
+    }
+    expect(await statuses()).toEqual(['live failed', 'closed failed']);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'live', status: 'failed' }, { id: 'closed', status: 'failed' }] });
   });
 });
 

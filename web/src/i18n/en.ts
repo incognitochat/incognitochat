@@ -198,6 +198,7 @@ export const en = {
   send: 'Send',
   sending: 'Sending…',
   notSent: 'Not sent',
+  resend: 'Send again',
   firstMessageHint: "Write the first message. They won't know who you are.",
   aboutOwnerConversation: "Writes to you through your link. You don't know who they are.",
   aboutSenderConversation: "You write through their link. They don't know who you are.",

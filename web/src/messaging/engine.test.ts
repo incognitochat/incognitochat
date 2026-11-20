@@ -22,6 +22,7 @@ import {
   addMessage,
   clearMedia,
   earlyFor,
+  failStuck,
   forgetUploadDeletes,
   getConversation,
   getIds,
@@ -40,6 +41,7 @@ import {
   queueUploadDeletes,
   saveConversation,
   setFile,
+  setMessageStatus,
   type IdKind,
 } from './store';
 import { MAX_PENDING_EDIT_BYTES, MAX_PENDING_EDITS } from '../storage/db';
@@ -4555,6 +4557,37 @@ describe('a send refused after its upload', () => {
       expect(backend.uploads.size).toBe(kept);
     }
   });
+
+  it('sends one refused outright again as a new upload: its message no longer names the deleted one', async () => {
+    const { backend, owner, sender, conv } = await failing(new ApiError(400, 'invalid_envelope'));
+    const failed = (await listMessages(sender.db, conv)).at(-1)!;
+    expect(failed.media!.id).toBeUndefined();
+    expect(canResend(failed)).toBe(true);
+    await sender.messaging.resend(conv, failed.id);
+    expect((await listMessages(sender.db, conv)).at(-1)).toMatchObject({ id: failed.id, status: 'sent', file: 'local' });
+    expect(backend.uploads.size).toBe(1);
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const theirs = (await listMessages(owner.db, local)).at(-1)!;
+    expect(theirs.id).toBe(failed.id);
+    expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
+  });
+
+  it('deleted here instead of sent again: an upload that may have arrived stays; a refused one is gone already', async () => {
+    const maybe = await failing(new NetworkError('answer lost'), true);
+    const kept = (await listMessages(maybe.sender.db, maybe.conv)).at(-1)!;
+    expect(kept.media!.id).toBeDefined();
+    await maybe.sender.messaging.deleteHere(maybe.conv, kept.id);
+    await maybe.sender.messaging.flushUploadDeletes();
+    expect(maybe.backend.uploads.size).toBe(1);
+    expect(await pendingUploadDeletes(maybe.sender.db)).toEqual([]);
+
+    const refused = await failing(new ApiError(429, 'rate_limited'));
+    expect(refused.backend.uploads.size).toBe(0);
+    await refused.sender.messaging.deleteHere(refused.conv, (await listMessages(refused.sender.db, refused.conv)).at(-1)!.id);
+    expect(await pendingUploadDeletes(refused.sender.db)).toEqual([]);
+    expect(refused.backend.mediaCalls.filter((c) => c === 'POST /media/delete')).toHaveLength(1);
+  });
 });
 
 describe('what a change that stops halfway leaves', () => {
@@ -4758,7 +4791,7 @@ describe('attachments paused by the operator', () => {
     expect(canResend(failed)).toBe(true);
 
     // Still paused: the same, once more.
-    await expect(sender.messaging.resendMedia(conv, failed.id)).rejects.toMatchObject({ code: 'uploads_paused' });
+    await expect(sender.messaging.resend(conv, failed.id)).rejects.toMatchObject({ code: 'uploads_paused' });
     expect(backend.mediaCalls).toEqual(['POST /media', 'POST /media']);
     expect(await tokensLeft()).toBe(0);
     expect(await mine()).toMatchObject({ id: failed.id, status: 'failed' });
@@ -4769,8 +4802,8 @@ describe('attachments paused by the operator', () => {
     backend.down.uploads = false;
     const shown: string[] = [];
     await Promise.all([
-      sender.messaging.resendMedia(conv, failed.id, async () => void shown.push((await mine()).status)),
-      sender.messaging.resendMedia(conv, failed.id, async () => void shown.push('again')),
+      sender.messaging.resend(conv, failed.id, async () => void shown.push((await mine()).status)),
+      sender.messaging.resend(conv, failed.id, async () => void shown.push('again')),
     ]);
     expect(backend.mediaCalls).toEqual(['POST /media', 'POST /media', 'POST /media']);
     expect(shown).toEqual(['sending']);
@@ -4780,7 +4813,7 @@ describe('attachments paused by the operator', () => {
     expect(canResend(sent)).toBe(false);
     expect(await tokensLeft()).toBe(1);
     // Nothing more to send again.
-    await sender.messaging.resendMedia(conv, failed.id);
+    await sender.messaging.resend(conv, failed.id);
     expect(backend.mediaCalls).toHaveLength(3);
 
     await owner.messaging.sync();
@@ -4820,6 +4853,161 @@ describe('attachments paused by the operator', () => {
     backend.down.downloads = false;
     expect(await owner.messaging.fetchMedia(local, theirs.id)).toBe('local');
     expect(await getMedia(owner.db, local, theirs.id)).toEqual(photo);
+  });
+});
+
+describe('ours left sending, and sending them again', () => {
+  async function chat() {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const local = await across(sender.db, conv, owner.db);
+    const mine = async () => (await listMessages(sender.db, conv)).at(-1)!;
+    const theirs = () => listMessages(owner.db, local);
+    const photo = crypto.getRandomValues(new Uint8Array(2000));
+    const out = { file: photo, media: { t: 'photo', s: photo.length, w: 10, h: 10, m: 'image/jpeg' } };
+    return { backend, owner, sender, conv, local, mine, theirs, photo, out };
+  }
+
+  it('shows one the app closed on as not sent; sent again, it goes once, with its ID, and they keep one copy', async () => {
+    const { backend, owner, sender, conv, mine, theirs } = await chat();
+    // Delivered, then the app closed before it marked it sent.
+    await sender.messaging.send(conv, 'did it go?');
+    const left = await mine();
+    await setMessageStatus(sender.db, conv, left.id, 'sending');
+    expect(await owner.messaging.sync()).toBe(1);
+    // The app starts again: no copy is sending it.
+    expect(await failStuck(sender.db)).toEqual([conv]);
+    const failed = await mine();
+    expect(failed).toMatchObject({ id: left.id, status: 'failed' });
+    expect(canResend(failed)).toBe(true);
+    // Sent again from two copies of the app at once: once, paid like any
+    // send, with fresh tokens, and the same ID.
+    const sends = backend.sendPayments.length;
+    await Promise.all([sender.messaging.resend(conv, failed.id), copyOf(backend, sender).resend(conv, failed.id)]);
+    expect(backend.sendPayments).toHaveLength(sends + 1);
+    expect(tiedSends(backend)).toEqual([]);
+    const sent = await mine();
+    expect(sent).toMatchObject({ id: failed.id, status: 'sent', text: 'did it go?' });
+    expect(canResend(sent)).toBe(false);
+    // They had it: the repeat is dropped (they have a message with its ID).
+    expect(await owner.messaging.sync()).toBe(0);
+    expect((await theirs()).filter((m) => m.id === failed.id)).toHaveLength(1);
+  });
+
+  it('keeps one they deleted deleted when it comes again', async () => {
+    const { owner, sender, conv, local, mine, theirs } = await chat();
+    await sender.messaging.send(conv, 'deleted there');
+    const left = await mine();
+    await setMessageStatus(sender.db, conv, left.id, 'sending');
+    await owner.messaging.sync();
+    await owner.messaging.deleteHere(local, left.id);
+    await failStuck(sender.db);
+    await sender.messaging.resend(conv, left.id);
+    expect(await mine()).toMatchObject({ id: left.id, status: 'sent' });
+    await owner.messaging.sync();
+    expect((await theirs()).map((m) => m.text)).toEqual(['hello']);
+  });
+
+  it('sends one that never went out, and a sticker, with their IDs, when asked', async () => {
+    const { owner, sender, conv, mine, theirs } = await chat();
+    // Stored as sending, then the app closed before they went out.
+    const at = (await mine()).at;
+    const [text, sticker] = [rand(), rand()];
+    await addMessage(sender.db, { id: text, conv, at: at + 1000, out: true, status: 'sending' }, { text: 'lost on the way', replyTo: (await mine()).id });
+    await addMessage(sender.db, { id: sticker, conv, at: at + 2000, out: true, status: 'sending' }, { text: '', sticker: { id: 'faces/winking_face' } });
+    expect(await failStuck(sender.db)).toEqual([conv]);
+    await sender.messaging.resend(conv, text);
+    await sender.messaging.resend(conv, sticker);
+    expect((await listMessages(sender.db, conv)).map((m) => [m.id, m.status])).toEqual([
+      [expect.any(String), 'sent'],
+      [text, 'sent'],
+      [sticker, 'sent'],
+    ]);
+    expect(await owner.messaging.sync()).toBe(2);
+    expect((await theirs()).slice(1)).toMatchObject([
+      { id: text, text: 'lost on the way', replyTo: (await theirs())[0]!.id },
+      { id: sticker, sticker: { id: 'faces/winking_face' } },
+    ]);
+  });
+
+  it('leaves one a copy of the app is sending as it is: a text, or an attachment uploading', async () => {
+    const { backend, owner, sender, conv, mine, out } = await chat();
+    const held = holdSends(backend);
+    const sending = sender.messaging.send(conv, 'slow');
+    await held.reached;
+    expect(await failStuck(sender.db)).toEqual([]);
+    expect(await mine()).toMatchObject({ text: 'slow', status: 'sending' });
+    held.release();
+    await sending;
+    expect(await mine()).toMatchObject({ text: 'slow', status: 'sent' });
+
+    const put = backend.transfer.put.bind(backend.transfer);
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      backend.transfer.put = (url, body, onProgress) => {
+        resolve();
+        return new Promise<void>((done) => (release = done)).then(() => put(url, body, onProgress));
+      };
+    });
+    const uploading = sender.messaging.sendMedia(conv, out, 'a cat');
+    await reached;
+    expect(await failStuck(sender.db)).toEqual([]);
+    expect(await mine()).toMatchObject({ text: 'a cat', status: 'sending' });
+    release();
+    await uploading;
+    expect(await mine()).toMatchObject({ text: 'a cat', status: 'sent' });
+    expect(await owner.messaging.sync()).toBe(2);
+  });
+
+  it('sends an uploaded attachment again with its upload: nothing uploaded or paid for twice', async () => {
+    const { backend, owner, sender, conv, local, mine, theirs, photo, out } = await chat();
+    // Its message's send failed on the way: it may have arrived (it didn't), so its upload stays.
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
+      backend.api.request = request;
+      throw new NetworkError('out of reach');
+    };
+    await expect(sender.messaging.sendMedia(conv, out, 'a cat')).rejects.toThrow(NetworkError);
+    const failed = await mine();
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'photo' } });
+    expect(failed.media!.id).toBeDefined();
+    expect(canResend(failed)).toBe(true);
+    const mediaCalls = backend.mediaCalls.length;
+    const mediaTokens = await countTokens(sender.db, backend.issuer.keyId, undefined, 'media');
+    await sender.messaging.resend(conv, failed.id);
+    expect(backend.mediaCalls).toHaveLength(mediaCalls);
+    expect(await countTokens(sender.db, backend.issuer.keyId, undefined, 'media')).toBe(mediaTokens);
+    expect(await mine()).toMatchObject({ id: failed.id, status: 'sent', text: 'a cat', media: { id: failed.media!.id } });
+    expect(await owner.messaging.sync()).toBe(1);
+    const there = (await theirs()).at(-1)!;
+    expect(there).toMatchObject({ id: failed.id, text: 'a cat', file: 'remote' });
+    expect(await owner.messaging.fetchMedia(local, there.id)).toBe('local');
+    expect(await getMedia(owner.db, local, there.id)).toEqual(photo);
+  });
+
+  it('shows one taken for not sent as sent, or seen, once they show they had it', async () => {
+    const { backend, owner, sender, conv, local, mine } = await chat();
+    const request = backend.api.request;
+    // Delivered, but the answer is lost: it shows as not sent.
+    backend.api.request = async (method, path, init, check) => {
+      if (method !== 'POST' || path !== '/send') return request(method, path, init, check);
+      backend.api.request = request;
+      await request(method, path, init, check);
+      throw new NetworkError('answer lost');
+    };
+    await expect(sender.messaging.send(conv, 'arrived')).rejects.toThrow(NetworkError);
+    expect(await mine()).toMatchObject({ text: 'arrived', status: 'failed' });
+    await owner.messaging.sync();
+    await owner.messaging.markSeen(local);
+    await sender.messaging.sync();
+    const seen = await mine();
+    expect(seen).toMatchObject({ text: 'arrived', status: 'seen' });
+    expect(canResend(seen)).toBe(false);
   });
 });
 

@@ -32,7 +32,7 @@ import {
   type PendingEdit,
   unanswered,
 } from '../storage/db';
-import { withLock } from '../sync/locks';
+import { withLock, withLockIfFree } from '../sync/locks';
 
 const STORAGE_KEY = 'storage-key';
 const IV = 12;
@@ -456,6 +456,51 @@ export async function patchMessage(
   });
 }
 
+/**
+ * The lock one of our messages is sent under, by whichever copy of the app
+ * sends it: taken before it's stored as sending (or, sent again, before it
+ * shows as sending again), and held until it's sent or failed. One that
+ * shows as sending with this lock free was left by a copy that closed
+ * halfway (failStuck).
+ */
+export function sendingLock(conv: string, id: string): string {
+  return `sending:${conv}:${id}`;
+}
+
+/**
+ * How long one of ours may show as sending, with no copy of the app sending
+ * it, before an open chat shows it as not sent (failStuck): more than a
+ * send takes, so one that a copy without Web Locks (sync/locks.ts), or of an
+ * older version, is still sending is left alone. At start there's no such
+ * wait: one found then was most likely left by this app, closed mid-send.
+ */
+export const STUCK_MS = 60_000;
+
+/**
+ * Marks our messages that show as sending, but that no copy of the app is
+ * sending (their sendingLock is free), as failed: the copy that sent them
+ * closed halfway (the app was killed mid-send, say). They show as not sent,
+ * to be sent again or deleted. In one conversation or all; with `before`,
+ * only those dated before it. Only the index is read, but for those it
+ * marks. Returns the conversations it changed.
+ */
+export async function failStuck(db: Database, which: { conv?: string; before?: number } = {}): Promise<string[]> {
+  const convs = which.conv !== undefined ? [which.conv] : await db.getAllKeys('conversations');
+  const tx = db.transaction('messages');
+  const index = tx.store.index('byStatus');
+  // Asked for all at once: one by one, thousands of chats take long.
+  const keys = (await Promise.all(convs.map((conv) => index.getAllKeys(withStatus(conv, 'sending', (which.before ?? Infinity) - 1))))).flat();
+  await tx.done;
+  const changed = new Set<string>();
+  for (const [conv, id] of keys) {
+    const marked = await withLockIfFree(sendingLock(conv, id), () =>
+      updateMessage(db, conv, id, (record) => (record.out && record.status === 'sending' ? { ...record, status: 'failed' } : null)),
+    );
+    if (marked?.value) changed.add(conv);
+  }
+  return [...changed];
+}
+
 /** Sets a message's status; with from, only if it has that status now. */
 export async function setMessageStatus(db: Database, conv: string, id: string, status: MessageRecord['status'], from?: MessageRecord['status']): Promise<void> {
   await updateMessage(db, conv, id, (record) => (from === undefined || record.status === from ? { ...record, status } : null));
@@ -674,11 +719,12 @@ export async function openPendingReaction(db: Database, tag: string, sealed: Uin
 
 /**
  * Notes that the other side had these messages of ours by `at` (their
- * clock): a receipt, a reaction or a reply named them, or `last` did. Those
- * in `read` they have read, so a sent one shows as seen (and stays so: a
- * receipt only ever marks). Their messages, and IDs not here, change
- * nothing. Returns how many now show as seen, and whether any named is one
- * of ours that's here.
+ * clock): a receipt, a reaction or a reply named them, or `last` did. One
+ * that showed as not sent did go out (its answer was lost, say): it shows as
+ * sent. Those in `read` they have read, so a sent one shows as seen (and
+ * stays so: a receipt only ever marks). Their messages, and IDs not here,
+ * change nothing. Returns how many now show as seen, and whether any named
+ * is one of ours that's here.
  */
 export async function noteHad(db: Database, conv: string, ids: string[], at: number, read: ReadonlySet<string>): Promise<{ seen: number; here: boolean }> {
   if (ids.length === 0) return { seen: 0, here: false };
@@ -691,7 +737,8 @@ export async function noteHad(db: Database, conv: string, ids: string[], at: num
     here = true;
     let next = record;
     if (record.had === undefined || at < record.had) next = { ...next, had: at };
-    if (read.has(id) && (record.status === 'sent' || record.status === 'sending')) {
+    if (record.status === 'failed') next = { ...next, status: 'sent' };
+    if (read.has(id) && (record.status === 'sent' || record.status === 'sending' || record.status === 'failed')) {
       next = { ...next, status: 'seen' };
       seen++;
     }

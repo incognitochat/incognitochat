@@ -98,6 +98,7 @@ import {
   saveConversation,
   sealPendingEdit,
   sealPendingReaction,
+  sendingLock,
   sentAt,
   sentEnvelopeAt,
   setFile,
@@ -377,9 +378,12 @@ function refusedOutright(err: unknown): boolean {
   return err instanceof NoTokens || err instanceof NoMailboxes || err instanceof MailboxLimit || (err instanceof ApiError && err.status >= 400 && err.status < 500);
 }
 
-/** Whether one of our attachments can be sent again: it failed before it was uploaded, and its file is here. */
+/**
+ * Whether one of ours that wasn't sent can be sent again (resend): a
+ * message or a sticker; an attachment while its file is on this device.
+ */
 export function canResend(m: Pick<MessageView, 'out' | 'status' | 'file' | 'media' | 'legacyFile'>): boolean {
-  return m.out && m.status === 'failed' && m.file === 'local' && !!m.media && !m.media.id && !m.legacyFile;
+  return m.out && m.status === 'failed' && (!m.media || (m.file === 'local' && !m.legacyFile));
 }
 
 function mediaBody(text: string, replyTo: string | undefined, media: LocalMedia): MessageBody {
@@ -573,23 +577,36 @@ export function createMessaging(deps: MessagingDeps) {
     replyTo?: string,
     onStored?: () => void | Promise<void>,
   ): Promise<void> {
-    // Stored and shown first; everything slow happens after.
+    const conv = conversation.id;
     const id = newId();
-    const at = await stampIn(conversation.id, id);
-    const answer = replyTo ? { replyTo } : {};
-    await addMessage(db, { id, conv: conversation.id, at, out: true, status: 'sending' }, { text: '', ...content, ...answer });
-    // Shown now; its chat's place in the list may wait for a send of ours
-    // still going out there.
-    await onStored?.();
-    await update(conversation.id, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
+    // Held until it's sent or failed, so no copy of the app takes it for stuck (failStuck).
+    await withLock(sendingLock(conv, id), async () => {
+      // Stored and shown first; everything slow happens after.
+      const at = await stampIn(conv, id);
+      const answer = replyTo ? { replyTo } : {};
+      await addMessage(db, { id, conv, at, out: true, status: 'sending' }, { text: '', ...content, ...answer });
+      // Shown now; its chat's place in the list may wait for a send of ours
+      // still going out there.
+      await onStored?.();
+      await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
+      await deliverMessage(conv, { kind: 'message', id, at, ...content, ...answer });
+    });
+  }
+
+  /**
+   * Sends one of our messages stored as sending, unless it was deleted
+   * meanwhile, and marks it sent, or failed (and throws). Under its
+   * sendingLock.
+   */
+  async function deliverMessage(conv: string, fields: Omit<Draft, 'conv' | 'reply' | 'last' | 'tag'> & { id: string }): Promise<void> {
     try {
       // Not if it was deleted meanwhile.
-      await transmit(conversation.id, { kind: 'message', id, at, ...content, ...answer }, { still: () => stillSending(db, conversation.id, id) });
+      await transmit(conv, fields, { still: () => stillSending(db, conv, fields.id) });
       // Unless their receipt came in first.
-      await setMessageStatus(db, conversation.id, id, 'sent', 'sending');
+      await setMessageStatus(db, conv, fields.id, 'sent', 'sending');
     } catch (err) {
       if (err instanceof Cancelled) return;
-      await setMessageStatus(db, conversation.id, id, 'failed');
+      await setMessageStatus(db, conv, fields.id, 'failed');
       throw err;
     }
   }
@@ -612,44 +629,49 @@ export function createMessaging(deps: MessagingDeps) {
     const conversation = await getConversation(db, conv);
     if (!conversation) throw new Error('unknown conversation');
     const id = newId();
-    const at = await stampIn(conv, id);
-    // The file with its message, in one transaction: never one without the other.
-    await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media), out.file);
-    await onStored?.(id);
-    await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
-    await deliverMedia(conv, id, at, out, caption, replyTo, onProgress);
+    // Held until it's sent or failed, so no copy of the app takes it for stuck (failStuck).
+    await withLock(sendingLock(conv, id), async () => {
+      const at = await stampIn(conv, id);
+      // The file with its message, in one transaction: never one without the other.
+      await addMessage(db, { id, conv, at, out: true, status: 'sending', file: 'local' }, mediaBody(caption, replyTo, out.media), out.file);
+      await onStored?.(id);
+      await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
+      await deliverMedia(conv, id, at, out, caption, replyTo, onProgress);
+    });
   }
 
   /**
-   * Sends one of our attachments again that failed before it was uploaded
-   * (attachments were paused, say, or the server couldn't be reached): its
-   * file is still on this device, and none of it reached the other side, so
-   * it goes like a new one, now, at the end of the conversation. One that
-   * was uploaded is left alone: its message may have arrived. Under the
-   * message's lock, so two copies of the app don't both send (and pay for)
-   * it; one that another copy sent meanwhile (or deleted) is quietly left
-   * as it is.
+   * Sends one of ours again that wasn't sent (Send again; canResend): the
+   * same message, with the same ID, now, at the end of the conversation,
+   * paid like a new one. If it did go out before (its answer was lost, or
+   * the app closed mid-send), the other side drops it as one it has. An
+   * attachment never uploaded (attachments were paused, say, or its upload
+   * failed) is uploaded now from its file on this device; one uploaded goes
+   * with that upload, kept for it (deliverMedia), so it isn't paid for
+   * twice. Under the message's sendingLock, so two copies of the app don't
+   * both send (and pay for) it; one that another copy sent meanwhile (or
+   * deleted) is quietly left as it is.
    */
-  function resendMedia(
-    conv: string,
-    id: string,
-    onStored?: () => void | Promise<void>,
-    onProgress?: (fraction: number) => void,
-  ): Promise<void> {
-    return withLock(mediaLock(conv, id), async () => {
+  function resend(conv: string, id: string, onStored?: () => void | Promise<void>, onProgress?: (fraction: number) => void): Promise<void> {
+    return withLock(sendingLock(conv, id), async () => {
       const message = await getMessage(db, conv, id);
       if (!message || !canResend(message) || !(await getConversation(db, conv))) return;
-      const file = await getMedia(db, conv, id);
-      if (!file) throw new Error('attachment missing');
+      const { text, replyTo, media, sticker } = message;
+      const uploaded = media?.id ? (media as Media) : undefined;
+      const file = media && !uploaded ? await getMedia(db, conv, id) : undefined;
+      if (media && !uploaded && !file) throw new Error('attachment missing');
       const at = await stampIn(conv, id);
-      const { text, replyTo, media } = message;
       // Unless it was deleted meanwhile.
       if (!(await patchMessage(db, conv, id, 'failed', { status: 'sending', at }))) return;
       await onStored?.();
       // Only these two change, on the chat as it is then (under the send
       // lock), so a message that arrived meanwhile isn't undone.
       await update(conv, (c) => withPreview(db, { ...c, lastAt: at, hidden: false }));
-      await deliverMedia(conv, id, at, { file, media: media! }, text, replyTo, onProgress);
+      if (file) return deliverMedia(conv, id, at, { file, media: media! }, text, replyTo, onProgress);
+      // A failure now says nothing of the first send: its upload stays, for
+      // the other side to fetch if that one arrived.
+      const content = sticker ? { sticker } : uploaded ? { ...(text ? { text } : {}), media: uploaded } : { text };
+      await deliverMessage(conv, { kind: 'message', id, at, ...content, ...(replyTo ? { replyTo } : {}) });
     });
   }
 
@@ -687,11 +709,15 @@ export function createMessaging(deps: MessagingDeps) {
       await setMessageStatus(db, conv, id, 'sent', 'sending');
     } catch (err) {
       if (err instanceof Cancelled || !(await stillSending(db, conv, id))) return deleteUploadsLater([made], true);
-      await setMessageStatus(db, conv, id, 'failed');
       // The upload is of use to no one if its message surely didn't go out:
-      // it failed before it could, or was refused. One that may have arrived
-      // (no answer, the server failing) stays, for the other side to fetch.
-      if (!going || refusedOutright(err)) await deleteUploadsLater([made], true);
+      // it failed before it could, or was refused. Its message then names it
+      // no more, before it's deleted: sent again, it's uploaded anew. One
+      // that may have arrived (no answer, the server failing) stays, for the
+      // other side to fetch, and goes with its message if that's sent again.
+      const surely = !going || refusedOutright(err);
+      if (going && surely) await patchMessage(db, conv, id, 'sending', { status: 'failed', media: out.media });
+      await setMessageStatus(db, conv, id, 'failed');
+      if (surely) await deleteUploadsLater([made], true);
       throw err;
     }
   }
@@ -2673,7 +2699,7 @@ export function createMessaging(deps: MessagingDeps) {
     findKey.clear();
   }
 
-  return { startConversation, send, sendMedia, resendMedia, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
+  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

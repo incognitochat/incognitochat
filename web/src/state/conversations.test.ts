@@ -838,7 +838,7 @@ describe('conversations in the app', () => {
     expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
 
     // Try again while still paused: the same notice, one more request, nothing lost.
-    await sender.resendMedia(failed.id);
+    await sender.resend(failed.id);
     expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: 'media-paused' });
     expect((await listMessages(sender.db, conv.id)).at(-1)).toMatchObject({ id: failed.id, status: 'failed' });
     expect(b.mediaCalls).toEqual(['POST /media', 'POST /media']);
@@ -861,6 +861,18 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+    const failed = conv.messages[0]!;
+    expect(canResend(failed)).toBe(true);
+
+    // The next day: Send again sends it, with its ID, once.
+    b.state.tokensLeft = Infinity;
+    await sender.resend(failed.id);
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: null, messages: [{ id: failed.id, text: 'hello', status: 'sent' }] });
+    await sender.resend(failed.id);
+    await owner.showTab('chats');
+    await owner.sync();
+    await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => [m.id, m.text])).toEqual([[failed.id, 'hello']]);
   });
 
   it('says when a link takes no more first messages for now, and from when it does, apart from a busy mailbox', async () => {

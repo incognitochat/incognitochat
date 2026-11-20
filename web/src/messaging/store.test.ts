@@ -22,6 +22,7 @@ import {
   dropStrayFiles,
   dropStrayMessages,
   earlyFor,
+  failStuck,
   forgetEarly,
   getConversation,
   getMedia,
@@ -34,6 +35,7 @@ import {
   MAX_EARLY,
   MAX_EARLY_BYTES,
   MAX_EARLY_DELETE_BYTES,
+  noteHad,
   noteSeenBefore,
   PAGE,
   pageMessages,
@@ -41,6 +43,7 @@ import {
   putMedia,
   putSweep,
   saveConversation,
+  sendingLock,
   setStatuses,
   strayConversations,
   strayFiles,
@@ -48,6 +51,7 @@ import {
   unreadIds,
   withPreview,
 } from './store';
+import { withLock } from '../sync/locks';
 
 let n = 0;
 const fresh = () => openDatabase(`store-test-${n++}`);
@@ -242,6 +246,57 @@ describe('seen', () => {
       ['m8', 'sent'],
       ['m10', 'sent'],
     ]);
+  });
+
+  it('shows one of ours taken for not sent as sent once they name it, or seen once they read it', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    for (const id of ['named', 'read', 'not named']) await addMessage(db, { id, conv: 'c', at: 1, out: true, status: 'failed' }, { text: id });
+    expect(await noteHad(db, 'c', ['named', 'read'], 5, new Set(['read']))).toEqual({ seen: 1, here: true });
+    expect((await listMessages(db, 'c')).map((m) => [m.id, m.status])).toEqual([
+      ['named', 'sent'],
+      ['read', 'seen'],
+      ['not named', 'failed'],
+    ]);
+  });
+});
+
+describe('ours left sending by a copy of the app that closed', () => {
+  it('show as not sent, unless a copy holds their send lock; with a time, only those dated before it', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await putConversation(db, conversation('d'));
+    const add = (conv: string, id: string, at: number, out = true, status: 'sending' | 'sent' | 'received' = 'sending') =>
+      addMessage(db, { id, conv, at, out, status }, { text: id });
+    await add('c', 'stuck', 1000);
+    await add('c', 'live', 2000);
+    await add('c', 'new', 5000);
+    await add('c', 'sent', 3000, true, 'sent');
+    await add('c', 'theirs', 3000, false, 'received');
+    await add('d', 'other', 1000);
+    const statuses = async () => [...(await listMessages(db, 'c')), ...(await listMessages(db, 'd'))].map((m) => `${m.id} ${m.status}`);
+    // A copy of the app is sending 'live': it holds its lock.
+    let taken!: () => void;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => (taken = resolve));
+    const sending = withLock(sendingLock('c', 'live'), async () => {
+      taken();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await holding;
+
+    // In an open chat, those dated before a time.
+    expect(await failStuck(db, { conv: 'c', before: 5000 })).toEqual(['c']);
+    expect(await statuses()).toEqual(['stuck failed', 'live sending', 'sent sent', 'theirs received', 'new sending', 'other sending']);
+    // At start, in every chat, whatever their time.
+    expect((await failStuck(db)).sort()).toEqual(['c', 'd']);
+    expect(await statuses()).toEqual(['stuck failed', 'live sending', 'sent sent', 'theirs received', 'new failed', 'other failed']);
+    // Once nothing sends it: the next time.
+    release();
+    await sending;
+    expect(await failStuck(db)).toEqual(['c']);
+    expect(await statuses()).toEqual(['stuck failed', 'live failed', 'sent sent', 'theirs received', 'new failed', 'other failed']);
+    expect(await failStuck(db)).toEqual([]);
   });
 });
 
