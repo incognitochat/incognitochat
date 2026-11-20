@@ -137,8 +137,17 @@ func TestMedia(t *testing.T) {
 	for range DownloadsPerDay - 1 {
 		h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false)
 	}
-	status, out = h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false)
-	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	// Past them, its own code, and when the UTC day ends (CON-9).
+	resp := h.serve(t, http.MethodGet, "/media/"+id, nil)
+	untilTomorrow := strconv.Itoa(int(h.now.Truncate(24*time.Hour).Add(24*time.Hour).Sub(h.now) / time.Second))
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Body != `{"error":"download_limit"}` || resp.Headers["retry-after"] != untilTomorrow {
+		t.Fatalf("past the day's downloads: %d %s %v", resp.StatusCode, resp.Body, resp.Headers)
+	}
+	// The next day it can be fetched again.
+	h.now = h.now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+	if status, out := h.call(t, nil, "", http.MethodGet, "/media/"+id, nil, false); status != http.StatusOK {
+		t.Fatalf("the next day: %d %v", status, out)
+	}
 
 	// Only the delete secret deletes it.
 	status, out = h.post(t, "/media/"+id+"/delete", map[string]any{"secret": b64([]byte("wrong"))})

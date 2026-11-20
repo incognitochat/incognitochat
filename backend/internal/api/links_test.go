@@ -596,3 +596,62 @@ func TestSigningKeyStaysWithItsAccount(t *testing.T) {
 		}
 	}
 }
+
+// On the real tables (DIR-6): once a link goes, revoked, replaced or with
+// its account, its ID stays taken. Another account can't put its own keys
+// up under it, so whoever opens the old link is told it doesn't exist
+// (not_found, as for a link that never did), not shown a link whose keys
+// don't match it.
+func TestGoneLinkIDsStayTaken(t *testing.T) {
+	client := dynamotest.Client(t)
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Directory = &directory.Store{DB: client, Table: dynamotest.Table(t, client)}
+	h.router = httpapi.NewRouter()
+	h.server.Routes(h.router)
+	owner, attacker := h.account(t, userID), h.account(t, userID+1)
+	gone := func(id, how string) {
+		t.Helper()
+		status, out := h.call(t, nil, "", http.MethodGet, "/links/"+id, nil, false)
+		if status != http.StatusNotFound || out["error"] != "not_found" {
+			t.Fatalf("%s link: %d %v", how, status, out)
+		}
+		// Claimed with the attacker's own key and a valid proof: as for an ID in use.
+		status, out = h.as(t, attacker, http.MethodPost, "/links", linkKeys{id: id, lsk: newLinkKeys(t).lsk}.create(t, h.now), true)
+		if status != http.StatusConflict || out["error"] != "conflict" {
+			t.Fatalf("another account takes a %s link's ID: %d %v", how, status, out)
+		}
+	}
+
+	revoked := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", revoked.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	if status, out := h.as(t, owner, http.MethodDelete, "/links/"+revoked.id, nil, true); status != http.StatusOK {
+		t.Fatalf("revoke: %d %v", status, out)
+	}
+	gone(revoked.id, "revoked")
+
+	replaced := newLinkKeys(t)
+	if status, out := h.as(t, owner, http.MethodPost, "/links", replaced.create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("create: %d %v", status, out)
+	}
+	next := linkKeys{id: b64(randomBytes(t, 8)), lsk: replaced.lsk}
+	body := next.create(t, h.now)
+	body["replaces"] = replaced.id
+	if status, out := h.as(t, owner, http.MethodPost, "/links", body, true); status != http.StatusCreated {
+		t.Fatalf("replace: %d %v", status, out)
+	}
+	gone(replaced.id, "replaced")
+
+	// The owner sets up again: its old account ends, with its link.
+	successor := newDevice(t)
+	successor.user = userID
+	h.loggedIn(t, successor, true)
+	gone(next.id, "ended account's")
+
+	// The attacker's own link, with an ID never used, is made as usual.
+	if status, out := h.as(t, attacker, http.MethodPost, "/links", newLinkKeys(t).create(t, h.now), true); status != http.StatusCreated {
+		t.Fatalf("a fresh ID: %d %v", status, out)
+	}
+}

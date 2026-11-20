@@ -40,7 +40,8 @@ func TestDelete(t *testing.T) {
 	}
 
 	// Nothing of it is left: the table holds only the other account's items,
-	// and its link signing key's tombstone, which names nobody.
+	// and the tombstones of its link and its link signing key, which name
+	// nobody.
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table)})
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +58,9 @@ func TestDelete(t *testing.T) {
 	}
 	if _, err := s.Link(ctx, l.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("link of a deleted account: %v", err)
+	}
+	if err := s.CreateLink(ctx, other.ID, withID(t, l.ID), links.MaxActive); !errors.Is(err, ErrConflict) {
+		t.Fatalf("another account takes the deleted account's link ID: %v", err)
 	}
 	for _, id := range append(pool, l.Mailbox) {
 		if _, err := s.Mailbox(ctx, id); !errors.Is(err, ErrNotFound) {

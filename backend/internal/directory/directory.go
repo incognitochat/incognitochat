@@ -10,7 +10,7 @@
 //	A#<account>  K#<link>    marks a link the account owns (links.go)
 //	A#<account>  L           older accounts' signed device list: bytes (b), signature (s), sequence (q); no longer stored
 //	A#<account>  M#<mailbox> marks a mailbox the account owns (mailboxes.go)
-//	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek)
+//	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek), intro mailbox (m); just its key once it went (links.go)
 //	F#<fingerprint> F        a link signing key: the account that has it (a), none once it ended (links.go)
 //	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r)
 //	S#levels     S           invitation allowance per level (m), version (v)
@@ -176,6 +176,13 @@ type Device struct {
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
 	Notices      bool   // Telegram notices are set up and not turned off
+	// NoticesRefused: notices are off because Telegram refused one (the
+	// user blocked the bot, say), not set up again since.
+	NoticesRefused bool
+	// NoticesLeft: notices are off, but what they need (the sealed chat
+	// ID, the language or the last notice's ID) is still stored, for
+	// ForgetNotices.
+	NoticesLeft bool
 	// Deleting: DELETE /account has started (MarkDeleting), and the
 	// account takes no other request.
 	Deleting bool
@@ -407,12 +414,12 @@ func (s *Store) Replace(ctx context.Context, old Account, n NewAccount, now time
 	return s.transact(ctx, append(append(writes, links...), keys...))
 }
 
-// endLinks returns the transaction items that delete an account's links
-// (at most maxSwapLinks; the steps take any more): each link the account
-// owns, only while it still does, and the account's record of it, with the
-// fingerprints of those links' signing keys (for endKeys). A record that
-// names a link the account doesn't own (which nothing makes) goes without
-// it.
+// endLinks returns the transaction items that end an account's links (at
+// most maxSwapLinks; the steps take any more): each link the account owns
+// becomes its tombstone, only while the account still owns it, and the
+// account's record of it goes, with the fingerprints of those links'
+// signing keys (for endKeys). A record that names a link the account
+// doesn't own (which nothing makes) goes without it.
 func (s *Store) endLinks(ctx context.Context, accountID string) ([]types.TransactWriteItem, []string, error) {
 	pk := accountPK(accountID)
 	records, err := s.query(ctx, pk, "begins_with(sk, :v)", linkPrefix, "sk", maxSwapLinks)
@@ -429,12 +436,7 @@ func (s *Store) endLinks(ctx context.Context, accountID string) ([]types.Transac
 			return nil, nil, err
 		}
 		if owner, _ := str(l, "a"); owner == accountID {
-			writes = append(writes, types.TransactWriteItem{Delete: &types.Delete{
-				TableName:                 &s.Table,
-				Key:                       key(linkPK(id), skLink),
-				ConditionExpression:       aws.String("a = :a"),
-				ExpressionAttributeValues: attrs{":a": sv(accountID)},
-			}})
+			writes = append(writes, s.endLinkWrite(accountID, id))
 			if k, ok := bin(l, "k"); ok {
 				fingerprints = append(fingerprints, devicesig.Fingerprint(k))
 			}
@@ -539,9 +541,10 @@ func (s *Store) expireDevices(ctx context.Context, accountID string, marker map[
 	return s.batchWrite(ctx, requests)
 }
 
-// MarkDeleting marks an account as being deleted (dl), deletes its link
-// (its bundle then answers "not found") and turns the items of the signing
-// keys it has into tombstones (endKeys), in one transaction of a few
+// MarkDeleting marks an account as being deleted (dl), ends its link,
+// leaving the ID's tombstone (endLinks: its bundle then answers "not
+// found"), and turns the items of the signing keys it has into tombstones
+// (endKeys), in one transaction of a few
 // writes: the first thing DELETE /account does. From then on nothing is
 // delivered to it (Recipients), its invitation codes stop working
 // (Redeem), nothing new joins its partition (live), and it takes no request
@@ -774,7 +777,8 @@ const sharedParallel = 8
 // code, a mailbox), which is deleted first, and only if the account owns it
 // (a record that names someone else's goes without it), so a step that
 // fails halfway leaves the record, and the next one finds and finishes it.
-// A signing key's item isn't deleted but becomes a tombstone (endKeys).
+// A link's item and a signing key's aren't deleted but become tombstones
+// (links.go).
 //
 // It reads only what one step deletes, so a step costs about the same
 // however much is left: about max write units and a few read units. It
@@ -804,7 +808,7 @@ func (s *Store) endSome(ctx context.Context, accountID string, max int) (bool, e
 		sk := sks[i]
 		switch {
 		case strings.HasPrefix(sk, linkPrefix):
-			shared = append(shared, ownedItem{key: key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), owner: "a"})
+			shared = append(shared, ownedItem{key: key(linkPK(strings.TrimPrefix(sk, linkPrefix)), skLink), owner: "a", keep: true})
 			n++
 		case strings.HasPrefix(sk, mailboxPrefix):
 			shared = append(shared, ownedItem{key: key(mailboxPK(strings.TrimPrefix(sk, mailboxPrefix)), skMailbox), owner: "o"})
@@ -829,7 +833,8 @@ func (s *Store) endSome(ctx context.Context, accountID string, max int) (bool, e
 }
 
 // ownedItem is a shared item, and the attribute that names its owner. One
-// to keep loses only its owner (a signing key's tombstone).
+// to keep is stripped to its key, a tombstone (a link's, or a signing
+// key's).
 type ownedItem struct {
 	key   map[string]types.AttributeValue
 	owner string
@@ -837,9 +842,9 @@ type ownedItem struct {
 }
 
 // deleteOwned deletes the items that accountID owns (or, those to keep,
-// removes their owner), sharedParallel at a time; an item it doesn't own,
-// or that is gone, stays as it is. It returns the first error, once all
-// have been tried.
+// strips them to their key), sharedParallel at a time; an item it doesn't
+// own, or that is gone, stays as it is. It returns the first error, once
+// all have been tried.
 func (s *Store) deleteOwned(ctx context.Context, accountID string, items []ownedItem) error {
 	var mu sync.Mutex
 	var first error
@@ -856,10 +861,9 @@ func (s *Store) deleteOwned(ctx context.Context, accountID string, items []owned
 			for it := range next {
 				var err error
 				if it.keep {
-					_, err = s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+					_, err = s.DB.PutItem(ctx, &dynamodb.PutItemInput{
 						TableName:                 &s.Table,
-						Key:                       it.key,
-						UpdateExpression:          aws.String("REMOVE #o"),
+						Item:                      it.key,
 						ConditionExpression:       aws.String("#o = :a"),
 						ExpressionAttributeNames:  map[string]string{"#o": it.owner},
 						ExpressionAttributeValues: attrs{":a": sv(accountID)},
@@ -963,20 +967,24 @@ func (s *Store) device(ctx context.Context, accountID, deviceID string, now time
 	th, _ := str(acct, "th")
 	_, member := acct["lv"].(*types.AttributeValueMemberN)
 	_, chat := acct["cid"]
+	_, language := acct["lg"]
+	_, last := acct["nm"]
 	_, off := acct["no"]
 	_, deleting := acct["dl"]
 	return Device{
-		Key:          k,
-		Replaced:     g == goneReplaced,
-		TelegramHash: th,
-		Member:       member,
-		Level:        int(num(acct, "lv")),
-		Granted:      int(num(acct, "ig")),
-		Allocated:    int(num(acct, "ia")),
-		Links:        int(num(acct, "lc")),
-		Notices:      chat && !off,
-		Deleting:     deleting,
-		Leftovers:    stringSet(acct, "ro"),
+		Key:            k,
+		Replaced:       g == goneReplaced,
+		TelegramHash:   th,
+		Member:         member,
+		Level:          int(num(acct, "lv")),
+		Granted:        int(num(acct, "ig")),
+		Allocated:      int(num(acct, "ia")),
+		Links:          int(num(acct, "lc")),
+		Notices:        chat && !off,
+		NoticesRefused: num(acct, "no") == noticesRefused,
+		NoticesLeft:    off && (chat || language || last),
+		Deleting:       deleting,
+		Leftovers:      stringSet(acct, "ro"),
 	}, nil
 }
 
@@ -1148,14 +1156,26 @@ func roundUp(t time.Time) int64 {
 // Notices are the Telegram "New message" notices (docs/protocol.md, Notices).
 // The account item keeps the chat ID sealed by the notify function (cid),
 // which nobody else can read; the language for the notice (lg); the last
-// notice's message ID, to delete it when a new one is sent (nm); and whether
-// Telegram refused the last notice, meaning notices are off for this user
-// (no).
+// notice's message ID, to delete it when a new one is sent (nm); and, once
+// notices are off, why (no): Telegram refused one (noticesRefused: the user
+// blocked the bot, say), or the sealed chat ID no longer opens
+// (noticesStale: the chat key was replaced). After a refusal the app offers
+// to set notices up again rather than doing it by itself, so a block holds;
+// after a new chat key it sets them up by itself, as at first. cid, lg and
+// nm are kept only while notices are on: once they are off, the api removes
+// them (ForgetNotices) the next time the app asks about the account, and
+// setting notices up again stores cid and lg anew.
 //
 // The notify function may touch nothing else (infra/functions.tf): it reads
 // cid, lg, nm and no, naming them, and writes nm and no, with conditions on
-// the key alone and nothing returned. Notices, NoticeSent and NoticesOff are
-// its calls, and must stay within that.
+// the key alone and nothing returned. Notices, NoticeSent, NoticesOff and
+// NoticesStale are its calls, and must stay within that.
+
+// Why notices are off (no).
+const (
+	noticesRefused = 1
+	noticesStale   = 2
+)
 
 // NoticeTarget is what the notify function needs about an account.
 type NoticeTarget struct {
@@ -1224,20 +1244,53 @@ func (s *Store) NoticeSent(ctx context.Context, accountID string, messageID int6
 }
 
 // NoticesOff records that Telegram refused a notice (the user blocked the
-// bot or never let it write), so none are tried until the app turns them on
-// again. Like NoticeSent, it writes nothing for an account that is gone.
+// bot or never let it write), so none are tried until the user turns them
+// on again in the app. Like NoticeSent, it writes nothing for an account
+// that is gone.
 func (s *Store) NoticesOff(ctx context.Context, accountID string) error {
+	return s.noticesOff(ctx, accountID, noticesRefused)
+}
+
+// NoticesStale records that an account's sealed chat ID no longer opens
+// (sealed under a chat key since replaced), so none are tried until the
+// app sets them up again, which it does by itself. Like NoticesOff, it
+// writes nothing for an account that is gone.
+func (s *Store) NoticesStale(ctx context.Context, accountID string) error {
+	return s.noticesOff(ctx, accountID, noticesStale)
+}
+
+func (s *Store) noticesOff(ctx context.Context, accountID string, why int64) error {
 	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
-		UpdateExpression:          aws.String("SET #no = :one"),
+		UpdateExpression:          aws.String("SET #no = :why"),
 		ConditionExpression:       aws.String("attribute_exists(pk)"),
 		ExpressionAttributeNames:  map[string]string{"#no": "no"},
-		ExpressionAttributeValues: attrs{":one": nv(1)},
+		ExpressionAttributeValues: attrs{":why": nv(why)},
 	})
 	var failed *types.ConditionalCheckFailedException
 	if errors.As(err, &failed) {
 		return nil
+	}
+	return err
+}
+
+// ForgetNotices removes what notices need (the sealed chat ID, the
+// language and the last notice's ID) from an account whose notices are
+// off (Device.NoticesLeft). Only while they still are: if the app turned
+// them on again meanwhile (SetNotices), nothing changes. The api's call,
+// not notify's, whose role may only write nm and no.
+func (s *Store) ForgetNotices(ctx context.Context, accountID string) error {
+	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &s.Table,
+		Key:                      key(accountPK(accountID), skAccount),
+		UpdateExpression:         aws.String("REMOVE cid, lg, nm"),
+		ConditionExpression:      aws.String("attribute_exists(#no)"),
+		ExpressionAttributeNames: map[string]string{"#no": "no"},
+	})
+	var failed *types.ConditionalCheckFailedException
+	if errors.As(err, &failed) {
+		return nil // turned on again, or the account is gone
 	}
 	return err
 }

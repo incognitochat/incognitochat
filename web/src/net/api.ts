@@ -14,6 +14,8 @@ type ErrorCode =
   | 'conflict'
   | 'rate_limited'
   | 'daily_limit'
+  | 'link_busy'
+  | 'download_limit'
   | 'login_refused'
   | 'clock_skew'
   | 'account_replaced'
@@ -52,6 +54,8 @@ const CODES = new Set<string>([
   'conflict',
   'rate_limited',
   'daily_limit',
+  'link_busy',
+  'download_limit',
   'login_refused',
   'clock_skew',
   'account_replaced',

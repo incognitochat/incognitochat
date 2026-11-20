@@ -65,6 +65,99 @@ func TestNotices(t *testing.T) {
 	}
 }
 
+// What notices need is kept only while they're on (PRV-5): once notify
+// marks them off, ForgetNotices removes the sealed chat ID, the language
+// and the last notice's ID, and only then: not while they're on, nor once
+// the app turned them on again. Setting them up again works as before.
+func TestForgetNotices(t *testing.T) {
+	s, client := store(t)
+	ctx := context.Background()
+	a := registered(t, s)
+	device := func() Device {
+		t.Helper()
+		d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	fields := func() []string {
+		t.Helper()
+		out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(a.ID), skAccount), ConsistentRead: aws.Bool(true)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var have []string
+		for _, f := range []string{"cid", "lg", "nm", "no"} {
+			if _, ok := out.Item[f]; ok {
+				have = append(have, f)
+			}
+		}
+		return have
+	}
+
+	if err := s.SetNotices(ctx, a.ID, []byte("sealed"), "fa"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.NoticeSent(ctx, a.ID, 77); err != nil {
+		t.Fatal(err)
+	}
+	// On: nothing to forget, and asking changes nothing.
+	if d := device(); !d.Notices || d.NoticesLeft {
+		t.Fatalf("on: %+v", d)
+	}
+	if err := s.ForgetNotices(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields(); !slices.Equal(got, []string{"cid", "lg", "nm"}) {
+		t.Fatalf("on, after ForgetNotices: %v", got)
+	}
+
+	// Off: forgotten, all three; the mark stays, so notify sends nothing.
+	if err := s.NoticesOff(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d := device(); d.Notices || !d.NoticesLeft {
+		t.Fatalf("off: %+v", d)
+	}
+	if err := s.ForgetNotices(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields(); !slices.Equal(got, []string{"no"}) {
+		t.Fatalf("off, after ForgetNotices: %v", got)
+	}
+	if d := device(); d.Notices || d.NoticesLeft {
+		t.Fatalf("forgotten: %+v", d)
+	}
+	if _, err := s.Notices(ctx, a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Notices after forgetting: %v", err)
+	}
+
+	// Turned on again, without a chat ID stored: as at first setup.
+	if err := s.SetNotices(ctx, a.ID, []byte("sealed2"), "en"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Notices(ctx, a.ID); err != nil || !bytes.Equal(n.SealedChat, []byte("sealed2")) || n.Language != "en" || n.LastMessage != 0 || n.Off {
+		t.Fatalf("on again: %+v, %v", n, err)
+	}
+	// A ForgetNotices that read the device before then removes nothing.
+	if err := s.ForgetNotices(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields(); !slices.Equal(got, []string{"cid", "lg"}) || !device().Notices {
+		t.Fatalf("on again, after a late ForgetNotices: %v", got)
+	}
+
+	// An account that is gone gets nothing written.
+	gone := ids.New()
+	if err := s.ForgetNotices(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(gone), skAccount)}); err != nil || out.Item != nil {
+		t.Fatalf("an item was made for a gone account: %v, %v", out.Item, err)
+	}
+}
+
 // The notify function's calls work within what its role allows (finding
 // BOT-5), and an account that is gone gets nothing written.
 func TestNoticesWithinNotifyRole(t *testing.T) {
@@ -82,6 +175,17 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 	if err := notify.NoticeSent(ctx, a.ID, 77); err != nil {
 		t.Fatal(err)
 	}
+	// A chat ID that no longer opens turns them off, but not as a refusal.
+	if err := notify.NoticesStale(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := notify.Notices(ctx, a.ID); err != nil || n.LastMessage != 77 || !n.Off {
+		t.Fatalf("after NoticesStale: %+v, %v", n, err)
+	}
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices || d.NoticesRefused || !d.NoticesLeft {
+		t.Fatalf("device read after NoticesStale: %+v, %v", d, err)
+	}
+	// Telegram refusing one does.
 	if err := notify.NoticesOff(ctx, a.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +193,15 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 		t.Fatalf("after writing: %+v, %v", n, err)
 	}
 	// The account item's other attributes are still there.
-	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices {
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || d.Notices || !d.NoticesRefused {
 		t.Fatalf("device read: %+v, %v", d, err)
+	}
+	// Set up again, they're neither off nor refused.
+	if err := s.SetNotices(ctx, a.ID, []byte("sealed2"), "fa"); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now()); err != nil || !d.Notices || d.NoticesRefused || d.NoticesLeft {
+		t.Fatalf("device read after setting up again: %+v, %v", d, err)
 	}
 
 	gone := ids.New()
@@ -101,6 +212,9 @@ func TestNoticesWithinNotifyRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := notify.NoticesOff(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := notify.NoticesStale(ctx, gone); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := client.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.Table, Key: key(accountPK(gone), skAccount)}); err != nil || out.Item != nil {

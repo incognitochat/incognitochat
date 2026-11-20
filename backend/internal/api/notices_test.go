@@ -4,12 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
+	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/initdata/initdatatest"
 )
@@ -101,6 +108,108 @@ func TestSetNoticesRejects(t *testing.T) {
 	h.server.Notices = nil
 	status, out = try(launchIn(userID, "", "en", h))
 	wantError(t, status, out, http.StatusNotFound, "not_found")
+}
+
+// On the real tables (PRV-5): what notices need is kept only while they're
+// on. Once Telegram refused one and notify marked them off, the next
+// GET /account says they're off, and refused, and removes the sealed chat
+// ID, the language and the last notice's ID. Set up again (POST /notices,
+// after the user's tap), they're stored anew, as at first. Off because the
+// chat ID no longer opens (a new chat key), they're forgotten the same
+// way, but not refused: the app sets them up again by itself.
+func TestAccountForgetsNoticesOnceOff(t *testing.T) {
+	client := dynamotest.Client(t)
+	store := &directory.Store{DB: client, Table: dynamotest.Table(t, client)}
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Notices = &memNotices{}
+	h.server.Directory = store
+	h.router = httpapi.NewRouter()
+	h.server.Routes(h.router)
+	m := h.account(t, userID)
+	ctx := context.Background()
+	turnOn := func() {
+		t.Helper()
+		if status, out := h.as(t, m, http.MethodPost, "/notices", map[string]any{"initData": launchIn(userID, "", "fa", h)}, false); status != http.StatusOK {
+			t.Fatalf("notices: %d %v", status, out)
+		}
+	}
+	// notices is what GET /account says: "on", "off", or "refused".
+	notices := func() string {
+		t.Helper()
+		status, out := h.as(t, m, http.MethodGet, "/account", nil, false)
+		if status != http.StatusOK {
+			t.Fatalf("account: %d %v", status, out)
+		}
+		switch {
+		case out["notices"] == true && out["noticesRefused"] == false:
+			return "on"
+		case out["notices"] == false && out["noticesRefused"] == false:
+			return "off"
+		case out["notices"] == false && out["noticesRefused"] == true:
+			return "refused"
+		}
+		t.Fatalf("account: %v", out)
+		return ""
+	}
+	stored := func() []string {
+		t.Helper()
+		out, err := client.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:      &store.Table,
+			Key:            map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "A#" + m.d.account}, "sk": &types.AttributeValueMemberS{Value: "A"}},
+			ConsistentRead: aws.Bool(true),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var have []string
+		for _, f := range []string{"cid", "lg", "nm", "no"} {
+			if _, ok := out.Item[f]; ok {
+				have = append(have, f)
+			}
+		}
+		return have
+	}
+
+	if got := notices(); got != "off" {
+		t.Fatalf("before setting up: %s", got)
+	}
+	turnOn()
+	if err := store.NoticeSent(ctx, m.d.account, 42); err != nil {
+		t.Fatal(err)
+	}
+	if got := notices(); got != "on" || !slices.Equal(stored(), []string{"cid", "lg", "nm"}) {
+		t.Fatalf("on: %s %v", got, stored())
+	}
+	// Telegram refuses a notice (the user blocked the bot): notify marks
+	// them off, and may write nothing else.
+	if err := store.NoticesOff(ctx, m.d.account); err != nil {
+		t.Fatal(err)
+	}
+	if got := notices(); got != "refused" || !slices.Equal(stored(), []string{"no"}) {
+		t.Fatalf("refused, after GET /account: %s %v", got, stored())
+	}
+	if _, err := store.Notices(ctx, m.d.account); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("notify still finds a chat: %v", err)
+	}
+	// Still refused at the next look, until they're set up again.
+	if got := notices(); got != "refused" {
+		t.Fatalf("refused, later: %s", got)
+	}
+	turnOn()
+	if got := notices(); got != "on" || !slices.Equal(stored(), []string{"cid", "lg"}) {
+		t.Fatalf("on again: %s %v", got, stored())
+	}
+	if n, err := store.Notices(ctx, m.d.account); err != nil || string(n.SealedChat) != "sealed:"+strconv.FormatInt(userID, 10) || n.Language != "fa" || n.Off {
+		t.Fatalf("on again: %+v, %v", n, err)
+	}
+	// A chat ID that no longer opens: forgotten too, but not refused.
+	if err := store.NoticesStale(ctx, m.d.account); err != nil {
+		t.Fatal(err)
+	}
+	if got := notices(); got != "off" || !slices.Equal(stored(), []string{"no"}) {
+		t.Fatalf("stale, after GET /account: %s %v", got, stored())
+	}
 }
 
 type pushed struct {

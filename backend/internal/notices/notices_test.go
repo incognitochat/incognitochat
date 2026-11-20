@@ -55,6 +55,7 @@ type memDirectory struct {
 	found  bool
 	sent   []int64
 	off    bool
+	stale  bool // off because the sealed chat ID didn't open, not a refusal
 }
 
 func (m *memDirectory) Notices(context.Context, string) (directory.NoticeTarget, error) {
@@ -80,6 +81,12 @@ func (m *memDirectory) NoticesOff(context.Context, string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.off = true
+	return nil
+}
+func (m *memDirectory) NoticesStale(context.Context, string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.off, m.stale = true, true
 	return nil
 }
 
@@ -262,8 +269,8 @@ func TestNotify(t *testing.T) {
 	// Telegram refusing turns notices off; then none are tried.
 	tg.answer(func(string, int) (int, string) { return http.StatusForbidden, refused })
 	*clock = clock.Add(Interval + time.Second)
-	if err := n.Notify(ctx, "acct"); err != nil || !dir.off {
-		t.Fatalf("forbidden: %v, off %v", err, dir.off)
+	if err := n.Notify(ctx, "acct"); err != nil || !dir.off || dir.stale {
+		t.Fatalf("forbidden: %v, off %v, stale %v", err, dir.off, dir.stale)
 	}
 	if calls, _ := tg.seen(); !slices.Equal(calls, []string{"sendMessage"}) {
 		t.Fatalf("forbidden: %v", calls)
@@ -273,13 +280,14 @@ func TestNotify(t *testing.T) {
 	if calls, _ := tg.seen(); len(calls) != 0 {
 		t.Fatal("a notice was tried with notices off")
 	}
-	// A chat ID sealed under another key turns notices off.
+	// A chat ID sealed under another key turns notices off too, but not
+	// as a refusal: the app sets them up again by itself.
 	stale, _ := NewSealer(bytes.Repeat([]byte("o"), 32))
 	old, _ := stale.Seal(4242)
 	staleDir := &memDirectory{target: directory.NoticeTarget{SealedChat: old}, found: true}
 	n2 := &Notifier{Directory: staleDir, Quiet: newMemQuiet(clock), QuietKey: n.QuietKey, Sealer: n.Sealer, Bot: n.Bot, Now: n.Now}
-	if err := n2.Notify(ctx, "acct"); err != nil || !staleDir.off {
-		t.Fatalf("stale seal: %v, off %v", err, staleDir.off)
+	if err := n2.Notify(ctx, "acct"); err != nil || !staleDir.off || !staleDir.stale {
+		t.Fatalf("stale seal: %v, off %v, stale %v", err, staleDir.off, staleDir.stale)
 	}
 	if calls, _ := tg.seen(); len(calls) != 0 {
 		t.Fatalf("stale seal: %v", calls)

@@ -104,6 +104,17 @@ describe('api', () => {
     }
   });
 
+  it('knows the limits that say when they start over: a busy link, a file downloaded as often as a day allows', async () => {
+    for (const [code, path, seconds] of [
+      ['link_busy', '/send', '1740'],
+      ['download_limit', '/media/x', '43200'],
+    ] as const) {
+      const limited = createApi('https://api.example', async () => new Response(`{"error":"${code}"}`, { status: 429, headers: { 'Retry-After': seconds } }));
+      const err = await limited.request('GET', path, {}, checkTokenResponse).catch((e: unknown) => e);
+      expect(err).toMatchObject({ status: 429, code, retryAfter: Number(seconds) });
+    }
+  });
+
   it('reports unreachable servers and unexpected bodies as NetworkError', async () => {
     const down = createApi('https://api.example', async () => {
       throw new TypeError('Failed to fetch');

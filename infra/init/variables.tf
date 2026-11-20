@@ -121,7 +121,7 @@ variable "token_requests_alarm" {
 }
 
 variable "limit_hits_alarm" {
-  description = "429 answers from the api function (rate_limited and daily_limit, every route) in an hour above which an alarm is raised. The limits sit above real use, so real users seldom meet them"
+  description = "429 answers from the api function (a limit refused the request: rate_limited, daily_limit, link_busy or download_limit, every route) in an hour above which an alarm is raised. The limits sit above real use, so real users seldom meet them"
   type        = number
   default     = 100
 

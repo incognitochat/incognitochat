@@ -53,7 +53,7 @@ func TestMetricFiltersReadNamesTheAPILogs(t *testing.T) {
 		t.Fatalf("read too little from metrics.tf: routes %v, errors %v", routes, errs)
 	}
 
-	codes, statuses := apiAnswers(t)
+	codes, limitCodes, statuses := apiAnswers(t)
 	router := httpapi.NewRouter()
 	(&api.Server{}).Routes(router)
 	names := map[string]bool{}
@@ -72,12 +72,29 @@ func TestMetricFiltersReadNamesTheAPILogs(t *testing.T) {
 			t.Errorf("metrics.tf reads errors.%s, which no api handler answers", code)
 		}
 	}
+
+	// And the other way: every code the api answers 429 with adds to
+	// Limited, or the limit-hits alarm wouldn't see it.
+	counted := map[string]bool{}
+	for _, m := range regexp.MustCompile(`metric\s*=\s*"Limited",\s*count\s*=\s*"errors\.([a-z0-9_]+)"`).FindAllStringSubmatch(tf, -1) {
+		counted[m[1]] = true
+	}
+	if len(limitCodes) < 2 {
+		t.Fatalf("read too few 429 codes from the api's source: %v", limitCodes)
+	}
+	for code := range limitCodes {
+		if !counted[code] {
+			t.Errorf("the api answers 429 %s, which no metric filter adds to Limited", code)
+		}
+	}
 }
 
 // apiAnswers reads the api package's source for the error codes its
-// handlers write (httpapi.Error(status, "code"), or "error": "code" in a
-// JSON answer) and the statuses it names (http.StatusXxx).
-func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
+// handlers write (httpapi.Error(status, "code"), limitReached("code", now,
+// window), or "error": "code" in a JSON answer), those of them it answers
+// 429 with (limited: httpapi.Error(http.StatusTooManyRequests, "code") and
+// limitReached), and the statuses it names (http.StatusXxx).
+func apiAnswers(t *testing.T) (codes, limited map[string]bool, statuses []int) {
 	t.Helper()
 	byName := map[string]int{}
 	words := strings.NewReplacer(" ", "", "-", "", "'", "")
@@ -90,7 +107,7 @@ func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codes = map[string]bool{}
+	codes, limited = map[string]bool{}, map[string]bool{}
 	seen := map[int]bool{}
 	fset := token.NewFileSet()
 	for _, file := range files {
@@ -107,6 +124,15 @@ func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
 				if isSelector(n.Fun, "httpapi", "Error") && len(n.Args) == 2 {
 					if code, ok := stringLit(n.Args[1]); ok {
 						codes[code] = true
+						if isSelector(n.Args[0], "http", "StatusTooManyRequests") {
+							limited[code] = true
+						}
+					}
+				}
+				if fn, ok := n.Fun.(*ast.Ident); ok && fn.Name == "limitReached" && len(n.Args) == 3 {
+					if code, ok := stringLit(n.Args[0]); ok {
+						codes[code] = true
+						limited[code] = true
 					}
 				}
 			case *ast.KeyValueExpr:
@@ -129,7 +155,7 @@ func apiAnswers(t *testing.T) (codes map[string]bool, statuses []int) {
 	if !codes["rate_limited"] || !seen[http.StatusOK] || !seen[http.StatusTooManyRequests] {
 		t.Fatalf("read too little from the api's source: codes %v, statuses %v", codes, statuses)
 	}
-	return codes, statuses
+	return codes, limited, statuses
 }
 
 func isSelector(e ast.Expr, pkg, name string) bool {

@@ -155,6 +155,8 @@ func TestSendAtCapGivesBackEveryToken(t *testing.T) {
 // A first message refused by its link's hourly cap gives back the tokens
 // it paid with, as the mailbox's cap does (CQ-3). The limiter's counters
 // are named by their window, so they roll over by the minute and the hour.
+// The refusal is link_busy, not the mailbox's rate_limited, with when the
+// hour ends (CON-9).
 func TestIntroCapGivesBackTokens(t *testing.T) {
 	h := newHarness(t)
 	h.server.InviteOnly = false
@@ -179,8 +181,11 @@ func TestIntroCapGivesBackTokens(t *testing.T) {
 	largest := testEnvelope(envelope.MaxWraps, 16384)
 	paid := mintTokens(t, h.now, envelope.MaxTokens)
 	before := spent.calls
-	status, out := h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
-	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	resp := h.serve(t, http.MethodPost, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
+	// Two minutes into the hour: 58 left.
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Body != `{"error":"link_busy"}` || resp.Headers["retry-after"] != "3480" {
+		t.Fatalf("the link's cap: %d %s %v", resp.StatusCode, resp.Body, resp.Headers)
+	}
 	if spent.calls-before != envelope.MaxTokens {
 		t.Fatalf("%d tokens were spent before the cap refused the send", spent.calls-before)
 	}
@@ -188,15 +193,15 @@ func TestIntroCapGivesBackTokens(t *testing.T) {
 		t.Fatalf("%d tokens stayed spent", n)
 	}
 	// Given back once only: replayed at the capped link, they stay spent.
-	status, out = h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
-	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	status, out := h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": paid})
+	wantError(t, status, out, http.StatusTooManyRequests, "link_busy")
 	if n := spent.count(t, paid); n != envelope.MaxTokens {
 		t.Fatalf("replayed: %d of %d tokens stayed spent", n, envelope.MaxTokens)
 	}
 	// Tokens given back pay for a send elsewhere.
 	again := mintTokens(t, h.now, envelope.MaxTokens)
 	status, out = h.post(t, "/send", map[string]any{"mailbox": intro, "envelope": largest, "tokens": again})
-	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	wantError(t, status, out, http.StatusTooManyRequests, "link_busy")
 	if status, out := h.post(t, "/send", map[string]any{"mailbox": ids.New(), "envelope": largest, "tokens": again}); status != http.StatusOK {
 		t.Fatalf("the same tokens elsewhere: %d %v", status, out)
 	}

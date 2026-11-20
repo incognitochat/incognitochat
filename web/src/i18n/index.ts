@@ -42,6 +42,16 @@ export function locale(language: Language): string {
   return language === 'fa' ? 'fa-IR' : 'en';
 }
 
+/** A time of day (Unix ms), in the reader's own time: "3:30 AM" / «۳:۳۰». */
+export function clockTime(language: Language, at: number): string {
+  return new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' }).format(new Date(at));
+}
+
+/** When the UTC hour or day (size, in ms) that holds now ends, in Unix ms: when limits counted by it start over. */
+export function nextUtc(size: number, now = Date.now()): number {
+  return Math.floor(now / size) * size + size;
+}
+
 /** "3 minutes ago" / «۳ دقیقه پیش». */
 export function relativeTime(language: Language, from: Date, now = new Date()): string {
   const seconds = Math.round((from.getTime() - now.getTime()) / 1000);

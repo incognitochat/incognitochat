@@ -126,6 +126,8 @@ function fakeServer(
     // (neither set) not_found, no such upload.
     mediaUrl: null as string | null,
     media: null as ApiError | NetworkError | null,
+    // GET /media/{id} of these uploads fails so, whatever the above say.
+    mediaRefused: new Map<string, ApiError>(),
   };
   let nextCode = 0;
   const take = (queue: Outcome[] | undefined) => {
@@ -247,6 +249,8 @@ function fakeServer(
       }
       if (method === 'GET' && path.startsWith('/media/')) {
         if (state.switches.downloadsPaused) throw new ApiError(503, 'downloads_paused');
+        const refused = state.mediaRefused.get(path.slice('/media/'.length));
+        if (refused) throw refused;
         if (state.mediaUrl) return check({ url: state.mediaUrl });
         throw state.media ?? new ApiError(404, 'not_found');
       }
@@ -2181,6 +2185,45 @@ describe('fetching attachments by themselves', () => {
       storeFaults.putMedia = null;
       vi.unstubAllGlobals();
     }
+  });
+
+  it("leaves one downloaded as often as a day allows, without holding up the rest, and a tap says until when", async () => {
+    const server = fakeServer();
+    // Its downloads used up, for the next hour (until the UTC day ends).
+    server.state.mediaRefused.set('upload-p1', new ApiError(429, 'download_limit', undefined, undefined, 3600));
+    const { app, db } = await registered(server.api, { issuer });
+    await chatOnDevice(db);
+    await received(db, 'p1', 2, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await received(db, 'p2', 3, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(2));
+    await tick();
+    // Quietly, and the next is fetched all the same (here it has expired).
+    expect(downloads()).toEqual(['GET /media/upload-p1', 'GET /media/upload-p2']);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
+    // Not fetched by itself again in this run, minutes later either.
+    await withDeviceClockOff(3 * 60_000, async () => {
+      await app.home();
+      await app.openConversation('c1');
+      await tick();
+    });
+    expect(downloads()).toHaveLength(2);
+
+    // A tap asks, and says from when it can be fetched again.
+    const before = Date.now();
+    await app.fetchMedia({ conv: 'c1', id: 'p1' });
+    expect(downloads()).toHaveLength(3);
+    const conv = app.screen.value;
+    if (conv.kind !== 'conversation' || typeof conv.error !== 'object' || conv.error === null) throw new Error(`no limit shown: ${JSON.stringify(conv)}`);
+    expect(conv.error.kind).toBe('download-limit');
+    expect(conv.error.until).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(conv.error.until).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    // The next day a tap fetches it (here it has expired), and the notice goes.
+    server.state.mediaRefused.clear();
+    await app.fetchMedia({ conv: 'c1', id: 'p1' });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'gone' }, { id: 'p2', file: 'gone' }] });
   });
 });
 

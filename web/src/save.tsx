@@ -4,19 +4,21 @@
 import { useSignal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { config } from './config';
-import { locale, t, type Language } from './i18n';
+import { clockTime, locale, nextUtc, t, type Language } from './i18n';
 import { fetchForSaving, Gone, type SaveTicket } from './media/save';
 import { ApiError, createApi } from './net/api';
 import { httpTransfer } from './net/transfer';
 
-/** paused: the operator has paused downloads for now. */
-type State = 'fetching' | 'ready' | 'done' | 'gone' | 'paused' | 'failed' | 'broken';
+/** paused: the operator has paused downloads for now. limited: the file was downloaded as often as a day allows. */
+type State = 'fetching' | 'ready' | 'done' | 'gone' | 'paused' | 'limited' | 'failed' | 'broken';
 
 export function SavePage({ ticket, language }: { ticket: SaveTicket | null; language: Language }) {
-  const tr = (key: Parameters<typeof t>[1]) => t(language, key);
+  const tr = (key: Parameters<typeof t>[1], values?: Record<string, string | number>) => t(language, key, values);
   const state = useSignal<State>(ticket && config ? 'fetching' : 'broken');
   const file = useSignal<{ file: File; url: string } | null>(null);
   const progress = useSignal(0);
+  /** When limited: when the file can be fetched again (Unix ms). */
+  const until = useSignal(0);
   const api = config ? createApi(config.apiUrl) : null;
 
   const load = async () => {
@@ -27,6 +29,12 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
       file.value = { file: f, url: URL.createObjectURL(f) };
       state.value = 'ready';
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'download_limit') {
+        // As the server said, or else when the UTC day ends.
+        until.value = err.retryAfter === undefined ? nextUtc(24 * 60 * 60 * 1000) : Date.now() + err.retryAfter * 1000;
+        state.value = 'limited';
+        return;
+      }
       state.value = err instanceof Gone ? 'gone' : err instanceof ApiError && err.code === 'downloads_paused' ? 'paused' : 'failed';
     }
   };
@@ -84,10 +92,12 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
       )}
       {state.value === 'gone' && <p class="notice">{tr('saveGone')}</p>}
       {state.value === 'broken' && <p class="notice">{tr('saveBroken')}</p>}
-      {(state.value === 'failed' || state.value === 'paused') && (
+      {(state.value === 'failed' || state.value === 'paused' || state.value === 'limited') && (
         <>
           <p class="notice" role="alert">
-            {tr(state.value === 'paused' ? 'errorMediaPaused' : 'errorNetwork')}
+            {state.value === 'limited'
+              ? tr('errorDownloadLimit', { time: clockTime(language, until.value) })
+              : tr(state.value === 'paused' ? 'errorMediaPaused' : 'errorNetwork')}
           </p>
           <button type="button" class="button secondary" onClick={() => void load()}>
             {tr('tryAgain')}

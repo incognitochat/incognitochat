@@ -12,7 +12,7 @@ import { listConversations, listMessages, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase } from '../storage/db';
-import { createApp, MAX_SHOWN, type Screen } from './app';
+import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -42,14 +42,16 @@ async function backend() {
   // uploadsPaused: the operator has paused uploads; mediaSigned: media
   // tokens signed; keyRetired: the issuer keys the apps' build names are
   // replaced, and no longer held; mailboxesFull: accounts hold all the
-  // mailboxes they may (4,000).
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false };
+  // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
+  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false, sendRefused: null as ApiError | null };
   /** Requests to the media routes. */
   const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
   const noticesOn = new Set<string>();
+  // Accounts whose notices Telegram refused (the user blocked the bot), not set up since.
+  const noticesRefused = new Set<string>();
 
   const api: Api = {
     post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
@@ -64,10 +66,13 @@ async function backend() {
         return check(token(a));
       }
       if (path === '/session') return check(token(body.account as string));
-      if (path === '/account') return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account) });
+      if (path === '/account') {
+        return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account), noticesRefused: noticesRefused.has(account) });
+      }
       if (path === '/notices') {
         noticeSetups.push(body.initData as string);
         noticesOn.add(account);
+        noticesRefused.delete(account);
         return check({});
       }
       if (path === '/invitations') {
@@ -110,6 +115,7 @@ async function backend() {
         if (auth) throw new Error('sends must not carry a login');
         // The tokens of a retired key, told apart from bad ones.
         if (state.keyRetired) throw new ApiError(401, 'unknown_issuer_key');
+        if (state.sendRefused) throw state.sendRefused;
         sends.push(body);
         const owner = owners.get(body.mailbox as string);
         if (owner) inboxes.get(owner)!.push({ id: rand(), mailbox: body.mailbox as string, envelope: body.envelope as string });
@@ -129,7 +135,12 @@ async function backend() {
       throw new ApiError(404, 'not_found');
     },
   };
-  return { api, issuer, state, noticeSetups, sends, mediaCalls };
+  /** Telegram refuses a notice to an account (its user blocked the bot): notify turns them off, as refused. */
+  const refuseNotices = (account: string) => {
+    noticesOn.delete(account);
+    noticesRefused.add(account);
+  };
+  return { api, issuer, state, noticeSetups, sends, mediaCalls, refuseNotices };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
@@ -317,6 +328,50 @@ describe('conversations in the app', () => {
     for (let i = 0; i < 20 && b.noticeSetups.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
     expect(b.noticeSetups).toHaveLength(1);
     expect(screenOf(app.screen.value, 'home').askNotices).toBe(false);
+  });
+
+  it("doesn't set notices up again by itself once Telegram refused one, only on the user's tap", async () => {
+    const b = await backend();
+    const db = await openDatabase(`conv-test-${n++}`);
+    const handlers: Record<string, (data: unknown) => void> = {};
+    const posted: string[] = [];
+    const tg: Bridge = {
+      transport: 'webview-proxy',
+      post: (type: string) => void posted.push(type),
+      on: (type: string, handler: (data: never) => void) => {
+        handlers[type] = handler as (data: unknown) => void;
+        return () => {};
+      },
+    } as Bridge;
+    const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+    // Set up, with the bot allowed to write: notices are set up by themselves, as at first.
+    await createApp({ ...deps, launch: launchWith('') }).setUp();
+    const code = 'reg' + (await readAccount(db))!.fingerprint;
+    await createApp({ ...deps, launch: launchWith(code) }).start();
+    expect(b.noticeSetups).toHaveLength(1);
+
+    // The user blocks the bot, and the next notice is refused. Telegram's
+    // launch data may still say the bot may write: a plain launch only offers.
+    const record = await readAccount(db);
+    if (!record || !('accountId' in record)) throw new Error('not set up');
+    b.refuseNotices(record.accountId);
+    const app = createApp({ ...deps, launch: launchWith('') });
+    await app.start();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(b.noticeSetups).toHaveLength(1);
+    expect(screenOf(app.screen.value, 'home')).toMatchObject({ askNotices: true, account: { notices: false, noticesRefused: true } });
+    await app.home();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(b.noticeSetups).toHaveLength(1);
+
+    // The user taps Turn on notices: Telegram is asked, and once it allows, they're set up.
+    const asked = posted.length;
+    app.allowNotices();
+    expect(posted.slice(asked)).toEqual(['web_app_request_write_access']);
+    handlers.write_access_requested!({ status: 'allowed' });
+    for (let i = 0; i < 20 && b.noticeSetups.length === 1; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(b.noticeSetups).toHaveLength(2);
+    expect(screenOf(app.screen.value, 'home')).toMatchObject({ askNotices: false, account: { notices: true, noticesRefused: false } });
   });
 
   it('deletes a conversation from the list, and brings it back when they write again', async () => {
@@ -806,6 +861,35 @@ describe('conversations in the app', () => {
     const conv = screenOf(sender.screen.value, 'conversation');
     expect(conv.error).toBe('no-tokens');
     expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+  });
+
+  it('says when a link takes no more first messages for now, and from when it does, apart from a busy mailbox', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    // The link's hourly cap, 29 minutes before the hour ends.
+    b.state.sendRefused = new ApiError(429, 'link_busy', undefined, undefined, 29 * 60);
+    const before = Date.now();
+    await sender.writeToLink('hello');
+    let conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+    expect(conv.error).toMatchObject({ kind: 'link-busy' });
+    const { until } = conv.error as LimitError;
+    expect(until).toBeGreaterThanOrEqual(before + 29 * 60_000);
+    expect(until).toBeLessThanOrEqual(Date.now() + 29 * 60_000);
+
+    // The mailbox's own cap is still "too fast": a minute.
+    b.state.sendRefused = new ApiError(429, 'rate_limited');
+    await sender.sendMessage('again');
+    conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('rate-limited');
+    // Without a Retry-After, until when isn't known (the message then says
+    // when the hour ends).
+    b.state.sendRefused = new ApiError(429, 'link_busy');
+    await sender.sendMessage('and again');
+    expect(screenOf(sender.screen.value, 'conversation').error).toEqual({ kind: 'link-busy', until: null });
   });
 
   it("doesn't take the user back to where an action failed once they've gone elsewhere", async () => {

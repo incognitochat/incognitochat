@@ -47,12 +47,12 @@ func burned(t *testing.T, client *dynamodb.Client, table string, signingKey []by
 	}
 }
 
-// tombstone reports whether an item is a signing key's tombstone: its key
-// and nothing else.
+// tombstone reports whether an item is a signing key's or a link's
+// tombstone: its key and nothing else, naming nobody.
 func tombstone(it map[string]types.AttributeValue) bool {
 	pk, _ := str(it, "pk")
 	sk, _ := str(it, "sk")
-	return strings.HasPrefix(pk, keyPK("")) && sk == skKey && len(it) == 2
+	return (strings.HasPrefix(pk, keyPK("")) && sk == skKey || strings.HasPrefix(pk, linkPK("")) && sk == skLink) && len(it) == 2
 }
 
 // withKey is a new link (new ID, keys, intro mailbox) with the given

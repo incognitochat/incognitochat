@@ -124,7 +124,10 @@ func (s *Sealer) Open(sealed []byte) (int64, error) {
 type Directory interface {
 	Notices(ctx context.Context, accountID string) (directory.NoticeTarget, error)
 	NoticeSent(ctx context.Context, accountID string, messageID int64) error
+	// NoticesOff turns notices off after Telegram refused one; NoticesStale
+	// after the sealed chat ID didn't open (directory.Store).
 	NoticesOff(ctx context.Context, accountID string) error
+	NoticesStale(ctx context.Context, accountID string) error
 }
 
 // Quiet holds the quiet period after a notice (ephemeral.Quiet).
@@ -197,8 +200,9 @@ func (n *Notifier) Notify(ctx context.Context, accountID string) error {
 	}
 	chat, err := n.Sealer.Open(target.SealedChat)
 	if err != nil {
-		// Sealed under an earlier key: wait for the app to set it up again.
-		return n.Directory.NoticesOff(ctx, accountID)
+		// Sealed under an earlier key: wait for the app to set it up again,
+		// which it does by itself (not a refusal).
+		return n.Directory.NoticesStale(ctx, accountID)
 	}
 	if n.flooded() {
 		return ErrRateLimited
@@ -329,7 +333,7 @@ func (n *Notifier) Check(ctx context.Context) error {
 		}
 		return err
 	}
-	return errors.Join(n.Directory.NoticeSent(ctx, account, 0), n.Directory.NoticesOff(ctx, account))
+	return errors.Join(n.Directory.NoticeSent(ctx, account, 0), n.Directory.NoticesOff(ctx, account), n.Directory.NoticesStale(ctx, account))
 }
 
 func (n *Notifier) sleep(ctx context.Context, d time.Duration) error {
