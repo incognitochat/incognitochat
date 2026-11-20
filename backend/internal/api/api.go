@@ -48,6 +48,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
@@ -115,8 +116,11 @@ type Directory interface {
 	// (not one being deleted).
 	AccountExists(ctx context.Context, telegramHash string) (bool, error)
 	// Used records the month an account was used in, unless it says so
-	// already (directory.Store.Used).
-	Used(ctx context.Context, accountID, month string) error
+	// already, and reports whether it wrote it (directory.Store.Used).
+	Used(ctx context.Context, accountID, month string) (bool, error)
+	// UseRecorded notes that a login recorded its month of use in month
+	// (directory.Store.UseRecorded), for the expiry's guard.
+	UseRecorded(ctx context.Context, month string) error
 }
 
 // UnusedAccounts is what the account expiry (expiry.go) needs of the
@@ -128,9 +132,9 @@ type UnusedAccounts interface {
 	// CountUnused counts them, up to about max, and says whether there
 	// are more.
 	CountUnused(ctx context.Context, lastExpired string, max int) (int, bool, error)
-	// NewestUse is the newest month any account was last used in; "" if
-	// none has one.
-	NewestUse(ctx context.Context) (string, error)
+	// RecordedUse is the newest month a login recorded its month of use
+	// in (UseRecorded); "" if none has.
+	RecordedUse(ctx context.Context) (string, error)
 	// AccountState reads what deleting an account needs to know of it.
 	AccountState(ctx context.Context, accountID string) (directory.Device, error)
 	// Expire marks an account as being deleted, as MarkDeleting does, only
@@ -226,6 +230,12 @@ type Server struct {
 	Expiry ExpiryMode
 	// sleep waits between the account expiry's steps; time's if nil.
 	sleep func(ctx context.Context, d time.Duration) error
+	// useNoted is the month this instance last noted that a login recorded
+	// its month of use in (recordUse), so it notes it once a month.
+	useNoted struct {
+		sync.Mutex
+		month string
+	}
 }
 
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).

@@ -125,7 +125,7 @@ func TestExpireAccounts(t *testing.T) {
 	twelveMonths := h.setUpAt(t, userID+2, start.AddDate(0, -12, 0))
 	noMonth := h.setUpAt(t, userID+3, start.AddDate(-3, 0, 0))
 	// Someone uses the app this month (TestExpiryPausesWithoutRecentUse).
-	h.setUpAt(t, userID+4, start)
+	h.loginThisMonth(t, userID+4)
 	if _, err := tb.meter.Client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:        &tb.directory,
 		Key:              map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "A#" + noMonth.d.account}, "sk": &types.AttributeValueMemberS{Value: "A"}},
@@ -234,18 +234,22 @@ func TestMonthOfUseWrittenOncePerMonth(t *testing.T) {
 	ctx := context.Background()
 	m := h.account(t, userID)
 	store := h.server.Directory.(*directory.Store)
+	// Writes of the account's item (the guard's note, TestLoginNotesRecordedUse,
+	// is another item).
+	written := 0
 	updates := func() int {
 		n := 0
-		for _, c := range tb.meter.Calls() {
-			if c == "UpdateItem "+tb.directory {
+		for _, k := range tb.meter.Written(tb.directory) {
+			if k == "A#"+m.d.account+" A" {
 				n++
 			}
 		}
+		n, written = n-written, n
 		return n
 	}
 	login := func() {
 		t.Helper()
-		tb.meter.Reset()
+		updates()
 		if status, out := h.post(t, "/session", m.d.login(t, h.now)); status != http.StatusOK {
 			t.Fatalf("login: %d %v", status, out)
 		}
@@ -289,7 +293,7 @@ func TestExpiryIsBoundedAndResumable(t *testing.T) {
 		small = append(small, h.setUpAt(t, userID+1+int64(i), start.AddDate(0, -14, 0)))
 	}
 	kept := h.setUpAt(t, userID+10, start.AddDate(0, -2, 0))
-	h.setUpAt(t, userID+11, start)
+	h.loginThisMonth(t, userID+11)
 	store := h.server.Directory.(*directory.Store)
 
 	runs := 0
@@ -384,7 +388,7 @@ func TestExpiryLeavesAccountsAlone(t *testing.T) {
 	store := h.server.Directory.(*directory.Store)
 	first := h.setUpAt(t, userID, start.AddDate(0, -15, 0))
 	held := h.setUpAt(t, userID+1, start.AddDate(0, -13, 0))
-	h.setUpAt(t, userID+2, start)
+	h.loginThisMonth(t, userID+2)
 	release, ok, err := store.Lease(ctx, held.d.account, h.now)
 	if err != nil || !ok {
 		t.Fatalf("lease: %v %v", ok, err)
@@ -409,7 +413,8 @@ func TestExpiryLeavesAccountsAlone(t *testing.T) {
 		h.now = h.now.Add(d)
 		if !used {
 			used = true
-			return store.Used(ctx, held.d.account, directory.Month(h.now))
+			_, err := store.Used(ctx, held.d.account, directory.Month(h.now))
+			return err
 		}
 		return nil
 	}
@@ -431,17 +436,27 @@ func TestExpiryLeavesAccountsAlone(t *testing.T) {
 	}
 }
 
+// loginThisMonth sets up an account last month and has it log in now: the
+// login records the new month, and notes it for the expiry's guard
+// (directory.Store.UseRecorded), as logins do in a deployment in use.
+func (h *harness) loginThisMonth(t *testing.T, user int64) member {
+	t.Helper()
+	m := h.setUpAt(t, user, time.Date(h.now.Year(), h.now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1))
+	m.token = h.token(t, m.d)
+	return m
+}
+
 // Logins that stop recording their month would make every account look
-// unused a year later. So a run deletes nothing unless some account was
-// used this month or last: otherwise it logs an error, constant, and
-// fails, for the alarm. Once a login records a month, it carries on.
+// unused a year later. So a run deletes nothing unless a login noted this
+// month or last: otherwise it logs an error, constant, and fails, for the
+// alarm. Once a login notes a month, it carries on.
 func TestExpiryPausesWithoutRecentUse(t *testing.T) {
 	h, _ := newExpiryTables(t)
 	ctx := context.Background()
 	h.server.Expiry = ExpiryOn
 	store := h.server.Directory.(*directory.Store)
 	due := h.setUpAt(t, userID, start.AddDate(0, -13, 0))
-	recent := h.setUpAt(t, userID+1, start.AddDate(0, -2, 0))
+	h.setUpAt(t, userID+1, start.AddDate(0, -2, 0))
 
 	if err := h.server.ExpireAccounts(ctx); !errors.Is(err, errExpiryPaused) {
 		t.Fatalf("a run with no recent month: %v", err)
@@ -454,8 +469,14 @@ func TestExpiryPausesWithoutRecentUse(t *testing.T) {
 		t.Fatalf("logged %s", h.logs)
 	}
 
-	// Last month's will do.
-	if err := store.Used(ctx, recent.d.account, directory.MonthsBefore(h.now, 1)); err != nil {
+	// Two months back won't do; last month's will.
+	if err := store.UseRecorded(ctx, directory.MonthsBefore(h.now, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.ExpireAccounts(ctx); !errors.Is(err, errExpiryPaused) {
+		t.Fatalf("a run with only a month from two months back: %v", err)
+	}
+	if err := store.UseRecorded(ctx, directory.MonthsBefore(h.now, 1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.server.ExpireAccounts(ctx); err != nil {
@@ -463,6 +484,89 @@ func TestExpiryPausesWithoutRecentUse(t *testing.T) {
 	}
 	if _, err := store.AccountState(ctx, due.d.account); !errors.Is(err, directory.ErrNotFound) {
 		t.Fatalf("after a recent login: %v", err)
+	}
+}
+
+// silentUsed records nothing, and says nothing either: a fault in the
+// month's write that returns no error.
+type silentUsed struct{ Directory }
+
+func (silentUsed) Used(context.Context, string, string) (bool, error) { return false, nil }
+
+// The guard reads only what logins write: an account used every month
+// whose logins silently stopped recording it isn't deleted because someone
+// registered this month (which stores its own month). The run pauses and
+// fails, the dry run too, and the account stays.
+func TestExpiryGuardIgnoresRegistrations(t *testing.T) {
+	for _, mode := range []ExpiryMode{ExpiryOn, ExpiryDryRun} {
+		h, _ := newExpiryTables(t)
+		ctx := context.Background()
+		store := h.server.Directory.(*directory.Store)
+		inUse := h.setUpAt(t, userID, start.AddDate(0, -14, 0))
+		h.server.Directory = silentUsed{h.server.Directory}
+		// It logs in every month since, recording nothing.
+		for months := 13; months >= 0; months-- {
+			h.now = start.AddDate(0, -months, 0)
+			h.token(t, inUse.d)
+		}
+		// Someone signs up this month.
+		h.account(t, userID+1)
+		if d, err := store.AccountState(ctx, inUse.d.account); err != nil || d.LastUse != "2025-11" {
+			t.Fatalf("%s: the account in use: %+v, %v", mode, d, err)
+		}
+
+		h.server.Expiry = mode
+		if err := h.server.ExpireAccounts(ctx); !errors.Is(err, errExpiryPaused) {
+			t.Fatalf("%s: a run while logins record nothing: %v", mode, err)
+		}
+		if d, err := store.AccountState(ctx, inUse.d.account); err != nil || d.Deleting {
+			t.Fatalf("%s: the account in use was deleted: %+v, %v", mode, d, err)
+		}
+		if lines := h.logged(t, msgExpiryPaused); len(lines) != 1 || lines[0]["level"] != "ERROR" {
+			t.Fatalf("%s: logged %s", mode, h.logs)
+		}
+	}
+}
+
+// A login that records a new month notes it for the guard, once a month
+// per instance, and a registration never does.
+func TestLoginNotesRecordedUse(t *testing.T) {
+	h, tb := newExpiryTables(t)
+	ctx := context.Background()
+	store := h.server.Directory.(*directory.Store)
+	notes := func() int {
+		n := 0
+		for _, k := range tb.meter.Written(tb.directory) {
+			if k == "S#use S" {
+				n++
+			}
+		}
+		return n
+	}
+	a := h.setUpAt(t, userID, start.AddDate(0, -1, 0))
+	b := h.setUpAt(t, userID+1, start.AddDate(0, -1, 0))
+	h.account(t, userID+2)
+	if got, err := store.RecordedUse(ctx); err != nil || got != "" || notes() != 0 {
+		t.Fatalf("after registrations alone: %q %v, %d notes", got, err, notes())
+	}
+	h.token(t, a.d)
+	if got, err := store.RecordedUse(ctx); err != nil || got != "2027-01" || notes() != 1 {
+		t.Fatalf("after the month's first login: %q %v, %d notes", got, err, notes())
+	}
+	// Another account's first login this month: its own month only.
+	h.token(t, b.d)
+	if notes() != 1 {
+		t.Fatalf("a second account's login noted the month again: %d", notes())
+	}
+	if d, err := store.AccountState(ctx, b.d.account); err != nil || d.LastUse != "2027-01" {
+		t.Fatalf("its month: %+v, %v", d, err)
+	}
+	// Next month, again once.
+	h.now = time.Date(2027, 2, 1, 0, 0, 1, 0, time.UTC)
+	h.token(t, a.d)
+	h.token(t, b.d)
+	if got, err := store.RecordedUse(ctx); err != nil || got != "2027-02" || notes() != 2 {
+		t.Fatalf("in February: %q %v, %d notes", got, err, notes())
 	}
 }
 
@@ -500,7 +604,7 @@ func TestExpiryPassesStuckAccounts(t *testing.T) {
 		stuck = append(stuck, m)
 	}
 	behind := h.setUpAt(t, userID+20, start.AddDate(0, -14, 0))
-	h.setUpAt(t, userID+21, start)
+	h.loginThisMonth(t, userID+21)
 
 	if err := h.server.ExpireAccounts(ctx); err == nil {
 		t.Fatal("a run with stuck accounts didn't fail")
@@ -558,7 +662,9 @@ func TestExpiryMetricFiltersMatchTheLogs(t *testing.T) {
 // failingUsed fails every Used.
 type failingUsed struct{ Directory }
 
-func (failingUsed) Used(context.Context, string, string) error { return errors.New("used failed") }
+func (failingUsed) Used(context.Context, string, string) (bool, error) {
+	return false, errors.New("used failed")
+}
 
 // A login whose month of use can't be recorded still goes through, and
 // logs an error line with a constant message that a metric filter counts
@@ -597,6 +703,7 @@ func TestExpiringAccountSaysSo(t *testing.T) {
 	tb.mailboxes(t, old.d.account, 400)
 	own := h.account(t, userID+1)
 	tb.mailboxes(t, own.d.account, 400)
+	h.loginThisMonth(t, userID+2)
 
 	if err := h.server.ExpireAccounts(ctx); err != nil {
 		t.Fatal(err)

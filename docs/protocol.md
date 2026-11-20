@@ -288,8 +288,11 @@ the server, every 15 minutes, finds the account and marks it as being
 deleted, ending its link, only if its month is still the one it read (a
 login since keeps it), and deletes it in the same step if it's small, or
 over later steps, a few each run, paced as an app deleting its account is.
-A run deletes nothing while no account at all has a month from this month
-or last (logins may have stopped recording it). From the mark on it is any
+A run, the dry run too, deletes nothing while no login has recorded a new
+month this month or last (logins may have stopped recording it; a
+registration doesn't count): the first login that records one each month
+in a server instance notes the month on a settings item, which names
+nobody, and the run reads that. From the mark on it is any
 account being deleted: its link answers "not found", so the people who
 wrote to it can't reach it any more (their sends to its mailboxes are
 dropped, as to any ended mailbox, and they aren't told), and `GET

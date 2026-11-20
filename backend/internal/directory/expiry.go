@@ -72,7 +72,8 @@ func LastExpiredMonth(now time.Time) string {
 // whose read of the account (Device.LastUse) showed an earlier month, so
 // it writes about once a month per account in use. Only a live account (not
 // replaced, and not being deleted: an expiry that started stays started).
-func (s *Store) Used(ctx context.Context, accountID, month string) error {
+// It reports whether it wrote the month.
+func (s *Store) Used(ctx context.Context, accountID, month string) (bool, error) {
 	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.Table,
 		Key:                       key(accountPK(accountID), skAccount),
@@ -82,9 +83,47 @@ func (s *Store) Used(ctx context.Context, accountID, month string) error {
 	})
 	var failed *types.ConditionalCheckFailedException
 	if errors.As(err, &failed) {
-		return nil // recorded already, or the account is gone or ending
+		return false, nil // recorded already, or the account is gone or ending
+	}
+	return err == nil, err
+}
+
+// usePK is the settings item that keeps the newest month a login recorded
+// its account's month of use in (m), and nothing else: it names nobody.
+// Only a login's write (Used, then UseRecorded) moves it on; registration,
+// which stores its own month, never does. The expiry deletes nothing unless
+// it says this month or last (RecordedUse): so a fault that stops logins
+// recording their month, silently or not, can't make accounts in use look
+// unused a year later, whoever signs up meanwhile.
+const usePK = "S#use"
+
+// UseRecorded notes that a login recorded its account's month of use in
+// month, unless the item says so already or later: one conditional write,
+// which the api makes at most once a month per instance.
+func (s *Store) UseRecorded(ctx context.Context, month string) error {
+	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(usePK, skSettings),
+		UpdateExpression:          aws.String("SET m = :m"),
+		ConditionExpression:       aws.String("attribute_not_exists(m) OR m < :m"),
+		ExpressionAttributeValues: attrs{":m": sv(month)},
+	})
+	var failed *types.ConditionalCheckFailedException
+	if errors.As(err, &failed) {
+		return nil // noted already, this month
 	}
 	return err
+}
+
+// RecordedUse is the newest month a login recorded its month of use in
+// (UseRecorded), strongly consistent: "" if none has.
+func (s *Store) RecordedUse(ctx context.Context) (string, error) {
+	it, err := s.get(ctx, usePK, skSettings, time.Time{})
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	m, _ := str(it, "m")
+	return m, err
 }
 
 // UnusedAccount is an account found unused (Unused): its ID and the month
@@ -120,28 +159,6 @@ func (s *Store) Unused(ctx context.Context, lastExpired string, limit int) ([]Un
 		}
 	}
 	return accounts, nil
-}
-
-// NewestUse is the newest last-use month any account has, from the last-use
-// index (one key read, eventually consistent): "" if none has one. While
-// logins record their month (Used), it is this month's or last month's
-// whenever anyone uses the app; the expiry deletes nothing otherwise, so a
-// fault that stops logins recording can't make accounts in use look unused
-// (api.Server.ExpireAccounts).
-func (s *Store) NewestUse(ctx context.Context) (string, error) {
-	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 &s.Table,
-		IndexName:                 aws.String(lastUseIndex),
-		KeyConditionExpression:    aws.String("sk = :a"),
-		ExpressionAttributeValues: attrs{":a": sv(skAccount)},
-		ScanIndexForward:          aws.Bool(false),
-		Limit:                     aws.Int32(1),
-	})
-	if err != nil || len(out.Items) == 0 {
-		return "", err
-	}
-	lu, _ := str(out.Items[0], "lu")
-	return lu, nil
 }
 
 // CountUnused counts the accounts last used in lastExpired or before, from

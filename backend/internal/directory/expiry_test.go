@@ -66,32 +66,22 @@ func TestMonths(t *testing.T) {
 	}
 }
 
-// NewestUse is the newest month any account has; "" with none. A replaced
-// account's marker, and an account with no month, have none.
-func TestNewestUse(t *testing.T) {
+// RecordedUse is the newest month UseRecorded noted, moving on, never
+// back; "" with none. Registrations don't touch it.
+func TestRecordedUse(t *testing.T) {
 	s, _ := lastUseStore(t)
 	ctx := context.Background()
-	if got, err := s.NewestUse(ctx); err != nil || got != "" {
-		t.Fatalf("no accounts: %q %v", got, err)
+	usedIn(t, s, "2026-11")
+	if got, err := s.RecordedUse(ctx); err != nil || got != "" {
+		t.Fatalf("none noted: %q %v", got, err)
 	}
-	usedIn(t, s, "2026-03")
-	newest := usedIn(t, s, "2026-11")
-	usedIn(t, s, "2025-12")
-	if err := s.Create(ctx, newAccount(t, "th-no-month")); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := s.NewestUse(ctx); err != nil || got != "2026-11" {
-		t.Fatalf("newest: %q %v", got, err)
-	}
-	acct, err := s.ByTelegram(ctx, newest.TelegramHash, newest.DeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Replace(ctx, acct, newAccount(t, newest.TelegramHash), now); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := s.NewestUse(ctx); err != nil || got != "2026-03" {
-		t.Fatalf("newest once it was replaced: %q %v", got, err)
+	for _, c := range []struct{ noted, want string }{{"2026-11", "2026-11"}, {"2026-10", "2026-11"}, {"2026-12", "2026-12"}} {
+		if err := s.UseRecorded(ctx, c.noted); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.RecordedUse(ctx); err != nil || got != c.want {
+			t.Fatalf("noted %s: %q %v, want %s", c.noted, got, err, c.want)
+		}
 	}
 }
 
@@ -112,9 +102,12 @@ func TestUsed(t *testing.T) {
 	if d, err := s.Device(ctx, n.ID, n.DeviceID, now); err != nil || d.LastUse != "2027-01" {
 		t.Fatalf("a login reads %+v, %v", d, err)
 	}
-	for _, c := range []struct{ used, want string }{{"2027-01", "2027-01"}, {"2027-03", "2027-03"}, {"2027-02", "2027-03"}} {
-		if err := s.Used(ctx, n.ID, c.used); err != nil {
-			t.Fatal(err)
+	for _, c := range []struct {
+		used, want string
+		written    bool
+	}{{"2027-01", "2027-01", false}, {"2027-03", "2027-03", true}, {"2027-02", "2027-03", false}} {
+		if written, err := s.Used(ctx, n.ID, c.used); err != nil || written != c.written {
+			t.Fatalf("used in %s: wrote %v, %v", c.used, written, err)
 		}
 		if got := month(n.ID); got != c.want {
 			t.Fatalf("used in %s: %s, want %s", c.used, got, c.want)
@@ -129,7 +122,7 @@ func TestUsed(t *testing.T) {
 	if got := month(older.ID); got != "" {
 		t.Fatalf("no month: %q", got)
 	}
-	if err := s.Used(ctx, older.ID, "2027-01"); err != nil || month(older.ID) != "2027-01" {
+	if written, err := s.Used(ctx, older.ID, "2027-01"); err != nil || !written || month(older.ID) != "2027-01" {
 		t.Fatalf("its first month: %v", err)
 	}
 
@@ -138,7 +131,7 @@ func TestUsed(t *testing.T) {
 	if err := s.MarkDeleting(ctx, n.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Used(ctx, n.ID, "2027-04"); err != nil || month(n.ID) != "2027-03" {
+	if written, err := s.Used(ctx, n.ID, "2027-04"); err != nil || written || month(n.ID) != "2027-03" {
 		t.Fatalf("being deleted: %v", err)
 	}
 	// Replaced, or gone: nothing is written, not even an item.
@@ -150,14 +143,14 @@ func TestUsed(t *testing.T) {
 	if err := s.Replace(ctx, acct, repl, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Used(ctx, older.ID, "2027-05"); err != nil || month(older.ID) != "" {
+	if written, err := s.Used(ctx, older.ID, "2027-05"); err != nil || written || month(older.ID) != "" {
 		t.Fatalf("replaced: %v", err)
 	}
 	out, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table), Select: "COUNT"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Used(ctx, "AAAAAAAAAAAAAAAAAAAAAA", "2027-05"); err != nil {
+	if written, err := s.Used(ctx, "AAAAAAAAAAAAAAAAAAAAAA", "2027-05"); err != nil || written {
 		t.Fatal(err)
 	}
 	again, err := client.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.Table), Select: "COUNT"})
@@ -223,7 +216,7 @@ func TestExpire(t *testing.T) {
 	}
 
 	// Used since it was listed: kept.
-	if err := s.Used(ctx, n.ID, "2027-01"); err != nil {
+	if _, err := s.Used(ctx, n.ID, "2027-01"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Expire(ctx, n.ID, "2025-12"); !errors.Is(err, ErrConflict) {

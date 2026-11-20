@@ -15,6 +15,7 @@
 //	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r)
 //	S#levels     S           invitation allowance per level (m), version (v)
 //	S#switches   S           the operator's emergency switches (switches.go)
+//	S#use        S           the newest month a login recorded its month of use in (m) (expiry.go)
 //	M#<mailbox>  M           a mailbox (mailboxes.go)
 //	T#<hash>     T           one account per Telegram user: account ID (a)
 //

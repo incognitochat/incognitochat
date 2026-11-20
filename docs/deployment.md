@@ -790,21 +790,25 @@ the next), and the failed steps don't count against the run's five, so
 such accounts can't hold up the others. Attachments aren't touched: they
 expire within 30 days, as always.
 
-**The guard.** Before deleting anything, a run checks that logins still
-record their month: some account must have this month's or last month's.
-If none has, logins may have stopped recording it (a fault in `api`, its
-role, or the table), and in a year accounts in use would look unused; or
+**The guard.** Whenever accounts are due, a run, the dry run too, checks
+that logins still record their month: some login must have recorded a new
+one this month or last. The first login that does, each month, in each
+`api` instance, notes the month on the directory item `S#use` (one month,
+naming nobody); registrations, which store their own month, never do, so
+new signups can't hide logins that stopped recording. If it's older,
+logins may have stopped recording (a fault in `api`, its role, or the
+table, silent or not), and in a year accounts in use would look unused; or
 nobody used the deployment for a month. Either way the run deletes
-nothing, logs `account expiry paused: no account has a recent month of
-use` and fails, until a login records a month. A login that can't record
-its month still logs in, and logs `month of use not recorded` as an
-error.
+nothing, logs `account expiry paused: no login has recorded a recent
+month of use` and fails, until a login records a month. A login that
+can't record its month, or note it, still logs in, and logs `month of use
+not recorded` as an error.
 
 `ACCOUNT_EXPIRY` (a variable of the GitHub environment) is the switch:
 
 | Value | What a run does |
 |---|---|
-| `dry-run` (unset) | Counts the due accounts and logs how many (`account expiry dry run: accounts it would delete`, "(at least)" past 10,000). Deletes nothing. |
+| `dry-run` (unset) | Counts the due accounts and logs how many (`account expiry dry run: accounts it would delete`, "(at least)" past 10,000). Deletes nothing. With accounts due, it checks the guard too, and pauses and fails as `on` would. |
 | `on` | Deletes them, and logs how many it deleted (`account expiry: accounts deleted`); as errors, how many it passed over as stuck (`account expiry: accounts stuck`, with the first error's kind), a run that failed (`account expiry failed`) or the guard's pause. A failed run isn't tried again; the next carries on. |
 | `off` | Nothing: the schedule is disabled, and `api` would ignore it. |
 

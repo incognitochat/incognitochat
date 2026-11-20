@@ -101,6 +101,8 @@ type memDirectory struct {
 	goneOnDelete bool
 	// leased are the accounts a step holds (Lease).
 	leased map[string]bool
+	// useRecorded is the newest month a login recorded (UseRecorded).
+	useRecorded string
 }
 
 func newMemDirectory() *memDirectory {
@@ -626,12 +628,20 @@ func (m *memDirectory) put(n directory.NewAccount) {
 	m.accounts[n.ID] = &memAccount{key: n.AccountKey, th: n.TelegramHash, devices: map[string][]byte{n.DeviceID: n.DeviceKey}, lastUse: n.Month}
 }
 
-func (m *memDirectory) Used(_ context.Context, account, month string) error {
+func (m *memDirectory) Used(_ context.Context, account, month string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if a, ok := m.accounts[account]; ok && !a.replaced && !a.deleting && a.lastUse < month {
 		a.lastUse = month
+		return true, nil
 	}
+	return false, nil
+}
+
+func (m *memDirectory) UseRecorded(_ context.Context, month string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.useRecorded = max(m.useRecorded, month)
 	return nil
 }
 

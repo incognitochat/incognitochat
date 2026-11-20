@@ -81,11 +81,11 @@ const (
 	msgExpiryDeleted = "account expiry: accounts deleted"
 	msgExpiryStuck   = "account expiry: accounts stuck"
 	msgExpiryFailed  = "account expiry failed"
-	msgExpiryPaused  = "account expiry paused: no account has a recent month of use"
+	msgExpiryPaused  = "account expiry paused: no login has recorded a recent month of use"
 )
 
-// errExpiryPaused fails a run that found no account used this month or
-// last (msgExpiryPaused).
+// errExpiryPaused fails a run that found no login had recorded a month of
+// use this month or last (guard, msgExpiryPaused).
 var errExpiryPaused = errors.New("api: account expiry paused: no recent month of use")
 
 // ExpireAccounts deletes some of the accounts nobody has used for over
@@ -95,11 +95,13 @@ var errExpiryPaused = errors.New("api: account expiry paused: no recent month of
 // on a schedule's event (backend/cmd/api, infra/functions.tf); nothing
 // else reaches it.
 //
-// Before deleting anything, it checks that logins still record their
-// month: some account must have this month's or last month's (NewestUse).
-// If none has, logins have stopped recording it (a fault, or nobody used
-// the deployment for a month), and accounts in use could look unused: it
-// deletes nothing, logs msgExpiryPaused and fails, for the alarm.
+// Whenever accounts are due, the dry run as well, it first checks that
+// logins still record their month (guard): one must have this month or
+// last (directory.Store.RecordedUse, which only a login's write moves on;
+// a registration doesn't). If none has, logins have stopped recording it (a
+// fault, or nobody used the deployment for a month), and accounts in use
+// could look unused: it deletes nothing, logs msgExpiryPaused and fails,
+// for the alarm.
 //
 // A run is bounded (expirySteps, paced) and the next carries on: an account
 // whose deletion started stays in the last-use index until it's gone, and,
@@ -125,6 +127,9 @@ func (s *Server) ExpireAccounts(ctx context.Context) error {
 			msg += " (at least)"
 		}
 		s.Log.Warn(msg, slog.String(logx.KeyRoute, expiryRoute), slog.Int(logx.KeyCount, n))
+		if n > 0 {
+			return s.guard(ctx, now)
+		}
 		return nil
 	}
 
@@ -133,13 +138,8 @@ func (s *Server) ExpireAccounts(ctx context.Context) error {
 		return s.expiryFailed(err)
 	}
 	if len(accounts) > 0 {
-		newest, err := s.Unused.NewestUse(ctx)
-		if err != nil {
-			return s.expiryFailed(err)
-		}
-		if newest < directory.MonthsBefore(now, 1) {
-			s.Log.Error(msgExpiryPaused, slog.String(logx.KeyRoute, expiryRoute))
-			return errExpiryPaused
+		if err := s.guard(ctx, now); err != nil {
+			return err
 		}
 	}
 	run := expiryRun{lastExpired: lastExpired}
@@ -168,6 +168,22 @@ func (s *Server) ExpireAccounts(ctx context.Context) error {
 		s.Log.Error(msgExpiryFailed, slog.String(logx.KeyRoute, expiryRoute), logx.ErrorKind(first))
 	}
 	return first
+}
+
+// guard checks that logins still record their month of use: some login
+// must have noted this month or last (directory.Store.RecordedUse). If none
+// has, it logs msgExpiryPaused, as an error, and returns errExpiryPaused:
+// the run deletes nothing.
+func (s *Server) guard(ctx context.Context, now time.Time) error {
+	recorded, err := s.Unused.RecordedUse(ctx)
+	if err != nil {
+		return s.expiryFailed(err)
+	}
+	if recorded < directory.MonthsBefore(now, 1) {
+		s.Log.Error(msgExpiryPaused, slog.String(logx.KeyRoute, expiryRoute))
+		return errExpiryPaused
+	}
+	return nil
 }
 
 // expiryFailed logs a run that failed before deleting anything, and

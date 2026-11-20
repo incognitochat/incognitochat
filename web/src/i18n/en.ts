@@ -321,7 +321,7 @@ export const en = {
     "It wasn't used for 12 months, so the server deleted it, as it does with every account left unused that long. Your old link no longer works. You can set up a new account.",
   signedOutTitle: 'This device is signed out',
   signedOutBody:
-    "The server didn't accept this device. That happens if its account was deleted, which the server does after 12 months without use, or if something is wrong on the server.",
+    "The server didn't accept this device. That happens if its account was deleted (the server may delete accounts nobody has used for 12 months), or if something is wrong on the server.",
   signedOutKept: 'Your chats are still on this device, and you can read them. The app asks the server again each time it opens.',
   readChats: 'Read my chats',
   readOnlyNotice: 'This device is signed out, so your chats are read-only.',

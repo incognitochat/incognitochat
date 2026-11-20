@@ -103,6 +103,7 @@ The keyed hashes and the edits are kept apart from the conversation itself
 | Attachments, encrypted, with their padded size and how many fresh upload links they were given (at most 3, when an upload is tried again) | Delivery, and fetching again (after clearing them from the device) | Until the recipient deletes the message or the chat, or at most 30 days; downloading or saving doesn't delete them. An upload is written once, with a link that only starts an upload within a minute and is given only in the 3 hours after payment, while nothing is stored: once deleted, it can't come back, except from a link given in that same minute (and that copy also expires within 30 days) |
 | Invitation codes the account created, and its invitation level | Invite-only access to links | While the account exists |
 | Two settings for everyone: whether uploads, and whether downloads, of attachments are paused (the operator's emergency switches). Nothing about any user | So the operator can pause attachments when their cost runs away | Until the operator changes them |
+| One month for everyone: the newest in which a login recorded its account's month of use. Nothing about any user | So the deletion of unused accounts deletes nothing if logins stop recording their month ([below](#accounts-nobody-uses)) | Replaced by the next month's, at the first such login of each month |
 | The admins' Telegram IDs, in an encrypted parameter (SSM Parameter Store), not in the `api` function's settings or the deployment's Terraform state. Whoever may read that parameter can read them: the `api` function, the deploy and the operator's AWS admins | To recognise admins, by the keyed hash of their ID | Until the operator changes them. SSM also keeps the parameter's earlier values, its last 100 |
 | Rate counters: how many messages each mailbox got in a minute, and first messages each link in an hour; how much each device fetched in a minute; and what each person (Telegram user) used in a day (tokens, mailboxes, link changes, notice setups, fetches, confirmations of messages already gone, and so on), and how often each attachment was fetched. Each is named by a keyed hash of what it counts and its window, which changes every window: without the server's secret key, nobody can tell which mailbox, link, device or person a counter is about, or that two counters are about the same one. The daily ones go by the Telegram user, so setting up again doesn't reset them | Rate limits, among them the ones that keep one account from using up the capacity everyone shares | Until their window (minute, hour or UTC day) ends |
 | Socket records: a keyed hash of the account (not its ID), the connection ID, and the minute the record expires | Live updates, while the app is open | From opening the app until the server finds the socket closed, the account is deleted, or the record expires, 40 minutes after the minute it opened |
@@ -194,9 +195,9 @@ later doesn't take accounts in use for unused. Accounts set up before it
 was stored get one at their next login, and aren't deleted until 12
 months after that (or after the month the operator gives the rest, once:
 [deployment.md](deployment.md#account-expiry)). It deletes nothing while
-no account at all has been used this month or last, as when logins have
-stopped recording their month, so accounts in use are never taken for
-unused.
+no login has recorded a month of use this month or last, as when logins
+have stopped recording it (registrations, which store their own month,
+don't count), so accounts in use are never taken for unused.
 
 **Never stored:** the content of any message or attachment in readable form,
 who sent a message, which conversations belong together, which mailboxes got
