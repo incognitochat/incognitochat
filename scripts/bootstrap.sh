@@ -5,8 +5,9 @@
 #     role (checked afterwards with IAM's policy simulator), the functions'
 #     roles and their permissions boundary, Lambda code signing (build
 #     bucket, signing profile, code signing config), cost and health
-#     alerts (a monthly budget, alarms, and the topics they publish to,
-#     one in us-east-1 for CloudFront's), and the audit trail (CloudTrail),
+#     alerts (a monthly budget, AWS's cost anomaly alerts, alarms, and the
+#     topics they publish to, one in us-east-1 for CloudFront's and the
+#     cost anomaly alerts), and the audit trail (CloudTrail),
 #     change alerts and IAM Access Analyzer (infra/init)
 #   - GitHub: a deployment environment that only accepts one branch (main) or
 #     release tags, optionally with required reviewers, plus its secrets and
@@ -16,6 +17,9 @@
 #
 # Requirements: AWS admin credentials for the target account (for example
 # AWS_PROFILE), gh authenticated as a repo admin, terraform >= 1.11, python3, jq.
+# In the account, Cost Explorer turned on and no AWS services cost monitor
+# but this stack's (checked before applying; docs/deployment.md, Setting up
+# an environment).
 #
 # Usage: AWS_PROFILE=<profile> scripts/bootstrap.sh <aws-region> [github-environment]
 #        DEPLOY_BRANCH=<branch> ... the only branch allowed to deploy (default: main).
@@ -90,7 +94,44 @@ existing_function_roles() {
   jq -cn '$ARGS.positional' --args "${names[@]}"
 }
 
+# The cost anomaly alerts (alerts.tf) need Cost Explorer, which only the
+# console can turn on, and their monitor is the account's one AWS services
+# monitor (DIMENSIONAL, SERVICE): AWS makes its own when Cost Explorer is
+# turned on, and then creating this stack's fails. Check both before
+# applying, so that a first run doesn't stop halfway.
+check_cost_explorer() {
+  local err out others
+  err=$(mktemp)
+  if ! out=$(aws ce get-anomaly-monitors --region us-east-1 --output json \
+    --query "AnomalyMonitors[?MonitorType=='DIMENSIONAL' && MonitorDimension=='SERVICE'].MonitorName" 2>"$err"); then
+    if grep -qi 'not enabled' "$err"; then
+      echo "Cost Explorer isn't turned on in this account, and the cost anomaly alerts need it." >&2
+      echo "Turn it on in the console (Billing and Cost Management, Cost Explorer, Launch Cost" >&2
+      echo "Explorer; there is no API for it), delete the AWS services monitor AWS then makes, and" >&2
+      echo "rerun this (docs/deployment.md, Setting up an environment). AWS said:" >&2
+    else
+      echo "Couldn't list the account's cost anomaly monitors, so nothing was applied. The cost" >&2
+      echo "anomaly alerts need Cost Explorer turned on (docs/deployment.md, Setting up an" >&2
+      echo "environment). AWS said:" >&2
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  # shellcheck disable=SC2016 # jq's own variables
+  others=$(jq -r --arg ours "${environment_prefix}-services" '.[] | select(. != $ours) | "  " + .' <<<"$out")
+  if [[ -n $others ]]; then
+    echo "The account already has an AWS services cost monitor, and may have only one:" >&2
+    echo "$others" >&2
+    echo "Delete it and its alert subscription first (Billing and Cost Management, Cost Anomaly" >&2
+    echo "Detection; docs/deployment.md, Setting up an environment), then rerun this." >&2
+    return 1
+  fi
+}
+
 # --- AWS (Terraform) ----------------------------------------------------------
+check_cost_explorer
 if aws s3api head-bucket --bucket "$state_bucket" --region "$region" 2>/dev/null; then
   tf init -input=false -reconfigure "${backend_args[@]}"
   roles=$(existing_function_roles)
@@ -220,4 +261,4 @@ EOF
 else
   echo "Done. BOT_TOKEN is already set. To deploy: ${how_to_deploy}."
 fi
-echo "Budget, alarm and change alerts go to the SNS topics ${environment_prefix}-alerts and, in us-east-1, ${environment_prefix}-edge-alerts; subscribe an address to each to receive them (docs/deployment.md)."
+echo "Budget, cost anomaly, alarm and change alerts go to the SNS topics ${environment_prefix}-alerts and, in us-east-1, ${environment_prefix}-edge-alerts; subscribe an address to each to receive them (docs/deployment.md)."

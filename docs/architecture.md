@@ -446,7 +446,12 @@ The panel under the message box has emoji and stickers, as in Telegram.
   (12,000 a minute, at most half what a table can serve); logins and sends
   never are, so a flood of lookups can't stop them. The API answers over
   IPv4 only, since the firewall would count each IPv6 address on its own
-  ([deployment.md](deployment.md#the-firewall)).
+  ([deployment.md](deployment.md#the-firewall)). Nothing caps the edge's
+  bill: CloudFront bills each request the firewall lets through and the
+  firewall each it looks at, so a flood spread over many addresses has no
+  ceiling, and the alerts on it come minutes to a day late. CloudFront's
+  flat-rate plans would cap it, and aren't used
+  ([deployment.md](deployment.md#flat-rate-plans-not-used)).
 - Secrets live in SSM, written through Terraform's write-only arguments, so they
   never land in Terraform state. Each function's role reads only its own.
 - Logs: warnings and errors only, kept 7 days. IDs, IP addresses, user agents

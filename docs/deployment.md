@@ -82,7 +82,20 @@ workflows. One-time setup:
 ## Setting up an environment
 
 An account admin bootstraps an AWS account once (and reruns it to apply
-changes to the bootstrap stack):
+changes to the bootstrap stack). Before the first run, in the account:
+
+- Turn on Cost Explorer, which the cost anomaly alerts (below) need: open
+  Cost Explorer once in the Billing and Cost Management console, Launch
+  Cost Explorer. There is no API for it.
+- Delete the AWS services monitor that AWS makes when Cost Explorer is
+  turned on, and its daily summary subscription (Billing and Cost
+  Management, Cost Anomaly Detection). An account may have only one AWS
+  services monitor, and the bootstrap makes its own,
+  `incognitochat-<env>-services`.
+
+The bootstrap checks both before applying anything, and stops if Cost
+Explorer is off or the account has an AWS services monitor with another
+name. Then:
 
 ```shell
 AWS_PROFILE=<profile> scripts/bootstrap.sh <aws-region> dev
@@ -163,17 +176,19 @@ profile from a given time, after which Lambda refuses to deploy anything it
 signed, and replace the profile by rerunning the bootstrap.
 
 Alerts are a monthly cost budget (`MONTHLY_BUDGET=<dollars>` when
-bootstrapping; 50 for production and 15 otherwise by default) and a few
-alarms, all publishing to one SNS topic, `incognitochat-<env>-alerts`,
-except the two on CloudFront and its firewall: their metrics are in
-us-east-1, whatever the app's region, so they publish to a second topic
-there, `incognitochat-<env>-edge-alerts`. The
+bootstrapping; 50 for production and 15 otherwise by default), AWS's cost
+anomaly alerts and a few alarms, all publishing to one SNS topic,
+`incognitochat-<env>-alerts`, except the three on CloudFront and its
+firewall: their metrics are in us-east-1, whatever the app's region, so
+they publish to a second topic there, `incognitochat-<env>-edge-alerts`,
+and so do the cost anomaly alerts. The
 [change alerts](#audit-trail-and-change-alerts) publish to the same two
 topics.
 
 | Alert | When |
 |---|---|
 | Budget | Half the budget is spent, all of it is, or the month is forecast to pass it. Billing data lags by hours. |
+| Cost anomaly (us-east-1) | AWS Cost Anomaly Detection found a service costing more than the account's history leads it to expect, by at least $5 in all (`cost_anomaly_alert_usd`). It watches nearly every AWS service, those no alarm reads too (not Route 53, Shield, Certificate Manager, Support and a few others, and only usage charges), and is free. It is slow: AWS runs it about three times a day, on billing data up to 24 hours old, so an alert can come a day after the spending; a new monitor starts after 24 hours, and a newly used service needs 10 days of history. An anomaly that lasts days is sent again while it stays above the threshold: several alerts can be one anomaly. |
 | `lambda-throttles` | Any function was refused for lack of concurrency. |
 | `api-invocations` | The `api` function was called more than 30,000 times in 5 minutes (100 a second). |
 | `api-errors` | The `api` function failed more than 10 times in 5 minutes. |
@@ -185,6 +200,7 @@ topics.
 | `ws-client-errors`, `ws-integration-errors` | The WebSocket API counted more than 300 `ClientError`s (refused by API Gateway before `ws` ran: mostly its throttle) or `IntegrationError`s (refused or failed by `ws`) in 5 minutes (`ws_errors_alarm`, each alarm on its own). |
 | `<table>-table-capacity` | A table used more than 70% of its read or write cap on average over 5 minutes (`table_capacity_alarm_percent`), before the cap refuses anyone. |
 | `edge-5xx` (us-east-1) | More than 5% of CloudFront's answers were 5xx errors in each of three 5-minute periods in a row (`edge_5xx_rate_alarm`). |
+| `edge-requests` (us-east-1) | CloudFront received more than 30,000 requests in 5 minutes (100 a second, as `api-invocations`; `edge_requests_alarm`), every distribution in the account together. This is what the edge bills, requests that never reach the `api` function included. AWS defines the metric as every request CloudFront receives; it doesn't say outright whether that includes those the firewall blocks, which `firewall-blocks` counts anyway. |
 | `firewall-blocks` (us-east-1) | The firewall blocked more than 3,000 requests in 5 minutes (10 a second; `firewall_blocks_alarm`). Only where `firewall` is true: by default in production alone. |
 | `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
 | `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
@@ -209,7 +225,8 @@ the same way, with `TF_VAR_<name>` at every rerun.
 
 What to do when a media alarm fires (`media-stored` too):
 [emergency switches](#emergency-switches). When a count alarm fires:
-[request counts](#request-counts). When another fires:
+[request counts](#request-counts). When `edge-requests` or a cost anomaly
+alert does: [under attack](#under-attack). When another fires:
 [health alarms](#health-alarms).
 
 The topics start without subscribers, so no address is stored in the
@@ -220,8 +237,8 @@ emails AWS sends:
 AWS_PROFILE=<profile> aws sns subscribe --region <aws-region> --protocol email \
   --topic-arn "$(terraform -chdir=infra/init output -raw alerts_topic_arn)" \
   --notification-endpoint <address>
-# CloudFront's and the firewall's alarms, and changes to IAM, CloudFront
-# and the firewall, in us-east-1.
+# CloudFront's and the firewall's alarms, the cost anomaly alerts, and
+# changes to IAM, CloudFront and the firewall, in us-east-1.
 AWS_PROFILE=<profile> aws sns subscribe --region us-east-1 --protocol email \
   --topic-arn "$(terraform -chdir=infra/init output -raw edge_alerts_topic_arn)" \
   --notification-endpoint <address>
@@ -665,6 +682,15 @@ prices ($0.1415 per million read units, $0.705 per million write units):
 The throttle alarms fire as soon as a table refuses requests; the budget's
 within a day, since billing data lags by hours.
 
+Nothing caps CloudFront's and the firewall's bill. Each request is billed,
+and a flood spread over many addresses, each under the firewall's
+per-address limits, isn't blocked, except on lookups by ID and batches of
+deletes, whose limits count everyone together (and the firewall still bills
+what those block): the edge bill has no ceiling. The
+`edge-requests` alarm says so within minutes, the cost anomaly alerts and
+the budget hours to a day later. What to do then, and the flat-rate plans
+that would cap it: [under attack](#under-attack).
+
 The caps are also the service's ceiling: every logged-in request reads the
 directory (one unit), and every small delivered message takes about three
 write units on the ephemeral table, so production's caps carry at most
@@ -1019,8 +1045,8 @@ about $2 a month per environment, at most about $6.50.
 
 The alarms on the other functions, the WebSocket API, the tables' capacity
 and the edge ([above](#setting-up-an-environment); `infra/init/alerts.tf`).
-Each costs $0.10 a month per metric it reads: about $1.60 a month for
-these in production, $1.50 elsewhere. The functions' logs, in Logs Insights
+Each costs $0.10 a month per metric it reads: about $1.70 a month for
+these in production, $1.60 elsewhere. The functions' logs, in Logs Insights
 on `/aws/lambda/<prefix>-<function>`, keep warnings and errors only, with
 allow-listed fields.
 
@@ -1073,10 +1099,23 @@ allow-listed fields.
 - `firewall-blocks`: a flood is being held off, or busy addresses are.
   The firewall's metrics (us-east-1, namespace AWS/WAFV2, dimensions WebACL
   `<prefix>-api` and Rule `<prefix>-api-<rule>`) say which rule blocks.
-  CloudFront and the firewall still bill each blocked request, about $1.80
-  per million together, and while `lookups-total` blocks, everyone's
-  lookups by ID are refused. If it lasts, watch what it costs (CloudFront's
-  `Requests`).
+  The firewall still bills each blocked request, $0.60 per million
+  (CloudFront doesn't), and while `lookups-total` blocks, everyone's
+  lookups by ID are refused. If it lasts, watch what it costs: the
+  firewall's `AllowedRequests` and `BlockedRequests` with Rule `ALL`
+  together are every request it bills, and the allowed ones are those
+  CloudFront bills too. See [under attack](#under-attack).
+- `edge-requests`: see [under attack](#under-attack). A rise that follows
+  the `api` function's invocations and the
+  [request counts](#request-counts) (registrations, sends) is real use:
+  raise `edge_requests_alarm`.
+- A cost anomaly alert: the message (JSON) names the service, region and
+  usage type that cost more, and links to the anomaly in the console
+  (`anomalyDetailsLink`). It describes spending up to a day old, so first
+  check in the metrics whether it still goes on. CloudFront or WAF:
+  [under attack](#under-attack). S3: the media alarms
+  ([emergency switches](#emergency-switches)). DynamoDB: the tables'
+  capacity ([cost guards](#cost-guards)).
 
 ## Audit trail and change alerts
 
@@ -1501,10 +1540,210 @@ with no one asked. For a lasting change, change `infra/edge.tf` or the
 limits' variables.
 
 The rule costs $1 a month, empty or not. Blocked requests are still billed
-(CloudFront and the firewall, about $1.80 per million), show as
+(by the firewall, $0.60 per million; CloudFront doesn't bill them), show as
 `BlockedRequests` with Rule `<prefix>-api-blocked`, and count towards the
 `firewall-blocks` alarm, which may stay on while a blocked host keeps
 sending. Remove the addresses once the incident is over: a shared address
 blocks everyone behind it. Empty the set before turning `FIREWALL` off,
 too: the deploy that deletes it prints its addresses in the plan, in public
 logs.
+
+## Under attack
+
+What to do when a flood costs money. The tables' caps bound the database's
+bill ([cost guards](#cost-guards)), but nothing bounds the edge's. CloudFront
+charges $1.00 to $1.20 per million HTTPS requests (North America and Europe,
+whose edge locations serve the API) for each request the firewall lets
+through, and the firewall $0.60 per million for each it looks at, plus a run
+of the `api` function for what gets past. Blocked requests are still billed:
+CloudFront hasn't charged for requests the firewall blocks since October
+2024, but the firewall bills them like any other. At 100 requests a second,
+the `edge-requests` alarm's threshold, a day is about 8.6 million requests:
+up to about $16 with the firewall (about $5 if it blocks them all), before
+data transfer and function runs, and as much again for each further 100 a
+second.
+
+**The signs**, in about the order they come:
+
+- `edge-requests` (us-east-1): CloudFront received more than 30,000
+  requests in 5 minutes.
+- `firewall-blocks` (us-east-1, where the firewall is on): it is blocking
+  much of it, which holds the flood back but not its bill.
+- `api-invocations`, `limit-hits`, `<table>-table-capacity` or
+  `<table>-table-throttles`: what got past reaches the `api` function and
+  the tables, and may crowd real users out.
+- A cost anomaly alert and the budget's, hours to a day later.
+
+**How to look.** Nothing records who sends: CloudFront keeps no access logs
+and the firewall no sampled requests (they would hold addresses), so there
+are only counts, in CloudWatch, a minute at a time:
+
+- CloudFront's `Requests` (us-east-1, namespace AWS/CloudFront, dimensions
+  DistributionId and Region `Global`): how big the flood is and when it
+  started.
+- The firewall's `BlockedRequests` for each rule, and `AllowedRequests` with
+  Rule `ALL` (us-east-1, namespace AWS/WAFV2, dimension WebACL
+  `<prefix>-api`; [what to watch](#the-firewall)): which rule holds it back,
+  and how much gets past.
+- The `api` function's `Invocations` (namespace AWS/Lambda, dimension
+  FunctionName `<prefix>-api`, in the app's region) and its
+  [request counts](#request-counts): which routes the rest goes to.
+
+The firewall can also list the addresses its per-address rules
+(`rate-per-ip`, `anonymous-per-ip`) are blocking at that moment, up to
+10,000 for each, for the block list (step 1 below). A flood that keeps each
+address under the limits isn't in it. As an admin:
+
+```shell
+export AWS_PROFILE=<profile>
+id=$(aws wafv2 list-web-acls --scope CLOUDFRONT --region us-east-1 \
+  --query "WebACLs[?Name=='incognitochat-<env>-api'].Id" --output text)
+for rule in rate-per-ip anonymous-per-ip; do
+  aws wafv2 get-rate-based-statement-managed-keys --scope CLOUDFRONT --region us-east-1 \
+    --web-acl-name incognitochat-<env>-api --web-acl-id "$id" --rule-name "$rule"
+done
+```
+
+**What to do**, in this order, going on only while the step before isn't
+enough. Steps 1 and 2 need the firewall: where it's off (dev, by default),
+turn it on first (step 4).
+
+1. **Block addresses** that stand out
+   ([blocking addresses](#blocking-addresses)). It takes effect within
+   about a minute, and its rule runs before the rate limits. It helps
+   against a few hosts, not against a flood from many addresses.
+2. **Lower the firewall's limits**: `FIREWALL_RATE_LIMIT` and
+   `FIREWALL_ANONYMOUS_RATE_LIMIT` (per address, in 5 minutes; at least
+   100), `FIREWALL_LOOKUPS_TOTAL_LIMIT` (everyone's lookups by ID, in a
+   minute; at least 1,000). More of the flood is then blocked, which costs
+   the firewall's fee but not CloudFront's, a function run or table
+   capacity; people behind a shared address (a carrier, a VPN) are blocked
+   sooner too. Set the variable on the environment, then deploy:
+   - dev: run CI on `main` (`gh workflow run ci.yml --ref main`).
+   - production: re-run the latest release's CI run
+     (`gh run list --workflow ci.yml --event release --limit 1`, then
+     `gh run rerun <run-id>`). The re-run reads the variables afresh and
+     waits for the reviewer's approval again. GitHub allows it for 30 days
+     after the run; after that, it takes a new release ([releases](#releases)).
+
+   A deploy takes some minutes. To act sooner, also change the rule's limit
+   by hand, as an admin: in the console, WAF & Shield, Web ACLs, region
+   Global (CloudFront), `<prefix>-api`, Rules, the rule, Edit. The deploy
+   then sets the same value; a change made only by hand is undone by the
+   next deploy. Changing a limit restarts that rule's counts, so it may not
+   block for up to a minute.
+3. **Pause attachments** if the media alarms fire too
+   ([emergency switches](#emergency-switches)): uploads and downloads go
+   straight to S3, past CloudFront and the firewall, and S3 bills each
+   request.
+4. **Turn the firewall on** where it's off (dev, by default): set
+   `FIREWALL=true` and deploy, as above, and rerun the bootstrap with
+   `TF_VAR_firewall=true` for its alarm. It protects the API only once
+   `API_ACCESS` is `cloudfront-only` ([the firewall](#the-firewall)). It
+   costs about $10 a month plus $0.60 per million requests; what it blocks
+   then costs that instead of CloudFront's fee and a run of the `api`
+   function.
+5. **Last resort: take the API's edge offline** by disabling its
+   distribution: as an admin, in the console, CloudFront, Distributions,
+   the one described as `Incognito Chat API (<env>)`, Disable. AWS says a
+   disabled distribution accepts no requests, and that a change usually
+   reaches every edge location within minutes. It doesn't say whether
+   requests that still arrive are billed. While it's disabled, an app that
+   reaches the API through CloudFront (`API_ACCESS` `cloudfront` or
+   `cloudfront-only`) can't reach it at all: nobody can log in, send or
+   fetch messages until it's enabled again. With `direct`, the app doesn't
+   use the distribution, so disabling it costs users nothing. The next
+   deploy enables it again (`infra/edge.tf` sets it enabled): enable it by
+   hand once the flood is over, or deploy. The change alerts email the
+   change, as any made by hand.
+6. **Ask AWS for relief.** Once it's over, open an account and billing case
+   in AWS Support (open to every account, without a paid support plan):
+   what happened, when, and what was done. AWS may waive some of the
+   charges; it promises nothing.
+
+Afterwards, remove the blocked addresses (a shared address blocks everyone
+behind it), set the limits back, and enable the distribution if it was
+disabled.
+
+### Flat-rate plans (not used)
+
+CloudFront also sells flat-rate plans: one price a month per distribution,
+which includes the firewall, and no bill for going over. The API stays on
+pay-as-you-go, with the alerts above: its traffic is small, and its setup
+doesn't fit the cheaper plans. What moving would take, from AWS's CloudFront
+guide (flat-rate pricing plans) and pricing page, checked 2026-11-21:
+
+| Plan | A month, per distribution | Allowance a month |
+|---|---|---|
+| Free | $0 | 1 million requests, 100 GB |
+| Pro | $15 | 10 million requests, 50 TB |
+| Business | $200 | 125 million requests, 50 TB |
+| Premium | $1,000 | 500 million requests, 50 TB |
+
+- Going over the allowance is never billed, however far. A first spike up
+  to three times the allowance doesn't affect service; overuse that lasts
+  is judged over two to three months, and delivery may then be slowed.
+- Requests the firewall blocks don't count toward the allowance. The plan
+  includes the web ACL, its rules and its request fees.
+- A web ACL must stay attached while on a plan, so `FIREWALL` can't be
+  turned off. Our own web ACL, which Terraform manages, is accepted by its
+  ARN; subscribing doesn't create another.
+
+What the API's setup uses, against the plans:
+
+| The API uses | Allowed on |
+|---|---|
+| Its own origin request policy, which passes on only what the API reads (`infra/edge.tf`) | Business and up. Free and Pro allow only AWS's managed origin request policies. |
+| Firewall routes matched by regular expressions (`regex_match_statement`; AWS calls it regex-based threat filtering) | Business and up |
+| The firewall's own answer: 429, with a JSON body the app reads | Pro and up |
+| Five firewall rules | All: Free allows exactly 5, Pro 25, Business 50 |
+
+On dev, on 2026-11-21, subscribing to the Free plan was refused: both the
+distribution and the web ACL were "not eligible for this subscription
+tier". AWS gave no reason: the table above comes from its feature list.
+
+- **Business**: no changes we know of, at $200 a month per distribution.
+- **Pro** would take:
+  - AWS's managed origin request policy `AllViewerExceptHostHeader` instead
+    of ours. The API would again receive cookies and the
+    `CloudFront-Viewer-*` headers (the viewer's city, postal code and
+    coordinates), so it should drop them where requests come in, before any
+    handler or log sees them: a partial undo of passing on only what it
+    reads.
+  - The firewall's routes matched without regular expressions: byte matches
+    (starts with, ends with, exactly), with the same behaviour.
+- **Free** would take the same, and lose the firewall's own answer: a
+  blocked request would get a plain 403 instead of 429, and the app would
+  show a generic error when rate-limited instead of waiting.
+
+An open question for every plan, Business and Premium too: whether the two
+limits on everyone together (`lookups-total` and `deletes-total`, aggregate
+key `CONSTANT`) are allowed. AWS lists only "IP-based rate limiting", for
+every tier. The free eligibility check below (a pending subscription,
+through Cloud Control) settles it.
+
+**Checking a plan, and subscribing.** A subscription is the Cloud Control
+(and CloudFormation) type `AWS::PricingPlanManager::Subscription`, in
+us-east-1: `PlanFamily` `CloudFront`, `PlanTier` (`FREE`, `PRO`, `BUSINESS`
+or `PREMIUM`), and `ResourceArns`, the distribution's ARN and the web
+ACL's. Creating one checks eligibility at no cost: a setup that isn't
+eligible is refused at once, and neither Cloud Control nor CloudFormation
+ever approves a paid plan. It waits in `PENDING_APPROVAL`, not billed
+(usage stays pay-as-you-go), until `ApprovePaidSubscription` is called;
+deleted then, it costs nothing. As an admin:
+
+```shell
+aws cloudcontrol create-resource --region us-east-1 --type-name AWS::PricingPlanManager::Subscription \
+  --desired-state '{"PlanFamily":"CloudFront","PlanTier":"PRO","ResourceArns":["<distribution-arn>","<web-acl-arn>"]}'
+# Refused: StatusMessage says why. Created (PENDING_APPROVAL): Identifier names it.
+aws cloudcontrol get-resource-request-status --region us-east-1 --request-token <RequestToken>
+aws cloudcontrol delete-resource --region us-east-1 --type-name AWS::PricingPlanManager::Subscription \
+  --identifier <Identifier>
+```
+
+A Free plan cancels at once; a paid plan's cancellation takes effect at the
+end of the calendar month. An account may have 3 Free plans. Newer AWS CLIs
+also have `aws pricing-plan-manager`: with it, pass `--approval-mode MANUAL`
+to `create-subscription` (its reference is unclear about the default).
+`IMMEDIATE` starts billing a paid plan at once, and it can't then be
+cancelled before the end of the month.

@@ -513,6 +513,15 @@ it. This is how close it gets.
   switch for all: uploads and downloads carry no login, so it can't single
   anyone out, and it reads or stores nothing about anyone. Messages keep
   working.
+- **The edge bill has no ceiling.** The tables' caps bound what a flood
+  costs the database, but CloudFront bills each request the firewall lets
+  through and the firewall each it looks at, blocked ones included, and a
+  flood spread over many addresses, each under the firewall's limits, is
+  never blocked. Its alarm comes within minutes, AWS's cost anomaly alerts
+  hours to a day later, and nothing acts by itself
+  ([deployment.md](deployment.md#under-attack)). CloudFront's flat-rate
+  plans would cap it; they aren't used
+  ([deployment.md](deployment.md#flat-rate-plans-not-used)).
 - **Forward secrecy is weekly, not per message.** Encryption keys rotate about
   weekly, and an old private key is deleted 35 days after it was replaced (a
   conversation key, 35 days after the other side first wrote to the new

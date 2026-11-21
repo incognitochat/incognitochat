@@ -350,8 +350,11 @@ resource "aws_iam_role_policy" "fn" {
 
 # Each build is uploaded, signed by AWS Signer, and the signed copy is
 # deployed. The code signing config (infra/init) makes Lambda refuse code
-# that isn't signed by CI's profile. A new upload happens only when a build
-# changes, and each upload gets a new signing job and a new signed copy.
+# that isn't signed with the environment's signing profile. The deploy role
+# signs whatever it uploads with it, so a signature shows that code came
+# through that role, not that CI built it. A new upload happens only when a
+# build changes, and each upload gets a new signing job and a new signed
+# copy.
 resource "aws_s3_object" "build" {
   for_each = local.functions
 
