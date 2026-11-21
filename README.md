@@ -103,3 +103,13 @@ doesn't.
 
 Version 1, an in-chat Telegram bot that this version replaces, is kept at tag
 [`v1`](../../tree/v1).
+
+## License
+
+Copyright © the Incognito Chat contributors.
+
+Incognito Chat is free software, under the [GNU Affero General Public
+License, version 3](LICENSE) (`AGPL-3.0-only`). You may use, study, change
+and share it. If you run a changed version as a service, you must offer its
+users the source of that version, the server included.
+
