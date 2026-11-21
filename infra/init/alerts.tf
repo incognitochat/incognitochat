@@ -225,6 +225,37 @@ resource "aws_cloudwatch_metric_alarm" "ws_api" {
   }
 }
 
+# The WebSocket API's volume: connects that reached ws (ConnectCount), and
+# messages both ways (MessageCount: apps' heartbeats, and pushes, which the
+# throttle doesn't limit). A flood that stays at the throttle fills it and
+# keeps real apps out while few requests are refused, so ws-client-errors
+# can stay quiet; these catch it. AWS documents stage throttling per method
+# for REST APIs, not for WebSocket APIs, so the threshold works either way:
+# kept below half of what the throttle lets through in 5 minutes, it is
+# passed by at least one of the two when a flood fills the throttle, even
+# if connects and messages share it. The queries take every WebSocket API
+# in the account, as ws_api's.
+resource "aws_cloudwatch_metric_alarm" "ws_requests" {
+  for_each = { connects = "ConnectCount", messages = "MessageCount" }
+
+  alarm_name          = "${local.prefix}-ws-${each.key}"
+  alarm_description   = "More than ${var.ws_requests_alarm} WebSocket ${each.key} in 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.ws_requests_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  metric_query {
+    id          = "requests"
+    expression  = "SELECT SUM(${each.value}) FROM SCHEMA(\"AWS/ApiGateway\", ApiId)"
+    label       = each.value
+    period      = local.alarm_period
+    return_data = true
+  }
+}
+
 # A table refusing requests: its per-second cap (a cost guard in the app
 # stack) is reached, so real users are being turned away.
 resource "aws_cloudwatch_metric_alarm" "table_throttles" {
