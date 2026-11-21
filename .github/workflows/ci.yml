@@ -215,8 +215,10 @@ jobs:
       # the firewall's block list) and checks the log retention's bounds;
       # plans the account expiry's index, schedule and switch.
       # infra/init/tests: renders the deploy role's policies and checks each
-      # fits IAM's size limit and allows no whole service. Fake credentials,
-      # overridden resources: no AWS calls.
+      # fits IAM's size limit and allows no whole service; plans the edge's
+      # cost alerts (the cost anomaly subscription, the edge topic's policy,
+      # the edge-requests alarm). Fake credentials, overridden resources: no
+      # AWS calls.
       - name: Test
         run: |
           terraform -chdir=infra test

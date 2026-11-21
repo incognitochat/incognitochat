@@ -718,16 +718,18 @@ resource "aws_cloudwatch_metric_alarm" "firewall_blocks" {
 # AWS's cost anomaly alerts. Cost Anomaly Detection learns what each AWS
 # service usually costs the account and reports spending above that; this
 # sends each anomaly whose total cost impact (above what was expected, over
-# all its days) reaches cost_anomaly_alert_usd, as soon as it is found. It
-# is free, and it watches every service, those no alarm here reads too, but
-# it is slow: it runs about three times a day on billing data up to 24
-# hours old, a new monitor starts after 24 hours, and a service needs 10
-# days of history. The alarms above notice a flood first.
+# all its days) reaches cost_anomaly_alert_usd, as soon as it is found, and
+# again while it lasts above that. It is free, and it watches nearly every
+# service, those no alarm here reads too (not Route 53, Shield and a few
+# others), but it is slow: it runs about three times a day on billing data
+# up to 24 hours old, a new monitor starts after 24 hours, and a service
+# needs 10 days of history. The alarms above notice a flood first.
 #
 # The monitor is the AWS services one (DIMENSIONAL, SERVICE), which AWS
 # manages, and an account may have only one: creating it fails where one
 # already exists (AWS makes one, with a daily email summary, when Cost
-# Explorer is first turned on). Delete that one first (docs/deployment.md).
+# Explorer is first turned on). Delete that one first: the bootstrap checks
+# (docs/deployment.md, Setting up an environment).
 # Cost Explorer's API is in us-east-1 whatever the provider's region, and
 # alerts sent as anomalies are found (IMMEDIATE) go only to an SNS topic:
 # both live next to the edge topic, which takes them.

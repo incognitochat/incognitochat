@@ -83,7 +83,7 @@ run "edge_alerts" {
     ]
   }
 
-  # The monitor over every AWS service, the one an account may have.
+  # The AWS services monitor, the one an account may have.
   assert {
     condition = (
       aws_ce_anomaly_monitor.services.monitor_type == "DIMENSIONAL"
@@ -91,7 +91,7 @@ run "edge_alerts" {
       && length(aws_ce_anomaly_subscription.costs.monitor_arn_list) == 1
       && aws_ce_anomaly_subscription.costs.monitor_arn_list[0] == "arn:aws:ce::123456789012:anomalymonitor/01234567-89ab-cdef-0123-456789abcdef"
     )
-    error_message = "The cost anomaly alerts don't come from a monitor of every AWS service."
+    error_message = "The cost anomaly alerts don't come from the AWS services monitor."
   }
 
   # Sent as each anomaly is found, which only an SNS topic takes: the edge
