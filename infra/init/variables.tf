@@ -193,6 +193,17 @@ variable "ws_errors_alarm" {
   }
 }
 
+variable "ws_requests_alarm" {
+  description = "WebSocket requests in 5 minutes above which an alarm is raised, separately for connects that reached the ws function (ConnectCount) and messages both ways (MessageCount: heartbeats, and pushes, which the throttle doesn't limit). 3000 is half of what the default throttle, 20 a second, lets through a route in 5 minutes. Keep it below what WS_THROTTLE_RATE_LIMIT allows in 5 minutes (300 times it), or a flood held at the throttle never raises it"
+  type        = number
+  default     = 3000
+
+  validation {
+    condition     = var.ws_requests_alarm > 0
+    error_message = "ws_requests_alarm must be positive."
+  }
+}
+
 variable "media_stored_gib_alarm" {
   description = "GiB held in the media bucket above which an alarm is raised (S3 measures it once a day). 50 GiB costs about $1.15 a month at $0.023 per GB; one account may upload 500 MiB a day, and uploads nobody fetches stay 30 days"
   type        = number

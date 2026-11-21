@@ -198,6 +198,7 @@ topics.
 | `media-stored` | The media bucket holds more than 50 GiB (`media_stored_gib_alarm`; about $1.15 a month). S3 measures it once a day, hours late, so this one is slow. The bootstrap finds the bucket by its name, so the alarm appears at the first bootstrap after the app stack's first deploy. |
 | `bot-errors`, `notify-errors`, `ws-errors` | That function failed at all in 5 minutes (a crash, a timeout, or an error it returned to Lambda), or, for `notify` and `ws`, dropped an event after waiting a minute to run. Those two are invoked without waiting and never retried, so each is a lost notice or push. |
 | `ws-client-errors`, `ws-integration-errors` | The WebSocket API counted more than 300 `ClientError`s (refused by API Gateway before `ws` ran: mostly its throttle) or `IntegrationError`s (refused or failed by `ws`) in 5 minutes (`ws_errors_alarm`, each alarm on its own). |
+| `ws-connects`, `ws-messages` | The WebSocket API took more than 3,000 connects (`ConnectCount`: those that reached `ws`) or messages (`MessageCount`: both ways, heartbeats and pushes) in 5 minutes (`ws_requests_alarm`, each alarm on its own): half of what the default throttle lets through a route in 5 minutes. A flood held at the throttle fills it while few requests are refused, so `ws-client-errors` can stay quiet; these catch it. Keep the threshold below 300 times `WS_THROTTLE_RATE_LIMIT`, or a flood held there never fires them. |
 | `<table>-table-capacity` | A table used more than 70% of its read or write cap on average over 5 minutes (`table_capacity_alarm_percent`), before the cap refuses anyone. |
 | `edge-5xx` (us-east-1) | More than 5% of CloudFront's answers were 5xx errors in each of three 5-minute periods in a row (`edge_5xx_rate_alarm`). |
 | `edge-requests` (us-east-1) | CloudFront received more than 30,000 requests in 5 minutes (100 a second, as `api-invocations`; `edge_requests_alarm`), every distribution in the account together. This is what the edge bills, requests that never reach the `api` function included. AWS defines the metric as every request CloudFront receives; it doesn't say outright whether that includes those the firewall blocks, which `firewall-blocks` counts anyway. |
@@ -291,7 +292,7 @@ anything else), so an environment comes from the repository alone.
 | `FIREWALL_RATE_LIMIT` | 2,000 | Requests one IP address may make in 5 minutes, to any route (`rate-per-ip`). |
 | `FIREWALL_ANONYMOUS_RATE_LIMIT` | 500 | Requests one IP address may make in 5 minutes to the routes that need no login (`anonymous-per-ip`). At most `FIREWALL_RATE_LIMIT`. |
 | `FIREWALL_LOOKUPS_TOTAL_LIMIT` | 30 times the read cap: 12,000 in production | Lookups of links and uploads by ID everyone together may make in 1 minute (`lookups-total`). At most 30 times the read cap, so it follows the caps when unset. |
-| `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone: requests a second, and the burst. At least 1. |
+| `WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT` | 20, 40 | The WebSocket API's throttle, shared by everyone, on each route: requests a second, and the burst. At least 1. Kept below 10 a second, also lower the bootstrap's `ws_requests_alarm` below 300 times the rate, or a flood held at the throttle never fires `ws-connects`. |
 | `LOG_RETENTION_DAYS` | 7 | Days the functions' logs are kept. One of the periods CloudWatch Logs takes (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, and longer ones up to 3653); never 0, which keeps them forever. [What the software stores](data.md) tells people 7 days: change it there before keeping them longer. |
 
 A change takes effect at the environment's next deploy: for dev, the next
@@ -1045,8 +1046,8 @@ about $2 a month per environment, at most about $6.50.
 
 The alarms on the other functions, the WebSocket API, the tables' capacity
 and the edge ([above](#setting-up-an-environment); `infra/init/alerts.tf`).
-Each costs $0.10 a month per metric it reads: about $1.70 a month for
-these in production, $1.60 elsewhere. The functions' logs, in Logs Insights
+Each costs $0.10 a month per metric it reads: about $1.90 a month for
+these in production, $1.80 elsewhere. The functions' logs, in Logs Insights
 on `/aws/lambda/<prefix>-<function>`, keep warnings and errors only, with
 allow-listed fields.
 
@@ -1074,6 +1075,15 @@ allow-listed fields.
   or `ws` failing (then `ws-errors` or a table alarm fires too). Otherwise
   someone is connecting with junk, or one account over and over; each
   costs a `ws` run, within the throttle.
+- `ws-connects`, `ws-messages`: far more WebSocket traffic than usual.
+  Connects with `ws-integration-errors`, or far above what the `api`
+  function's use suggests, are a flood that may be filling the throttle
+  while it refuses few: see [under attack](#under-attack). Messages that
+  rise with sends ([request counts](#request-counts)) are pushes, which
+  follow the HTTP API, not the throttle. With more of everything, it's real
+  use: raise `WS_THROTTLE_RATE_LIMIT` (and the burst) and the bootstrap's
+  `ws_requests_alarm` together, keeping the threshold below 300 times the
+  rate.
 - `<table>-table-capacity`: look at the table's consumed units
   ([cost guards](#cost-guards)) next to the `api` function's invocations and
   [request counts](#request-counts). Real growth: raise
@@ -1570,11 +1580,14 @@ per million messages (each 32 KB or less; a larger one counts as several)
 and $0.285 per million connection minutes (AWS's API Gateway pricing page,
 checked 2026-11-21). Its only limit is one throttle shared by everyone
 (`WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT`; 20 a second, burst 40,
-by default), which bounds the messages and the `ws` runs: a month at 20 a
-second is about 52 million requests, about $59 if each is billed as one
-message. Connection minutes grow instead with the sockets left open, which
-only logged-in apps can open, 5 a minute per account. The throttle stays at
-20, far above real use, as the bill's cap and the brake (step 4 below).
+by default), on each route by itself: connects, and messages from apps (AWS
+says so of REST APIs' methods; its WebSocket guide doesn't say). It bounds
+the apps' messages and the `ws` runs: a month at 20 a second is about 52
+million requests a route, about $59 a route if each is billed as one
+message. Pushes are messages too, but follow sends, through the HTTP API.
+Connection minutes grow with the sockets left open, which only logged-in
+apps can open, 5 a minute per account. The throttle stays at 20, far above
+real use, as the bill's cap and the brake (step 4 below).
 
 **The signs**, in about the order they come:
 
@@ -1585,11 +1598,12 @@ only logged-in apps can open, 5 a minute per account. The throttle stays at
 - `api-invocations`, `limit-hits`, `<table>-table-capacity` or
   `<table>-table-throttles`: what got past reaches the `api` function and
   the tables, and may crowd real users out.
-- `ws-client-errors`, on the WebSocket API, which a flood can hit apart
-  from the rest: API Gateway refused more than 300 requests in 5 minutes
-  before `ws` ran, mostly at the throttle: a flood above the limit. A flood
-  just at the limit fills it, but makes few refusals when few people use the
-  app, so also look at its `ConnectCount` and `MessageCount` (below).
+- `ws-client-errors`, `ws-connects` or `ws-messages`, on the WebSocket API,
+  which a flood can hit apart from the rest. `ws-client-errors`: API Gateway
+  refused more than 300 requests in 5 minutes before `ws` ran, mostly at
+  the throttle: a flood above the limit. A flood just at the limit fills it,
+  but makes few refusals when few people use the app; `ws-connects` and
+  `ws-messages` (more than 3,000 in 5 minutes) catch that one.
 - A cost anomaly alert and the budget's, hours to a day later.
 
 **How to look.** Nothing records who sends: CloudFront keeps no access logs
@@ -1665,7 +1679,7 @@ turn it on first (step 5).
    straight to S3, past CloudFront and the firewall, and S3 bills each
    request.
 4. **Lower the WebSocket API's throttle** if the flood is on it
-   (`ws-client-errors`, or its counts far above real use): it's the brake.
+   (`ws-client-errors`, `ws-connects`, `ws-messages`): it's the brake.
    Set `WS_THROTTLE_RATE_LIMIT` and `WS_THROTTLE_BURST_LIMIT` (at least 1) on
    the environment and deploy, as in step 2. To act sooner, also change it
    by hand, as an admin: in the console, API Gateway, the WebSocket API
