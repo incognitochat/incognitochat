@@ -222,12 +222,34 @@ variable "edge_5xx_rate_alarm" {
 }
 
 variable "firewall_blocks_alarm" {
-  description = "Requests the firewall blocked in 5 minutes above which an alarm is raised (3000 is 10 a second). CloudFront and the firewall still bill each blocked request"
+  description = "Requests the firewall blocked in 5 minutes above which an alarm is raised (3000 is 10 a second). The firewall still bills each blocked request (CloudFront doesn't)"
   type        = number
   default     = 3000
 
   validation {
     condition     = var.firewall_blocks_alarm > 0
     error_message = "firewall_blocks_alarm must be positive."
+  }
+}
+
+variable "edge_requests_alarm" {
+  description = "Requests to CloudFront in 5 minutes, every distribution in the account together, above which an alarm is raised (30000 is 100 a second, as for the api function's invocations). CloudFront bills those the firewall lets through, and the firewall those it looks at, blocked ones included"
+  type        = number
+  default     = 30000
+
+  validation {
+    condition     = var.edge_requests_alarm > 0
+    error_message = "edge_requests_alarm must be positive."
+  }
+}
+
+variable "cost_anomaly_alert_usd" {
+  description = "Total cost impact, in US dollars, from which AWS Cost Anomaly Detection sends an anomaly it finds to the edge alerts topic: how much more than expected it cost, over all its days. AWS looks for anomalies about three times a day, on billing data up to 24 hours old"
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.cost_anomaly_alert_usd > 0
+    error_message = "cost_anomaly_alert_usd must be positive."
   }
 }

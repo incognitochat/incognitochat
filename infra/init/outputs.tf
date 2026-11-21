@@ -39,7 +39,7 @@ output "alerts_topic_arn" {
 }
 
 output "edge_alerts_topic_arn" {
-  description = "SNS topic in us-east-1 the alarms on CloudFront and its firewall, and the change alerts recorded there (IAM, CloudFront, the firewall…), publish to; subscribe an address to it too"
+  description = "SNS topic in us-east-1 the alarms on CloudFront and its firewall, AWS's cost anomaly alerts, and the change alerts recorded there (IAM, CloudFront, the firewall…), publish to; subscribe an address to it too"
   value       = aws_sns_topic.edge_alerts.arn
 }
 

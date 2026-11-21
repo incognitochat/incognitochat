@@ -127,8 +127,12 @@ resource "aws_signer_signing_profile" "lambda" {
   }
 }
 
+# Lambda checks the signing profile, not who signed: the deploy role signs
+# whatever it uploads, so a signature shows that code came through that
+# role, not that CI built it (docs/security.md, Users can't verify the
+# backend directly).
 resource "aws_lambda_code_signing_config" "lambda" {
-  description = "Incognito Chat (${var.github_environment}): run only code signed by CI"
+  description = "Incognito Chat (${var.github_environment}): run only code signed with this environment's signing profile"
 
   allowed_publishers {
     signing_profile_version_arns = [aws_signer_signing_profile.lambda.version_arn]

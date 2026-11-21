@@ -1,10 +1,11 @@
 # Cost and health alerts for the account: a monthly budget and a few
 # CloudWatch alarms, all publishing to one SNS topic, except those on
 # CloudFront and its firewall, whose metrics are in us-east-1: they publish
-# to a second topic there (at the end). They live in this stack so that CI,
-# which can't change it, can't silence them either. The six on the api
-# function's request counts are the exception: CI deploys what they read
-# (the log line, the metric filters, the log level), so it could.
+# to a second topic there (at the end), as do AWS's cost anomaly alerts.
+# They live in this stack so that CI, which can't change it, can't silence
+# them either. The six on the api function's request counts are the
+# exception: CI deploys what they read (the log line, the metric filters,
+# the log level), so it could.
 #
 # The change alerts and Access Analyzer's findings (audit.tf) publish to
 # the same topics: those of the app's region to the first, those of
@@ -554,7 +555,8 @@ resource "aws_cloudwatch_metric_alarm" "token_requests" {
 # Their metrics are there, whatever the app's region, and an alarm notifies
 # only a topic in its own region: a second topic, subscribed like the first.
 # The change alerts on what is recorded there too (IAM, CloudFront, the
-# firewall…) publish to it as well (audit.tf).
+# firewall…) publish to it as well (audit.tf), and so do AWS's cost anomaly
+# alerts (at the end).
 
 resource "aws_sns_topic" "edge_alerts" {
   provider = aws.global
@@ -599,6 +601,28 @@ data "aws_iam_policy_document" "edge_alerts_topic" {
       ]
     }
   }
+
+  # AWS's cost anomaly alerts (at the end), for this account's
+  # subscriptions: the condition AWS documents. aws:SourceArn could name the
+  # one subscription, but nobody else may make one (the deploy role has no
+  # Cost Explorer rights). The topic isn't encrypted, so the service needs
+  # no rights on a key.
+  statement {
+    sid       = "CostAnomalyAlertsPublish"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.edge_alerts.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["costalerts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
+  }
 }
 
 resource "aws_sns_topic_policy" "edge_alerts" {
@@ -634,10 +658,39 @@ resource "aws_cloudwatch_metric_alarm" "edge_5xx" {
   }
 }
 
+# Requests reaching CloudFront: what the edge bills. CloudFront bills each
+# request the firewall lets through, and the firewall each it looks at,
+# blocked or not, with no ceiling. A flood spread over many addresses, each
+# under the firewall's limits, never makes firewall-blocks fire; this
+# counts every request CloudFront receives, whether or not it reaches the
+# api function. The query takes every distribution in the account, as
+# edge_5xx's: the app stack makes one.
+resource "aws_cloudwatch_metric_alarm" "edge_requests" {
+  provider = aws.global
+
+  alarm_name          = "${local.prefix}-edge-requests"
+  alarm_description   = "CloudFront received more than ${var.edge_requests_alarm} requests in 5 minutes."
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = var.edge_requests_alarm
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.edge_alerts.arn]
+  ok_actions          = [aws_sns_topic.edge_alerts.arn]
+
+  metric_query {
+    id          = "requests"
+    expression  = "SELECT SUM(Requests) FROM SCHEMA(\"AWS/CloudFront\", DistributionId, Region)"
+    label       = "Requests"
+    period      = local.alarm_period
+    return_data = true
+  }
+}
+
 # The firewall blocking requests, all its rules together: a flood is being
-# held off, or real users behind a busy address are refused. CloudFront
-# and the firewall still bill each blocked request. Only where the app
-# stack puts the firewall (FIREWALL), production by default.
+# held off, or real users behind a busy address are refused. The firewall
+# still bills each blocked request (CloudFront doesn't, since October
+# 2024). Only where the app stack puts the firewall (FIREWALL), production
+# by default.
 locals {
   firewall = coalesce(var.firewall, var.github_environment == "production")
 }
@@ -660,4 +713,51 @@ resource "aws_cloudwatch_metric_alarm" "firewall_blocks" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.edge_alerts.arn]
   ok_actions          = [aws_sns_topic.edge_alerts.arn]
+}
+
+# AWS's cost anomaly alerts. Cost Anomaly Detection learns what each AWS
+# service usually costs the account and reports spending above that; this
+# sends each anomaly whose total cost impact (above what was expected, over
+# all its days) reaches cost_anomaly_alert_usd, as soon as it is found. It
+# is free, and it watches every service, those no alarm here reads too, but
+# it is slow: it runs about three times a day on billing data up to 24
+# hours old, a new monitor starts after 24 hours, and a service needs 10
+# days of history. The alarms above notice a flood first.
+#
+# The monitor is the AWS services one (DIMENSIONAL, SERVICE), which AWS
+# manages, and an account may have only one: creating it fails where one
+# already exists (AWS makes one, with a daily email summary, when Cost
+# Explorer is first turned on). Delete that one first (docs/deployment.md).
+# Cost Explorer's API is in us-east-1 whatever the provider's region, and
+# alerts sent as anomalies are found (IMMEDIATE) go only to an SNS topic:
+# both live next to the edge topic, which takes them.
+resource "aws_ce_anomaly_monitor" "services" {
+  provider = aws.global
+
+  name              = "${local.prefix}-services"
+  monitor_type      = "DIMENSIONAL"
+  monitor_dimension = "SERVICE"
+}
+
+resource "aws_ce_anomaly_subscription" "costs" {
+  provider = aws.global
+
+  name             = "${local.prefix}-cost-anomalies"
+  frequency        = "IMMEDIATE"
+  monitor_arn_list = [aws_ce_anomaly_monitor.services.arn]
+
+  subscriber {
+    type    = "SNS"
+    address = aws_sns_topic.edge_alerts.arn
+  }
+
+  threshold_expression {
+    dimension {
+      key           = "ANOMALY_TOTAL_IMPACT_ABSOLUTE"
+      match_options = ["GREATER_THAN_OR_EQUAL"]
+      values        = [tostring(var.cost_anomaly_alert_usd)]
+    }
+  }
+
+  depends_on = [aws_sns_topic_policy.edge_alerts]
 }

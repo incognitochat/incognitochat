@@ -5,8 +5,9 @@
 #     role (checked afterwards with IAM's policy simulator), the functions'
 #     roles and their permissions boundary, Lambda code signing (build
 #     bucket, signing profile, code signing config), cost and health
-#     alerts (a monthly budget, alarms, and the topics they publish to,
-#     one in us-east-1 for CloudFront's), and the audit trail (CloudTrail),
+#     alerts (a monthly budget, AWS's cost anomaly alerts, alarms, and the
+#     topics they publish to, one in us-east-1 for CloudFront's and the
+#     cost anomaly alerts), and the audit trail (CloudTrail),
 #     change alerts and IAM Access Analyzer (infra/init)
 #   - GitHub: a deployment environment that only accepts one branch (main) or
 #     release tags, optionally with required reviewers, plus its secrets and
@@ -220,4 +221,4 @@ EOF
 else
   echo "Done. BOT_TOKEN is already set. To deploy: ${how_to_deploy}."
 fi
-echo "Budget, alarm and change alerts go to the SNS topics ${environment_prefix}-alerts and, in us-east-1, ${environment_prefix}-edge-alerts; subscribe an address to each to receive them (docs/deployment.md)."
+echo "Budget, cost anomaly, alarm and change alerts go to the SNS topics ${environment_prefix}-alerts and, in us-east-1, ${environment_prefix}-edge-alerts; subscribe an address to each to receive them (docs/deployment.md)."
