@@ -229,9 +229,12 @@ resource "aws_cloudwatch_metric_alarm" "ws_api" {
 # messages both ways (MessageCount: apps' heartbeats, and pushes, which the
 # throttle doesn't limit). A flood that stays at the throttle fills it and
 # keeps real apps out while few requests are refused, so ws-client-errors
-# can stay quiet; these catch it. The throttle applies to each route on its
-# own, so each metric has the whole threshold. The queries take every
-# WebSocket API in the account, as ws_api's.
+# can stay quiet; these catch it. AWS documents stage throttling per method
+# for REST APIs, not for WebSocket APIs, so the threshold works either way:
+# kept below half of what the throttle lets through in 5 minutes, it is
+# passed by at least one of the two when a flood fills the throttle, even
+# if connects and messages share it. The queries take every WebSocket API
+# in the account, as ws_api's.
 resource "aws_cloudwatch_metric_alarm" "ws_requests" {
   for_each = { connects = "ConnectCount", messages = "MessageCount" }
 

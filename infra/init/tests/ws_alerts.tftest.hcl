@@ -84,12 +84,12 @@ run "ws_requests" {
     error_message = "The ws-messages alarm doesn't sum MessageCount over 5 minutes, every WebSocket API together."
   }
 
-  # Past 3,000 in 5 minutes by default, half of what the default throttle
-  # lets through a route, to the alerts topic, there and back.
+  # Past 2,000 in 5 minutes by default, below half of what the default
+  # throttle lets through in 5 minutes, to the alerts topic, there and back.
   assert {
     condition = alltrue([
       for a in aws_cloudwatch_metric_alarm.ws_requests : (
-        a.threshold == 3000
+        a.threshold == 2000
         && a.comparison_operator == "GreaterThanThreshold"
         && a.evaluation_periods == 1
         && a.treat_missing_data == "notBreaching"
@@ -97,13 +97,13 @@ run "ws_requests" {
         && a.ok_actions == toset(["arn:aws:sns:eu-west-1:123456789012:incognitochat-production-alerts"])
       )
     ])
-    error_message = "The WebSocket volume alarms don't fire past 3,000 in 5 minutes, to the alerts topic."
+    error_message = "The WebSocket volume alarms don't fire past 2,000 in 5 minutes, to the alerts topic."
   }
 
   assert {
     condition = (
-      aws_cloudwatch_metric_alarm.ws_requests["connects"].alarm_description == "More than 3000 WebSocket connects in 5 minutes."
-      && aws_cloudwatch_metric_alarm.ws_requests["messages"].alarm_description == "More than 3000 WebSocket messages in 5 minutes."
+      aws_cloudwatch_metric_alarm.ws_requests["connects"].alarm_description == "More than 2000 WebSocket connects in 5 minutes."
+      && aws_cloudwatch_metric_alarm.ws_requests["messages"].alarm_description == "More than 2000 WebSocket messages in 5 minutes."
     )
     error_message = "The WebSocket volume alarms' descriptions don't say what they count."
   }

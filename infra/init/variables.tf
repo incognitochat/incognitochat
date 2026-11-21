@@ -194,9 +194,9 @@ variable "ws_errors_alarm" {
 }
 
 variable "ws_requests_alarm" {
-  description = "WebSocket requests in 5 minutes above which an alarm is raised, separately for connects that reached the ws function (ConnectCount) and messages both ways (MessageCount: heartbeats, and pushes, which the throttle doesn't limit). 3000 is half of what the default throttle, 20 a second, lets through a route in 5 minutes. Keep it below what WS_THROTTLE_RATE_LIMIT allows in 5 minutes (300 times it), or a flood held at the throttle never raises it"
+  description = "WebSocket requests in 5 minutes above which an alarm is raised, separately for connects that reached the ws function (ConnectCount) and messages both ways (MessageCount: heartbeats, and pushes, which the throttle doesn't limit). Keep it below 150 times WS_THROTTLE_RATE_LIMIT, half of what the throttle lets through in 5 minutes, so that a flood held at the throttle passes it on at least one of the two, whether the throttle is per route or shared by them (AWS doesn't say for WebSocket APIs). At the default throttle, 20 a second, that is 3000: 2000 is below it"
   type        = number
-  default     = 3000
+  default     = 2000
 
   validation {
     condition     = var.ws_requests_alarm > 0
