@@ -1066,8 +1066,8 @@ allow-listed fields.
   `ConnectCount` (namespace AWS/ApiGateway) far above what the `api`
   function's use suggests, or with `ws-integration-errors`, it's a flood of
   connects: nothing at the edge limits the WebSocket API, so raising the
-  throttle only lets more of a flood through. With more of everything, it's
-  real use: raise the throttle.
+  throttle only lets more of a flood through ([under attack](#under-attack)).
+  With more of everything, it's real use: raise the throttle.
 - `ws-integration-errors`: `ws` refused connects or failed: sessions that
   don't check out (forged, or ended: expected for a while after a deploy
   that replaced the session key), more connects than one account may make,
@@ -1563,6 +1563,19 @@ up to about $16 with the firewall (about $5 if it blocks them all), before
 data transfer and function runs, and as much again for each further 100 a
 second.
 
+The WebSocket API is apart from all this: it isn't behind CloudFront or the
+firewall. API Gateway bills it per message and per connection minute, plus a
+run of the `ws` function for what reaches it: at eu-west-1's prices, $1.14
+per million messages (each 32 KB or less; a larger one counts as several)
+and $0.285 per million connection minutes (AWS's API Gateway pricing page,
+checked 2026-11-21). Its only limit is one throttle shared by everyone
+(`WS_THROTTLE_RATE_LIMIT`, `WS_THROTTLE_BURST_LIMIT`; 20 a second, burst 40,
+by default), which bounds the messages and the `ws` runs: a month at 20 a
+second is about 52 million requests, about $59 if each is billed as one
+message. Connection minutes grow instead with the sockets left open, which
+only logged-in apps can open, 5 a minute per account. The throttle stays at
+20, far above real use, as the bill's cap and the brake (step 4 below).
+
 **The signs**, in about the order they come:
 
 - `edge-requests` (us-east-1): CloudFront received more than 30,000
@@ -1572,6 +1585,11 @@ second.
 - `api-invocations`, `limit-hits`, `<table>-table-capacity` or
   `<table>-table-throttles`: what got past reaches the `api` function and
   the tables, and may crowd real users out.
+- `ws-client-errors`, on the WebSocket API, which a flood can hit apart
+  from the rest: API Gateway refused more than 300 requests in 5 minutes
+  before `ws` ran, mostly at the throttle: a flood above the limit. A flood
+  just at the limit fills it, but makes few refusals when few people use the
+  app, so also look at its `ConnectCount` and `MessageCount` (below).
 - A cost anomaly alert and the budget's, hours to a day later.
 
 **How to look.** Nothing records who sends: CloudFront keeps no access logs
@@ -1588,6 +1606,16 @@ are only counts, in CloudWatch, a minute at a time:
 - The `api` function's `Invocations` (namespace AWS/Lambda, dimension
   FunctionName `<prefix>-api`, in the app's region) and its
   [request counts](#request-counts): which routes the rest goes to.
+- The WebSocket API's `ConnectCount` (connects that reached `ws`),
+  `MessageCount` (messages from and to apps, pushes included), `ClientError`
+  and `IntegrationError` (namespace AWS/ApiGateway, dimension ApiId, in the
+  app's region). Nothing records who connects: it keeps no access logs. Its
+  ID is random; as an admin:
+
+  ```shell
+  AWS_PROFILE=<profile> aws apigatewayv2 get-apis --region <aws-region> \
+    --query "Items[?ProtocolType=='WEBSOCKET'].ApiId" --output text
+  ```
 
 The firewall can also list the addresses its per-address rules
 (`rate-per-ip`, `anonymous-per-ip`) are blocking at that moment, up to
@@ -1606,7 +1634,7 @@ done
 
 **What to do**, in this order, going on only while the step before isn't
 enough. Steps 1 and 2 need the firewall: where it's off (dev, by default),
-turn it on first (step 4).
+turn it on first (step 5).
 
 1. **Block addresses** that stand out
    ([blocking addresses](#blocking-addresses)). It takes effect within
@@ -1636,14 +1664,38 @@ turn it on first (step 4).
    ([emergency switches](#emergency-switches)): uploads and downloads go
    straight to S3, past CloudFront and the firewall, and S3 bills each
    request.
-4. **Turn the firewall on** where it's off (dev, by default): set
+4. **Lower the WebSocket API's throttle** if the flood is on it
+   (`ws-client-errors`, or its counts far above real use): it's the brake.
+   Set `WS_THROTTLE_RATE_LIMIT` and `WS_THROTTLE_BURST_LIMIT` (at least 1) on
+   the environment and deploy, as in step 2. To act sooner, also change it
+   by hand, as an admin: in the console, API Gateway, the WebSocket API
+   `<prefix>-ws`, Stages, `live`, its default route throttling; or:
+
+   ```shell
+   export AWS_PROFILE=<profile> AWS_REGION=<aws-region>
+   id=$(aws apigatewayv2 get-apis --query "Items[?ProtocolType=='WEBSOCKET'].ApiId" --output text)
+   aws apigatewayv2 update-stage --api-id "$id" --stage-name live \
+     --default-route-settings ThrottlingRateLimit=<n>,ThrottlingBurstLimit=<n>
+   ```
+
+   A change made only by hand is undone by the next deploy, which sets the
+   variables' values. Either way, the change alerts email it
+   (`audit-changes`). Apps that can't connect keep trying, about once a
+   minute, and poll meanwhile: every 20 seconds while on screen, instead of
+   every 2 minutes. Messages still arrive, later, and accounts with notices
+   on still get their Telegram notices, but the polls are more requests to
+   the HTTP API, through CloudFront where the app reaches it that way.
+   There is no limit per address on the WebSocket API: if it's ever abused
+   for real, the fix is putting it behind CloudFront and the firewall (not
+   done).
+5. **Turn the firewall on** where it's off (dev, by default): set
    `FIREWALL=true` and deploy, as above, and rerun the bootstrap with
    `TF_VAR_firewall=true` for its alarm. It protects the API only once
    `API_ACCESS` is `cloudfront-only` ([the firewall](#the-firewall)). It
    costs about $10 a month plus $0.60 per million requests; what it blocks
    then costs that instead of CloudFront's fee and a run of the `api`
    function.
-5. **Last resort: take the API's edge offline** by disabling its
+6. **Last resort: take the API's edge offline** by disabling its
    distribution: as an admin, in the console, CloudFront, Distributions,
    the one described as `Incognito Chat API (<env>)`, Disable. AWS says a
    disabled distribution accepts no requests, and that a change usually
@@ -1656,14 +1708,14 @@ turn it on first (step 4).
    deploy enables it again (`infra/edge.tf` sets it enabled): enable it by
    hand once the flood is over, or deploy. The change alerts email the
    change, as any made by hand.
-6. **Ask AWS for relief.** Once it's over, open an account and billing case
+7. **Ask AWS for relief.** Once it's over, open an account and billing case
    in AWS Support (open to every account, without a paid support plan):
    what happened, when, and what was done. AWS may waive some of the
    charges; it promises nothing.
 
 Afterwards, remove the blocked addresses (a shared address blocks everyone
-behind it), set the limits back, and enable the distribution if it was
-disabled.
+behind it), set the limits and the WebSocket API's throttle back, and
+enable the distribution if it was disabled.
 
 ### Flat-rate plans (not used)
 
