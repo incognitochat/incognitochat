@@ -54,7 +54,9 @@ until checked. The script checks, in this order:
    repository has a Pages site. Their pages would be served from the app's
    origin, with access to the keys in the browser. (It sees the public
    repositories; on the free plan, which the organization keeps, Pages needs
-   a public repository.)
+   a public repository.) And `https://<org>.github.io/` answers itself,
+   without redirecting: a custom domain would move the app's origin to a
+   domain whose DNS someone else could control.
 2. `manifest.json` names the expected repository, a full commit SHA, and as
    its ref that commit or a release tag (`vX.Y.Z`). Every path it lists must
    be a plain relative path (letters, digits, `.`, `_`, `-`, separated by
@@ -74,9 +76,14 @@ until checked. The script checks, in this order:
    afterwards, and even when a reviewed copy signed the same manifest too.
    Without such an attestation, the script doesn't fetch the files the
    manifest lists.
-5. Every file the manifest lists is served with that SHA-256, and attested by
+5. The live site was deployed by one of the runs that signed the manifest:
+   the newest `github-pages` deployment that succeeded names a run of the
+   hosting repository's `deploy.yml` on `main`, and that run is one of those
+   the manifest's attestations name. Not another workflow, and not Pages
+   building a branch (GitHub's own `pages-build-deployment`).
+6. Every file the manifest lists is served with that SHA-256, and attested by
    the same workflow.
-6. With `--rebuild`, and only if everything above passed: it clones the
+7. With `--rebuild`, and only if everything above passed: it clones the
    expected repository at that commit, builds it with the manifest's settings
    (`npm ci --ignore-scripts`, then `npm run build`), and checks that the
    build makes exactly the files listed, byte for byte.
@@ -113,7 +120,9 @@ so the script refuses those versions, and warns below 2.102.0.
   unchanged copy of the hosting workflow built from a commit on this
   repository's `main` (or a release tag at such a commit), for everyone who
   fetches them, and with `--rebuild`, what that commit's code builds into.
-  And that no other repository of the organization has a Pages site. It
+  And that no other repository of the organization has a Pages site, that
+  there's no custom domain, and that, by GitHub's deployment records, the
+  live site was deployed by a run that signed the manifest. It
   doesn't check whether the site builds commits or tags: the manifest's ref
   says which.
 - **Doesn't prove** what one particular person was served inside Telegram. A
@@ -122,14 +131,15 @@ so the script refuses those versions, and warns below 2.102.0.
   device: it would have to make you set up again, which ends your account
   loudly on your old device and changes your link. A page on the app's own
   address would have them, which is why nothing else may be served there.
-- **Doesn't see files the manifest doesn't list.** Whoever controls the
-  hosting repository could publish an attested build together with extra
-  pages on the app's origin: through a changed `deploy.yml`, another workflow
-  allowed to deploy Pages, or by switching Pages to deploy from a branch,
-  without touching `deploy.yml`. Nothing the script checks would catch it.
-  The change may show in the hosting repository's public history and
-  Actions runs, but an admin of the hosting organization can rewrite that
-  history (force-push `main`) and delete runs and deployments.
+- **Doesn't see files the manifest doesn't list.** It can't list what a
+  site serves, only fetch what the manifest names. Extra pages deployed by
+  another workflow, or by switching Pages to deploy from a branch, fail
+  check 5: the live deployment would name that run, not one that signed the
+  manifest. What stays open: the deployment records come from GitHub's API,
+  and an admin of the hosting organization can create deployment records and
+  statuses that name any run, rewrite the repository's history (force-push
+  `main`), and delete runs and deployments. So an admin who deploys extra
+  pages and then forges the records isn't caught; one who doesn't is.
 - **Doesn't fail an old build.** It warns when the site isn't the newest
   build, but still verifies it: a site held back, or rolled back on purpose,
   is still a genuine build of `main`. It prints the commit and ref it

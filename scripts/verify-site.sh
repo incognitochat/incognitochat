@@ -131,6 +131,19 @@ else
   echo "ok        only ${hosting} has Pages"
 fi
 
+# No custom domain: with one, GitHub redirects the github.io address to it,
+# the app's origin moves there, and whoever controls that domain's DNS could
+# serve other pages on it.
+root=$(curl -sS -o /dev/null --max-time 30 --proto '=https' -w '%{http_code} %{redirect_url}' "${site}/?nocache=$RANDOM") \
+  || die "can't reach ${site}"
+case $root in
+  3*)
+    echo "CUSTOM DOMAIN ${site} redirects to ${root#* }"
+    failed=1 ;;
+  200*) echo "ok        ${site} is served from its own address, with no custom domain" ;;
+  *) echo "Note: ${site}/ answered HTTP ${root%% *}" ;;
+esac
+
 echo "Fetching ${site}/manifest.json"
 manifest=$work/manifest.json
 curl -fsS --max-time 30 --max-filesize 1048576 --proto '=https' "${site}/manifest.json?nocache=$RANDOM" -o "$manifest" \
@@ -277,6 +290,57 @@ else
   failed=1
 fi
 
+# How the live site got there. GitHub serves the newest github-pages
+# deployment that succeeded (a failed or running one leaves the old site up).
+# It must have been made by one of the runs that signed this manifest, with a
+# reviewed deploy.yml: not by another workflow, nor by Pages building a branch
+# (GitHub's own pages-build-deployment). The deployment records come from the
+# API: an admin of the hosting organization could forge them (docs/verifying.md).
+echo "Checking how ${site} was deployed"
+signed_runs=()
+for digest in ${approved[@]+"${approved[@]}"}; do
+  while IFS= read -r run; do
+    [[ $run =~ ^[0-9]+$ ]] && signed_runs+=("$run")
+  done < <(attest "$manifest" --signer-digest "$digest" --format json \
+    --jq '.[].verificationResult.signature.certificate.runInvocationURI' 2>/dev/null \
+    | sed -n "s|^https://github\.com/${hosting}/actions/runs/\([0-9]*\)/attempts/[0-9]*\$|\1|p")
+done
+deploys=$(gh api "repos/${hosting}/deployments?environment=github-pages&per_page=30" --jq '.[].id') \
+  || die "can't list ${hosting}'s deployments"
+live_url='' running=0
+while IFS= read -r id; do
+  [[ $id =~ ^[0-9]+$ ]] || continue
+  status=$(gh api "repos/${hosting}/deployments/${id}/statuses?per_page=1" \
+    --jq '.[0] | "\(.state) \(.log_url // "")"') || die "can't read ${hosting}'s deployment ${id}"
+  case ${status%% *} in
+    success) live_url=${status#* }; break ;;
+    queued|pending|in_progress|waiting) running=1 ;;
+  esac
+done <<<"$deploys"
+[ "$running" = 0 ] || echo "Note: a newer deploy is running; the live site is the one before it"
+live_run=''
+case $live_url in
+  "https://github.com/${hosting}/actions/runs/"*)
+    live_run=${live_url#"https://github.com/${hosting}/actions/runs/"}
+    live_run=${live_run%%/*} ;;
+esac
+if ! [[ $live_run =~ ^[0-9]+$ ]]; then
+  echo "UNKNOWN DEPLOY no successful github-pages deployment names a workflow run of ${hosting}"
+  failed=1
+else
+  run_info=$(gh api "repos/${hosting}/actions/runs/${live_run}" --jq '"\(.path)\t\(.head_branch)"') \
+    || die "can't read ${hosting}'s run ${live_run}"
+  if [ "$run_info" != ".github/workflows/deploy.yml"$'\t'"${branch}" ]; then
+    echo "OTHER DEPLOYER the live site was deployed by run ${live_run} ($(tr '\t' ' ' <<<"$run_info")), not deploy.yml on ${branch}"
+    failed=1
+  elif ! printf '%s\n' ${signed_runs[@]+"${signed_runs[@]}"} | grep -qxF -- "$live_run"; then
+    echo "OTHER DEPLOYER the live site was deployed by run ${live_run}, which didn't sign this manifest"
+    failed=1
+  else
+    echo "ok        deployed by run ${live_run} of deploy.yml, which signed this manifest"
+  fi
+fi
+
 check() { # path expected-sha256
   local path=$1 want=$2 file dir got
   # Checked above already; again here, since the path becomes a file name.
@@ -376,7 +440,8 @@ if [ "$failed" != 0 ]; then
   exit 1
 fi
 echo "Verified: every file matches the manifest and is attested by a reviewed copy of hosting/deploy.yml"
-echo "in ${hosting}, built from ${code_repo} ${ref} (commit ${commit}, on ${branch}); no other ${org} repository has Pages"
+echo "in ${hosting}, built from ${code_repo} ${ref} (commit ${commit}, on ${branch}) and deployed by the run that signed it;"
+echo "no other ${org} repository has Pages, and there's no custom domain"
 if [ -n "$stale" ]; then
   echo "Warning: it isn't the newest build (NOT LATEST above)"
 fi
