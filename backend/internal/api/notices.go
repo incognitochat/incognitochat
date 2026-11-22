@@ -10,6 +10,7 @@ import (
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+	"github.com/incognitochat/incognitochat/backend/internal/i18n"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/notices"
 )
@@ -68,6 +69,61 @@ func (s *Server) setNotices(ctx context.Context, req httpapi.Request, c caller) 
 	err = s.Directory.SetNotices(ctx, c.AccountID, sealed, notices.Language(launch.LanguageCode))
 	if errors.Is(err, directory.ErrNotFound) {
 		return httpapi.Error(http.StatusUnauthorized, "session_expired")
+	}
+	if err != nil {
+		return s.internal(route, err)
+	}
+	return accepted()
+}
+
+// NoticeLanguageChangesPerDay bounds how often a person's notice language
+// can change (POST /notices/language).
+const NoticeLanguageChangesPerDay = 5
+
+// setNoticeLanguage changes the language of the caller's notices to the one
+// Telegram's language picks, while they're on, and changes nothing else. As
+// with POST /notices, the language comes only from Telegram's signed launch
+// data, never from the app, and only a launch without a link or invitation
+// in it is accepted. Nothing to change (no language in the launch data, or
+// the same one) is answered as done.
+func (s *Server) setNoticeLanguage(ctx context.Context, req httpapi.Request, c caller) httpapi.Response {
+	const route = "POST /notices/language"
+	var in noticesRequest
+	if err := httpapi.DecodeJSON(req, &in); err != nil {
+		return httpapi.DecodeError(err)
+	}
+	if in.InitData == "" || len(in.InitData) > maxInitData {
+		return httpapi.Error(http.StatusBadRequest, "bad_request")
+	}
+	if s.Notices == nil {
+		return httpapi.Error(http.StatusNotFound, "not_found")
+	}
+	launch, err := s.Telegram.Verify(in.InitData, s.Now())
+	if err != nil || !PlainLaunch(launch.StartParam) ||
+		directory.TelegramHash(s.Pepper, launch.UserID) != c.device.TelegramHash {
+		return httpapi.Error(http.StatusUnauthorized, "init_data_rejected")
+	}
+	// No language: never read as English, which would replace the one kept.
+	if launch.LanguageCode == "" {
+		return accepted()
+	}
+	if !c.device.Notices {
+		return httpapi.Error(http.StatusConflict, "notices_off")
+	}
+	language := i18n.Pick(launch.LanguageCode)
+	if language == c.device.NoticeLanguage {
+		return accepted()
+	}
+	ok, err := s.allow(ctx, "ntl", NoticeLanguageChangesPerDay, 24*time.Hour, c.person())
+	if err != nil {
+		return s.internal(route, err)
+	}
+	if !ok {
+		return httpapi.Error(http.StatusTooManyRequests, "rate_limited")
+	}
+	err = s.Directory.SetNoticeLanguage(ctx, c.AccountID, language)
+	if errors.Is(err, directory.ErrNoticesOff) {
+		return httpapi.Error(http.StatusConflict, "notices_off")
 	}
 	if err != nil {
 		return s.internal(route, err)

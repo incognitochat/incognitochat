@@ -60,6 +60,10 @@ type accountResponse struct {
 	// user blocked the bot, say): the app doesn't set them up again by
 	// itself, but offers to.
 	NoticesRefused bool `json:"noticesRefused"`
+	// NoticeLanguage is the language notices are sent in, while they're on:
+	// the app asks to change it when Telegram's language picks another
+	// (POST /notices/language).
+	NoticeLanguage string `json:"noticeLanguage,omitempty"`
 	// Deleting says the account is being deleted (DELETE /account has
 	// started): the app carries on with it.
 	Deleting bool `json:"deleting"`
@@ -93,6 +97,7 @@ func (s *Server) account(ctx context.Context, _ httpapi.Request, c caller) httpa
 		MaxLinks:       links.MaxActive,
 		Notices:        c.device.Notices,
 		NoticesRefused: c.device.NoticesRefused,
+		NoticeLanguage: c.device.NoticeLanguage,
 		Deleting:       c.device.Deleting,
 		Expired:        c.device.Deleting && c.device.Expired,
 		Cleanup:        len(c.device.Leftovers) > 0,

@@ -71,6 +71,7 @@ import { createClock } from '../net/clock';
 import { createSession, type AppSession, type Session } from '../net/session';
 import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
+import { pickLanguage } from '../i18n';
 import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { findSourceUrl } from '../platform/source';
@@ -521,6 +522,7 @@ export function createApp(deps: Deps) {
   const noticeLaunch = deps.launch.initData !== '' && (signedStart === '' || isRegistrationLaunch(signedStart));
   let writeAllowed = deps.launch.allowsWriteToPm;
   let noticesTried = false;
+  let noticeLanguageTried = false;
   deps.bridge?.on('write_access_requested', ({ status }) => {
     if (status !== 'allowed') return;
     writeAllowed = true;
@@ -2049,6 +2051,30 @@ export function createApp(deps: Deps) {
     // By itself only if Telegram never refused one (never set up, or a new
     // chat key): a block holds until the user taps Turn on notices.
     if (account && !account.notices && !account.noticesRefused && writeAllowed && !noticesTried) void setUpNotices();
+    // While they're on, notices follow Telegram's language: the server picks
+    // it from the launch data the same way the app does (shared vectors),
+    // and keeps it only once set up, so a language the app gained since, or
+    // a change in Telegram, needs telling. Never the language chosen in the
+    // app, nor the browser's, which stay on this device.
+    const telegramLanguage = deps.launch.userLanguage;
+    if (account?.notices && account.noticeLanguage !== undefined && telegramLanguage !== '' && pickLanguage(telegramLanguage) !== account.noticeLanguage && !noticeLanguageTried) {
+      void changeNoticeLanguage();
+    }
+  }
+
+  /**
+   * Asks the server to send notices in Telegram's language, from this
+   * launch's data: a plain launch only, as for setting them up. Failures
+   * are left alone: the next launch tries again.
+   */
+  async function changeNoticeLanguage(): Promise<void> {
+    if (!noticeLaunch || !session) return;
+    noticeLanguageTried = true;
+    try {
+      await session.call('POST', '/notices/language', { initData: deps.launch.initData }, checkObject);
+    } catch {
+      return;
+    }
   }
 
   /**

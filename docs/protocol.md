@@ -206,7 +206,8 @@ up again, and, in the last step, its socket records. Unlike a replacement, it ke
 marker, also when setting up again replaces it before it's done (above);
 only rate-limit counters remain until they expire (within about a
 day; DynamoDB can take longer to delete them). The daily limits (send and
-media tokens, new mailboxes, link changes, notice setups, mailbox checks,
+media tokens, new mailboxes, link changes, notice setups and language
+changes, mailbox checks,
 invitation attempts) count per Telegram user, by the same keyed hash that
 keeps one account per user, so deleting an account and setting up again
 doesn't start a fresh day. It works in steps of about 50
@@ -1387,6 +1388,18 @@ deploy sets the bot up (its webhook, menu button and command).
   after a refusal, Telegram's launch data may still say the bot may write,
   so the app only offers to (Turn on notices), and sets them up when the
   user taps it.
+- While notices are on, `GET /account` also gives their language
+  (`noticeLanguage`), which the server picked from Telegram's language
+  code. When a plain launch's Telegram language picks another of the app's
+  languages (the app picks the same way: shared vectors,
+  `backend/internal/i18n/testdata/languages.json`), the app sends
+  `POST /notices/language {initData}`, once per launch. The server checks
+  the launch data as for `POST /notices`, picks the language from it, and
+  changes that alone, only while notices are on: otherwise `409
+  notices_off`, so it never turns them back on and a refusal holds. Launch
+  data without a language, or with the same one, changes nothing. At most
+  5 changes a day per Telegram user. The language the user picks in the
+  app is never sent.
 - After each delivery that isn't `quiet` and that no open app took (Delivery,
   Push), `ws` asks `notify` to send the owner a notice, without waiting.
   `notify` sends at most one every 3 minutes per account (its quiet period is

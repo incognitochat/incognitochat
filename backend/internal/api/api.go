@@ -28,6 +28,7 @@
 //	admin_only                            only admins can do this
 //	invalid_envelope                      the envelope's layout can't be valid
 //	mailbox_limit                         the account has the most mailboxes allowed
+//	notices_off                           409: POST /notices/language while notices are off (turned off, refused by Telegram, or never set up)
 //	invalid_token                         the send token is missing, invalid, from another week, or spent
 //	tokens_needed                         402: a send brought more or fewer tokens than its envelope costs, which "needed" gives
 //	unknown_issuer_key                    a token batch names, or a token is for, an issuer key the server doesn't hold (an app built for a retired key)
@@ -75,6 +76,9 @@ type Directory interface {
 	ReplaceLink(ctx context.Context, accountID, oldID string, l directory.Link) error
 	SetLinkKeys(ctx context.Context, accountID, id string, keys []links.Key) error
 	SetNotices(ctx context.Context, accountID string, sealedChat []byte, language string) error
+	// SetNoticeLanguage changes only the notice language, only while
+	// notices are on (directory.ErrNoticesOff otherwise).
+	SetNoticeLanguage(ctx context.Context, accountID, language string) error
 	// ForgetNotices removes what notices need from an account whose
 	// notices are off, only while they still are.
 	ForgetNotices(ctx context.Context, accountID string) error
@@ -294,6 +298,7 @@ func (s *Server) Routes(r *httpapi.Router) {
 	r.Handle(http.MethodGet, "/inbox", s.withDevice("GET /inbox", s.listInbox))
 	r.Handle(http.MethodPost, "/ack", s.withDevice("POST /ack", s.ack))
 	r.Handle(http.MethodPost, "/notices", s.withDevice("POST /notices", s.setNotices))
+	r.Handle(http.MethodPost, "/notices/language", s.withDevice("POST /notices/language", s.setNoticeLanguage))
 	r.Handle(http.MethodPost, "/accounts/lookup", s.lookupAccount)
 	r.Handle(http.MethodPost, "/media", s.upload)
 	r.Handle(http.MethodPost, "/media/{id}/upload", s.renewUpload)

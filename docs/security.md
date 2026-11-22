@@ -223,7 +223,7 @@ it. This is how close it gets.
   so they say what AWS's own per-minute metrics of the functions and tables
   already say, by route. The lines also count, for public statistics, the
   messages sent (sends that aren't quiet) and the padded bytes of the
-  uploads paid for. The lines are kept 7 days. The 21 metrics made from
+  uploads paid for. The lines are kept 7 days. The 22 metrics made from
   them (registrations, token batches, 429s overall and by route, three kinds
   of refusal, messages sent and media bytes) are kept by CloudWatch for 15
   days a minute at a time, 63 days 5 minutes at a time and 15 months an

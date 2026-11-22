@@ -697,6 +697,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
 		Notices: a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
+		NoticeLanguage: map[bool]string{true: a.language}[a.chat != nil && !a.noticesOff],
 		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers), LastUse: a.lastUse,
 	}, nil
 }
@@ -709,6 +710,17 @@ func (m *memDirectory) SetNotices(_ context.Context, account string, sealed []by
 		return directory.ErrNotFound
 	}
 	a.chat, a.language, a.noticesOff = sealed, language, false
+	return nil
+}
+
+func (m *memDirectory) SetNoticeLanguage(_ context.Context, account, language string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.accounts[account]
+	if !ok || a.chat == nil || a.noticesOff {
+		return directory.ErrNoticesOff
+	}
+	a.language = language
 	return nil
 }
 

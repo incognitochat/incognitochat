@@ -43,6 +43,7 @@ locals {
     "post_mailboxes",
     "post_mailboxes_check",
     "post_notices",
+    "post_notices_language",
     "post_send",
     "post_tokens",
     "post_tokens_media",

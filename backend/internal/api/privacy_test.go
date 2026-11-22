@@ -380,6 +380,7 @@ func TestEphemeralRowsNameNoIDs(t *testing.T) {
 	link := newLinkKeys(t)
 	intro := ok(h.as(t, owner, http.MethodPost, "/links", link.create(t, h.now), true))["mailbox"].(string)
 	ok(h.as(t, owner, http.MethodPost, "/notices", map[string]any{"initData": launchIn(userID, "", "en", h)}, false))
+	ok(h.as(t, owner, http.MethodPost, "/notices/language", map[string]any{"initData": launchIn(userID, "", "fa", h)}, false))
 	ownerBoxes := ok(h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false))["mailboxes"].([]any)
 	senderBoxes := ok(h.as(t, sender, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false))["mailboxes"].([]any)
 	blinded := randomBytes(t, testIssuer().BlindedLen())
@@ -454,7 +455,7 @@ func TestEphemeralRowsNameNoIDs(t *testing.T) {
 			}
 		}
 	}
-	for _, kind := range []string{"send", "intro", "inbox", "inboxday", "mbx", "link", "ntc", "tok", "reg", "regtry", "look", "redeem", "mbxcheck", "mtok", "dl"} {
+	for _, kind := range []string{"send", "intro", "inbox", "inboxday", "mbx", "link", "ntc", "ntl", "tok", "reg", "regtry", "look", "redeem", "mbxcheck", "mtok", "dl"} {
 		if !kinds[kind] {
 			t.Errorf("no %s counter in the flow", kind)
 		}

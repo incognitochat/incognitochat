@@ -11,7 +11,8 @@ import { canResend } from '../messaging/engine';
 import { listConversations, listMessages, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
-import { openDatabase } from '../storage/db';
+import { openDatabase, putMeta } from '../storage/db';
+import { pickLanguage } from '../i18n';
 import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
 
 let n = 0;
@@ -44,12 +45,21 @@ async function backend() {
   // replaced, and no longer held; mailboxesFull: accounts hold all the
   // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
   const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false, sendRefused: null as ApiError | null };
+  // An older server says no notice language; languageRefused: how a change of it is refused, if set.
+  const noticeState = { languageSaid: true, languageRefused: null as Error | null };
   /** Requests to the media routes. */
   const mediaCalls: string[] = [];
   // What the app sent to /notices and /send, to check what it tells the server.
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
   const noticesOn = new Set<string>();
+  // The language notices are sent in, as the server picks it from the launch data; and what the app sent to change it.
+  const noticeLanguages = new Map<string, string>();
+  const languageChanges: string[] = [];
+  const telegramLanguage = (initData: string) => {
+    const user = JSON.parse(new URLSearchParams(initData).get('user') ?? '{}') as { language_code?: string };
+    return pickLanguage(user.language_code ?? '');
+  };
   // Accounts whose notices Telegram refused (the user blocked the bot), not set up since.
   const noticesRefused = new Set<string>();
 
@@ -67,12 +77,21 @@ async function backend() {
       }
       if (path === '/session') return check(token(body.account as string));
       if (path === '/account') {
-        return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account), noticesRefused: noticesRefused.has(account) });
+        const noticeLanguage = noticeState.languageSaid && noticesOn.has(account) ? { noticeLanguage: noticeLanguages.get(account) } : {};
+        return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account), noticesRefused: noticesRefused.has(account), ...noticeLanguage });
       }
       if (path === '/notices') {
         noticeSetups.push(body.initData as string);
         noticesOn.add(account);
         noticesRefused.delete(account);
+        noticeLanguages.set(account, telegramLanguage(body.initData as string));
+        return check({});
+      }
+      if (path === '/notices/language') {
+        languageChanges.push(body.initData as string);
+        if (noticeState.languageRefused) throw noticeState.languageRefused;
+        if (!noticesOn.has(account)) throw new ApiError(409, 'notices_off');
+        noticeLanguages.set(account, telegramLanguage(body.initData as string));
         return check({});
       }
       if (path === '/invitations') {
@@ -140,7 +159,7 @@ async function backend() {
     noticesOn.delete(account);
     noticesRefused.add(account);
   };
-  return { api, issuer, state, noticeSetups, sends, mediaCalls, refuseNotices };
+  return { api, issuer, state, noticeSetups, sends, mediaCalls, refuseNotices, noticeState, noticeLanguages, languageChanges };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
@@ -160,8 +179,9 @@ function telegram() {
   return { bridge: tg, fire: (type: string, data: unknown) => handlers.get(type)?.forEach((h) => h(data)) };
 }
 
-function launchWith(startParam: string, allowsWrite = true): Launch {
-  const initData = `auth_date=1&start_param=${startParam}&user=${encodeURIComponent(`{"id":1,"allows_write_to_pm":${allowsWrite}}`)}`;
+function launchWith(startParam: string, allowsWrite = true, language?: string): Launch {
+  const code = language === undefined ? '' : `,"language_code":"${language}"`;
+  const initData = `auth_date=1&start_param=${startParam}&user=${encodeURIComponent(`{"id":1,"allows_write_to_pm":${allowsWrite}${code}}`)}`;
   return parseLaunch('tgWebAppData=' + encodeURIComponent(initData));
 }
 
@@ -300,6 +320,76 @@ describe('conversations in the app', () => {
     // The receipt goes in the background.
     for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
     expect(b.sends.map((s) => s.quiet === true)).toEqual([false, true]);
+  });
+
+  it("keeps notices in Telegram's language, from plain launches only, never the app's", async () => {
+    const b = await backend();
+    const db = await openDatabase(`conv-test-${n++}`);
+    const deps = { config, api: b.api, db, bridge: bridge(), broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+    await createApp({ ...deps, launch: launchWith('', true, 'en') }).setUp();
+    const code = 'reg' + (await readAccount(db))!.fingerprint;
+    await createApp({ ...deps, launch: launchWith(code, true, 'en') }).start();
+    const record = await readAccount(db);
+    if (!record || !('accountId' in record)) throw new Error('not set up');
+    const id = record.accountId;
+    expect(b.noticeSetups).toHaveLength(1);
+    expect(b.noticeLanguages.get(id)).toBe('en');
+    // Opens the app, and waits for what it sends in the background.
+    const open = async (startParam: string, language?: string) => {
+      const app = createApp({ ...deps, launch: launchWith(startParam, true, language) });
+      await app.start();
+      for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 10));
+      return app;
+    };
+
+    // The same language, or none in the launch data (never read as English): nothing to tell.
+    await open('', 'en-GB');
+    await open('');
+    expect(b.languageChanges).toHaveLength(0);
+    // The language chosen in the app stays on this device.
+    await putMeta(db, 'language', 'fa');
+    await open('', 'en');
+    expect(b.languageChanges).toHaveLength(0);
+
+    // Telegram now in Persian: told once, with this launch's data.
+    await open('', 'fa');
+    expect(b.languageChanges).toHaveLength(1);
+    expect(JSON.parse(new URLSearchParams(b.languageChanges[0]).get('user')!)).toMatchObject({ language_code: 'fa' });
+    expect(b.noticeLanguages.get(id)).toBe('fa');
+    await open('', 'fa-IR');
+    // No language in the launch data is never read as English.
+    await open('');
+    expect(b.languageChanges).toHaveLength(1);
+    expect(b.noticeLanguages.get(id)).toBe('fa');
+
+    // Through an invitation or someone's link, the launch data would say whose: never sent.
+    await open('invABCDEFGH', 'en');
+    expect(b.languageChanges).toHaveLength(1);
+
+    // A failure is left alone, and not tried again until the next launch.
+    b.noticeState.languageRefused = new NetworkError('unreachable');
+    const app = await open('', 'en');
+    expect(b.languageChanges).toHaveLength(2);
+    await app.home();
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(b.languageChanges).toHaveLength(2);
+    expect(app.screen.value.kind).toBe('home');
+    b.noticeState.languageRefused = null;
+    await open('', 'en');
+    expect(b.languageChanges).toHaveLength(3);
+    expect(b.noticeLanguages.get(id)).toBe('en');
+
+    // A server that doesn't say the language: nothing sent.
+    b.noticeState.languageSaid = false;
+    await open('', 'fa');
+    expect(b.languageChanges).toHaveLength(3);
+    b.noticeState.languageSaid = true;
+
+    // Refused by Telegram (the bot blocked): off, so nothing to change, and no setup either.
+    b.refuseNotices(id);
+    await open('', 'fa');
+    expect(b.languageChanges).toHaveLength(3);
+    expect(b.noticeSetups).toHaveLength(1);
   });
 
   it('asks before setting up notices when the bot may not write yet', async () => {
