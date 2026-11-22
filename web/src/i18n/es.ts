@@ -184,7 +184,7 @@ export const es = {
   errorUnreadable: 'No se pudo leer ese archivo.',
   reply: 'Responder',
   replyingTo: 'Responder a: {name}',
-  replyingToYours: 'Respuesta a tu mensaje',
+  replyingToYours: 'Responder a tu mensaje',
   cancelReply: 'Cancelar respuesta',
   deletedMessage: 'Mensaje eliminado',
   messageActions: 'Acciones del mensaje',
