@@ -134,9 +134,10 @@ if [[ -n $stats_repo && $stats_repo != none ]]; then
 fi
 
 # Sets stats, the stats role's Terraform variables. After tf init; with
-# first-run, on the first run's empty local state.
+# first-run on the first run's local state, which may not exist yet (then
+# listing it fails, and that's no error).
 stats_vars() {
-  local state
+  local state err
   if [[ -z $stats_repo ]]; then
     stats_subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
     [[ $stats_subject == *:environment:stats ]] || stats_subject=''
@@ -144,11 +145,19 @@ stats_vars() {
     # this apply: stop instead (STATS_REPO=none removes it on purpose). The
     # state is read whole first: grep -q leaving early could make terraform
     # fail on a closed pipe and the check pass by mistake.
-    if [[ -z $stats_subject && ${1:-} != first-run ]]; then
-      if ! state=$(tf state list 2>/dev/null); then
-        echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied." >&2
-        exit 1
+    if [[ -z $stats_subject ]]; then
+      err=$(mktemp)
+      if ! state=$(tf state list 2>"$err"); then
+        if [[ ${1:-} != first-run ]]; then
+          echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied" >&2
+          echo "(rerun with STATS_REPO=<owner>/<repo> or STATS_REPO=none to skip this check). Terraform said:" >&2
+          cat "$err" >&2
+          rm -f "$err"
+          exit 1
+        fi
+        state=''
       fi
+      rm -f "$err"
       if grep -qxF 'aws_iam_role.stats[0]' <<<"$state"; then
         echo "The stats role exists, but its subject couldn't be read from the state, and applying" >&2
         echo "would remove it. Rerun with STATS_REPO=<owner>/<repo> to keep it, or STATS_REPO=none" >&2
