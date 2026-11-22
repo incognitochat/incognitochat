@@ -67,15 +67,16 @@ func (n *Nonces) Use(ctx context.Context, nonce string, expires time.Time) (bool
 //	S#<nonce>  S  until it expires (e); given back (u), and whether it
 //	              has been given back before (r)
 //
-// It also remembers, in memory, the tokens it has seen spent, so replaying
-// one token over and over costs the table nothing after the first time.
+// It also remembers, in memory, the tokens it has seen spent, until they
+// expire (spentMemory: up to maxRemembered of them), so a token replayed
+// over and over costs the table one write unit at most on each instance.
 type Spent struct {
 	DB    DB
 	Table string
 	Now   func() time.Time
 
-	mu   sync.Mutex
-	seen map[string]int64 // spent nonce -> when its record expires (Unix seconds)
+	mu     sync.Mutex
+	memory spentMemory
 }
 
 // TokenNonce is a token to spend: its nonce, and when the token stops being
@@ -85,32 +86,32 @@ type TokenNonce struct {
 	ForgetAfter time.Time
 }
 
-// maxSeen bounds the in-memory record of spent tokens; it starts over when full.
-const maxSeen = 8192
-
-// known reports whether this instance has seen the token spent.
-func (sp *Spent) known(key string, now time.Time) bool {
+// memoryKey returns a nonce's key in the memory.
+func (sp *Spent) memoryKey(nonce []byte) spentKey {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	until, ok := sp.seen[key]
-	return ok && now.Unix() < until
+	return sp.memory.key(nonce)
+}
+
+// known reports whether this instance has seen the token spent.
+func (sp *Spent) known(key spentKey, now time.Time) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	return sp.memory.has(key, minuteOf(now))
 }
 
 // remember records, in memory, that a token is spent.
-func (sp *Spent) remember(key string, forgetAfter time.Time) {
+func (sp *Spent) remember(key spentKey, forgetAfter, now time.Time) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	if sp.seen == nil || len(sp.seen) >= maxSeen {
-		sp.seen = map[string]int64{}
-	}
-	sp.seen[key] = expiry(forgetAfter)
+	sp.memory.add(key, minuteOf(time.Unix(expiry(forgetAfter), 0)), minuteOf(now))
 }
 
 // Spend records a token's nonce until forgetAfter (when the token stops
 // being accepted anyway). It reports false if the token was spent already,
 // and not given back since.
 func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time) (bool, error) {
-	key := base64.RawURLEncoding.EncodeToString(nonce)
+	key := sp.memoryKey(nonce)
 	now := sp.Now()
 	if sp.known(key, now) {
 		return false, nil
@@ -118,7 +119,7 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 	// An update, not a put, so a token given back keeps r when spent again.
 	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &sp.Table,
-		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + base64.RawURLEncoding.EncodeToString(nonce)), "sk": s("S")},
 		UpdateExpression:          aws.String("SET e = :e REMOVE u"),
 		ConditionExpression:       aws.String("attribute_not_exists(pk) OR e <= :now OR attribute_exists(u)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":e": num(expiry(forgetAfter)), ":now": num(now.Unix())},
@@ -131,7 +132,7 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 		return false, err
 	}
 	// Spent either way: just now, or before.
-	sp.remember(key, forgetAfter)
+	sp.remember(key, forgetAfter, now)
 	return fresh, nil
 }
 
@@ -148,9 +149,9 @@ func (sp *Spent) Spend(ctx context.Context, nonce []byte, forgetAfter time.Time)
 // cost the table that much on every try.
 func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error) {
 	now := sp.Now()
-	keys := make([]string, len(tokens))
+	keys := make([]spentKey, len(tokens))
 	for i, t := range tokens {
-		keys[i] = base64.RawURLEncoding.EncodeToString(t.Nonce)
+		keys[i] = sp.memoryKey(t.Nonce)
 		if sp.known(keys[i], now) || slices.Contains(keys[:i], keys[i]) {
 			return false, nil
 		}
@@ -171,10 +172,9 @@ func (sp *Spent) SpendAll(ctx context.Context, tokens []TokenNonce) (bool, error
 // refused again, it stays spent. Otherwise one token could be replayed
 // against a refusal without end, each time at the table's cost.
 func (sp *Spent) Unspend(ctx context.Context, nonce []byte) error {
-	key := base64.RawURLEncoding.EncodeToString(nonce)
 	_, err := sp.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &sp.Table,
-		Key:                       map[string]types.AttributeValue{"pk": s("S#" + key), "sk": s("S")},
+		Key:                       map[string]types.AttributeValue{"pk": s("S#" + base64.RawURLEncoding.EncodeToString(nonce)), "sk": s("S")},
 		UpdateExpression:          aws.String("SET u = :one, r = :one"),
 		ConditionExpression:       aws.String("attribute_exists(pk) AND attribute_not_exists(r)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":one": num(1)},
@@ -186,7 +186,7 @@ func (sp *Spent) Unspend(ctx context.Context, nonce []byte) error {
 		return err
 	}
 	sp.mu.Lock()
-	delete(sp.seen, key)
+	sp.memory.remove(sp.memory.key(nonce))
 	sp.mu.Unlock()
 	return nil
 }

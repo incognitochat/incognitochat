@@ -256,6 +256,18 @@ export class MailboxLimit extends Error {
   }
 }
 
+/**
+ * The firewall turned an upload away: too many requests from this address
+ * (shared, maybe, with others behind it) for now, which lasts minutes. Its
+ * media tokens are back in the wallet: the server never saw them.
+ */
+export class TurnedAway extends Error {
+  constructor() {
+    super('upload turned away');
+    this.name = 'TurnedAway';
+  }
+}
+
 /** A message of ours was deleted here (or its chat) before it went out: it isn't sent. */
 class Cancelled extends Error {
   constructor() {
@@ -362,6 +374,15 @@ function checkRenewal(value: unknown): string | 'uploaded' {
 /** The operator has paused uploads or downloads of attachments for now: try again later, not at once. */
 export function isPaused(err: unknown): boolean {
   return err instanceof ApiError && (err.code === 'uploads_paused' || err.code === 'downloads_paused');
+}
+
+/**
+ * Whether the firewall turned a request for an upload (POST /media) away:
+ * 429 rate_limited, which the server itself never answers there. So the
+ * request never reached the server, and neither did its tokens.
+ */
+function turnedAway(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 429 && err.code === 'rate_limited';
 }
 
 /**
@@ -819,11 +840,14 @@ export function createMessaging(deps: MessagingDeps) {
         created = await api.post('/media', { size: body.length, deleteHash: toBase64Url(deleteHash), tokens: tokens.map((t) => t.token) }, checkUpload);
       } catch (err) {
         // Unspent if uploads are paused (the server answers that before
-        // spending any), and an upload names no mailbox, so using them for
-        // another ties nothing anyone receives to this try. Without an
-        // answer they may be spent: dropped, like those the server refused.
-        if (isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
-        throw err;
+        // spending any), or if the firewall turned the request away (the
+        // server never saw it), and an upload names no mailbox, so using
+        // them for another ties nothing anyone receives to this try.
+        // Without an answer they may be spent: dropped, like those the
+        // server refused.
+        const away = turnedAway(err);
+        if (away || isPaused(err)) for (const t of tokens) await returnToken(db, t.token, t.epoch, 'media');
+        throw away ? new TurnedAway() : err;
       }
       const media = { ...out.media, id: created.id, k: toBase64Url(key), d: toBase64Url(secret) };
       onPaid(media);

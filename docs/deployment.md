@@ -1495,13 +1495,15 @@ Terraform keeps it so.
 
 The routes that need no login, which `anonymous-per-ip` counts, are
 `POST /session`, `POST /register`, `POST /accounts/lookup`, `POST /send`,
-`GET /links/{id}`, `GET /media/{id}`, `POST /media/{id}/upload` and
-`POST /media/delete`: each reads a table before any limit of its own, or,
-for sends, is paid with a token but has no login. Two more need no login
-and are left to `rate-per-ip`: `POST /media` spends no table capacity on
-forged media tokens, and `POST /media/{id}/delete`, one upload at a time,
-is what apps before batches sent for every received attachment of a deleted
-chat, six at a time without a pause (a chat with a few thousand set off
+`POST /media`, `GET /links/{id}`, `GET /media/{id}`,
+`POST /media/{id}/upload` and `POST /media/delete`: each reads a table
+before any limit of its own, or, for sends and uploads, is paid with tokens
+but has no login. A forged token costs the tables nothing, but one spent
+already costs a write unit whenever it reaches an `api` instance that
+doesn't remember it (below). One more needs no login and is left to
+`rate-per-ip`: `POST /media/{id}/delete`, one upload at a time, is what
+apps before batches sent for every received attachment of a deleted chat,
+six at a time without a pause (a chat with a few thousand set off
 `rate-per-ip`). The app now sends it only to a server without
 `POST /media/delete`.
 
@@ -1523,12 +1525,16 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   at a time. Most of it is sends: each message, reaction, edit and "seen"
   receipt is one, and the server takes at most 30 a minute for one mailbox.
   Someone chatting fast sends about 25 a minute, so at most about 150 to 200
-  in 5 minutes all told; most people send under 30. Deleting a chat sends
-  one batch for every 50 attachments, two seconds apart: a chat with
-  thousands adds at most about 130 in 5 minutes while it goes. 500 leaves
-  room for two or three people that busy, or fifteen or so ordinary ones,
-  behind one address. Past it, only these routes are blocked for that
-  address; requests with a session go on.
+  in 5 minutes all told; most people send under 30. Each attachment sent is
+  two, its upload and its message. Files are picked one at a time, and each
+  is prepared and encrypted first, so even photo after photo goes at most
+  one every few seconds: 20 in a row add 40, and nonstop for 5 minutes
+  about 200. Deleting a chat sends one batch for every 50 attachments, two
+  seconds apart: a chat with thousands adds at most about 130 in 5 minutes
+  while it goes. 500 leaves room for two or three people that busy, about
+  fourteen ordinary ones, or seven to ten who send many photos, behind one
+  address. Past it, only these routes are blocked for that address;
+  requests with a session go on.
 
   Logins, registrations, account lookups and sends have only the per-address
   rules, so a flood of them spread over many addresses is bounded only by
@@ -1559,14 +1565,28 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   its day, and accounts spending a minute's limits at once can make a
   short spike. Logins of random devices read half a
   directory unit each and write nothing; filling its 400 reads a second
-  takes about 480 addresses. Still open, each for a change of its own:
-  every request with a session reads the directory before any limit (one
-  unit; `GET /usage` two, and four on the ephemeral table), refused ones
+  takes about 480 addresses. Still open, for a change of its own: every
+  request with a session reads the directory before any limit (one unit;
+  `GET /usage` two, and four on the ephemeral table), refused ones
   included, so one account and about 30 addresses can still use up the
-  directory's reads; and spent send and media tokens replayed past what a
-  function instance remembers cost a write unit each, and `POST /media`
-  has only the `rate-per-ip` rule, so about 30 addresses with one or two
-  accounts can still fill the ephemeral table's writes.
+  directory's reads.
+
+  Sends and uploads that replay tokens spent already are the same kind of
+  flood: tokens say nothing about whose they are, so only these limits hold
+  them. Each `api` instance remembers the spent tokens it meets, about a
+  million, each until it expires (two weeks at most); when full, it forgets
+  those that have expired first, then those expiring soonest. So a token
+  costs a write unit at most once per instance, and filling production's
+  200 writes a second this way takes about 120 addresses (500 in 5 minutes
+  each). How long that lasts depends on the tokens. A Telegram account gets 1,500 a
+  day (send and media), and the issuer can't see which week it signs a
+  token for, so an account can mint weeks ahead for one fortnight: 21,000
+  minted within it, 84,000 over 8 weeks. Each day's minting keeps the
+  writes full for about 7.5 seconds for each instance the flood reaches,
+  so 8 weeks' about 7 minutes. About 700 account-days of minting (13
+  accounts minting for 8 weeks) fill one instance's memory; past that,
+  replays to it cost a write unit each again. Replacing an issuer key
+  voids what was minted with it.
 - **`lookups-total`**: everyone's lookups by ID, over one minute so that a
   block ends soon after a flood does. With a random ID, a lookup writes
   nothing and reads half a unit (a link's bundle from the directory; a
@@ -1640,8 +1660,10 @@ failed login waits 5 to 10 seconds, twice as long after each further
 failure up to one to two minutes; a link's keys that couldn't be fetched
 wait 5 to 10 minutes; and attachments stop being fetched by themselves for
 one to two minutes. The waits are jittered, so the apps behind one address
-don't try together and keep it blocked. A blocked CORS preflight (only
-`rate-per-ip` counts those) still looks like a network error to the app.
+don't try together and keep it blocked. An upload turned away keeps its
+media tokens, which the server never saw, and the app says "Too many tries.
+Try again later." A blocked CORS preflight (only `rate-per-ip` counts
+those) still looks like a network error to the app.
 
 AWS WAF checks rates about every 10 seconds and doesn't match a limit
 exactly: a flood usually gets through for up to 30 seconds before it's
