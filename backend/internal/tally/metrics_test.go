@@ -1,6 +1,8 @@
 package tally_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/api"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+	"github.com/incognitochat/incognitochat/backend/internal/logx"
 	"github.com/incognitochat/incognitochat/backend/internal/tally"
 )
 
@@ -174,4 +178,55 @@ func stringLit(e ast.Expr) (string, bool) {
 	}
 	s, err := strconv.Unquote(lit.Value)
 	return s, err == nil
+}
+
+// The public counts (messages, media_bytes) are read from the line's top
+// level: every one a filter reads must be one the counter logs, and every
+// one the counter logs must have a filter, or the published statistics
+// would read nothing.
+func TestMetricFiltersReadThePublicCounts(t *testing.T) {
+	src, err := os.ReadFile("../../../infra/metrics.tf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]bool{}
+	for _, m := range regexp.MustCompile(`count\s*=\s*"([a-z0-9_]+)"`).FindAllStringSubmatch(string(src), -1) {
+		read[m[1]] = true
+	}
+
+	var buf bytes.Buffer
+	c := tally.New(logx.New(&buf, "api"))
+	now := time.Date(2026, 11, 18, 10, 2, 0, 0, time.UTC)
+	c.Sent(now)
+	c.Uploaded(now, 16<<10)
+	c.Add(now, "POST /send", 200, "")
+	c.Flush()
+	var line map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	logged := map[string]bool{}
+	for key, value := range line {
+		switch key {
+		case "time", "level", "msg", logx.KeyFunction, logx.KeyCount, logx.KeyRoutes, logx.KeyErrors:
+			continue
+		}
+		if _, ok := value.(float64); !ok {
+			t.Errorf("the line's %s isn't a number: %v", key, value)
+		}
+		logged[key] = true
+	}
+	if len(logged) < 2 || len(read) < 2 {
+		t.Fatalf("logged %v, filters read %v", logged, read)
+	}
+	for name := range read {
+		if !logged[name] {
+			t.Errorf("metrics.tf reads %s, which the counter doesn't log", name)
+		}
+	}
+	for name := range logged {
+		if !read[name] {
+			t.Errorf("the counter logs %s, which no metric filter reads", name)
+		}
+	}
 }
