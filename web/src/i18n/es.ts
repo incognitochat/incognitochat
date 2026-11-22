@@ -36,7 +36,7 @@ export const es = {
   revokeYes: 'Eliminar enlace',
   noticeCreated: 'Tu enlace está listo.',
   noticeReplaced: 'Tu nuevo enlace está listo. El anterior ya no funciona.',
-  noticeNewSigningKey: 'Tu enlace tiene una clave nueva. Si ya compartiste un enlace, comparte este en su lugar. Quienes escriban a este enlace reciben nombres nuevos, y los bloqueos no se trasladan a él.',
+  noticeNewSigningKey: 'Tu enlace tiene una clave nueva. Si ya compartiste un enlace, comparte este en su lugar. Quienes te escriban a través de este enlace reciben nombres nuevos, y los bloqueos no se trasladan a él.',
   noticeRevoked: 'Tu enlace se eliminó.',
   noticeLimit: 'Ya tienes un enlace. Cámbialo por uno nuevo.',
 
@@ -281,7 +281,7 @@ export const es = {
   clearMediaConfirm: '¿Borrar estos archivos multimedia de este dispositivo? Los mensajes se conservan.',
   storageCleared: 'Espacio liberado: {size}.',
   storageNote:
-    'Las fotos, los videos y los archivos borrados se quedan en sus chats con un botón de descarga. Solo se pueden volver a descargar mientras el servidor aún los conserve: como máximo 30 días después de enviarse, y no una vez que quien los recibió los haya eliminado.',
+    'Las fotos, los videos y los archivos que borres se quedan en sus chats con un botón de descarga. Solo se pueden volver a descargar mientras el servidor aún los conserve: como máximo 30 días después de enviarse, y no una vez que quien los recibió los haya eliminado.',
   blockedConversation: 'Bloqueaste esta conversación. No te llega nada de lo que envíe, y no se le avisa.',
   noticeUnblocked: 'Desbloqueado. Puede volver a escribirte; lo que haya enviado durante el bloqueo se ha perdido.',
   block: 'Bloquear',
@@ -337,7 +337,7 @@ export const es = {
     'No se usó durante 12 meses, así que el servidor la eliminó, como hace con toda cuenta que pasa tanto tiempo sin usarse. Tu enlace anterior ya no funciona. Puedes configurar una cuenta nueva.',
   signedOutTitle: 'Sesión cerrada en este dispositivo',
   signedOutBody:
-    'El servidor no aceptó este dispositivo. Eso pasa si su cuenta se eliminó (el servidor puede eliminar las cuentas que nadie ha usado durante 12 meses) o si algo falla en el servidor.',
+    'El servidor no aceptó este dispositivo. Eso pasa si la cuenta de este dispositivo se eliminó (el servidor puede eliminar las cuentas que nadie ha usado durante 12 meses) o si algo falla en el servidor.',
   signedOutKept: 'Tus chats siguen en este dispositivo y puedes leerlos. La app vuelve a consultar al servidor cada vez que se abre.',
   readChats: 'Leer mis chats',
   readOnlyNotice: 'Se cerró la sesión en este dispositivo, así que tus chats son de solo lectura.',
@@ -354,7 +354,7 @@ export const es = {
   errorExpired: 'Este paso de la configuración tardó demasiado. Continúa para intentarlo de nuevo.',
   errorRateLimited: 'Demasiadas configuraciones hoy. Inténtalo de nuevo mañana.',
   errorClock:
-    'La fecha o la hora de este dispositivo tiene un error de más de dos días, así que la app no puede comunicarse con el servidor de forma segura. Configura la fecha y la hora correctas en los ajustes del dispositivo e inténtalo de nuevo.',
+    'La fecha o la hora de este dispositivo está desfasada más de dos días, así que la app no puede comunicarse con el servidor de forma segura. Configura la fecha y la hora correctas en los ajustes del dispositivo e inténtalo de nuevo.',
   errorGeneric: 'Algo salió mal. Inténtalo de nuevo.',
   tryAgain: 'Reintentar',
   continue: 'Continuar',
