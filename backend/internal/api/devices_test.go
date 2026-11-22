@@ -47,13 +47,19 @@ func (h *harness) logIn(t *testing.T, body map[string]any) answer {
 // token), to send once, or again as a replay.
 func (h *harness) signedRequest(t *testing.T, m member, method, path string) httpapi.Request {
 	t.Helper()
+	return h.signedRequestAt(t, m, method, path, h.now)
+}
+
+// signedRequestAt is signedRequest signed at by the device's clock.
+func (h *harness) signedRequestAt(t *testing.T, m member, method, path string, at time.Time) httpapi.Request {
+	t.Helper()
 	var req httpapi.Request
 	req.RawPath = path
 	req.RequestContext.HTTP.Method = method
 	req.Headers = map[string]string{"content-type": "application/json", "x-session": m.token}
 	signed := session.SignedRequest{
 		AccountID: m.d.account, DeviceID: m.d.id, Method: method, Path: path,
-		Timestamp: h.now.Unix(), Nonce: b64(randomBytes(t, 16)),
+		Timestamp: at.Unix(), Nonce: b64(randomBytes(t, 16)),
 	}
 	sig := signP1363(t, m.d.dsk, devicesig.Message(devicesig.LabelRequest, session.RequestParts(signed)...))
 	req.Headers["x-device-signature"] = strconv.FormatInt(signed.Timestamp, 10) + "." + signed.Nonce + "." + b64(sig)
@@ -201,6 +207,12 @@ func TestDeviceSignedLimits(t *testing.T) {
 		wantAnswer(t, "revoke", h.revoke(t, m), notFound)
 	}
 	wantAnswer(t, "past the minute", h.revoke(t, m), limited(time.Minute))
+	// Signed a minute ahead, or behind (the last quarter, by the device's
+	// clock): counted in the server's minute, so refused all the same.
+	for _, skew := range []time.Duration{session.MaxSkew, -session.MaxSkew} {
+		ahead := h.signedRequestAt(t, m, http.MethodDelete, "/links/"+b64(randomBytes(t, 8)), h.now.Add(skew))
+		wantAnswer(t, "signed "+skew.String()+" off", h.send(t, ahead), limited(time.Minute))
+	}
 	// Logins have their own budget.
 	wantAnswer(t, "login", h.logIn(t, m.d.login(t, h.now)), answer{status: http.StatusOK})
 	h.now = start.Add(time.Minute)

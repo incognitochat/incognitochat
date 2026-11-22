@@ -191,6 +191,58 @@ func TestSpendAtInstances(t *testing.T) {
 	}
 }
 
+// An instance whose memory is behind the row, with the quarter or the day
+// used up meanwhile on another and its minute still below its limit, is
+// refused by the table itself: one refused write, nothing counted. In the
+// same minute and in a later minute of the quarter.
+func TestSpendAtTableRefusesWhatMemoryMissed(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		budget Budget
+		later  bool
+		want   time.Duration
+	}{
+		{"quarter, same minute", Budget{Kind: "s", Day: "s", PerMinute: 10, PerQuarter: 4, PerDay: 100}, false, Quarter},
+		{"quarter, later minute", Budget{Kind: "s", Day: "s", PerMinute: 10, PerQuarter: 4, PerDay: 100}, true, Quarter},
+		{"day, same minute", Budget{Kind: "s", Day: "s", PerMinute: 10, PerQuarter: 10, PerDay: 4}, false, 24 * time.Hour},
+		{"day, later minute", Budget{Kind: "s", Day: "s", PerMinute: 10, PerQuarter: 10, PerDay: 4}, true, 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			table := dynamotest.Table(t, client)
+			clock := start
+			now := func() time.Time { return clock }
+			a := &Limiter{DB: meter, Table: table, Now: now}
+			b := &Limiter{DB: meter, Table: table, Now: now}
+			spend := func(l *Limiter, want time.Duration) {
+				t.Helper()
+				if full, err := l.SpendAt(ctx, "k", tc.budget, clock); err != nil || full != want {
+					t.Fatalf("at %v: full %v, %v; want %v", clock.Sub(start), full, err, want)
+				}
+			}
+			// b learns the row at 2; a takes it to 4, the quarter's or the
+			// day's limit.
+			spend(a, 0)
+			spend(b, 0)
+			spend(a, 0)
+			spend(a, 0)
+			if tc.later {
+				clock = start.Add(time.Minute)
+			}
+			meter.Reset()
+			spend(b, tc.want)
+			if w := meter.Units(table).Write; w != 1 {
+				t.Fatalf("refusing cost %v write units, want 1", w)
+			}
+			if got := rowOf(t, client, table, "k", start); got["sq"] != 4 || got["sd"] != 4 {
+				t.Fatalf("row %v", got)
+			}
+		})
+	}
+}
+
 // A refused write that isn't a condition (the table throttled, say) is an
 // error, and counts nothing.
 func TestSpendAtFails(t *testing.T) {
