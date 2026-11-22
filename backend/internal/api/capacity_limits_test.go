@@ -52,10 +52,16 @@ func TestAckReplayCapacity(t *testing.T) {
 		t.Fatalf("ack: %d %v", status, out)
 	}
 	tb.meter.Reset()
+	begin := h.now
 	answered := 0
+	// What the logins write to the ephemeral table (each its nonce and the
+	// device's count of logins, devices.go) is theirs, not the replays'.
+	logins := 0.0
 	for minute := range 30 {
 		if minute%10 == 0 {
+			before := tb.meter.Units(tb.ephemeral).Write
 			owner.token = h.token(t, owner.d) // sessions last 15 minutes
+			logins += tb.meter.Units(tb.ephemeral).Write - before
 		}
 		for range 20 {
 			switch status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false); status {
@@ -68,11 +74,19 @@ func TestAckReplayCapacity(t *testing.T) {
 		}
 		h.now = h.now.Add(time.Minute)
 	}
+	if h.now.Truncate(24*time.Hour) != begin.Truncate(24*time.Hour) {
+		t.Fatal("the replays ran into the next UTC day, which allows its own misses")
+	}
 	m, e := tb.cost(t, "POST /ack, a confirmed page replayed for 30 minutes")
-	t.Logf("  %d replays answered 200", answered)
-	// The misses are written in batches of at least 50.
-	if m.Write > AckMissesPerDay+AckBatch || e.Write > AckMissesPerDay/AckBatch+5 {
-		t.Fatalf("30 minutes of replays cost messages %v, ephemeral %v", m, e)
+	t.Logf("  %d replays answered 200; the 3 logins wrote %.0f of the ephemeral units", answered, logins)
+	// A replay misses 5 to 14 items (AckMissesPerRequest, and the deletes
+	// already under way when the fifth comes back), as its parallel deletes
+	// happen to finish. The misses are written at once on the first
+	// replay, then in batches of at least 50, and at once when they may
+	// use up the day: so in at most AckMissesPerDay/50+1 writes, however
+	// many each replay missed.
+	if m.Write > AckMissesPerDay+AckBatch || e.Write-logins > AckMissesPerDay/AckBatch+1 {
+		t.Fatalf("30 minutes of replays cost messages %v, ephemeral %v (of which the logins %.0f)", m, e, logins)
 	}
 }
 
