@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.8.0](https://github.com/incognitochat/incognitochat/compare/v2.7.0...v2.8.0) (2026-11-22)
+
+
+### Features
+
+* add Arabic to the app and the bot ([#219](https://github.com/incognitochat/incognitochat/issues/219)) ([2f1aafb](https://github.com/incognitochat/incognitochat/commit/2f1aafbb9f8432e024054518ec8b0e8d7ad5e2bf))
+* add Russian to the app and the bot ([#218](https://github.com/incognitochat/incognitochat/issues/218)) ([79d8e7d](https://github.com/incognitochat/incognitochat/commit/79d8e7ddddca277c0bae083f3c9d9b72431a67ef))
+* **bot:** set the bot's texts in each language from the code ([#215](https://github.com/incognitochat/incognitochat/issues/215)) ([9fbca81](https://github.com/incognitochat/incognitochat/commit/9fbca815e7a70dc29ca9d6fe0eacc95a832e12c7))
+* keep notices in Telegram's language ([#214](https://github.com/incognitochat/incognitochat/issues/214)) ([5f206fb](https://github.com/incognitochat/incognitochat/commit/5f206fb4d7c4ba9da8b789809a8d78aa41ab7b21))
+* **web:** a Source code link to the running build's code ([#210](https://github.com/incognitochat/incognitochat/issues/210)) ([f54a8cf](https://github.com/incognitochat/incognitochat/commit/f54a8cfbd99ee932a46a0ccc7ffd71a3fb3afd44))
+
+
+### Bug Fixes
+
+* call the product Incognito Chat in Persian too ([#217](https://github.com/incognitochat/incognitochat/issues/217)) ([48e7f61](https://github.com/incognitochat/incognitochat/commit/48e7f61e88ec83ef8016daf62665239d421c66e0))
+
 ## [2.7.0](https://github.com/incognitochat/incognitochat/compare/v2.6.1...v2.7.0) (2026-11-22)
 
 
