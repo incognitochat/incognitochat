@@ -260,6 +260,8 @@ export const ru = {
   usageLeftOf: 'Осталось {left} из {limit}',
   usageOf: '{used} из {limit}',
   usageCount: '{count}',
+  sourceCode: 'Исходный код',
+  sourceCodeUnknown: 'Не удалось найти исходный код этой копии приложения.',
   messagesLeftToday: 'Осталось сообщений на сегодня: {count}. Новые — с {time}.',
   storageMedia: 'Медиа на этом устройстве: {size}',
   storageApp: 'Всего приложение занимает на этом устройстве {size}, вместе с вашими чатами и ключами.',
