@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
+import { LANGUAGES } from '../i18n';
 import { openDatabase, putMeta } from '../storage/db';
 import { getLanguageChoice, LANGUAGE_CHOICES, loadLanguageSetting } from './language';
 
@@ -51,6 +52,12 @@ describe('the language setting', () => {
     expect(await getLanguageChoice(db)).toBe('telegram');
     // With Telegram in another language next time, that's the one.
     expect((await loadLanguageSetting(db, ['en-GB'], page().doc)).language.value).toBe('en');
+  });
+
+  it('offers Same as Telegram first, then every language once', () => {
+    expect(LANGUAGE_CHOICES[0]).toBe('telegram');
+    expect([...LANGUAGE_CHOICES.slice(1)].sort()).toEqual(Object.keys(LANGUAGES).sort());
+    expect(new Set(LANGUAGE_CHOICES).size).toBe(LANGUAGE_CHOICES.length);
   });
 
   it('offers Same as Telegram first, then each language in the registry order', () => {
