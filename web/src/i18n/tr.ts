@@ -25,7 +25,7 @@ export const tr = {
     'İnsanların size anonim olarak mesaj gönderebilmesi için bağlantınızı paylaşın. Bağlantınızı istediğiniz zaman yenisiyle değiştirebilirsiniz: eskisi artık çalışmaz, sohbetleriniz devam eder ve engellediğiniz kişiler engelli kalır.',
   newLink: 'Yeni bağlantı',
   createLink: 'Bağlantımı oluştur',
-  newLinkConfirm: 'Bağlantınızı yenisiyle değiştirmek istiyor musunuz? Şu anki bağlantı hemen çalışmaz olur. Sohbetleriniz devam eder ve engellediğiniz kişiler engelli kalır.',
+  newLinkConfirm: 'Bağlantınızı yenisiyle değiştirmek istiyor musunuz? Şu anki bağlantı hemen çalışmayı bırakır. Sohbetleriniz devam eder ve engellediğiniz kişiler engelli kalır.',
   noLinks: 'Henüz bir bağlantınız yok.',
   needInvitation: 'Kendi bağlantınızı almak için bir davet gerekiyor. Yine de başkalarının bağlantılarına yazabilirsiniz.',
   copy: 'Kopyala',
@@ -274,7 +274,7 @@ export const tr = {
   noticeUnblocked: 'Engel kaldırıldı. Size yeniden yazabilir; engelliyken gönderdiği her şey kayboldu.',
   block: 'Engelle',
   blockConfirmOwner:
-    'Bu kişi engellensin mi? Ondan bir daha ne burada ne de bu bağlantı üzerinden açılan yeni sohbetlerde mesaj alırsınız. Bundan haberdar edilmez.',
+    'Bu kişi engellensin mi? Ondan artık burada da, bu bağlantı üzerinden açılan yeni sohbetlerde de mesaj almazsınız. Bundan haberdar edilmez.',
   blockConfirmSender: 'Bu sohbet engellensin mi? Bu sohbette bir daha mesaj almazsınız. Karşı taraf bundan haberdar edilmez.',
   blockYes: 'Engelle',
   noticeBlocked: 'Engellendi. Bundan haberdar edilmeyecek.',
@@ -304,7 +304,7 @@ export const tr = {
   deletingElsewhereTitle: 'Hesabınız siliniyor',
   deletingElsewhereBody:
     'Sunucu bu hesabın silinmesinin başladığını söylüyor, ancak silme işlemi bu cihazda başlatılmadı. Uygulamanın başka bir kopyası başlatmış olabilir ya da sunucuda bir sorun olabilir.',
-  finishDeleting: 'Hesabımın silinmesini tamamla',
+  finishDeleting: 'Hesabımı silmeyi tamamla',
   deleteHereOnly: 'Yalnızca bu cihazdan sil',
   deleteHereOnlyNote:
     'Sunucu bunu tamamlayamazsa, bu cihazdaki her şeyi şimdi silebilirsiniz. Sunucuda hâlâ duranlar, yeniden kurulum yapana kadar kullanılmadan kalır; yeniden kurulum onları sona erdirir.',
@@ -312,12 +312,12 @@ export const tr = {
     'Uygulama bu cihazdaki sohbetlerinizi ve anahtarlarınızı temizledi. Bazı cihazlarda bunlar uygulamanın depolama dosyalarında kalabilir ve cihazın daha önce alınmış bir kopyası bunları hâlâ içerebilir. Sunucuda hâlâ duranlar, yeniden kurulum yapana kadar kullanılmadan kalır.',
   deleteHereOnlyConfirm: 'Tüm sohbetleriniz ve anahtarlarınız şimdi bu cihazdan silinsin mi? Bu işlem geri alınamaz.',
   deletionPausedNotice: 'Hesabınızın silinmesi henüz tamamlanamadı. Tamamlanana kadar sohbetleriniz yalnızca okunabilir.',
-  deletePhrase: 'hesap sil',
+  deletePhrase: 'hesabımı sil',
   deleteAccountConfirm: 'Hesabımı sil',
   accountDeleted:
     'Hesabınız sunucudan silindi ve uygulama bu cihazdaki sohbetlerinizi ve anahtarlarınızı temizledi. Bazı cihazlarda bunlar uygulamanın depolama dosyalarında kalabilir ve cihazın daha önce alınmış bir kopyası bunları hâlâ içerebilir.',
 
-  replacedTitle: 'Hesabınız değiştirildi',
+  replacedTitle: 'Hesabınız yenisiyle değiştirildi',
   replacedBody:
     'Sunucu, hesabınızın Telegram hesabınızla yapılan yeni bir kurulumla değiştirildiğini söylüyor. Bunu siz yapmadıysanız, Telegram hesabınıza erişilmiş ya da uygulama üzerinde oynanmış demektir.',
   expiredTitle: 'Hesabınız silindi',

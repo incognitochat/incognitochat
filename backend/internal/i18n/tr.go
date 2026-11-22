@@ -10,7 +10,7 @@ var turkish = Language{
 		Command:    "Uygulamayı aç",
 		Notice:     "Yeni mesaj",
 		NoticeOpen: "Aç",
-		Description: "Uçtan uca şifreli anonim mesajlar. Bağlantınıza sahip olan herkes, siz kim olduğunu bilmeden size yazabilir ve siz de yanıt verebilirsiniz. " +
+		Description: "Uçtan uca şifreli anonim mesajlar. Bağlantınıza sahip olan herkes, siz onun kim olduğunu bilmeden size yazabilir ve siz de yanıt verebilirsiniz. " +
 			"Mesajlar gönderilmeden önce cihazda şifrelenir: sunucu onları okuyamaz ve kimin kime yazdığını asla kaydetmez.",
 		About: "Kendi bağlantınız üzerinden uçtan uca şifreli anonim mesajlar.",
 	},
