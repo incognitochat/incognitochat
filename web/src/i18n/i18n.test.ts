@@ -129,7 +129,7 @@ const SECURITY_KEYS: readonly Key[] = [
   'deleteMessageConfirm', 'elsewhereBody', 'elsewhereLost', 'replaceBody', 'replaceWarning', 'deleteBody', 'deleteWarning',
   'deletingAccount', 'deletingElsewhereBody', 'deleteHereOnlyNote', 'accountDeletedHere', 'deleteHereOnlyConfirm',
   'deletionPausedNotice', 'accountDeleted', 'replacedBody', 'expiredBody', 'signedOutBody', 'signedOutKept', 'resetBody',
-  'resetWarning', 'errorClock',
+  'resetWarning', 'errorClock', 'autoDownloadNote', 'noticeDeleted',
 ];
 
 /** Fills every placeholder of a key with a long value, and {count} with a number. */
