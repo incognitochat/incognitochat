@@ -8,7 +8,10 @@
     "es",
     "pt-BR",
     "id",
-    "tr"
+    "tr",
+    "uk",
+    "fr",
+    "de"
   ],
   "pick": {
     "en": "en",
@@ -74,6 +77,25 @@
     "tr-TR": "tr",
     "TR": "tr",
     "tr_CY": "tr",
-    "tur": "en"
+    "tur": "en",
+    "uk": "uk",
+    "uk-UA": "uk",
+    "UK": "uk",
+    "uk_UA": "uk",
+    "ukr": "en",
+    "fr": "fr",
+    "fr-FR": "fr",
+    "fr-CA": "fr",
+    "fr-BE": "fr",
+    "FR": "fr",
+    "fr_CH": "fr",
+    "fra": "en",
+    "de": "de",
+    "de-DE": "de",
+    "de-AT": "de",
+    "de-CH": "de",
+    "DE": "de",
+    "de_CH": "de",
+    "deu": "en"
   }
 }

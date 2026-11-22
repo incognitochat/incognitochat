@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Du kannst noch 0 Personen einladen.
+  1: Du kannst noch 1 Person einladen.
+  2: Du kannst noch 2 Personen einladen.
+  3: Du kannst noch 3 Personen einladen.
+  5: Du kannst noch 5 Personen einladen.
+  11: Du kannst noch 11 Personen einladen.
+  21: Du kannst noch 21 Personen einladen.
+  100: Du kannst noch 100 Personen einladen.
+  101: Du kannst noch 101 Personen einladen.
+  102: Du kannst noch 102 Personen einladen.
+  1000000: Du kannst noch 1.000.000 Personen einladen.
+levelLine:
+  0: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Stufe xxxxxxxxxxxxxxxxxxxxxxxx: 1.000.000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+unreadMessagesCount:
+  0: 0 ungelesene Nachrichten
+  1: 1 ungelesene Nachricht
+  2: 2 ungelesene Nachrichten
+  3: 3 ungelesene Nachrichten
+  5: 5 ungelesene Nachrichten
+  11: 11 ungelesene Nachrichten
+  21: 21 ungelesene Nachrichten
+  100: 100 ungelesene Nachrichten
+  101: 101 ungelesene Nachrichten
+  102: 102 ungelesene Nachrichten
+  1000000: 1.000.000 ungelesene Nachrichten
+newMessages:
+  0: 0 neue Nachrichten
+  1: 1 neue Nachricht
+  2: 2 neue Nachrichten
+  3: 3 neue Nachrichten
+  5: 5 neue Nachrichten
+  11: 11 neue Nachrichten
+  21: 21 neue Nachrichten
+  100: 100 neue Nachrichten
+  101: 101 neue Nachrichten
+  102: 102 neue Nachrichten
+  1000000: 1.000.000 neue Nachrichten
+blockedCount:
+  0: Blockiert (0)
+  1: Blockiert (1)
+  2: Blockiert (2)
+  3: Blockiert (3)
+  5: Blockiert (5)
+  11: Blockiert (11)
+  21: Blockiert (21)
+  100: Blockiert (100)
+  101: Blockiert (101)
+  102: Blockiert (102)
+  1000000: Blockiert (1.000.000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+messagesLeftToday:
+  0: Verbleibende Nachrichten heute: 0. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Verbleibende Nachrichten heute: 1. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Verbleibende Nachrichten heute: 2. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Verbleibende Nachrichten heute: 3. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Verbleibende Nachrichten heute: 5. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Verbleibende Nachrichten heute: 11. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Verbleibende Nachrichten heute: 21. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Verbleibende Nachrichten heute: 100. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Verbleibende Nachrichten heute: 101. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Verbleibende Nachrichten heute: 102. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Verbleibende Nachrichten heute: 1.000.000. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.

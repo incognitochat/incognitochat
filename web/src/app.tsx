@@ -1533,7 +1533,7 @@ function Composer({
                 <svg class="icon-stroke chevron" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M15 5l-7 7 7 7" />
                 </svg>
-                {t(language, 'slideToCancel')}
+                <span class="slide-cancel-text">{t(language, 'slideToCancel')}</span>
               </span>
             )}
           </div>

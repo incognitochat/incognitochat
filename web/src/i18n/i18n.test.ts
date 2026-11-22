@@ -136,6 +136,18 @@ describe('i18n', () => {
     expect([0, 1, 2, 1000].map((count) => t('tr', 'newMessages', { count }))).toEqual(['0 yeni mesaj', '1 yeni mesaj', '2 yeni mesaj', '1.000 yeni mesaj']);
   });
 
+  it('counts in Ukrainian with its three forms', () => {
+    expect([1, 2, 5, 21].map((count) => t('uk', 'newMessages', { count }))).toEqual(['1 нове повідомлення', '2 нові повідомлення', '5 нових повідомлень', '21 нове повідомлення']);
+  });
+
+  it('counts in French: 0 and 1 singular, "de" after a round million', () => {
+    expect([0, 1, 2, 1000, 1_000_000].map((count) => t('fr', 'newMessages', { count }))).toEqual(['0 nouveau message', '1 nouveau message', '2 nouveaux messages', '1\u202f000 nouveaux messages', '1\u202f000\u202f000 de nouveaux messages']);
+  });
+
+  it('counts in German with one and other', () => {
+    expect([0, 1, 2, 1000].map((count) => t('de', 'newMessages', { count }))).toEqual(['0 neue Nachrichten', '1 neue Nachricht', '2 neue Nachrichten', '1.000 neue Nachrichten']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');

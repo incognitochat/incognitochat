@@ -145,7 +145,7 @@ export const nl = {
   holdForVoice: 'Houd ingedrukt om een spraakbericht op te nemen. Tik om naar video te wisselen.',
   holdForRound: 'Houd ingedrukt om een videobericht op te nemen. Tik om naar spraak te wisselen.',
   holdToRecord: 'Houd ingedrukt om een spraakbericht op te nemen.',
-  slideToCancel: 'Schuif om te annuleren',
+  slideToCancel: 'Schuif: annuleren',
   flipCamera: 'Camera wisselen',
   cameraDenied: 'Toegang tot camera of microfoon staat uit. Geef Telegram toegang tot camera en microfoon om op te nemen.',
   cameraMissing: 'Geen camera gevonden.',

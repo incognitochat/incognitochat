@@ -52,7 +52,7 @@ type Texts struct {
 const Fallback = "en"
 
 // languages are the app's languages, in its order (English first).
-var languages = []Language{english, persian, russian, arabic, dutch, spanish, portuguese, indonesian, turkish}
+var languages = []Language{english, persian, russian, arabic, dutch, spanish, portuguese, indonesian, turkish, ukrainian, french, german}
 
 // Languages returns the app's languages, in its order, English first: a
 // copy, so a caller can't change what Pick reads.
