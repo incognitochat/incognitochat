@@ -179,6 +179,7 @@ export const fa = {
   errorUnreadable: 'خواندن آن فایل ممکن نشد.',
   reply: 'پاسخ',
   replyingTo: 'پاسخ به {name}',
+  replyingToYours: 'پاسخ به پیام خودتان',
   cancelReply: 'لغو پاسخ',
   deletedMessage: 'پیام پاک‌شده',
   messageActions: 'کارهای پیام',

@@ -184,6 +184,7 @@ export const uk = {
   errorUnreadable: 'Не вдалося прочитати цей файл.',
   reply: 'Відповісти',
   replyingTo: 'Відповідь: {name}',
+  replyingToYours: 'Відповідь на ваше повідомлення',
   cancelReply: 'Скасувати відповідь',
   deletedMessage: 'Видалене повідомлення',
   messageActions: 'Дії з повідомленням',

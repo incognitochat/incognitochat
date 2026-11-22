@@ -184,6 +184,7 @@ export const pl = {
   errorUnreadable: 'Nie udało się odczytać tego pliku.',
   reply: 'Odpowiedz',
   replyingTo: 'Odpowiedź: {name}',
+  replyingToYours: 'Odpowiedź na twoją wiadomość',
   cancelReply: 'Anuluj odpowiedź',
   deletedMessage: 'Usunięta wiadomość',
   messageActions: 'Opcje wiadomości',

@@ -184,6 +184,7 @@ export const ru = {
   errorUnreadable: 'Не удалось прочитать этот файл.',
   reply: 'Ответить',
   replyingTo: 'Ответ: {name}',
+  replyingToYours: 'Ответ на ваше сообщение',
   cancelReply: 'Отменить ответ',
   deletedMessage: 'Удалённое сообщение',
   messageActions: 'Действия с сообщением',

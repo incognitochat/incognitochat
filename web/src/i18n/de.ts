@@ -180,6 +180,7 @@ export const de = {
   errorUnreadable: 'Diese Datei konnte nicht gelesen werden.',
   reply: 'Antworten',
   replyingTo: 'Antwort: {name}',
+  replyingToYours: 'Antwort auf deine Nachricht',
   cancelReply: 'Antwort abbrechen',
   deletedMessage: 'Gelöschte Nachricht',
   messageActions: 'Nachrichtenaktionen',

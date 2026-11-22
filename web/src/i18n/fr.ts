@@ -184,6 +184,7 @@ export const fr = {
   errorUnreadable: 'Impossible de lire ce fichier.',
   reply: 'Répondre',
   replyingTo: 'Réponse : {name}',
+  replyingToYours: 'Réponse à votre message',
   cancelReply: 'Annuler la réponse',
   deletedMessage: 'Message supprimé',
   messageActions: 'Actions sur le message',

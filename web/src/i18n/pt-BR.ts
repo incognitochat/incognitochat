@@ -183,6 +183,7 @@ export const ptBR = {
   errorUnreadable: 'Não foi possível ler esse arquivo.',
   reply: 'Responder',
   replyingTo: 'Resposta: {name}',
+  replyingToYours: 'Resposta à sua mensagem',
   cancelReply: 'Cancelar resposta',
   deletedMessage: 'Mensagem apagada',
   messageActions: 'Ações da mensagem',

@@ -180,6 +180,7 @@ export const id = {
   errorUnreadable: 'Tidak bisa membaca berkas itu.',
   reply: 'Balas',
   replyingTo: 'Membalas {name}',
+  replyingToYours: 'Membalas pesan Anda',
   cancelReply: 'Batalkan balasan',
   deletedMessage: 'Pesan dihapus',
   messageActions: 'Tindakan pesan',

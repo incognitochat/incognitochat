@@ -185,6 +185,7 @@ export const ar = {
   errorUnreadable: 'تعذّرت قراءة هذا الملف.',
   reply: 'رد',
   replyingTo: 'الرد: {name}',
+  replyingToYours: 'الرد على رسالتك',
   cancelReply: 'إلغاء الرد',
   deletedMessage: 'رسالة محذوفة',
   messageActions: 'إجراءات الرسالة',
