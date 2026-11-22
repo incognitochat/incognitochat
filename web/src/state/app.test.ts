@@ -5,7 +5,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, deleteMessage, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
+import { addMessage, deleteMessage, getConversation, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
@@ -832,6 +832,41 @@ describe('when the server stops taking this device', () => {
     await app.readChats();
     expect(home(app.screen.value)).toMatchObject({ signedOut: 'replaced', conversations: [{ id: 'c1' }] });
     expect(await listMessages(db, 'c1')).toHaveLength(1);
+  });
+});
+
+describe('the chat list', () => {
+  it('draws the newest it read: a refresh that read the list before another never draws over it', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    await chatOnDevice(db);
+    // Another chat, newer than those before it.
+    const chat = async (id: string, lastAt: number) => putConversation(db, { ...(await getConversation(db, 'c1'))!, id, lastAt, preview: null });
+    const shown = () => home(app.screen.value).conversations.map((c) => c.id);
+    await app.home();
+    expect(shown()).toEqual(['c1']);
+
+    // A refresh slow to read the list. Meanwhile a chat comes in, and another
+    // refresh draws it: the first, once read, draws nothing.
+    const slow = holdRead('listConversations');
+    const first = app.refresh();
+    await slow.atRead;
+    await chat('c2', 2);
+    await app.refresh();
+    expect(shown()).toEqual(['c2', 'c1']);
+    slow.release();
+    await first;
+    expect(shown()).toEqual(['c2', 'c1']);
+
+    // The same when the list is shown afresh (a tab tapped) meanwhile.
+    const slower = holdRead('listConversations');
+    const again = app.refresh();
+    await slower.atRead;
+    await chat('c3', 3);
+    await app.showTab('chats');
+    expect(shown()).toEqual(['c3', 'c2', 'c1']);
+    slower.release();
+    await again;
+    expect(shown()).toEqual(['c3', 'c2', 'c1']);
   });
 });
 

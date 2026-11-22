@@ -916,6 +916,12 @@ export function createApp(deps: Deps) {
     }
   }
 
+  // Draws of the home screen's lists from storage (refresh, showHome),
+  // counted: a refresh draws only if no newer one started since, so one
+  // that read storage before another can't draw over it (an older list,
+  // previews or unread counts, until something drew it again).
+  let homeDraws = 0;
+
   /**
    * Redraws the current screen from storage (after new messages, or another
    * copy's change), as it is once read: a notice shown meanwhile stays.
@@ -923,9 +929,11 @@ export function createApp(deps: Deps) {
   async function refresh(): Promise<void> {
     const current = screen.value;
     if (current.kind === 'home' && !current.busy) {
+      const draw = ++homeDraws;
       const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
       const latest = screen.value;
-      if (latest.kind !== 'home' || latest.busy) return;
+      // A newer one draws (or drew) what's newer.
+      if (draw !== homeDraws || latest.kind !== 'home' || latest.busy) return;
       const notice = withNewKey(latest.notice, newKey);
       screen.value = { ...latest, conversations: list, links, notice };
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
@@ -2098,6 +2106,8 @@ export function createApp(deps: Deps) {
     }
     if (account?.deleting) return deletingOnServer(account.expired);
     if (account?.cleanup) void cleanUpReplaced();
+    // Read from here on: a refresh that read before draws nothing over it.
+    homeDraws++;
     const links = await linkViews();
     backButton(false);
     screen.value = {
