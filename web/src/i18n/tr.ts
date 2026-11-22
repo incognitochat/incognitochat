@@ -240,7 +240,7 @@ export const tr = {
   usageFilesNote: 'Aldıklarınızı değil, gönderdiklerinizi sayar.',
   usageNewChats: 'Yeni sohbetler',
   usageNewChatsNote: 'Başlattığınız ya da yanıtladığınız her yeni sohbet.',
-  usageLinkChanges: 'Bağlantı değişiklikleri',
+  usageLinkChanges: 'Yeni bağlantılar',
   usageChats: 'Sohbetler',
   usageChatsNote: 'Birini engellemek bir yer açar; bir sohbeti silmek açmaz.',
   usageLeftOf: '{limit} içinden {left} kaldı',
