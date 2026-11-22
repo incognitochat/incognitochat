@@ -1531,9 +1531,10 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   one every few seconds: 20 in a row add 40, and nonstop for 5 minutes
   about 200. Deleting a chat sends one batch for every 50 attachments, two
   seconds apart: a chat with thousands adds at most about 130 in 5 minutes
-  while it goes. 500 leaves room for two or three people that busy, or
-  fifteen or so ordinary ones, behind one address. Past it, only these
-  routes are blocked for that address; requests with a session go on.
+  while it goes. 500 leaves room for two or three people that busy, about
+  fourteen ordinary ones, or seven to ten who send many photos, behind one
+  address. Past it, only these routes are blocked for that address;
+  requests with a session go on.
 
   Logins, registrations, account lookups and sends have only the per-address
   rules, so a flood of them spread over many addresses is bounded only by
@@ -1574,12 +1575,18 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   flood: tokens say nothing about whose they are, so only these limits hold
   them. Each `api` instance remembers the spent tokens it meets, about a
   million, each until it expires (two weeks at most); when full, it forgets
-  those that have expired first, then those expiring soonest. That is more
-  than 50 people's tokens (each gets at most 1,500 a day), so a token costs
-  a write unit at most once per instance. Filling production's 200 writes a
-  second this way takes about 120 addresses (500 in 5 minutes each), and
-  one person's tokens (21,000 at most) keep it full for about two minutes
-  for each instance the flood reaches.
+  those that have expired first, then those expiring soonest. So a token
+  costs a write unit at most once per instance, and filling production's
+  200 writes a second this way takes about 120 addresses (500 in 5 minutes
+  each). How long that lasts depends on the tokens. A Telegram account gets 1,500 a
+  day (send and media), and the issuer can't see which week it signs a
+  token for, so an account can mint weeks ahead for one fortnight: 21,000
+  minted within it, 84,000 over 8 weeks. Each day's minting keeps the
+  writes full for about 7.5 seconds for each instance the flood reaches,
+  so 8 weeks' about 7 minutes. About 700 account-days of minting (13
+  accounts minting for 8 weeks) fill one instance's memory; past that,
+  replays to it cost a write unit each again. Replacing an issuer key
+  voids what was minted with it.
 - **`lookups-total`**: everyone's lookups by ID, over one minute so that a
   block ends soon after a flood does. With a random ID, a lookup writes
   nothing and reads half a unit (a link's bundle from the directory; a

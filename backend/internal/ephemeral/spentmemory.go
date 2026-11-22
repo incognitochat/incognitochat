@@ -36,10 +36,12 @@ type spentSlot struct {
 // most one write unit per instance while it is accepted, unless more
 // tokens than the memory holds are replayed to one instance.
 //
-// Tokens carry no identity, so nothing limits replays per person. One
-// person gets at most 1,500 tokens a day (send and media), each accepted
-// for at most two weeks: 21,000 at once. maxRemembered holds those of
-// about 50 people.
+// Tokens carry no identity, so nothing limits replays per person. A
+// Telegram account gets 1,500 tokens a day (send and media), and the
+// issuer can't see which week it signs a token for, so an account can mint
+// weeks ahead for one fortnight: 21,000 minted within it, 84,000 over 8
+// weeks. maxRemembered holds about 700 account-days of minting (13
+// accounts that minted for 8 weeks).
 //
 // The table starts small and doubles as it fills, up to twice
 // maxRemembered slots: 2^21 slots of 20 bytes, 40 MiB, in the api
