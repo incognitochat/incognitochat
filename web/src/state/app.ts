@@ -73,6 +73,7 @@ import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
+import { findSourceUrl } from '../platform/source';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
 import type { SyncEvent } from '../sync/locks';
 
@@ -390,6 +391,8 @@ export interface Deps {
   background?: boolean;
   /** The pause between steps of a deletion or cleanup, instead of a second (tests). */
   stepPauseMs?: number;
+  /** Fetches the app's own manifest, for the source link (tests). */
+  fetch?: typeof fetch;
 }
 
 /** How often an open app checks its inbox while it has no push socket. */
@@ -2441,6 +2444,17 @@ export function createApp(deps: Deps) {
         if (i >= 0) onTop.splice(i, 1);
         showBack();
       };
+    },
+    /**
+     * The running build's source code (AGPL-3.0, section 13), in the
+     * device's browser: the repository and commit its signed manifest names
+     * (platform/source). 'unknown' when the build has none to name.
+     */
+    openSource: async (): Promise<'opened' | 'unknown'> => {
+      const url = deps.bridge ? await findSourceUrl(location.origin + location.pathname, deps.fetch) : null;
+      if (!url || !deps.bridge) return 'unknown';
+      deps.bridge.post('web_app_open_link', { url });
+      return 'opened';
     },
     /** Data and storage. */
     storage: () => showStorage(),

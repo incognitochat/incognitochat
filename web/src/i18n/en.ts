@@ -230,6 +230,8 @@ export const en = {
 
   storageTitle: 'Data and storage',
   usageTitle: 'Usage',
+  sourceCode: 'Source code',
+  sourceCodeUnknown: "Couldn't find where this copy of the app's source code is.",
   usageDaily: 'Today',
   usageTotal: 'In total',
   usageResets: 'Starts over at {time}, {in}.',

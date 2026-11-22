@@ -480,6 +480,16 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
       <button type="button" class="link-button muted-link" disabled={busy || offline} onClick={() => void app.usage()}>
         {tr('usageTitle')}
       </button>
+      <button
+        type="button"
+        class="link-button muted-link"
+        disabled={busy}
+        onClick={async () => {
+          if ((await app.openSource()) === 'unknown') void app.popup({ message: tr('sourceCodeUnknown'), buttons: [{ id: 'ok', type: 'ok' }] });
+        }}
+      >
+        {tr('sourceCode')}
+      </button>
       <button type="button" class="link-button delete-account" disabled={busy || offline} onClick={app.askDeleteAccount}>
         {tr('deleteAccount')}
       </button>

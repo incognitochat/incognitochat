@@ -230,6 +230,8 @@ export const fa = {
 
   storageTitle: 'داده و فضای ذخیره',
   usageTitle: 'مصرف',
+  sourceCode: 'کد منبع',
+  sourceCodeUnknown: 'جای کد منبع این نسخه از برنامه پیدا نشد.',
   usageDaily: 'امروز',
   usageTotal: 'در کل',
   usageResets: 'ساعت {time} از نو شروع می‌شود ({in}).',
