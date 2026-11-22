@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Vous pouvez encore inviter 0 personne.
+  1: Vous pouvez encore inviter 1 personne.
+  2: Vous pouvez encore inviter 2 personnes.
+  3: Vous pouvez encore inviter 3 personnes.
+  5: Vous pouvez encore inviter 5 personnes.
+  11: Vous pouvez encore inviter 11 personnes.
+  21: Vous pouvez encore inviter 21 personnes.
+  100: Vous pouvez encore inviter 100 personnes.
+  101: Vous pouvez encore inviter 101 personnes.
+  102: Vous pouvez encore inviter 102 personnes.
+  1000000: Vous pouvez encore inviter 1 000 000 de personnes.
+levelLine:
+  0: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 0
+  1: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 1
+  2: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 2
+  3: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 3
+  5: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 5
+  11: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 11
+  21: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 21
+  100: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 100
+  101: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 101
+  102: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 102
+  1000000: Niveau xxxxxxxxxxxxxxxxxxxxxxxx : 1 000 000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1 000 000
+unreadMessagesCount:
+  0: 0 message non lu
+  1: 1 message non lu
+  2: 2 messages non lus
+  3: 3 messages non lus
+  5: 5 messages non lus
+  11: 11 messages non lus
+  21: 21 messages non lus
+  100: 100 messages non lus
+  101: 101 messages non lus
+  102: 102 messages non lus
+  1000000: 1 000 000 de messages non lus
+newMessages:
+  0: 0 nouveau message
+  1: 1 nouveau message
+  2: 2 nouveaux messages
+  3: 3 nouveaux messages
+  5: 5 nouveaux messages
+  11: 11 nouveaux messages
+  21: 21 nouveaux messages
+  100: 100 nouveaux messages
+  101: 101 nouveaux messages
+  102: 102 nouveaux messages
+  1000000: 1 000 000 de nouveaux messages
+blockedCount:
+  0: Bloqués (0)
+  1: Bloqués (1)
+  2: Bloqués (2)
+  3: Bloqués (3)
+  5: Bloqués (5)
+  11: Bloqués (11)
+  21: Bloqués (21)
+  100: Bloqués (100)
+  101: Bloqués (101)
+  102: Bloqués (102)
+  1000000: Bloqués (1 000 000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1 000 000
+messagesLeftToday:
+  0: Messages restants aujourd'hui : 0. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Messages restants aujourd'hui : 1. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Messages restants aujourd'hui : 2. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Messages restants aujourd'hui : 3. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Messages restants aujourd'hui : 5. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Messages restants aujourd'hui : 11. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Messages restants aujourd'hui : 21. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Messages restants aujourd'hui : 100. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Messages restants aujourd'hui : 101. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Messages restants aujourd'hui : 102. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Messages restants aujourd'hui : 1 000 000. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
