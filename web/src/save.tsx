@@ -4,7 +4,7 @@
 import { useSignal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { config } from './config';
-import { clockTime, locale, nextUtc, t, type Language } from './i18n';
+import { clockTime, formatSaveSize, nextUtc, t, type Language } from './i18n';
 import { fetchForSaving, Gone, type SaveTicket } from './media/save';
 import { ApiError, createApi } from './net/api';
 import { httpTransfer } from './net/transfer';
@@ -42,14 +42,7 @@ export function SavePage({ ticket, language }: { ticket: SaveTicket | null; lang
     void load();
   }, []);
 
-  const size = ticket
-    ? new Intl.NumberFormat(locale(language), {
-        style: 'unit',
-        unit: ticket.s < 1024 * 1024 ? 'kilobyte' : 'megabyte',
-        unitDisplay: language === 'fa' ? 'long' : 'short',
-        maximumFractionDigits: 1,
-      }).format(ticket.s < 1024 * 1024 ? Math.max(1, Math.round(ticket.s / 1024)) : ticket.s / 1024 / 1024)
-    : '';
+  const size = ticket ? formatSaveSize(language, ticket.s) : '';
   // Raster images only: fetchForSaving gives no other image type.
   const image = file.value && file.value.file.type.startsWith('image/');
   return (

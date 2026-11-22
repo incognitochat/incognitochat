@@ -65,6 +65,25 @@ export function locale(language: Language): string {
   return language === 'fa' ? 'fa-IR' : 'en';
 }
 
+/** A size in bytes, as the app shows it: kB, MB or GB; nothing as 0 MB, anything else as at least 1 kB. */
+export function formatSize(language: Language, bytes: number): string {
+  // Nothing reads as 0 MB; anything else as at least 1 kB.
+  const unit = bytes === 0 ? 'megabyte' : bytes < 1024 * 1024 ? 'kilobyte' : bytes < 1024 * 1024 * 1024 ? 'megabyte' : 'gigabyte';
+  const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : unit === 'megabyte' ? bytes / 1024 / 1024 : bytes / 1024 / 1024 / 1024;
+  // Persian spells the unit out (کیلوبایت), so it reads in the right direction.
+  return new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: language === 'fa' ? 'long' : 'short', maximumFractionDigits: 1 }).format(n);
+}
+
+/** A file's size on the save page: kB under a MiB (at least 1), else MB. */
+export function formatSaveSize(language: Language, bytes: number): string {
+  return new Intl.NumberFormat(locale(language), {
+    style: 'unit',
+    unit: bytes < 1024 * 1024 ? 'kilobyte' : 'megabyte',
+    unitDisplay: language === 'fa' ? 'long' : 'short',
+    maximumFractionDigits: 1,
+  }).format(bytes < 1024 * 1024 ? Math.max(1, Math.round(bytes / 1024)) : bytes / 1024 / 1024);
+}
+
 /** A time of day (Unix ms), in the reader's own time: "3:30 AM" / «۳:۳۰». */
 export function clockTime(language: Language, at: number): string {
   return new Intl.DateTimeFormat(locale(language), { hour: 'numeric', minute: '2-digit' }).format(new Date(at));

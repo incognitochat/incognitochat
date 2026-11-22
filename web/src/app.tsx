@@ -3,7 +3,7 @@ import { createContext, createPortal, type ComponentChildren, type RefObject } f
 import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
 import { menuKeyDown, moveInMenu } from './a11y/keys';
-import { clockTime, locale, nextUtc, relativeTime, t, type Language } from './i18n';
+import { clockTime, formatSize, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import { LANGUAGE_CHOICES, type LanguageSetting } from './state/language';
 import type { MessageView } from './messaging/store';
@@ -2319,14 +2319,6 @@ function songTitle(name: string | undefined): string {
 function extension(name: string | undefined): string {
   const dot = name?.lastIndexOf('.') ?? -1;
   return dot > 0 ? name!.slice(dot + 1, dot + 5).toUpperCase() : '';
-}
-
-function formatSize(language: Language, bytes: number): string {
-  // Nothing reads as 0 MB; anything else as at least 1 kB.
-  const unit = bytes === 0 ? 'megabyte' : bytes < 1024 * 1024 ? 'kilobyte' : bytes < 1024 * 1024 * 1024 ? 'megabyte' : 'gigabyte';
-  const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : unit === 'megabyte' ? bytes / 1024 / 1024 : bytes / 1024 / 1024 / 1024;
-  // Persian spells the unit out (کیلوبایت), so it reads in the right direction.
-  return new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: language === 'fa' ? 'long' : 'short', maximumFractionDigits: 1 }).format(n);
 }
 
 /** A progress ring (fraction 0–1; undefined spins). */
