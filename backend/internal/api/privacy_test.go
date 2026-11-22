@@ -426,7 +426,8 @@ func TestEphemeralRowsNameNoIDs(t *testing.T) {
 	ok(h.call(t, nil, "", http.MethodGet, "/media/"+upload, nil, false))
 
 	// Each row expires at the end of its window: rate counters at the end
-	// of their minute, hour or day; socket records on a whole minute; the
+	// of their minute, hour or day (a device's logins and signed requests,
+	// dev, in one row for the day); socket records on a whole minute; the
 	// notice's quiet period on the minute after it ends.
 	scan, err := tb.meter.Client.Scan(ctx, &dynamodb.ScanInput{TableName: &tb.ephemeral})
 	if err != nil {
@@ -455,7 +456,7 @@ func TestEphemeralRowsNameNoIDs(t *testing.T) {
 			}
 		}
 	}
-	for _, kind := range []string{"send", "intro", "inbox", "inboxday", "mbx", "link", "ntc", "ntl", "tok", "reg", "regtry", "look", "redeem", "mbxcheck", "mtok", "dl"} {
+	for _, kind := range []string{"send", "intro", "inbox", "inboxday", "mbx", "link", "ntc", "ntl", "tok", "reg", "regtry", "look", "redeem", "mbxcheck", "mtok", "dl", "dev"} {
 		if !kinds[kind] {
 			t.Errorf("no %s counter in the flow", kind)
 		}

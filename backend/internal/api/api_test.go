@@ -737,6 +737,64 @@ type memLimiter struct {
 	mu     sync.Mutex
 	counts map[string]int
 	local  map[string]int // LocalAt's
+	// rows are SpendAt's, by key: each budget's minute of its last use and
+	// its counts, as ephemeral.Limiter keeps them; spendErr, if set, is how
+	// every SpendAt fails (the table throttled, say).
+	rows     map[string]map[string]int64
+	spendErr error
+}
+
+// SpendAt counts in minutes, quarters and the day as ephemeral.Limiter does
+// (its keys name the day, its windows go by at).
+func (l *memLimiter) SpendAt(_ context.Context, key string, b ephemeral.Budget, at time.Time) (time.Duration, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.spendErr != nil {
+		return 0, l.spendErr
+	}
+	if l.rows == nil {
+		l.rows = map[string]map[string]int64{}
+	}
+	row := l.rows[key]
+	if row == nil {
+		row = map[string]int64{}
+		l.rows[key] = row
+	}
+	m, n, q, d := b.Kind+"m", b.Kind+"n", b.Kind+"q", b.Day+"d"
+	minute, quarter := at.Truncate(time.Minute).Unix(), at.Truncate(ephemeral.Quarter).Unix()
+	last, used := row[m]
+	sameMinute, sameQuarter := used && last == minute, used && last >= quarter
+	switch {
+	case row[d] >= int64(b.PerDay):
+		return 24 * time.Hour, nil
+	case sameQuarter && row[q] >= int64(b.PerQuarter):
+		return ephemeral.Quarter, nil
+	case sameMinute && row[n] >= int64(b.PerMinute):
+		return time.Minute, nil
+	}
+	if !sameMinute {
+		row[n] = 0
+	}
+	if !sameQuarter {
+		row[q] = 0
+	}
+	row[m] = minute
+	row[n]++
+	row[q]++
+	row[d]++
+	return 0, nil
+}
+
+// spent is what SpendAt counted in the attribute of every row (a budget's
+// day, say: "ld" for logins, "sd" for signed requests and steps).
+func (l *memLimiter) spent(attr string) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var n int64
+	for _, row := range l.rows {
+		n += row[attr]
+	}
+	return n
 }
 
 func (l *memLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {

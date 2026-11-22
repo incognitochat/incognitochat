@@ -5,7 +5,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
+import { addMessage, deleteMessage, getConversation, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
@@ -38,6 +38,24 @@ vi.mock('../messaging/engine', async (importOriginal) => {
 const storeFaults = vi.hoisted(() => ({ putMedia: null as Error | null }));
 // How many times where the user first wrote in a chat was looked up (and the lookup over).
 const lookups = vi.hoisted(() => ({ answered: 0 }));
+// How many times an open chat's page was read, and what happens on the
+// screen while one is (pageReads.during): as when another draw or a tap
+// lands while IndexedDB is slow.
+const pageReads = vi.hoisted(() => ({ count: 0, during: null as (() => void) | null }));
+// Reads a test holds up once they're done, until it lets them go (holdRead):
+// as a slow IndexedDB would, with what read them still under way.
+const heldReads = vi.hoisted(() => {
+  const next = new Map<string, { when: (args: unknown[]) => boolean; hold: () => Promise<void> }>();
+  return {
+    next,
+    async pass(name: string, args: unknown[]): Promise<void> {
+      const held = next.get(name);
+      if (!held?.when(args)) return;
+      next.delete(name);
+      await held.hold();
+    },
+  };
+});
 vi.mock('../messaging/store', async (importOriginal) => {
   const original = await importOriginal<typeof import('../messaging/store')>();
   return {
@@ -45,6 +63,18 @@ vi.mock('../messaging/store', async (importOriginal) => {
     putMedia: async (...args: Parameters<typeof original.putMedia>) => {
       if (storeFaults.putMedia) throw storeFaults.putMedia;
       return original.putMedia(...args);
+    },
+    pageMessages: async (...args: Parameters<typeof original.pageMessages>) => {
+      pageReads.count++;
+      const page = await original.pageMessages(...args);
+      pageReads.during?.();
+      await heldReads.pass('pageMessages', args);
+      return page;
+    },
+    listConversations: async (...args: Parameters<typeof original.listConversations>) => {
+      const list = await original.listConversations(...args);
+      await heldReads.pass('listConversations', args);
+      return list;
     },
     answeredAt: async (...args: Parameters<typeof original.answeredAt>) => {
       try {
@@ -99,6 +129,9 @@ function fakeServer(
     mediaDelete?: Outcome[];
     inbox?: Outcome[];
     cleanup?: Outcome[];
+    invitations?: Outcome[];
+    admin?: Outcome[];
+    usage?: Outcome[];
     elsewhere?: boolean;
   } = {},
 ) {
@@ -223,6 +256,7 @@ function fakeServer(
         });
       }
       if (method === 'GET' && path === '/usage') {
+        take(outcomes.usage);
         const item = (used: number, limit: number) => ({ used, limit });
         return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
       }
@@ -241,6 +275,7 @@ function fakeServer(
       }
       if (method === 'POST' && path === '/invitations') {
         needsSignature();
+        take(outcomes.invitations);
         const code = `aaaa-aaa${'abcdefghjk'[nextCode++]}`;
         state.codes.set(code, { uses: body.uses as number, left: body.uses as number });
         return check({ code });
@@ -257,6 +292,7 @@ function fakeServer(
       if (path === '/admin/levels' && method === 'GET') return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
       if (path === '/admin/levels' && method === 'PUT') {
         needsSignature();
+        take(outcomes.admin);
         state.levels.set(body.level as number, body.invitations as number);
         return check({});
       }
@@ -353,6 +389,25 @@ function home(screen: Screen) {
 
 function payloadOf(url: string): string {
   return new URL(url).searchParams.get('startapp')!;
+}
+
+/**
+ * Holds the next read of `name` (that `when` picks) once it's done, until
+ * released: as a slow IndexedDB would, with what read it still under way.
+ */
+function holdRead(name: 'pageMessages' | 'listConversations', when: (args: unknown[]) => boolean = () => true) {
+  let reached!: () => void;
+  const atRead = new Promise<void>((resolve) => (reached = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  heldReads.next.set(name, {
+    when,
+    hold: () => {
+      reached();
+      return released;
+    },
+  });
+  return { atRead, release };
 }
 
 describe('setup', () => {
@@ -786,6 +841,41 @@ describe('when the server stops taking this device', () => {
   });
 });
 
+describe('the chat list', () => {
+  it('draws the newest it read: a refresh that read the list before another never draws over it', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    await chatOnDevice(db);
+    // Another chat, newer than those before it.
+    const chat = async (id: string, lastAt: number) => putConversation(db, { ...(await getConversation(db, 'c1'))!, id, lastAt, preview: null });
+    const shown = () => home(app.screen.value).conversations.map((c) => c.id);
+    await app.home();
+    expect(shown()).toEqual(['c1']);
+
+    // A refresh slow to read the list. Meanwhile a chat comes in, and another
+    // refresh draws it: the first, once read, draws nothing.
+    const slow = holdRead('listConversations');
+    const first = app.refresh();
+    await slow.atRead;
+    await chat('c2', 2);
+    await app.refresh();
+    expect(shown()).toEqual(['c2', 'c1']);
+    slow.release();
+    await first;
+    expect(shown()).toEqual(['c2', 'c1']);
+
+    // The same when the list is shown afresh (a tab tapped) meanwhile.
+    const slower = holdRead('listConversations');
+    const again = app.refresh();
+    await slower.atRead;
+    await chat('c3', 3);
+    await app.showTab('chats');
+    expect(shown()).toEqual(['c3', 'c2', 'c1']);
+    slower.release();
+    await again;
+    expect(shown()).toEqual(['c3', 'c2', 'c1']);
+  });
+});
+
 describe('syncing', () => {
   it('runs one sync at a time, and one more for all asked for meanwhile', async () => {
     const server = fakeServer();
@@ -990,6 +1080,121 @@ describe('an open chat', () => {
     await addMessage(db, { id: 'first', conv: 'c1', at: S, out: false, status: 'received' }, { text: 'first' });
     await app.refresh();
     expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'first' }, { id: 'second' }], more: false });
+  });
+
+  // These apps have no messaging engine (the build's issuer key here isn't
+  // a real one): nothing in an open chat is drawn by itself (no "seen", no
+  // downloads), so the draws below are the tests' own.
+
+  /** Chat c1 with `count` messages after its first (m1): n0, n1… a second apart. Returns their IDs, m1 first. */
+  async function longChat(db: Awaited<ReturnType<typeof openDatabase>>, count: number): Promise<string[]> {
+    await chatOnDevice(db);
+    const ids = ['m1', ...Array.from({ length: count }, (_, i) => `n${i}`)];
+    for (const [i, id] of ids.slice(1).entries()) await addMessage(db, { id, conv: 'c1', at: 1_800_000_000_000 + i * 1000, out: false, status: 'read' }, { text: id });
+    return ids;
+  }
+  type Chat = Extract<Screen, { kind: 'conversation' }>;
+  function chatOf(screen: Screen): Chat {
+    if (screen.kind !== 'conversation') throw new Error(`expected conversation, got ${screen.kind}`);
+    return screen;
+  }
+
+  it('keeps older messages loaded on purpose, however often the chat changes while it is drawn again', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    const ids = await longChat(db, PAGE + 5);
+    const chat = () => chatOf(app.screen.value);
+    const shown = () => [chat().messages.map((m) => m.id), chat().more];
+    await app.openConversation('c1');
+    expect(shown()).toEqual([ids.slice(-PAGE), true]);
+    // Scrolled up: the rest. What that draws stands in below for older ones
+    // that load while the chat is being drawn again.
+    expect(await app.loadOlder()).toBe(true);
+    const loaded = chat();
+    expect(shown()).toEqual([ids, false]);
+
+    // Opened again, at its newest. While a redraw reads its page (slowly, as
+    // when a write holds IndexedDB up), the chat is drawn again, twice, then
+    // the older ones load: each time it has read, the screen has changed.
+    // (Set here by the test: in the app, only a reaction shown at once
+    // changes the screen while a draw is under way; what this pins is that
+    // a draw builds its page again then, however often.)
+    await app.openConversation('c1');
+    const meanwhile: ((s: Chat) => Chat)[] = [
+      (s) => ({ ...s, messages: [...s.messages] }),
+      (s) => ({ ...s, messages: [...s.messages] }),
+      (s) => ({ ...s, messages: loaded.messages, more: loaded.more, quoted: loaded.quoted }),
+    ];
+    pageReads.during = () => {
+      const change = meanwhile.shift();
+      if (change) app.screen.value = change(chat());
+    };
+    try {
+      await app.refresh();
+    } finally {
+      pageReads.during = null;
+    }
+    expect(meanwhile).toHaveLength(0);
+    expect(shown()).toEqual([ids, false]);
+
+    // The app's own draws, asked for all at once (a refresh, slow to read,
+    // a scroll up, two more refreshes): drawn one at a time, each from the
+    // screen the one before left, so the older ones stay and a new one
+    // shows. The page would be right side by side too (a draw builds again
+    // on a changed screen): what shows they wait their turn is that none
+    // reads while the first is under way, and the two refreshes asked for
+    // while another waits join it (one read for both).
+    await app.openConversation('c1');
+    await addMessage(db, { id: 'new', conv: 'c1', at: 1_800_000_000_000 + ids.length * 1000, out: false, status: 'read' }, { text: 'new' });
+    const first = holdRead('pageMessages');
+    pageReads.count = 0;
+    const draws = [app.refresh(), app.loadOlder(), app.refresh(), app.refresh()];
+    await first.atRead;
+    await tick();
+    expect(pageReads.count).toBe(1);
+    first.release();
+    expect(await Promise.all(draws)).toEqual([undefined, true, undefined, undefined]);
+    expect(shown()).toEqual([[...ids, 'new'], false]);
+    expect(pageReads.count).toBe(3);
+  });
+
+  it('opens a chat again in its turn: a page read before a redraw is never drawn over it', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    await chatOnDevice(db);
+    await app.openConversation('c1');
+    // Opened again while it's shown (as Unblock does), and the page that
+    // reads (the newest PAGE of a chat shown afresh) is slow to come back.
+    const opening = holdRead('pageMessages', ([, , options]) => (options as { count?: number; since?: number }).count === PAGE);
+    const reopened = app.openConversation('c1');
+    await opening.atRead;
+    // Meanwhile a message comes in, and the chat is to be drawn again for
+    // it: after the opening's page, not before (that page, read before the
+    // message came, would then be drawn over it). It reads nothing until then.
+    await addMessage(db, { id: 'm2', conv: 'c1', at: 2, out: false, status: 'read' }, { text: 'new' });
+    const reads = pageReads.count;
+    const redrawn = app.refresh();
+    await tick();
+    expect(pageReads.count).toBe(reads);
+    opening.release();
+    await Promise.all([reopened, redrawn]);
+    expect(chatOf(app.screen.value).messages.map((m) => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('jumps to a quote tapped while older messages are loading, once they have', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    // More than two pages after the first message, which is quoted.
+    const ids = await longChat(db, 2 * PAGE + 5);
+    await app.openConversation('c1');
+    // Scrolled up: PAGE more, slow to come. The quote tapped meanwhile: all
+    // from its message on, after those.
+    const scrolling = holdRead('pageMessages');
+    const scrolled = app.loadOlder();
+    await scrolling.atRead;
+    const jumped = app.loadOlder('m1');
+    // Another scroll up meanwhile asks for nothing: those loading are what it would.
+    expect(await app.loadOlder()).toBe(false);
+    scrolling.release();
+    expect(await Promise.all([scrolled, jumped])).toEqual([true, true]);
+    expect([chatOf(app.screen.value).messages.map((m) => m.id), chatOf(app.screen.value).more]).toEqual([ids, false]);
   });
 
   it('shows ours left sending as not sent: at start, and in the open chat after a while, but not while a copy sends them', async () => {
@@ -1905,6 +2110,148 @@ describe('deleting the account', () => {
   });
 });
 
+describe("the server's limit on this device's logins and signed requests", () => {
+  // 429 device_limit, for a minute, as the server says (Retry-After).
+  const deviceLimit = (seconds = 42) => new ApiError(429, 'device_limit', undefined, undefined, seconds);
+
+  it('says to try again in a minute, never "tomorrow", when a link action is refused', async () => {
+    const server = fakeServer({ createLink: [deviceLimit()] });
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit', links: [] });
+    // The link changes' own daily limit still says so.
+    server.outcomes.createLink = [new ApiError(429, 'rate_limited')];
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'rate-limited', links: [] });
+  });
+
+  it('says so for a login refused at launch, and for a request whose login is refused', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    server.outcomes.session = [deviceLimit(), deviceLimit()];
+    const logins = () => server.calls.filter((c) => c === 'POST /session').length;
+    const before = logins();
+    const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
+    await again.app.start();
+    expect(home(again.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit' });
+    // Joining needs a login, refused too: the device's limit, not the
+    // route's own ("Too many tries. Try again tomorrow.").
+    await again.app.redeem('abcd-efgh');
+    expect(home(again.app.screen.value)).toMatchObject({ notice: 'device-limit' });
+    // The launch's login, then the one joining needed; and none while the
+    // session waits after that one (home's requests too).
+    expect(logins() - before).toBe(2);
+    expect(server.calls).not.toContain('POST /invitations/redeem');
+  });
+
+  it('keeps Join on an invitation refused for now', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    server.outcomes.session = [deviceLimit(), deviceLimit()];
+    const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith('invabcdefgh'), db: owner.db });
+    await again.app.start();
+    expect(again.app.screen.value).toMatchObject({ kind: 'invitation' });
+    await again.app.redeem('abcd-efgh');
+    expect(again.app.screen.value).toMatchObject({ kind: 'invitation', busy: false, error: 'device-limit' });
+  });
+
+  it('says so when an invitation is refused', async () => {
+    const server = fakeServer({ invitations: [deviceLimit()] });
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.invitations();
+    await admin.app.createInvitation(3);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'invitations', notice: 'device-limit' });
+  });
+
+  it('says "later" when the wait is longer than a minute, or unsaid', async () => {
+    const server = fakeServer({ createLink: [deviceLimit(600), new ApiError(429, 'device_limit'), deviceLimit(60)] });
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit-later', links: [] });
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit-later', links: [] });
+    // A minute, exactly, is still "in a minute".
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit', links: [] });
+  });
+
+  it('says so for an invitation whose login is refused, and the screen that would show it', async () => {
+    // The session lapsed: logging in again is refused for now, so is
+    // reading the invitations again after.
+    const server = fakeServer({ invitations: [new ApiError(401, 'session_expired')] });
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.invitations();
+    server.outcomes.session = [deviceLimit()];
+    await admin.app.createInvitation(3);
+    expect(home(admin.app.screen.value)).toMatchObject({ notice: 'device-limit' });
+  });
+
+  it("says so for an admin's change refused, and for one whose login is refused", async () => {
+    const server = fakeServer({ admin: [deviceLimit(), new ApiError(401, 'session_expired')] });
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.admin();
+    await admin.app.setLevel(1, 5);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'device-limit' });
+    server.outcomes.session = [deviceLimit(600)];
+    await admin.app.setLevel(1, 5);
+    expect(home(admin.app.screen.value)).toMatchObject({ notice: 'device-limit-later' });
+  });
+
+  it('says so on Usage', async () => {
+    const server = fakeServer({ usage: [deviceLimit(600)] });
+    const owner = await registered(server.api);
+    await owner.app.usage();
+    expect(owner.app.screen.value).toEqual({ kind: 'usage', usage: null, error: 'device-limit-later' });
+  });
+
+  it('says so on the signed-out screen when asking again is refused for now', async () => {
+    // The first login is the one registered() makes.
+    const server = fakeServer({ session: ['ok', new ApiError(401, 'login_refused')] });
+    const { db } = await registered(server.api);
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: false });
+    server.outcomes.session = [deviceLimit()];
+    await app.recheck();
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: true, limited: 'device-limit' });
+  });
+
+  it("says so when a deletion stalls on the device's limit", async () => {
+    const server = fakeServer({ deleteAccount: Array.from({ length: 401 }, () => deviceLimit(0)) });
+    const owner = await registered(server.api, { stepPauseMs: 0 });
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'deleting', error: 'device-limit' });
+    expect(server.calls.filter((c) => c === 'DELETE /account')).toHaveLength(400);
+  }, 60_000);
+
+  it("says so on the deletion's screen for a login refused at launch, and carries on when asked", async () => {
+    const server = fakeServer({ deleteAccount: [new NetworkError('lost')] });
+    const owner = await registered(server.api);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    server.outcomes.session = [deviceLimit()];
+    const again = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db: owner.db });
+    await again.app.start();
+    expect(again.app.screen.value).toEqual({ kind: 'deleting', error: 'device-limit' });
+    await again.app.continueDeletion();
+    expect(again.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+  });
+
+  it("waits a deletion's step out as long as the server asks, then carries on", async () => {
+    const server = fakeServer({ deleteAccount: [deviceLimit(1)] });
+    const owner = await registered(server.api, { stepPauseMs: 0 });
+    owner.app.askDeleteAccount();
+    const started = Date.now();
+    await owner.app.deleteAccount();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+  }, 10_000);
+});
+
 describe('after setting up over an account elsewhere', () => {
   it('asks the server, in the background, to delete what the old account left, until nothing is', async () => {
     const step = new ApiError(409, 'in_progress');
@@ -2483,6 +2830,38 @@ describe('attachments paused by the operator', () => {
     await app.openConversation('c1');
     await vi.waitFor(() => expect(downloads()).toHaveLength(4));
     expect(downloads().at(-1)).toBe('GET /media/upload-p1');
+  });
+
+  it('takes the paused notice away after a tap that fetches, though the tap that brought it was still waiting to be drawn', async () => {
+    const server = fakeServer();
+    server.state.switches.downloadsPaused = true;
+    const { app, db } = await registered(server.api, { issuer });
+    await startedOnDevice(db);
+    for (const [id, at] of [['p1', 2], ['p2', 3]] as const) {
+      await addMessage(
+        db,
+        { id, conv: 'c1', at, out: false, status: 'received', file: 'remote' },
+        { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    }
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(1));
+
+    // A draw of the chat under way, slow to read: what's drawn next waits its turn.
+    const drawing = holdRead('pageMessages');
+    const redrawn = app.refresh();
+    await drawing.atRead;
+    // A tap while downloads are paused: the notice is to show, once it's drawn.
+    const refused = app.fetchMedia({ conv: 'c1', id: 'p2' });
+    await vi.waitFor(() => expect([downloads().length, app.transfers.value]).toEqual([2, {}]));
+    // Resumed: a tap fetches (here the upload has expired), so the notice goes.
+    server.state.switches.downloadsPaused = false;
+    const fetched = app.fetchMedia({ conv: 'c1', id: 'p1' });
+    await vi.waitFor(() => expect([downloads().length, app.transfers.value]).toEqual([3, {}]));
+    drawing.release();
+    await Promise.all([redrawn, refused, fetched]);
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'gone' }, { id: 'p2', file: 'remote' }] });
   });
 
   it('fetches by itself again some minutes after downloads were paused', async () => {

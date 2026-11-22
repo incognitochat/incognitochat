@@ -210,6 +210,8 @@ export const id = {
   errorNoMailboxes: 'Anda sudah memulai atau membalas banyak obrolan baru hari ini. Coba lagi besok.',
   errorMailboxLimit: 'Anda sudah mencapai batas 4.000 obrolan. Memblokir seseorang membebaskan satu tempat; menghapus obrolan tidak. Lihat Penggunaan.',
   errorTooFast: 'Terlalu banyak pesan ke orang ini saat ini. Coba lagi dalam satu menit.',
+  errorDeviceLimit: 'Terlalu banyak percobaan. Coba lagi dalam satu menit.',
+  errorDeviceLimitLater: 'Terlalu banyak percobaan. Coba lagi nanti.',
   errorLinkBusy: 'Terlalu banyak pesan lewat tautan ini saat ini. Coba lagi pukul {time}.',
   errorDownloadLimit: 'Berkas ini sudah terlalu sering diunduh hari ini. Coba lagi pukul {time}.',
   errorMediaPaused: 'Lampiran sedang dijeda; coba lagi nanti.',

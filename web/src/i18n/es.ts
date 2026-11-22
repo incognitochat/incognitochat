@@ -218,6 +218,8 @@ export const es = {
   errorNoMailboxes: 'Hoy has iniciado o respondido muchos chats nuevos. Inténtalo de nuevo mañana.',
   errorMailboxLimit: 'Has llegado al límite de 4000 chats. Bloquear a alguien libera uno; eliminar un chat, no. Consulta «Uso».',
   errorTooFast: 'Demasiados mensajes a esta persona en este momento. Inténtalo de nuevo en un minuto.',
+  errorDeviceLimit: 'Demasiados intentos. Inténtalo de nuevo en un minuto.',
+  errorDeviceLimitLater: 'Demasiados intentos. Inténtalo de nuevo más tarde.',
   errorLinkBusy: 'Demasiados mensajes por este enlace en este momento. Inténtalo de nuevo a partir de esta hora: {time}.',
   errorDownloadLimit: 'Este archivo se ha descargado demasiadas veces hoy. Inténtalo de nuevo a partir de esta hora: {time}.',
   errorMediaPaused: 'Los archivos adjuntos están en pausa por ahora; inténtalo más tarde.',

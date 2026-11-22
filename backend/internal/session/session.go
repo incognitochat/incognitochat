@@ -160,14 +160,22 @@ type Login struct {
 	Signature []byte
 }
 
-// Check verifies a login against the device's public key. The nonce is only
-// recorded once the signature is valid, so unsigned requests can't fill the
-// nonce store.
-func Check(ctx context.Context, login Login, pub *ecdsa.PublicKey, nonces NonceStore, now time.Time) error {
+// Gate runs once a login's or signed request's signature checks out, and
+// before its nonce is recorded: what may refuse it only to the device's own
+// key, and must write nothing first (the account's state, the device's
+// limits). An error from it ends the check, and is returned as it is; the
+// nonce isn't recorded. A nil Gate lets everything through.
+type Gate func() error
+
+// Check verifies a login against the device's public key. Only once the
+// signature is valid does it run gate, and only once gate lets the login
+// through is the nonce recorded, so unsigned requests can't fill the nonce
+// store, and nobody without the device's key can reach what gate does.
+func Check(ctx context.Context, login Login, pub *ecdsa.PublicKey, nonces NonceStore, now time.Time, gate Gate) error {
 	if !ids.Valid(login.AccountID) || !ids.Valid(login.DeviceID) {
 		return ErrLogin
 	}
-	return checkFresh(ctx, pub, login.Signature, devicesig.LabelSession, LoginParts(login), login.Timestamp, login.Nonce, nonces, now)
+	return checkFresh(ctx, pub, login.Signature, devicesig.LabelSession, LoginParts(login), login.Timestamp, login.Nonce, nonces, now, gate)
 }
 
 // Precheck refuses a login that can't be valid whatever the device's key,
@@ -217,9 +225,9 @@ func RequestParts(r SignedRequest) [][]byte {
 }
 
 // CheckRequest verifies a signed request like a login: fresh timestamp,
-// valid signature, unused nonce.
-func CheckRequest(ctx context.Context, r SignedRequest, pub *ecdsa.PublicKey, nonces NonceStore, now time.Time) error {
-	return checkFresh(ctx, pub, r.Signature, devicesig.LabelRequest, RequestParts(r), r.Timestamp, r.Nonce, nonces, now)
+// valid signature, then gate, then an unused nonce.
+func CheckRequest(ctx context.Context, r SignedRequest, pub *ecdsa.PublicKey, nonces NonceStore, now time.Time, gate Gate) error {
+	return checkFresh(ctx, pub, r.Signature, devicesig.LabelRequest, RequestParts(r), r.Timestamp, r.Nonce, nonces, now, gate)
 }
 
 // CheckTime returns ErrClockSkew if a login's or signed request's timestamp
@@ -234,7 +242,11 @@ func CheckTime(timestamp int64, now time.Time) error {
 	return nil
 }
 
-func checkFresh(ctx context.Context, pub *ecdsa.PublicKey, signature []byte, label string, parts [][]byte, timestamp int64, nonce string, nonces NonceStore, now time.Time) error {
+// checkFresh checks, in this order: the nonce's form and the timestamp
+// (nothing read), the signature, gate, and last the nonce, recorded: its
+// one write, made only once gate let the login or request through. A
+// replay gets as far as the nonce, gate included.
+func checkFresh(ctx context.Context, pub *ecdsa.PublicKey, signature []byte, label string, parts [][]byte, timestamp int64, nonce string, nonces NonceStore, now time.Time, gate Gate) error {
 	if !validNonce(nonce) {
 		return ErrLogin
 	}
@@ -243,6 +255,11 @@ func checkFresh(ctx context.Context, pub *ecdsa.PublicKey, signature []byte, lab
 	}
 	if devicesig.Verify(pub, signature, label, parts...) != nil {
 		return ErrLogin
+	}
+	if gate != nil {
+		if err := gate(); err != nil {
+			return err
+		}
 	}
 	fresh, err := nonces.Use(ctx, nonce, now.Add(NonceTTL))
 	if err != nil {

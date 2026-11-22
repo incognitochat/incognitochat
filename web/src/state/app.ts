@@ -125,8 +125,16 @@ const UPLOAD_DELETE_RETRIES = [1, 2, 4];
 /** The longest wait a step's Retry-After (503 unavailable, 429) is honoured for. */
 const STEP_WAIT_MAX_MS = 30_000;
 
-/** Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without finishing. */
-class DeletionStalled extends Error {}
+/**
+ * Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without
+ * finishing. last: why its last step had to wait, if it did.
+ */
+class DeletionStalled extends Error {
+  constructor(readonly last: unknown) {
+    super('the deletion stalled');
+    this.name = 'DeletionStalled';
+  }
+}
 
 /**
  * How long to wait before the next step after err, or null if err ends the
@@ -141,8 +149,19 @@ function stepWait(err: unknown, pause: number): number | null {
   return null;
 }
 
-/** clock: the device's clock is too far off (more than two days) for the server's to be believed. */
-export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'generic';
+/**
+ * The server refused this device's login or signed request for now
+ * (deviceLimit): until the minute ends (device-limit, "Try again in a
+ * minute"), or for longer, its quarter of an hour or its day being used up
+ * (device-limit-later, "Try again later").
+ */
+export type DeviceLimit = 'device-limit' | 'device-limit-later';
+
+/**
+ * clock: the device's clock is too far off (more than two days) for the
+ * server's to be believed.
+ */
+export type ErrorKind = 'network' | 'expired' | 'rate-limited' | DeviceLimit | 'clock' | 'generic';
 
 /**
  * Why the server no longer takes this device: it refused the login (the
@@ -170,6 +189,7 @@ export type HomeNotice =
   | 'already-member'
   | 'own-invitation'
   | 'rate-limited'
+  | DeviceLimit
   | 'new-signing-key'
   | 'network'
   | 'generic';
@@ -182,7 +202,7 @@ function withNewKey(notice: HomeNotice | null, newKey: boolean): HomeNotice | nu
   return newKey && (notice === null || ROUTINE_NOTICES.has(notice)) ? 'new-signing-key' : notice;
 }
 
-export type InvitationsNotice = 'created' | 'none-left' | 'network' | 'generic';
+export type InvitationsNotice = 'created' | 'none-left' | DeviceLimit | 'network' | 'generic';
 
 /** What the Data and storage screen shows: attachments on this device, in bytes. */
 interface StorageUsage {
@@ -193,12 +213,15 @@ interface StorageUsage {
   app: { usage: number; quota: number } | null;
 }
 
-export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
+export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | DeviceLimit | 'network' | 'generic';
 
 /**
  * Why a message couldn't be sent. mailbox-limit: the account has as many
  * chats as it may (4,000), so no new one can be started or answered.
  * rate-limited: too many messages to this mailbox this minute.
+ * device-limit, device-limit-later: the server refused this device's login
+ * for now (deviceLimit), which a send that needed one (to fetch tokens or a
+ * mailbox) passes on.
  * media-paused: the operator has paused attachments for now (also said
  * when a tapped download is refused for it). outdated: the server no longer
  * holds the issuer key this build names (it was replaced), so the app must
@@ -209,6 +232,7 @@ export type SendError =
   | 'no-mailboxes'
   | 'mailbox-limit'
   | 'rate-limited'
+  | DeviceLimit
   | 'media-paused'
   | 'outdated'
   | 'network'
@@ -232,6 +256,20 @@ export interface LimitError {
 /** The LimitError of a refusal, until when the server said. */
 function limitError(kind: LimitError['kind'], err: ApiError): LimitError {
   return { kind, until: err.retryAfter === undefined ? null : Date.now() + err.retryAfter * 1000 };
+}
+
+/**
+ * Whether the server refused this device's login or signed request for now
+ * (429 device_limit): too many from this device in a minute, a quarter of
+ * an hour or the day, whatever the request was. A request that had to log
+ * in first passes the login's refusal on as its own, so this is never the
+ * route's own limit (a day's tokens or mailboxes, say). Which DeviceLimit
+ * goes by how long the server asked to wait (Retry-After): a minute or
+ * less, or longer (or unsaid).
+ */
+function deviceLimit(err: unknown): DeviceLimit | null {
+  if (!(err instanceof ApiError && err.code === 'device_limit')) return null;
+  return err.retryAfter !== undefined && err.retryAfter <= 60 ? 'device-limit' : 'device-limit-later';
 }
 
 /** Whether an error is one a tapped download shows, which the next tap's outcome replaces. */
@@ -341,7 +379,7 @@ export type Screen =
   /** chat: the conversation already written through this link. */
   | { kind: 'link'; status: 'existing'; canWrite: false; busy: boolean; error: null; chat: string }
   /** An invitation link: joins only on a tap. error: Join failed, and can be tried again. */
-  | { kind: 'invitation'; code: string; busy: boolean; error: 'network' | 'generic' | null }
+  | { kind: 'invitation'; code: string; busy: boolean; error: 'network' | DeviceLimit | 'generic' | null }
   | {
       kind: 'conversation';
       id: string;
@@ -370,7 +408,8 @@ export type Screen =
    * app asks again (Try again, and at every launch). offline: it couldn't
    * be asked just now.
    */
-  | { kind: 'signed-out'; reason: SignedOutReason; busy: boolean; offline: boolean }
+  /** offline: the server couldn't be asked; limited, if set: it was, and refused this device's login for now. */
+  | { kind: 'signed-out'; reason: SignedOutReason; busy: boolean; offline: boolean; limited?: DeviceLimit }
   /** Setting up again from there, which deletes everything on this device: a typed confirmation first. */
   | { kind: 'confirm-reset'; reason: SignedOutReason }
   | { kind: 'error'; error: ErrorKind };
@@ -613,6 +652,8 @@ export function createApp(deps: Deps) {
     // when the app closed.
     const deleting = await deletionConfirmed();
     let offline = false;
+    // The login was refused for now: said on home, as well as offline.
+    let notice: HomeNotice | null = null;
     try {
       session!.use(await logIn(deps.db, deps.api!, clock));
       signedOut = null;
@@ -642,7 +683,7 @@ export function createApp(deps: Deps) {
       // Couldn't ask, with a deletion the user confirmed here: its own
       // screen (Try again, the chats, deleting here only), whatever the
       // server said before.
-      if (deleting) return showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
+      if (deleting) return showDeletionError(err instanceof NetworkError ? 'network' : (deviceLimit(err) ?? 'generic'));
       // Couldn't ask: as the server last said, until it can be asked again.
       const last =
         signedOut ??
@@ -655,9 +696,10 @@ export function createApp(deps: Deps) {
                 ? 'deleting'
                 : 'refused'
             : null);
-      if (last) return showSignedOut(last, true);
+      if (last) return showSignedOut(last, true, deviceLimit(err));
       // Offline or the server is down: the device still works on what it has.
       offline = true;
+      notice = deviceLimit(err);
     }
     // Carried on before anything else is asked: the server takes no other
     // request from an account being deleted.
@@ -666,7 +708,7 @@ export function createApp(deps: Deps) {
     // The first sync found the server no longer takes this device (its
     // account being deleted, say): that screen stays.
     if (signedOut) return;
-    return continueLaunch(offline);
+    return continueLaunch(offline, notice);
   }
 
   /**
@@ -684,13 +726,17 @@ export function createApp(deps: Deps) {
     return false;
   }
 
-  /** The server no longer takes this device: say so, and keep its chats readable. */
-  function showSignedOut(reason: SignedOutReason, offline = false): void {
+  /**
+   * The server no longer takes this device: say so, and keep its chats
+   * readable. offline: it couldn't be asked now; limited: it refused the
+   * login for now.
+   */
+  function showSignedOut(reason: SignedOutReason, offline = false, limited: DeviceLimit | null = null): void {
     signedOut = reason;
     readOnly.value = true;
     stopMessaging();
     backButton(false);
-    screen.value = { kind: 'signed-out', reason, busy: false, offline };
+    screen.value = { kind: 'signed-out', reason, busy: false, offline, ...(limited ? { limited } : {}) };
   }
 
   /**
@@ -916,6 +962,12 @@ export function createApp(deps: Deps) {
     }
   }
 
+  // Draws of the home screen's lists from storage (refresh, showHome),
+  // counted: a refresh draws only if no newer one started since, so one
+  // that read storage before another can't draw over it (an older list,
+  // previews or unread counts, until something drew it again).
+  let homeDraws = 0;
+
   /**
    * Redraws the current screen from storage (after new messages, or another
    * copy's change), as it is once read: a notice shown meanwhile stays.
@@ -923,9 +975,11 @@ export function createApp(deps: Deps) {
   async function refresh(): Promise<void> {
     const current = screen.value;
     if (current.kind === 'home' && !current.busy) {
+      const draw = ++homeDraws;
       const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
       const latest = screen.value;
-      if (latest.kind !== 'home' || latest.busy) return;
+      // A newer one draws (or drew) what's newer.
+      if (draw !== homeDraws || latest.kind !== 'home' || latest.busy) return;
       const notice = withNewKey(latest.notice, newKey);
       screen.value = { ...latest, conversations: list, links, notice };
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
@@ -1008,23 +1062,85 @@ export function createApp(deps: Deps) {
     return { ...page, quoted };
   }
 
+  type ChatScreen = Extract<Screen, { kind: 'conversation' }>;
+  type ChatPage = Awaited<ReturnType<typeof chatPage>>;
+  /**
+   * What a redraw does to the error the chat shows, decided by the error
+   * shown when it draws (in its turn), not when it was asked for: shows this
+   * one (error), takes away a notice about downloads (clearDownloadError: a
+   * tap that fetched), or leaves it.
+   */
+  type ChatChanges = { error?: SendError | null; clearDownloadError?: true };
+  type ErrorChange = (shown: SendError | null) => SendError | null;
+  const errorChange = (changes: ChatChanges): ErrorChange => (shown) => (changes.error !== undefined ? changes.error : changes.clearDownloadError && downloadError(shown) ? null : shown);
+  const keepError: ErrorChange = (shown) => shown;
+
+  // The open chat's messages are drawn one draw at a time, in the order
+  // asked for (inTurn): opening it, redrawing it (showChat) and loading
+  // older ones (loadOlder). Each builds its page from the screen as the
+  // draw before left it, and from storage read after that one drew. Side by
+  // side, one could draw a page built from a screen another had since
+  // replaced, and older messages loaded on purpose would go.
+  // A draw waits for storage only: nothing it waits for may wait for a draw.
+  // So chatPage, and anything else a draw waits for, must never wait for a
+  // lock (send:…, sending:…, seen:…): a send redraws its chat (onStored)
+  // while it holds its sendingLock (engine.ts), so a draw waiting for that
+  // lock would wait for itself, and the send and every draw after it would
+  // hang. failStuck takes a sendingLock only if it's free (withLockIfFree).
+  let chatDraws: Promise<unknown> = Promise.resolve();
+  // A redraw waiting its turn, last in line: redraws of its chat asked for
+  // meanwhile join it, their changes after its own.
+  let waitingRedraw: { conv: string; error: ErrorChange; done: Promise<void> } | null = null;
+  function inTurn<T>(draw: () => Promise<T>): Promise<T> {
+    waitingRedraw = null;
+    const run = chatDraws.then(draw);
+    chatDraws = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Draws the page build makes from the open chat as it's shown, with the
+   * error it shows changed so, if it's still `conv`. If its messages are
+   * shown otherwise once the page is built (a reaction shown at once: the
+   * one change that doesn't wait its turn), it's built again from that: a
+   * page is only ever drawn on the screen it was built from. Returns that
+   * screen and the page; null if `conv` is no longer open.
+   */
+  async function drawChat(conv: string, build: (shown: ChatScreen) => Promise<ChatPage>, error: ErrorChange = keepError): Promise<{ shown: ChatScreen; page: ChatPage } | null> {
+    for (;;) {
+      const before = currentScreen();
+      if (before.kind !== 'conversation' || before.id !== conv) return null;
+      const page = await build(before);
+      const now = currentScreen();
+      if (now.kind !== 'conversation' || now.id !== conv) return null;
+      if (now.messages !== before.messages) continue;
+      screen.value = { ...now, error: error(now.error), ...page };
+      return { shown: now, page };
+    }
+  }
+
   /**
    * Redraws the open chat from storage, if it's still `conv`, with these
-   * changes: on the screen as it is once its messages are read, and with
-   * the messages it shows then (older ones loaded meanwhile stay).
+   * changes: in its turn (inTurn), from the messages it shows then (older
+   * ones loaded before stay). Asked for while a redraw of it waits its turn:
+   * that one, with these changes too, after its own.
    */
-  async function showChat(conv: string, changes: { error?: SendError | null } = {}): Promise<void> {
-    for (let tries = 0; ; tries++) {
-      const before = currentScreen();
-      if (before.kind !== 'conversation' || before.id !== conv) return;
-      const page = await chatPage(conv, before);
-      const now = currentScreen();
-      if (now.kind !== 'conversation' || now.id !== conv) return;
-      // Shown otherwise meanwhile (older ones loaded, say): read again for that.
-      if (now.messages !== before.messages && tries < 2) continue;
-      screen.value = { ...now, ...changes, ...page };
-      return;
+  function showChat(conv: string, changes: ChatChanges = {}): Promise<void> {
+    const current = currentScreen();
+    if (current.kind !== 'conversation' || current.id !== conv) return Promise.resolve();
+    const waiting = waitingRedraw;
+    if (waiting?.conv === conv) {
+      const [first, then] = [waiting.error, errorChange(changes)];
+      waiting.error = (shown) => then(first(shown));
+      return waiting.done;
     }
+    const redraw = { conv, error: errorChange(changes), done: Promise.resolve() };
+    redraw.done = inTurn(async () => {
+      if (waitingRedraw === redraw) waitingRedraw = null;
+      await drawChat(conv, (shown) => chatPage(conv, shown), redraw.error);
+    });
+    waitingRedraw = redraw;
+    return redraw.done;
   }
 
   /**
@@ -1061,25 +1177,28 @@ export function createApp(deps: Deps) {
     if (stuckConv !== null && (s.kind !== 'conversation' || s.id !== stuckConv)) stopWatchingStuck();
   });
 
-  let loadingOlder = false;
+  // Older messages being loaded (loadOlder), waiting their turn or drawing.
+  let loadingOlder = 0;
   /**
    * Shows older messages in the open chat: PAGE more, or all from the one
-   * with this ID on (a quote's, to jump to it). Returns whether any came.
+   * with this ID on (a quote's, to jump to it), in its turn (inTurn), more
+   * than it shows then. Returns whether any came. A scroll up while some
+   * are loading does nothing (those are what it asks for); a jump to a
+   * quote waits its turn after them.
    */
   async function loadOlder(until?: string): Promise<boolean> {
     const current = screen.value;
-    if (current.kind !== 'conversation' || !current.more || loadingOlder) return false;
-    loadingOlder = true;
+    if (current.kind !== 'conversation' || !current.more || (loadingOlder > 0 && until === undefined)) return false;
+    const conv = current.id;
+    loadingOlder++;
     try {
-      const page = await chatPage(current.id, current, until ?? true);
-      const now = currentScreen();
-      if (now.kind !== 'conversation' || now.id !== current.id) return false;
-      screen.value = { ...now, ...page };
+      const drawn = await inTurn(() => drawChat(conv, (shown) => chatPage(conv, shown, until ?? true)));
+      if (!drawn) return false;
       // Their attachments shown now download as they would have when the chat opened.
-      autoFetch(current.id);
-      return page.messages[0]?.id !== now.messages[0]?.id;
+      autoFetch(conv);
+      return drawn.page.messages[0]?.id !== drawn.shown.messages[0]?.id;
     } finally {
-      loadingOlder = false;
+      loadingOlder--;
     }
   }
 
@@ -1129,7 +1248,7 @@ export function createApp(deps: Deps) {
       if (!forBoth) await messaging.remove(id);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ tab: 'chats', notice: err instanceof NetworkError ? 'network' : 'generic' });
+      return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     deps.broadcast({ type: 'data-changed' });
     return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
@@ -1148,18 +1267,21 @@ export function createApp(deps: Deps) {
     // In the background: it waits for a send of ours still going out in this chat.
     void messaging?.markRead(id).catch(() => {});
     backButton(true);
-    screen.value = {
-      kind: 'conversation',
-      id,
-      label: c.label,
-      role: c.role,
-      ended: c.status === 'ended',
-      blocked: c.status === 'blocked',
-      readOnly: signedOut !== null || deletionPaused,
-      ...(await chatPage(id, null)),
-      busy: false,
-      error: null,
-    };
+    // In its turn (inTurn): a draw under way, of this chat as it was shown before, finishes first.
+    await inTurn(async () => {
+      screen.value = {
+        kind: 'conversation',
+        id,
+        label: c.label,
+        role: c.role,
+        ended: c.status === 'ended',
+        blocked: c.status === 'blocked',
+        readOnly: signedOut !== null || deletionPaused,
+        ...(await chatPage(id, null)),
+        busy: false,
+        error: null,
+      };
+    });
     if (attending) seen(id);
     autoFetch(id);
   }
@@ -1353,10 +1475,12 @@ export function createApp(deps: Deps) {
     const now = currentScreen();
     if (now.kind === 'conversation') {
       // A tap says it's paused or past the day's downloads, or that it no
-      // longer is.
-      let error = now.error;
-      if (!auto && now.id === m.conv) error = paused ? 'media-paused' : (limited ?? (downloadError(error) ? null : error));
-      await showChat(now.id, { error });
+      // longer is: by the notice shown when the chat is drawn (in its turn,
+      // perhaps after a tap's still waiting), not the one shown now. Any
+      // other error is left as it is then.
+      const onTap = !auto && now.id === m.conv;
+      const changes: ChatChanges = !onTap ? {} : paused ? { error: 'media-paused' } : limited ? { error: limited } : { clearDownloadError: true };
+      await showChat(now.id, changes);
     }
   }
 
@@ -1483,7 +1607,9 @@ export function createApp(deps: Deps) {
       info = await session!.call('GET', '/usage', undefined, checkUsage);
     } catch (err) {
       if (handleGone(err)) return;
-      if (currentScreen().kind === 'usage') screen.value = { kind: 'usage', usage: null, error: err instanceof NetworkError ? 'network' : 'generic' };
+      if (currentScreen().kind === 'usage') {
+        screen.value = { kind: 'usage', usage: null, error: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') };
+      }
       return;
     }
     // What the server will still sign today, for the low-balance notice too.
@@ -1560,7 +1686,7 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       if (current.kind === 'conversation') return showErrorIn(current.id, sendError(err));
       // Only if the user is still on the Blocked list.
-      if (currentScreen().kind === 'blocked') return showBlocked(err instanceof NetworkError ? 'network' : 'generic');
+      if (currentScreen().kind === 'blocked') return showBlocked(deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic'));
       return;
     }
     deps.broadcast({ type: 'data-changed' });
@@ -1585,6 +1711,8 @@ export function createApp(deps: Deps) {
     if (err instanceof MailboxLimit) return 'mailbox-limit';
     if (err instanceof ApiError && err.code === 'link_busy') return limitError('link-busy', err);
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
+    const limited = deviceLimit(err);
+    if (limited) return limited;
     if (isPaused(err)) return 'media-paused';
     // The server no longer holds the issuer key this build names (it was
     // replaced): a fresh copy of the app names the new one.
@@ -1671,7 +1799,7 @@ export function createApp(deps: Deps) {
    * setup) pointed. Only to a screen: a launch can come from anyone's link,
    * so nothing is opened, sent or redeemed until the user taps.
    */
-  async function continueLaunch(offline: boolean): Promise<void> {
+  async function continueLaunch(offline: boolean, notice: HomeNotice | null = null): Promise<void> {
     const param = launchParam ?? (await takePendingLink(deps.db)) ?? '';
     launchParam = null;
     const ref = parsePayload(param);
@@ -1683,7 +1811,7 @@ export function createApp(deps: Deps) {
       screen.value = { kind: 'invitation', code, busy: false, error: null };
       return;
     }
-    return showHome({ offline });
+    return showHome({ offline, notice });
   }
 
   /**
@@ -1766,6 +1894,8 @@ export function createApp(deps: Deps) {
     const prepareUntil = Date.now() + PREPARE_MS;
     let steps = 0;
     let finished = false;
+    // Why the last step had to wait, if it did: said if the run stalls.
+    let waited: unknown = null;
     try {
       // Also when carrying on at a launch, which starts no messaging.
       await createEngine();
@@ -1808,7 +1938,7 @@ export function createApp(deps: Deps) {
       // change interrupted the last step, or another step was running. A
       // pause between steps leaves the database's capacity to everyone else.
       while (await still()) {
-        if (steps++ >= STEPS_PER_RUN || Date.now() > until) throw new DeletionStalled();
+        if (steps++ >= STEPS_PER_RUN || Date.now() > until) throw new DeletionStalled(waited);
         // Shown again each step: nothing else is, until it's done.
         screen.value = { kind: 'deleting', error: null };
         try {
@@ -1818,6 +1948,7 @@ export function createApp(deps: Deps) {
         } catch (err) {
           const wait = stepWait(err, pause);
           if (wait === null) throw err;
+          waited = err;
           await new Promise((resolve) => setTimeout(resolve, wait));
         }
       }
@@ -1836,7 +1967,9 @@ export function createApp(deps: Deps) {
       else if (ours) {
         deletionRunning = false;
         if (handleGone(err)) return;
-        showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
+        // Stalled while the server refused this device's steps for now: that.
+        const limited = deviceLimit(err instanceof DeletionStalled ? err.last : err);
+        showDeletionError(err instanceof NetworkError ? 'network' : (limited ?? 'generic'));
         return;
       }
     }
@@ -2028,6 +2161,8 @@ export function createApp(deps: Deps) {
     }
     if (account?.deleting) return deletingOnServer(account.expired);
     if (account?.cleanup) void cleanUpReplaced();
+    // Read from here on: a refresh that read before draws nothing over it.
+    homeDraws++;
     const links = await linkViews();
     backButton(false);
     screen.value = {
@@ -2113,11 +2248,10 @@ export function createApp(deps: Deps) {
       else if (err instanceof ApiError && err.code === 'already_member') notice = 'already-member';
       else if (err instanceof ApiError && err.code === 'own_invitation') notice = 'own-invitation';
       else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     // From an invitation link, what can be tried again keeps its Join button.
-    if (current.kind === 'invitation' && (notice === 'network' || notice === 'generic')) {
+    if (current.kind === 'invitation' && (notice === 'network' || notice === 'device-limit' || notice === 'device-limit-later' || notice === 'generic')) {
       screen.value = { ...current, busy: false, error: notice };
       return;
     }
@@ -2131,7 +2265,8 @@ export function createApp(deps: Deps) {
       info = await session!.call('GET', '/invitations', undefined, checkInvitations);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ notice: err instanceof NetworkError ? 'network' : 'generic' });
+      // A login refused for now refuses this reload too (the session waits).
+      return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     const codes = info.codes.map((c) => ({ ...c, url: invitationUrl(config!.botUsername, config!.appName, c.code) }));
     backButton(true);
@@ -2148,7 +2283,9 @@ export function createApp(deps: Deps) {
     } catch (err) {
       if (handleGone(err)) return;
       const notice: InvitationsNotice =
-        err instanceof ApiError && err.code === 'no_invitations_left' ? 'none-left' : err instanceof NetworkError ? 'network' : 'generic';
+        err instanceof ApiError && err.code === 'no_invitations_left'
+          ? 'none-left'
+          : (deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic'));
       return openInvitations(notice);
     }
   }
@@ -2159,7 +2296,8 @@ export function createApp(deps: Deps) {
       levels = await session!.call('GET', '/admin/levels', undefined, checkLevels);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ notice: err instanceof NetworkError ? 'network' : 'generic' });
+      // A login refused for now refuses this reload too (the session waits).
+      return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     // The rest of the screen still works if these can't be read.
     let switches: Switches | null = null;
@@ -2193,8 +2331,7 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'not_member') notice = 'not-member';
       else if (err instanceof ApiError && err.code === 'not_found') notice = 'not-found';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     return openAdmin(notice);
   }
@@ -2227,8 +2364,7 @@ export function createApp(deps: Deps) {
       if (err instanceof ApiError && err.code === 'invitation_required') notice = 'invitation';
       else if (err instanceof ApiError && err.code === 'link_limit') notice = 'limit';
       else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     deps.broadcast({ type: 'data-changed' });
     return showHome({ notice, tab: 'links' });

@@ -5,7 +5,7 @@
 //	N#<nonce>  N              a used login nonce
 //	S#<nonce>  S              a spent send or media token's nonce (Spent)
 //	Q#<key>    Q              a quiet period (e.g. after a notice), with a random token (t)
-//	R#<key>    <window start> a rate counter (c)
+//	R#<key>    <window start> a rate counter (c), or a device's budgets for a UTC day (Limiter.SpendAt)
 //	C#<name>   <connection>   a socket (sockets.go)
 //	U#<id>     U              an upload (uploads.go)
 //
@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -296,9 +297,10 @@ type Limiter struct {
 	Timeout time.Duration
 
 	mu      sync.Mutex
-	known   map[string]counted // key and window start -> the count the table last returned
-	tallies map[string]tally   // key and window start -> uses not yet written (Tally)
-	local   map[string]int     // key and window start -> uses counted here only (LocalAt)
+	known   map[string]counted   // key and window start -> the count the table last returned
+	tallies map[string]tally     // key and window start -> uses not yet written (Tally)
+	local   map[string]int       // key and window start -> uses counted here only (LocalAt)
+	rows    map[string]budgetRow // key and day start -> the row the table last returned (SpendAt)
 }
 
 type counted struct {
@@ -507,6 +509,194 @@ func (l *Limiter) LocalAt(key string, n, limit int, window time.Duration, at tim
 	}
 	l.local[k] += n
 	return true
+}
+
+// Quarter is a quarter of an hour, a Budget's middle window.
+const Quarter = 15 * time.Minute
+
+// A Budget limits one kind of use of a key that SpendAt counts in the
+// key's row for the UTC day: at most PerMinute in a minute, PerQuarter in a
+// quarter of an hour and PerDay in the day, each window aligned like every
+// Limiter window. Kind names the row's attributes for its minute and
+// quarter, Day the one for its day, which budgets may share (so share
+// PerDay): one letter each. Every limit is at least 1.
+type Budget struct {
+	Kind, Day                     string
+	PerMinute, PerQuarter, PerDay int
+}
+
+// The attributes a Budget counts in: the start of the minute of its last
+// use (Unix seconds), its uses in that minute and in that minute's quarter,
+// and its day's.
+func (b Budget) minute() string   { return b.Kind + "m" }
+func (b Budget) inMinute() string { return b.Kind + "n" }
+func (b Budget) quarter() string  { return b.Kind + "q" }
+func (b Budget) day() string      { return b.Day + "d" }
+
+// full is the longest of b's windows that holds at (its minute, its
+// quarter) and that row, as the table last returned it, shows used up: the
+// day, a quarter or a minute; 0 if none.
+func (b Budget) full(row map[string]int64, minute, quarter int64) time.Duration {
+	last, used := row[b.minute()]
+	switch {
+	case row[b.day()] >= int64(b.PerDay):
+		return 24 * time.Hour
+	case used && last >= quarter && row[b.quarter()] >= int64(b.PerQuarter):
+		return Quarter
+	case used && last == minute && row[b.inMinute()] >= int64(b.PerMinute):
+		return time.Minute
+	}
+	return 0
+}
+
+// budgetRow is a key's row for a day, as the table last returned it to
+// this instance (SpendAt): its numbers by attribute.
+type budgetRow struct {
+	attrs map[string]int64
+	until int64 // when its day ends, Unix seconds
+}
+
+// spendTries is how many conditional updates SpendAt makes at most: one
+// that fails returns the row as it is, so the next is the right one, unless
+// another request moved the row on meanwhile (at a window's edge).
+const spendTries = 3
+
+// errRowMoving is SpendAt's error when its row changed under each of its
+// tries: no use was counted, and none must go uncounted.
+var errRowMoving = errors.New("ephemeral: the row kept changing")
+
+// SpendAt counts one use of b in key's row for the UTC day that holds at,
+// if it fits in b's minute, quarter and day that hold at; otherwise it
+// counts nothing and returns the longest of those windows that is used up
+// (time.Minute, Quarter or 24 hours), whose end is when to try again.
+//
+// The row holds, for each budget, only the start of the minute of its last
+// use and its uses in that minute, in that minute's quarter and in the day,
+// overwritten as it goes: so the table keeps one row per key and day, which
+// says when the last use of each kind was, not when every one was. It
+// expires when its day ends.
+//
+// One conditional update counts the use (a write unit), picked by what this
+// instance last learned of the row: the same minute, a later minute of the
+// same quarter, or a later quarter (or no row yet). One picked wrong
+// (another instance counted meanwhile), or refused because a window is used
+// up, costs a write unit too, and returns the row as it is, so the next try
+// is right. What the row says is used up is refused from memory, at no
+// cost, until its window ends. As with AllowNAt, a call that fails counts
+// nothing (a lost answer aside), and only what the table returned refuses
+// anything.
+func (l *Limiter) SpendAt(ctx context.Context, key string, b Budget, at time.Time) (time.Duration, error) {
+	day := at.Truncate(24 * time.Hour)
+	k := knownKey(key, day)
+	for range spendTries {
+		row := l.row(k)
+		minute := at.Truncate(time.Minute).Unix()
+		last, used := row[b.minute()]
+		// Another instance's clock a moment ahead counted in the next
+		// minute already: this counts there too.
+		if used && last > minute {
+			minute = last
+		}
+		quarter := time.Unix(minute, 0).Truncate(Quarter).Unix()
+		if full := b.full(row, minute, quarter); full > 0 {
+			return full, nil
+		}
+		in := b.update(key, day, minute, quarter, used && last == minute, used && last >= quarter)
+		in.TableName = &l.Table
+		callCtx, cancel := l.deadline(ctx)
+		out, err := l.DB.UpdateItem(callCtx, in, fewerRetries)
+		cancel()
+		var failed *types.ConditionalCheckFailedException
+		if errors.As(err, &failed) {
+			// Picked wrong, or a window is used up: the row as it is says
+			// which.
+			l.learnRow(k, day, failed.Item)
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		l.learnRow(k, day, out.Attributes)
+		return 0, nil
+	}
+	return 0, errRowMoving
+}
+
+// update is the conditional update that counts one use of b in key's row
+// for day, in the minute and quarter that start at minute and quarter:
+// sameMinute, the row's last use of b was in that minute; sameQuarter, in
+// that quarter; neither, earlier or never. Each counts only while every
+// window has room, and only if the row is as it says.
+func (b Budget) update(key string, day time.Time, minute, quarter int64, sameMinute, sameQuarter bool) *dynamodb.UpdateItemInput {
+	names := map[string]string{"#m": b.minute(), "#n": b.inMinute(), "#q": b.quarter(), "#d": b.day()}
+	values := map[string]types.AttributeValue{
+		":one": num(1),
+		":e":   num(day.Add(24 * time.Hour).Unix()),
+		":pd":  num(int64(b.PerDay)),
+	}
+	const dayRoom = "(attribute_not_exists(#d) OR #d < :pd)"
+	var update, condition string
+	switch {
+	case sameMinute:
+		update = "SET e = :e ADD #n :one, #q :one, #d :one"
+		condition = "#m = :m AND #n < :pm AND #q < :pq AND " + dayRoom
+		values[":m"], values[":pm"], values[":pq"] = num(minute), num(int64(b.PerMinute)), num(int64(b.PerQuarter))
+	case sameQuarter:
+		update = "SET #m = :m, #n = :one, e = :e ADD #q :one, #d :one"
+		condition = "#m >= :qs AND #m < :m AND #q < :pq AND " + dayRoom
+		values[":m"], values[":qs"], values[":pq"] = num(minute), num(quarter), num(int64(b.PerQuarter))
+	default:
+		update = "SET #m = :m, #n = :one, #q = :one, e = :e ADD #d :one"
+		condition = "(attribute_not_exists(#m) OR #m < :qs) AND " + dayRoom
+		values[":m"], values[":qs"] = num(minute), num(quarter)
+	}
+	return &dynamodb.UpdateItemInput{
+		Key: map[string]types.AttributeValue{
+			"pk": s("R#" + key),
+			"sk": s(strconv.FormatInt(day.Unix(), 10)),
+		},
+		UpdateExpression:                    aws.String(update),
+		ConditionExpression:                 aws.String(condition),
+		ExpressionAttributeNames:            names,
+		ExpressionAttributeValues:           values,
+		ReturnValues:                        types.ReturnValueAllNew,
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+	}
+}
+
+// row is a copy of what this instance last learned of a key's row for a
+// day (SpendAt): empty if nothing.
+func (l *Limiter) row(k string) map[string]int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return maps.Clone(l.rows[k].attrs)
+}
+
+// learnRow records a key's row for a day as the table just returned it
+// (nil: there is none).
+func (l *Limiter) learnRow(k string, day time.Time, item map[string]types.AttributeValue) {
+	attrs := map[string]int64{}
+	for name, v := range item {
+		if n, ok := v.(*types.AttributeValueMemberN); ok {
+			if x, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
+				attrs[name] = x
+			}
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.rows[k]; !ok && len(l.rows) >= maxKnown {
+		now := l.Now().Unix()
+		for k, r := range l.rows {
+			if r.until <= now {
+				delete(l.rows, k)
+			}
+		}
+	}
+	if l.rows == nil || len(l.rows) >= maxKnown {
+		l.rows = map[string]budgetRow{}
+	}
+	l.rows[k] = budgetRow{attrs: attrs, until: day.Add(24 * time.Hour).Unix()}
 }
 
 // add adds n to key's count for the window that starts at start, if at

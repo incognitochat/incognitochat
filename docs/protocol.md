@@ -65,8 +65,10 @@ with a body carries the body's SHA-256, in hex, in `X-Amz-Content-Sha256`,
 which that signature covers.
 Signed requests carry `X-Device-Signature: <timestamp>.<nonce>.<signature>`
 next to the session token. Nonces are 16–64 base64url characters and are used
-once; timestamps must be within 60 seconds of the server's clock (otherwise
-`clock_skew`, below). A login that can't be valid whatever the device's key
+once (a replay is refused `401`, or `429 device_limit` once the device's
+limits are reached, below: nothing is done either way); timestamps must be
+within 60 seconds of the server's clock (otherwise `clock_skew`, below). A
+login that can't be valid whatever the device's key
 (its nonce or signature malformed) is refused with `login_refused` before
 the server reads anything. A login reads the device eventually consistent,
 at half the cost. So a device replaced or removed in about the last second
@@ -107,6 +109,37 @@ second), and so they are until a login succeeds in a run of the app: while
 it's offline, and also while the server refuses or fails logins (`429`,
 `5xx`), which the app treats the same way.
 
+**Limits per device.** Each login and signed request writes its nonce to
+a table every user shares, so each device's are limited. Logins: 20 a
+minute, 60 a quarter of an hour and 1,000 a UTC day. Signed requests: 30 a
+minute and 60 a quarter of an hour; while the account is being deleted, or
+has what is left of an account it replaced to delete, the steps of that
+(`DELETE /account`, `POST /account/cleanup`) count apart, 90 a minute and
+900 a quarter of an hour; 2,000 a UTC day for all signed requests. They
+go by the device, so by the account: setting up again (at most 3 times a
+day) starts a new device with days of its own, so one Telegram user has
+at most about 4 days' worth in a day. Windows are aligned (a quarter
+starts on the hour, at :15, :30 and :45) and go by the server's clock, not
+the request's timestamp. Past one, the server answers
+`429 {"error": "device_limit"}` with `Retry-After`, the seconds until the
+longest window that is used up ends (the day's, then the quarter's, then
+the minute's). It counts and refuses only once the signature
+checks out, so nobody without the device's key can use up its limits, or
+learn of them: a forged login of a device that reached its limits is still
+`401 login_refused`. A replaced account (`410`) and one being deleted
+(`409`, on the routes it doesn't take) are refused before anything is
+counted or written. A request refused by a limit counts nothing; a
+replay counts (it passed the signature); nothing counted is ever taken
+back. If the count can't be taken, the answer is `503 unavailable`, and
+the request goes no further. The app waits out a login refused so until
+`Retry-After`, but at least 5 seconds and at most 2 minutes at a time (a
+try before the end is refused at no cost); waits out a deletion's steps
+by `Retry-After` too, up to 30 seconds (below); and otherwise says "Too
+many tries. Try again in a minute.", or "Try again later." when the wait
+is longer than a minute. A copy of the device's storage shares its
+limits ([security.md](security.md#other-limits), Keys are stored with the
+data).
+
 **Overload.** When AWS throttles the server (a table at its cap, a function
 out of instances) or a request runs out of time, the server answers
 `503 {"error": "unavailable"}` with `Retry-After: 2`, rather than
@@ -127,6 +160,7 @@ Delivery).
 | `401 session_expired` | The session token is missing or over; the app logs in again. |
 | `401 clock_skew` | The device's clock is off (above). |
 | `401 login_refused` | The device or its account doesn't exist (deleted, by its user or for going unused 12 months, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
+| `429 device_limit` | The device's logins or signed requests reached a limit (above, Limits per device), until `Retry-After`. Said only once the device's signature checks out. |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
 | `409 account_deleting` | The account is being deleted (below): it takes no request but `GET /account` (which says `deleting: true`) and `DELETE /account`. |
 

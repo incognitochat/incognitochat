@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readAccount } from '../account/account';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
@@ -8,12 +8,43 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { listConversations, listMessages, PAGE } from '../messaging/store';
+import { listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase, putMeta } from '../storage/db';
 import { pickLanguage } from '../i18n';
+import type { SyncEvent } from '../sync/locks';
 import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
+
+// A read of an open chat's page held up once it's done, until the test lets
+// it go (holdPage): as a slow IndexedDB would, with its draw still under way.
+const pages = vi.hoisted(() => ({ hold: null as (() => Promise<void>) | null }));
+vi.mock('../messaging/store', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../messaging/store')>();
+  return {
+    ...original,
+    pageMessages: async (...args: Parameters<typeof original.pageMessages>) => {
+      const page = await original.pageMessages(...args);
+      const hold = pages.hold;
+      pages.hold = null;
+      await hold?.();
+      return page;
+    },
+  };
+});
+
+/** Holds the next read of an open chat's page, once it's done, until released. */
+function holdPage() {
+  let reached!: () => void;
+  const atRead = new Promise<void>((resolve) => (reached = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  pages.hold = () => {
+    reached();
+    return released;
+  };
+  return { atRead, release };
+}
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -44,7 +75,16 @@ async function backend() {
   // tokens signed; keyRetired: the issuer keys the apps' build names are
   // replaced, and no longer held; mailboxesFull: accounts hold all the
   // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false, sendRefused: null as ApiError | null };
+  // tokensRefused: how every token request is refused, if set.
+  const state = {
+    tokensLeft: Infinity,
+    uploadsPaused: false,
+    mediaSigned: 0,
+    keyRetired: false,
+    mailboxesFull: false,
+    sendRefused: null as ApiError | null,
+    tokensRefused: null as ApiError | null,
+  };
   // An older server says no notice language; languageRefused: how a change of it is refused, if set.
   const noticeState = { languageSaid: true, languageRefused: null as Error | null };
   /** Requests to the media routes. */
@@ -126,6 +166,7 @@ async function backend() {
         // Signed with the key the request names, the only one held here
         // until it is retired.
         if (state.keyRetired || body.keyId !== toBase64Url(issuer.keyId)) throw new ApiError(409, 'unknown_issuer_key');
+        if (state.tokensRefused) throw state.tokensRefused;
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
@@ -188,9 +229,15 @@ function launchWith(startParam: string, allowsWrite = true, language?: string): 
 }
 
 /** Sets up an account (two launches) and returns the app of the registration launch. */
-async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', tg: Bridge = bridge()): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
+async function person(
+  b: Awaited<ReturnType<typeof backend>>,
+  startParam = '',
+  tg: Bridge = bridge(),
+): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>>; broadcasts: SyncEvent[] }> {
   const db = await openDatabase(`conv-test-${n++}`);
-  const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+  // What the apps on this device told the others.
+  const broadcasts: SyncEvent[] = [];
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -202,7 +249,7 @@ async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', t
     await next.start();
     return next;
   };
-  return Object.assign(app, { db, reopen });
+  return Object.assign(app, { db, reopen, broadcasts });
 }
 
 function screenOf<K extends Screen['kind']>(screen: Screen, kind: K): Extract<Screen, { kind: K }> {
@@ -837,7 +884,8 @@ describe('conversations in the app', () => {
     await owner.showTab('chats');
     await owner.sync();
     await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
-    for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    // The receipt goes in the background: waited for, however slow.
+    await vi.waitFor(() => expect(b.sends).toHaveLength(2), { timeout: 30_000, interval: 50 });
     // Ours fails: the server can't be reached.
     const post = b.api.post;
     b.api.post = async (path, body, check) => {
@@ -850,7 +898,13 @@ describe('conversations in the app', () => {
       ['hello', 'read'],
       ['mine', 'failed'],
     ]);
-    // A flood comes in while it's open.
+    // A flood comes in while it's open. The clock stands still from here:
+    // how a flood is dated depends on how fast it comes and on both apps'
+    // clocks (a run dated a minute ahead goes back to the clock, and what
+    // follows it can then show before it: engine.ts, stampIn and shownAt).
+    // Standing still, the order shown is the order taken in, however fast.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    onTestFinished(() => clock.mockRestore());
     for (let i = 0; i < MAX_SHOWN + 10; i++) await sender.sendMessage(`flood ${i}`);
     await owner.sync();
     // Message texts opened while it's drawn again for one more (message IDs are what they're bound to).
@@ -866,14 +920,50 @@ describe('conversations in the app', () => {
       decrypt.mockClear();
       await owner.sync();
       const chat = screenOf(owner.screen.value, 'conversation');
-      // The newest 200, and ours failed first, however old: no more each time.
-      expect(chat.messages).toHaveLength(MAX_SHOWN + 1);
+      // The newest 200 as stored (records: nothing opened), and ours failed
+      // first, however old: no more each time.
+      const stored = (await listRecords(owner.db, chat.id)).filter((m) => !(m.out && m.status === 'failed'));
+      expect(chat.messages.slice(1).map((m) => m.id)).toEqual(stored.slice(-MAX_SHOWN).map((m) => m.id));
       expect([chat.messages[0]!.text, chat.messages[0]!.status, chat.messages.at(-1)!.text, chat.more]).toEqual(['mine', 'failed', `one more ${round}`, true]);
       // What it shows, and the new one as it's taken in: not the flood behind them.
       expect(opened()).toBeLessThanOrEqual(MAX_SHOWN + 1 + 5);
     }
     decrypt.mockRestore();
   }, 60_000);
+
+  it("shows why a send failed, though a redraw of the chat was waiting its turn when it did", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    // The next send is held at the server, then fails.
+    const send = holdAndFail(b, /^\/send$/);
+    const sending = sender.sendMessage('mine');
+    await send.atServer;
+    // A draw of the chat under way, slow to read, and a sync's redraw
+    // waiting its turn after it.
+    const drawing = holdPage();
+    const synced = sender.refresh();
+    await drawing.atRead;
+    const waiting = sender.refresh();
+    // The send fails meanwhile: what it shows joins the redraw waiting (it
+    // tells the other copies, then redraws, at once).
+    const told = sender.broadcasts.length;
+    send.fail(new NetworkError('unreachable'));
+    await vi.waitFor(() => expect(sender.broadcasts.length).toBeGreaterThan(told));
+    drawing.release();
+    await Promise.all([sending, synced, waiting]);
+    const chat = screenOf(sender.screen.value, 'conversation');
+    expect([chat.error, chat.messages.map((m) => [m.text, m.status])]).toEqual([
+      'network',
+      [
+        ['hello', 'sent'],
+        ['mine', 'failed'],
+      ],
+    ]);
+  });
 
   it('sends replies that quote a message, and deletes one message on this device', async () => {
     const b = await backend();
@@ -965,6 +1055,24 @@ describe('conversations in the app', () => {
     await owner.sync();
     await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
     expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => [m.id, m.text])).toEqual([[failed.id, 'hello']]);
+  });
+
+  // A send that has to fetch tokens first, while the server refuses this
+  // device's logins for a minute: as that request's own refusal, never as
+  // the day's tokens used up.
+  it('says to try again in a minute when the device is refused for now, not that the day is used up', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    b.state.tokensLeft = 0;
+    b.state.tokensRefused = new ApiError(429, 'device_limit', undefined, undefined, 30);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('device-limit');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+    expect(canResend(conv.messages[0]!, Date.now())).toBe(true);
   });
 
   it('says when a link takes no more first messages for now, and from when it does, apart from a busy mailbox', async () => {
