@@ -206,6 +206,53 @@ func TestSessionLimitCapacity(t *testing.T) {
 	}
 }
 
+// GET /invitations reads the directory once, as any logged-in request
+// does, then half a unit for the codes however many there are, and the
+// levels at most every half a minute on an instance; for an account that
+// never made a code, nothing more. It read a strong unit per code.
+func TestInvitationsCapacity(t *testing.T) {
+	h, tb := newDirectoryTables(t)
+	h.makeAdmin(userID)
+	admin := h.account(t, userID)
+	member := h.account(t, userID+1)
+	var first string
+	for i := range 20 {
+		status, out := h.as(t, admin, http.MethodPost, "/invitations", map[string]any{"uses": 2}, true)
+		if status != http.StatusCreated {
+			t.Fatalf("code %d: %d %v", i, status, out)
+		}
+		if i == 0 {
+			first = out["code"].(string)
+		}
+	}
+	if status, out := h.as(t, member, http.MethodPost, "/invitations/redeem", map[string]any{"code": first}, false); status != http.StatusOK {
+		t.Fatalf("redeem: %d %v", status, out)
+	}
+	tb.meter.Reset()
+	status, out := h.as(t, admin, http.MethodGet, "/invitations", nil, false)
+	codes, _ := out["codes"].([]any)
+	if status != http.StatusOK || len(codes) != 20 {
+		t.Fatalf("admin's invitations: %d %v", status, out)
+	}
+	for _, c := range codes {
+		if c := c.(map[string]any); c["code"] == first && c["left"] != float64(1) {
+			t.Fatalf("the redeemed code shows %v left", c["left"])
+		}
+	}
+	if d, _ := tb.cost(t, "GET /invitations, 20 codes"); d.Read > 1.5 {
+		t.Fatalf("listing 20 codes read %v directory units", d.Read)
+	}
+	// A member who made no code: the levels once, then nothing more.
+	h.as(t, member, http.MethodGet, "/invitations", nil, false)
+	if d, _ := tb.cost(t, "GET /invitations, a member without codes, first"); d.Read > 2 {
+		t.Fatalf("read %v directory units", d.Read)
+	}
+	h.as(t, member, http.MethodGet, "/invitations", nil, false)
+	if d, _ := tb.cost(t, "GET /invitations, a member without codes, again"); d.Read != 1 {
+		t.Fatalf("read %v directory units", d.Read)
+	}
+}
+
 // GET /usage reads the directory once, as any logged-in request does (the
 // mailboxes owned are on the account item it reads), and its four counters
 // eventually consistent, half a unit each; asked again within half a

@@ -1585,8 +1585,9 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   spike of a minute or two. `GET /usage` reads no more of the directory
   than any logged-in request, and at most two units of the ephemeral
   table (eventually consistent, and nothing again for half a minute on an
-  instance); it read two and four. `GET /invitations` reads more for a
-  member with invitation codes (about a unit a code). Counting adds about
+  instance); it read two and four. `GET /invitations` reads half a unit
+  more for an account's invitation codes, however many (it read a unit a
+  code), and nothing more for one that never made any. Counting adds about
   150 write units a quarter of an hour per account kept at its limits on
   a few instances, up to about 600 over 100: with the logins' and signed
   requests', filling the ephemeral table's 200 writes a second takes about

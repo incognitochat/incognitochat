@@ -234,6 +234,8 @@ type Server struct {
 	// pause uploads or downloads of attachments (switches.go).
 	Switches    SwitchStore
 	switchCache switchCache
+	// levelsCache keeps the invitation levels for listing (listedLevels).
+	levelsCache levelsCache
 	// paged remembers devices whose inbox needed more than a first read
 	// here lately (listInbox).
 	paged paged

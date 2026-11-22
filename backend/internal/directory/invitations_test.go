@@ -3,8 +3,15 @@ package directory
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
 )
 
@@ -89,6 +96,63 @@ func TestInvitations(t *testing.T) {
 	// Non-members have no allowance at all.
 	if err := s.CreateInvitation(ctx, admin.ID, "cccc-cccc", 1, 0, 5); !errors.Is(err, ErrLimit) {
 		t.Fatalf("non-member with an allowance: %v", err)
+	}
+}
+
+// Listing an account's codes is one eventually consistent query, half a
+// read unit for many of them, whatever their number: each code's entry
+// keeps its uses, which redeeming keeps up. A code made before entries kept
+// them is read from its own item, and redeemed as before.
+func TestInvitationsListCost(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	s := &Store{DB: meter, Table: dynamotest.Table(t, client)}
+	ctx := context.Background()
+	admin := registered(t, s)
+	bob := registered(t, s)
+	for i := range 20 {
+		if err := s.CreateInvitation(ctx, admin.ID, fmt.Sprintf("aaaa-%04d", i), 3, 0, -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Redeem(ctx, bob.ID, "aaaa-0007"); err != nil {
+		t.Fatal(err)
+	}
+	meter.Reset()
+	list, err := s.Invitations(ctx, admin.ID)
+	if err != nil || len(list) != 20 || list[7] != (Invitation{Code: "aaaa-0007", Uses: 3, Left: 2}) || list[8].Left != 3 {
+		t.Fatalf("Invitations = %+v, %v", list, err)
+	}
+	if u := meter.Units(s.Table); u.Read > 0.5 || !slices.Equal(meter.Calls(), []string{"Query " + s.Table}) {
+		t.Fatalf("listing 20 codes read %v in %v", u.Read, meter.Calls())
+	}
+
+	// A code from before: its entry holds nothing but its name.
+	carol := registered(t, s)
+	if err := s.CreateInvitation(ctx, admin.ID, "bbbb-bbbb", 2, 0, -1); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []map[string]types.AttributeValue{key(accountPK(admin.ID), codePrefix+"bbbbbbbb"), key(codePK("bbbbbbbb"), skCode)} {
+		if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: &s.Table, Key: k, UpdateExpression: aws.String("REMOVE u, r, m")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: &s.Table, Key: key(codePK("bbbbbbbb"), skCode),
+		UpdateExpression: aws.String("SET u = :two, r = :two"), ExpressionAttributeValues: attrs{":two": nv(2)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Redeem(ctx, carol.ID, "bbbb-bbbb"); err != nil {
+		t.Fatal(err)
+	}
+	meter.Reset()
+	list, err = s.Invitations(ctx, admin.ID)
+	if err != nil || len(list) != 21 || list[20] != (Invitation{Code: "bbbb-bbbb", Uses: 2, Left: 1}) {
+		t.Fatalf("Invitations = %+v, %v", list, err)
+	}
+	if u := meter.Units(s.Table); u.Read > 1 {
+		t.Fatalf("listing with one older code read %v", u.Read)
 	}
 }
 

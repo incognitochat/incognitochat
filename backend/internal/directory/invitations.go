@@ -119,6 +119,10 @@ func (s *Store) SetLevel(ctx context.Context, level, allowance int) error {
 // ErrConflict if the code is taken, ErrLimit if the member has too few
 // invitations left (or isn't a member any more, or is being deleted), and
 // ErrNotFound if an admin's account is gone, replaced or being deleted.
+//
+// The owner's entry for the code keeps its uses and what is left of them
+// too (u, r), which Redeem keeps up, so listing an account's codes is one
+// query (Invitations); the code's item says so (m).
 func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, uses, ownerLevel, maxAllocated int) error {
 	k := codeKey(code)
 	writes := []types.TransactWriteItem{
@@ -129,10 +133,14 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 				"l": nv(int64(ownerLevel)),
 				"u": nv(int64(uses)),
 				"r": nv(int64(uses)),
+				"m": nv(1),
 			}),
 			ConditionExpression: aws.String("attribute_not_exists(pk)"),
 		}},
-		{Put: &types.Put{TableName: &s.Table, Item: item(accountPK(accountID), codePrefix+k, attrs{})}},
+		{Put: &types.Put{TableName: &s.Table, Item: item(accountPK(accountID), codePrefix+k, attrs{
+			"u": nv(int64(uses)),
+			"r": nv(int64(uses)),
+		})}},
 	}
 	if maxAllocated >= 0 {
 		writes = append(writes, types.TransactWriteItem{Update: &types.Update{
@@ -164,7 +172,12 @@ func (s *Store) CreateInvitation(ctx context.Context, accountID, code string, us
 	return err
 }
 
-// Invitations lists an account's codes (at most 50), in code order.
+// Invitations lists an account's codes (at most 50), in code order, from
+// their entries in the account's partition: one eventually consistent
+// query, half a read unit for 50 of them, as any logged-in request may ask
+// (GET /invitations, at every home screen). A use redeemed in about the
+// last second may not show yet. Codes made before entries kept their uses
+// are read from their own items, eventually consistent too.
 func (s *Store) Invitations(ctx context.Context, accountID string) ([]Invitation, error) {
 	out, err := s.DB.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.Table,
@@ -178,13 +191,22 @@ func (s *Store) Invitations(ctx context.Context, accountID string) ([]Invitation
 	if err != nil || len(out.Items) == 0 {
 		return nil, err
 	}
-	keys := make([]map[string]types.AttributeValue, 0, len(out.Items))
+	list := make([]Invitation, 0, len(out.Items))
+	var keys []map[string]types.AttributeValue
 	for _, it := range out.Items {
 		sk, _ := str(it, "sk")
-		keys = append(keys, key(codePK(strings.TrimPrefix(sk, codePrefix)), skCode))
+		k := strings.TrimPrefix(sk, codePrefix)
+		if _, ok := it["u"]; ok {
+			list = append(list, Invitation{Code: codeFromKey(k), Uses: int(num(it, "u")), Left: int(num(it, "r"))})
+			continue
+		}
+		keys = append(keys, key(codePK(k), skCode))
 	}
 	var items []map[string]types.AttributeValue
-	request := map[string]types.KeysAndAttributes{s.Table: {Keys: keys, ConsistentRead: aws.Bool(true)}}
+	request := map[string]types.KeysAndAttributes{}
+	if len(keys) > 0 {
+		request[s.Table] = types.KeysAndAttributes{Keys: keys}
+	}
 	for attempt := 0; len(request) > 0; attempt++ {
 		if attempt == maxBatchRetries {
 			return nil, errors.New("directory: batch read left keys unprocessed")
@@ -199,7 +221,6 @@ func (s *Store) Invitations(ctx context.Context, accountID string) ([]Invitation
 		items = append(items, got.Responses[s.Table]...)
 		request = got.UnprocessedKeys
 	}
-	list := make([]Invitation, 0, len(items))
 	for _, it := range items {
 		pk, _ := str(it, "pk")
 		list = append(list, Invitation{
@@ -228,6 +249,7 @@ func (s *Store) Redeem(ctx context.Context, accountID, code string) (int, error)
 		return 0, ErrOwnInvitation
 	}
 	level := int(num(it, "l")) + 1
+	_, mirrored := it["m"]
 	writes := []types.TransactWriteItem{
 		{Update: &types.Update{
 			TableName:                 &s.Table,
@@ -249,10 +271,20 @@ func (s *Store) Redeem(ctx context.Context, accountID, code string) (int, error)
 			ConditionExpression: aws.String(live),
 		}},
 	}
+	// The owner's entry keeps what is left too (CreateInvitation).
+	if mirrored {
+		writes = append(writes, types.TransactWriteItem{Update: &types.Update{
+			TableName:                 &s.Table,
+			Key:                       key(accountPK(owner), codePrefix+k),
+			UpdateExpression:          aws.String("SET r = r - :one"),
+			ConditionExpression:       aws.String("attribute_exists(r)"),
+			ExpressionAttributeValues: attrs{":one": nv(1)},
+		}})
+	}
 	reasons, err := s.transactReasons(ctx, writes)
 	if errors.Is(err, ErrConflict) && len(reasons) == len(writes) {
 		switch {
-		case reasons[0] == "ConditionalCheckFailed", reasons[2] == "ConditionalCheckFailed":
+		case reasons[0] == "ConditionalCheckFailed", reasons[2] == "ConditionalCheckFailed", len(reasons) > 3 && reasons[3] == "ConditionalCheckFailed":
 			return 0, ErrNotFound
 		case reasons[1] == "ConditionalCheckFailed":
 			return 0, ErrAlreadyMember
