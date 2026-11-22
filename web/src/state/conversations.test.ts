@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readAccount } from '../account/account';
 import type { TokenIssuer } from '../account/wallet';
 import { i2osp, modPow, os2ip, type IssuerKey } from '../crypto/blindrsa';
@@ -8,7 +8,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { listConversations, listMessages, PAGE } from '../messaging/store';
+import { listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase, putMeta } from '../storage/db';
@@ -874,7 +874,8 @@ describe('conversations in the app', () => {
     await owner.showTab('chats');
     await owner.sync();
     await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
-    for (let i = 0; i < 100 && b.sends.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+    // The receipt goes in the background: waited for, however slow.
+    await vi.waitFor(() => expect(b.sends).toHaveLength(2), { timeout: 30_000, interval: 50 });
     // Ours fails: the server can't be reached.
     const post = b.api.post;
     b.api.post = async (path, body, check) => {
@@ -887,7 +888,13 @@ describe('conversations in the app', () => {
       ['hello', 'read'],
       ['mine', 'failed'],
     ]);
-    // A flood comes in while it's open.
+    // A flood comes in while it's open. The clock stands still from here:
+    // how a flood is dated depends on how fast it comes and on both apps'
+    // clocks (a run dated a minute ahead goes back to the clock, and what
+    // follows it can then show before it: engine.ts, stampIn and shownAt).
+    // Standing still, the order shown is the order taken in, however fast.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    onTestFinished(() => clock.mockRestore());
     for (let i = 0; i < MAX_SHOWN + 10; i++) await sender.sendMessage(`flood ${i}`);
     await owner.sync();
     // Message texts opened while it's drawn again for one more (message IDs are what they're bound to).
@@ -903,8 +910,10 @@ describe('conversations in the app', () => {
       decrypt.mockClear();
       await owner.sync();
       const chat = screenOf(owner.screen.value, 'conversation');
-      // The newest 200, and ours failed first, however old: no more each time.
-      expect(chat.messages).toHaveLength(MAX_SHOWN + 1);
+      // The newest 200 as stored (records: nothing opened), and ours failed
+      // first, however old: no more each time.
+      const stored = (await listRecords(owner.db, chat.id)).filter((m) => !(m.out && m.status === 'failed'));
+      expect(chat.messages.slice(1).map((m) => m.id)).toEqual(stored.slice(-MAX_SHOWN).map((m) => m.id));
       expect([chat.messages[0]!.text, chat.messages[0]!.status, chat.messages.at(-1)!.text, chat.more]).toEqual(['mine', 'failed', `one more ${round}`, true]);
       // What it shows, and the new one as it's taken in: not the flood behind them.
       expect(opened()).toBeLessThanOrEqual(MAX_SHOWN + 1 + 5);
