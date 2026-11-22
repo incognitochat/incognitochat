@@ -6,13 +6,13 @@
 //	A#<account>  A           account: account key (ak), Telegram hash (th)
 //	A#<account>  D#<device>  device: signing key (k)
 //	A#<account>  F#<fingerprint> marks a link signing key the account has (links.go)
-//	A#<account>  I#<code>    marks an invitation code the account made (invitations.go)
+//	A#<account>  I#<code>    marks an invitation code the account made, with its uses (u) and uses left (r) if made since they're kept here (invitations.go)
 //	A#<account>  K#<link>    marks a link the account owns (links.go)
 //	A#<account>  L           older accounts' signed device list: bytes (b), signature (s), sequence (q); no longer stored
 //	A#<account>  M#<mailbox> marks a mailbox the account owns (mailboxes.go)
 //	L#<link>     L           a link: owner (a), signing key (k), encryption keys (ek), intro mailbox (m); just its key once it went (links.go)
 //	F#<fingerprint> F        a link signing key: the account that has it (a), none once it ended (links.go)
-//	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r)
+//	I#<code>     I           a code: owner (o), owner's level (l), uses (u), uses left (r), whether its owner's entry keeps them too (m)
 //	S#levels     S           invitation allowance per level (m), version (v)
 //	S#switches   S           the operator's emergency switches (switches.go)
 //	S#use        S           the newest month a login recorded its month of use in (m) (expiry.go)
@@ -182,6 +182,7 @@ type Device struct {
 	Granted      int    // invitations granted on top of the level's allowance
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
+	Mailboxes    int    // pool and conversation mailboxes owned (not the link's intro mailbox), as counted against the most allowed
 	Notices      bool   // Telegram notices are set up and not turned off
 	// NoticesRefused: notices are off because Telegram refused one (the
 	// user blocked the bot, say), not set up again since.
@@ -1023,6 +1024,7 @@ func accountState(acct map[string]types.AttributeValue) Device {
 		Granted:        int(num(acct, "ig")),
 		Allocated:      int(num(acct, "ia")),
 		Links:          int(num(acct, "lc")),
+		Mailboxes:      int(num(acct, "mc")),
 		Notices:        chat && !off,
 		NoticesRefused: num(acct, "no") == noticesRefused,
 		NoticesLeft:    off && (chat || language || last),

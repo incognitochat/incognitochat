@@ -34,7 +34,7 @@ import {
 import { checkSwitches, type Switch, type Switches } from '../account/switches';
 import { checkAccountInfo, createLink, listLinks, newKeyToTell, replaceLink, revokeLink, toldNewKey, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
-import { budgetLeft, countTokens, rememberLeft, type TokenIssuer, type TokenKind } from '../account/wallet';
+import { budgetLeft, countTokens, lowerLeft, type TokenIssuer, type TokenKind } from '../account/wallet';
 import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
@@ -76,7 +76,8 @@ import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { findSourceUrl } from '../platform/source';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
-import type { SyncEvent } from '../sync/locks';
+import { withLock, type SyncEvent } from '../sync/locks';
+import { createPace } from '../sync/pace';
 
 /** Whether the device says it's offline (its saying online proves nothing). */
 const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -150,8 +151,8 @@ function stepWait(err: unknown, pause: number): number | null {
 }
 
 /**
- * The server refused this device's login or signed request for now
- * (deviceLimit): until the minute ends (device-limit, "Try again in a
+ * The server refused this device's login, signed request or other
+ * logged-in request for now (deviceLimit): until the minute ends (device-limit, "Try again in a
  * minute"), or for longer, its quarter of an hour or its day being used up
  * (device-limit-later, "Try again later").
  */
@@ -261,13 +262,15 @@ function limitError(kind: LimitError['kind'], err: ApiError): LimitError {
 }
 
 /**
- * Whether the server refused this device's login or signed request for now
- * (429 device_limit): too many from this device in a minute, a quarter of
- * an hour or the day, whatever the request was. A request that had to log
- * in first passes the login's refusal on as its own, so this is never the
- * route's own limit (a day's tokens or mailboxes, say). Which DeviceLimit
- * goes by how long the server asked to wait (Retry-After): a minute or
- * less, or longer (or unsaid).
+ * Whether the server refused this device's login, signed request or any
+ * logged-in request for now (429 device_limit): too many from this device
+ * in a minute, a quarter of an hour or the day, whatever the request was.
+ * A request that had to log in first passes the login's refusal on as its
+ * own, so this is never the route's own limit (a day's tokens or
+ * mailboxes, say). Which DeviceLimit goes by how long the server asked to
+ * wait (Retry-After): a minute or less, or longer (or unsaid). Background
+ * requests (the inbox) wait it out as any 429 (net/backoff), as long as
+ * Retry-After says, up to their longest wait.
  */
 function deviceLimit(err: unknown): DeviceLimit | null {
   if (!(err instanceof ApiError && err.code === 'device_limit')) return null;
@@ -348,6 +351,8 @@ export type Screen =
       tab: 'chats' | 'links';
       conversations: ConversationView[];
       offline: boolean;
+      /** Offline because the server refused home's own requests for now (deviceLimit): said in place of "offline". */
+      limited: DeviceLimit | null;
       account: AccountInfo | null;
       invitations: InvitationsInfo | null;
       links: LinkView[];
@@ -416,6 +421,8 @@ export type Screen =
   | { kind: 'confirm-reset'; reason: SignedOutReason }
   | { kind: 'error'; error: ErrorKind };
 
+type AdminScreen = Extract<Screen, { kind: 'admin' }>;
+
 export interface Deps {
   config: Config | null;
   api: Api | null;
@@ -447,6 +454,14 @@ const STUCK_SLACK_MS = 1_000;
  * in a row doubles it, up to this.
  */
 const SYNC_BACKOFF_MAX_MS = 5 * 60_000;
+/**
+ * How many pages of the inbox a sync the app asks for by itself reads (a
+ * push, the poll): one, of up to 50 messages, and its confirmation, so a
+ * flood of messages costs the device at most 2 requests a sync
+ * (sync/pace.ts). One that stops with more waiting asks for another, at the
+ * device's pace; what the user does reads as many as a sync does.
+ */
+const BACKGROUND_PAGES = 1;
 
 /** A link of this account, with its shareable URL. */
 export interface LinkView extends LinkRecord {
@@ -509,14 +524,23 @@ export function createApp(deps: Deps) {
   let stopBackground = (): void => {};
   /** Holds back the syncs the app asks for by itself (backgroundSync) while the server is in trouble. */
   const syncBackoff = createBackoff({ baseMs: POLL_MS, maxMs: SYNC_BACKOFF_MAX_MS });
-  /** The one sync waiting for the backoff to end, for all asked for meanwhile. */
+  /** The one sync waiting for the backoff or the device's pace to allow it, for all asked for meanwhile. */
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * What the syncs the app asks for by itself, not run yet, are for: what
+   * came after this (Unix ms, the latest asked); null if none waits.
+   */
+  let wantedSince: number | null = null;
+  /** The device's syncs as this copy knows them (sync/pace.ts), and whether this copy is running its paced one. */
+  const syncPace = createPace();
+  let pacing = false;
   /** Stops messaging and everything started for it: the poll, the socket, a sync waiting out a server's pause. */
   function stopMessaging(): void {
     stopWatchingStuck();
     stopBackground();
     clearTimeout(backoffTimer);
     backoffTimer = undefined;
+    wantedSince = null;
     messaging?.stop();
     messaging = null;
   }
@@ -816,7 +840,7 @@ export function createApp(deps: Deps) {
     // Without a usable issuer key the app still works, but can't send.
     if (!(await createEngine())) return;
     if (online) {
-      await sync();
+      await syncNow();
       // The server no longer takes this device (its account being deleted,
       // say): nothing more starts, no poll, socket or logins.
       if (signedOut) return;
@@ -838,28 +862,29 @@ export function createApp(deps: Deps) {
             // The server is reachable again: no more waiting.
             onOpen: () => {
               endWait();
-              void sync();
+              void syncNow();
             },
           })
         : null;
     // Being shown is the user's doing: it syncs, backoff or not.
     const visibility = () => {
       socket?.setVisible(shown());
-      if (shown()) void sync();
+      if (shown()) void syncNow();
     };
     socket?.setVisible(shown());
     socket?.start();
-    // With a socket open, polling is only a safety net.
+    // With a socket open, polling is only a safety net. A poll is answered
+    // by a sync in the last half of its interval, in any copy.
     let ticks = 0;
     const poll = setInterval(() => {
       ticks++;
-      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync();
+      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync(Date.now() - POLL_MS / 2);
     }, POLL_MS);
     document.addEventListener('visibilitychange', visibility);
     // Back online: whatever the backoff, sync now.
     const backOnline = () => {
       endWait();
-      if (shown()) void sync();
+      if (shown()) void syncNow();
     };
     const win = typeof window === 'undefined' ? null : window;
     win?.addEventListener('online', backOnline);
@@ -884,21 +909,42 @@ export function createApp(deps: Deps) {
     };
   }
 
-  /** The sync under way, and whether another was asked for meanwhile: pushes, polls and showing the app ask often, so one runs and one waits, no more. */
+  /**
+   * The sync under way, and whether another was asked for meanwhile (and
+   * how many pages it may read): one runs and one waits, no more.
+   */
   let syncing: Promise<void> | null = null;
   let syncAgain = false;
+  let againPages = 0;
 
-  /** Fetches new messages; refreshes the screen if any arrived. */
-  function sync(): Promise<void> {
+  /**
+   * A sync the user's doing asks for (opening the app, showing it, coming
+   * back online, the push socket opening): at once, whatever the device's
+   * pace, and it answers the syncs asked for before it, in every copy
+   * (sync/pace.ts).
+   */
+  function syncNow(): Promise<void> {
+    const at = Date.now();
+    syncPace.started(at, false);
+    deps.broadcast({ type: 'sync-started', at, paced: false });
+    return sync(Infinity);
+  }
+
+  /** Fetches new messages, up to `pages` pages (Infinity: as many as a sync reads); refreshes the screen if any arrived. */
+  function sync(pages: number): Promise<void> {
     if (syncing) {
       syncAgain = true;
+      againPages = Math.max(againPages, pages);
       return syncing;
     }
     syncing = (async () => {
       try {
+        let next = pages;
         do {
           syncAgain = false;
-          await syncOnce();
+          againPages = 0;
+          await syncOnce(next);
+          next = againPages;
           // Not again at once after a failure: when the wait is over.
         } while (syncAgain && syncBackoff.remaining() === 0);
         if (syncAgain) {
@@ -913,41 +959,85 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * A sync the app asks for by itself (the poll, a push, the end of a
-   * pause): while the server is in trouble (syncBackoff), it waits, and all
-   * asked for meanwhile become one when the wait ends.
+   * A sync the app asks for by itself (a push, the poll, a chat free again,
+   * the end of a pause), for what came after `since`: paced on the whole
+   * device (sync/pace.ts), so that pushes, however many messages come and
+   * however many copies are open, make at most one every SYNC_GAP_MS (a
+   * flood, one every SYNC_REFILL_MS once it has lasted), and one another
+   * copy ran since answers it; and while the server is in trouble
+   * (syncBackoff), it waits. All asked for meanwhile become one.
    */
-  function backgroundSync(): void {
-    const wait = syncBackoff.remaining();
-    if (wait === 0) {
-      void sync();
-      return;
-    }
-    // For when the wait ends now, which may be sooner than before (it
-    // started over).
+  function backgroundSync(since = Date.now()): void {
+    wantedSince = Math.max(wantedSince ?? since, since);
+    armPace(syncBackoff.remaining());
+  }
+
+  function armPace(wait: number): void {
     clearTimeout(backoffTimer);
     backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
-      backgroundSync();
+      void runPaced();
     }, wait);
   }
 
-  /** Ends the wait. Returns whether a sync was waiting for it, which is then up to the caller. */
-  function endWait(): boolean {
-    syncBackoff.succeeded();
-    if (backoffTimer === undefined) return false;
-    clearTimeout(backoffTimer);
-    backoffTimer = undefined;
-    return true;
+  /**
+   * Runs the sync asked for by itself once the device's pace allows it, or
+   * drops it if a sync started since (in any copy). It decides and syncs
+   * holding a lock across copies, and tells the other copies when its sync
+   * started; so a copy that decides next knows of it, and waits out the
+   * rest of the gap (without the lock).
+   */
+  async function runPaced(): Promise<void> {
+    if (pacing || wantedSince === null) return;
+    pacing = true;
+    let after: { wait: number } | { partway: boolean } = { wait: -1 };
+    try {
+      after = await withLock('sync-pace', async () => {
+        for (;;) {
+          const since = wantedSince;
+          if (since === null) return { wait: -1 };
+          // A sync started after it was asked for, here or in another
+          // copy: it took in what was asked for then (and the other copy
+          // tells this one of it).
+          if (syncPace.last(Date.now()) > since) {
+            if (wantedSince === since) wantedSince = null;
+            continue;
+          }
+          // The server in trouble, or the device's pace: waited out
+          // without the lock.
+          const wait = Math.max(syncBackoff.remaining(), syncPace.wait(Date.now()));
+          if (wait > 0) return { wait };
+          break;
+        }
+        const at = Date.now();
+        syncPace.started(at, true);
+        deps.broadcast({ type: 'sync-started', at, paced: true });
+        // Starting now: it answers everything asked so far.
+        wantedSince = null;
+        await sync(BACKGROUND_PAGES);
+        return { partway: messaging?.partway() ?? false };
+      });
+    } finally {
+      pacing = false;
+    }
+    // More waits than it read: another, at the pace. Or asked meanwhile.
+    if ('partway' in after && after.partway) backgroundSync();
+    else if (wantedSince !== null) armPace('wait' in after && after.wait > 0 ? after.wait : 0);
   }
 
-  async function syncOnce(): Promise<void> {
+  /** Ends the wait for a server in trouble: a sync asked for meanwhile goes at the device's pace. */
+  function endWait(): void {
+    syncBackoff.succeeded();
+    if (wantedSince !== null) armPace(0);
+  }
+
+  async function syncOnce(pages: number): Promise<void> {
     if (!messaging) return;
     let received = 0;
     try {
-      received = await messaging.sync();
-      // Through: what was waiting runs now.
-      if (endWait()) syncAgain = true;
+      received = await messaging.sync({ pages });
+      // Through: what was waiting goes now (at the device's pace).
+      endWait();
     } catch (err) {
       // What it stored before failing is still shown.
       if (err instanceof SyncFailed) received = err.received;
@@ -1614,9 +1704,13 @@ export function createApp(deps: Deps) {
       }
       return;
     }
-    // What the server will still sign today, for the low-balance notice too.
-    await rememberLeft(deps.db, 'send', info.send.limit - info.send.used);
-    await rememberLeft(deps.db, 'media', info.media.limit - info.media.used);
+    // What the server will still sign today, for the low-balance notice
+    // too: never more than it said before today (a batch's exact answer),
+    // since this one may miss what was counted in the last half a minute.
+    const serverDay = Math.floor(info.resetsAt / 86_400) - 1;
+    const sendLeft = await lowerLeft(deps.db, 'send', info.send.limit - info.send.used, serverDay);
+    const mediaLeft = await lowerLeft(deps.db, 'media', info.media.limit - info.media.used, serverDay);
+    info = { ...info, send: { ...info.send, used: info.send.limit - sendLeft }, media: { ...info.media, used: info.media.limit - mediaLeft } };
     void refreshBudget();
     const held = {
       sendTokens: await tokensHeld('send'),
@@ -2149,18 +2243,29 @@ export function createApp(deps: Deps) {
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
+    let notice = options.notice ?? null;
+    let limited: DeviceLimit | null = null;
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
-      try {
-        [account, invitations] = await Promise.all([
-          session!.call('GET', '/account', undefined, checkAccountInfo),
-          session!.call('GET', '/invitations', undefined, checkInvitations),
-        ]);
-      } catch (err) {
-        if (handleGone(err)) return;
+      // Apart: the invitations failing alone leaves the account shown, and
+      // home online, without its invitations section.
+      const [a, i] = await Promise.allSettled([
+        session!.call('GET', '/account', undefined, checkAccountInfo),
+        session!.call('GET', '/invitations', undefined, checkInvitations),
+      ]);
+      for (const r of [a, i]) if (r.status === 'rejected' && handleGone(r.reason)) return;
+      if (a.status === 'fulfilled') account = a.value;
+      else {
         offline = true;
+        // Refused for now (any of the device's requests are, past its
+        // limit): said as the notice, unless what brought the user here
+        // says something, and then in place of "offline".
+        limited = deviceLimit(a.reason);
+        notice ??= limited;
       }
+      if (i.status === 'fulfilled') invitations = i.value;
+      else notice ??= deviceLimit(i.reason);
     }
     if (account?.deleting) return deletingOnServer(account.expired);
     if (account?.cleanup) void cleanUpReplaced();
@@ -2173,11 +2278,12 @@ export function createApp(deps: Deps) {
       tab,
       conversations: await conversations(),
       offline,
+      limited,
       account,
       invitations,
       links,
       busy: false,
-      notice: withNewKey(options.notice ?? null, await newKeyToTell(db)),
+      notice: withNewKey(notice, await newKeyToTell(db)),
       // Offered while the bot may not write yet, and after Telegram refused
       // a notice: then only the user's tap sets them up again.
       askNotices: noticeLaunch && !!account && !account.notices && (!writeAllowed || account.noticesRefused),
@@ -2261,17 +2367,31 @@ export function createApp(deps: Deps) {
     return showHome({ notice });
   }
 
-  async function openInvitations(notice: InvitationsNotice | null = null, created: string | null = null): Promise<void> {
+  /**
+   * The Invitations screen, read afresh. made: the code just made (and its
+   * uses), shown even if the list can't be read again now, so it isn't
+   * made twice.
+   */
+  async function openInvitations(notice: InvitationsNotice | null = null, made: { code: string; uses: number } | null = null): Promise<void> {
     const { config } = deps;
+    const url = (code: string) => invitationUrl(config!.botUsername, config!.appName, code);
+    const created = made?.code ?? null;
     let info: InvitationsInfo;
     try {
       info = await session!.call('GET', '/invitations', undefined, checkInvitations);
     } catch (err) {
       if (handleGone(err)) return;
+      const current = screen.value;
+      if (made && current.kind === 'invitations') {
+        const left = current.info.unlimited ? current.info.maxUses : Math.max(0, current.info.maxUses - made.uses);
+        const codes = [...current.info.codes, { code: made.code, uses: made.uses, left: made.uses, url: url(made.code) }].sort((a, b) => a.code.localeCompare(b.code));
+        screen.value = { ...current, info: { ...current.info, codes, maxUses: left, remaining: current.info.unlimited ? current.info.remaining : left }, busy: false, notice, created };
+        return;
+      }
       // A login refused for now refuses this reload too (the session waits).
       return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
-    const codes = info.codes.map((c) => ({ ...c, url: invitationUrl(config!.botUsername, config!.appName, c.code) }));
+    const codes = info.codes.map((c) => ({ ...c, url: url(c.code) }));
     backButton(true);
     screen.value = { kind: 'invitations', info: { ...info, codes }, busy: false, notice, created };
   }
@@ -2282,7 +2402,7 @@ export function createApp(deps: Deps) {
     screen.value = { ...current, busy: true, notice: null };
     try {
       const code = await session!.call('POST', '/invitations', { uses }, checkCreated, { sign: true });
-      return openInvitations('created', code);
+      return openInvitations('created', { code, uses });
     } catch (err) {
       if (handleGone(err)) return;
       const notice: InvitationsNotice =
@@ -2293,12 +2413,24 @@ export function createApp(deps: Deps) {
     }
   }
 
-  async function openAdmin(notice: AdminNotice | null = null): Promise<void> {
+  /**
+   * The admin screen, read afresh. done: what a change just done makes of
+   * the screen as it was, for when it can't be read again now.
+   */
+  async function openAdmin(notice: AdminNotice | null = null, done: (s: AdminScreen) => AdminScreen = (s) => s): Promise<void> {
     let levels: LevelAllowance[];
     try {
       levels = await session!.call('GET', '/admin/levels', undefined, checkLevels);
     } catch (err) {
       if (handleGone(err)) return;
+      // Done, but the screen can't be read again now: it stays, with the
+      // change in it, saying it was done, so it isn't done twice (a grant
+      // would be).
+      const current = screen.value;
+      if ((notice === 'saved' || notice === 'granted' || notice === 'switched') && current.kind === 'admin') {
+        screen.value = done({ ...current, busy: false, notice });
+        return;
+      }
       // A login refused for now refuses this reload too (the session waits).
       return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
@@ -2319,24 +2451,43 @@ export function createApp(deps: Deps) {
    * follows within about half a minute.
    */
   function setSwitch(which: Switch, paused: boolean): Promise<void> {
-    return adminAction(() => session!.call('PUT', '/admin/switches', { switch: which, paused }, checkSwitches, { sign: true }), 'switched');
+    return adminAction(
+      () => session!.call('PUT', '/admin/switches', { switch: which, paused }, checkSwitches, { sign: true }),
+      'switched',
+      (s, switches) => ({ ...s, switches }),
+    );
   }
 
-  /** Runs an admin change, then shows the admin screen again with its outcome. */
-  async function adminAction(action: () => Promise<unknown>, done: AdminNotice): Promise<void> {
+  /** Sets a level's invitation allowance. */
+  function setLevel(level: number, invitations: number): Promise<void> {
+    return adminAction(
+      () => session!.call('PUT', '/admin/levels', { level, invitations }, checkObject, { sign: true }),
+      'saved',
+      (s) => ({ ...s, levels: [...s.levels.filter((l) => l.level !== level), { level, invitations }].sort((a, b) => a.level - b.level) }),
+    );
+  }
+
+  /**
+   * Runs an admin change, then shows the admin screen again with its
+   * outcome. apply: what the change makes of the screen, if it can't be
+   * read again now.
+   */
+  async function adminAction<T>(action: () => Promise<T>, done: AdminNotice, apply: (s: AdminScreen, result: T) => AdminScreen = (s) => s): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'admin' || current.busy) return;
     screen.value = { ...current, busy: true, notice: null };
     let notice: AdminNotice = done;
+    let changed: (s: AdminScreen) => AdminScreen = (s) => s;
     try {
-      await action();
+      const result = await action();
+      changed = (s) => apply(s, result);
     } catch (err) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'not_member') notice = 'not-member';
       else if (err instanceof ApiError && err.code === 'not_found') notice = 'not-found';
       else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
-    return openAdmin(notice);
+    return openAdmin(notice, changed);
   }
 
   /** Grants a member extra invitations, naming them by one of their links. */
@@ -2660,7 +2811,16 @@ export function createApp(deps: Deps) {
       deps.bridge ? openPopup(deps.bridge, params) : Promise.resolve(null),
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
     showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
-    sync,
+    sync: syncNow,
+    /**
+     * Another copy started a sync at `at` (paced: one the app asked for by
+     * itself). One said to start later than a second from now (sent before
+     * the clock was set back) is ignored: it would take every sync asked
+     * for until then as answered.
+     */
+    syncStarted: (at: number, paced: boolean) => {
+      if (at <= Date.now() + 1_000) syncPace.started(at, paced);
+    },
     refresh,
     /** A tap on a chat. */
     openConversation: (id: string) => openConversation(id),
@@ -2678,8 +2838,7 @@ export function createApp(deps: Deps) {
     invitations: () => openInvitations(),
     createInvitation,
     admin: () => openAdmin(),
-    setLevel: (level: number, invitations: number) =>
-      adminAction(() => session!.call('PUT', '/admin/levels', { level, invitations }, checkObject, { sign: true }), 'saved'),
+    setLevel,
     grant,
     setSwitch,
   };

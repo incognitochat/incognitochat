@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/invitations"
 )
@@ -70,9 +72,14 @@ func TestInvitationChain(t *testing.T) {
 		t.Fatalf("admin codes: %v", codes)
 	}
 
-	// Members spend their level's allowance; admins set it.
+	// Members spend their level's allowance; admins set it. Listing keeps
+	// the levels for half a minute, but a change on this server shows at
+	// once.
 	status, out = h.as(t, alice, http.MethodPost, "/invitations", map[string]any{"uses": 1}, true)
 	wantError(t, status, out, http.StatusConflict, "no_invitations_left")
+	if _, out := h.as(t, alice, http.MethodGet, "/invitations", nil, false); out["remaining"] != float64(0) {
+		t.Fatalf("alice invitations before her level has any: %v", out)
+	}
 	if status, out := h.as(t, admin, http.MethodPut, "/admin/levels", map[string]any{"level": 1, "invitations": 2}, true); status != http.StatusOK {
 		t.Fatalf("set level: %d %v", status, out)
 	}
@@ -85,8 +92,14 @@ func TestInvitationChain(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("alice code: %d %v", status, out)
 	}
-	if status, out := h.as(t, bob, http.MethodPost, "/invitations/redeem", map[string]any{"code": out["code"]}, false); out["level"] != float64(2) {
+	aliceCode := out["code"]
+	if status, out := h.as(t, bob, http.MethodPost, "/invitations/redeem", map[string]any{"code": aliceCode}, false); out["level"] != float64(2) {
 		t.Fatalf("bob redeem: %d %v", status, out)
+	}
+	// A member sees their own codes, and how much of each is used.
+	_, out = h.as(t, alice, http.MethodGet, "/invitations", nil, false)
+	if codes, _ := out["codes"].([]any); len(codes) != 1 || codes[0].(map[string]any)["code"] != aliceCode || codes[0].(map[string]any)["uses"] != float64(2) || codes[0].(map[string]any)["left"] != float64(1) {
+		t.Fatalf("alice's codes: %v", out["codes"])
 	}
 
 	// Admins grant extra invitations to a member through one of their links.
@@ -104,6 +117,19 @@ func TestInvitationChain(t *testing.T) {
 	wantError(t, status, out, http.StatusNotFound, "not_found")
 	if _, out := h.as(t, admin, http.MethodGet, "/admin/levels", nil, false); len(out["levels"].([]any)) != 1 {
 		t.Fatalf("levels: %v", out)
+	}
+
+	// A change made through another server shows here within half a
+	// minute: 2 + 3 granted - 2 used, then 5 + 3 - 2.
+	if err := h.dir.SetLevel(context.Background(), 1, 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, out := h.as(t, alice, http.MethodGet, "/invitations", nil, false); out["remaining"] != float64(3) {
+		t.Fatalf("within half a minute: %v", out)
+	}
+	h.now = h.now.Add(levelsFresh + time.Second)
+	if _, out := h.as(t, alice, http.MethodGet, "/invitations", nil, false); out["remaining"] != float64(6) {
+		t.Fatalf("after half a minute: %v", out)
 	}
 }
 

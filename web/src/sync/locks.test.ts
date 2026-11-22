@@ -159,9 +159,12 @@ describe('openChannel', () => {
     const b = openChannel((e) => received.push(e));
     expect(a && b).toBeTruthy();
     a!.send({ type: 'keys-changed' });
+    a!.send({ type: 'sync-started', at: 1_800_000_000_000, paced: true });
     new BroadcastChannel('incognitochat:sync').postMessage({ type: 'evil', payload: 'x' });
+    new BroadcastChannel('incognitochat:sync').postMessage({ type: 'sync-started', at: 'soon', paced: true });
+    new BroadcastChannel('incognitochat:sync').postMessage({ type: 'sync-started', at: 1, paced: 'yes' });
     await sleep(20);
-    expect(received).toEqual([{ type: 'keys-changed' }]);
+    expect(received).toEqual([{ type: 'keys-changed' }, { type: 'sync-started', at: 1_800_000_000_000, paced: true }]);
     a!.close();
     b!.close();
   });

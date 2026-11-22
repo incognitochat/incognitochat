@@ -1858,10 +1858,11 @@ export function createMessaging(deps: MessagingDeps) {
    * confirmed later; once MAX_PENDING wait, the walk stops, so nothing is
    * read again and again before it's confirmed. Items that can't be taken
    * in yet (NotYet) stay unconfirmed, and the walk goes past them. With
-   * `until` (Unix ms, now()'s clock), no page is fetched from then on: the
-   * next sync carries on.
+   * `until` (Unix ms, now()'s clock), no page is fetched from then on; with
+   * `pages`, no more than that many pages: the next sync carries on
+   * (partway).
    */
-  function sync(options: { until?: number } = {}): Promise<number> {
+  function sync(options: { until?: number; pages?: number } = {}): Promise<number> {
     return withLock('messaging-sync', async () => {
       let received = 0;
       unresolved = new Map();
@@ -1876,7 +1877,8 @@ export function createMessaging(deps: MessagingDeps) {
         // Resumed partway: this pass goes round to here.
         if (!w.round) w.origin = w.after;
         walk = w;
-        for (let page = 0; page < MAX_INBOX_PAGES && pending.size < MAX_PENDING; page++) {
+        const pages = Math.min(MAX_INBOX_PAGES, options.pages ?? MAX_INBOX_PAGES);
+        for (let page = 0; page < pages && pending.size < MAX_PENDING; page++) {
           if (options.until !== undefined && now() >= options.until) break;
           const path: string = w.after ? `/inbox?after=${w.after}` : '/inbox';
           let listed: ReturnType<typeof checkInbox>;
@@ -2795,7 +2797,17 @@ export function createMessaging(deps: MessagingDeps) {
     findKey.clear();
   }
 
-  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
+  /**
+   * Whether the last sync stopped partway through the inbox (its pages, or
+   * its time, ran out), so the next carries on now. Not while fetching is
+   * paused (rate_limited, daily_limit): the end of the pause carries on
+   * (onResume).
+   */
+  function partway(): boolean {
+    return walk !== null && !paused();
+  }
+
+  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

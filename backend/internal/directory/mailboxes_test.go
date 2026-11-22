@@ -55,14 +55,15 @@ func TestMailboxes(t *testing.T) {
 		t.Fatalf("unknown mailbox: %v", err)
 	}
 	// The discard freed a place.
-	if n, err := s.MailboxCount(ctx, owner.ID, now); err != nil || n != len(pool)-1 {
-		t.Fatalf("MailboxCount after discard = %d, %v", n, err)
+	if d, err := s.Device(ctx, owner.ID, owner.DeviceID, now); err != nil || d.Mailboxes != len(pool)-1 {
+		t.Fatalf("mailboxes after discard = %d, %v", d.Mailboxes, err)
 	}
 	if err := s.CreateMailboxes(ctx, owner.ID, []string{ids.New(), ids.New()}, 4); err != nil {
 		t.Fatalf("after discard: %v", err)
 	}
-	if n, err := s.MailboxCount(ctx, owner.ID, now); err != nil || n != len(pool)+1 {
-		t.Fatalf("MailboxCount = %d, %v", n, err)
+	// Every logged-in request reads it with the device (GET /usage shows it).
+	if d, err := s.Device(ctx, owner.ID, owner.DeviceID, now); err != nil || d.Mailboxes != len(pool)+1 {
+		t.Fatalf("Device = %+v, %v", d, err)
 	}
 
 	devices, err := s.Devices(ctx, owner.ID, now)

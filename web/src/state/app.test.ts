@@ -8,7 +8,8 @@ import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db'
 import { addMessage, deleteMessage, getConversation, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
-import type { TokenIssuer } from '../account/wallet';
+import { SYNC_GAP_MS } from '../sync/pace';
+import { rememberLeft, type TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
@@ -132,6 +133,8 @@ function fakeServer(
     invitations?: Outcome[];
     admin?: Outcome[];
     usage?: Outcome[];
+    /** For GET /invitations and GET /admin/levels. */
+    reads?: Outcome[];
     elsewhere?: boolean;
   } = {},
 ) {
@@ -172,6 +175,8 @@ function fakeServer(
     media: null as ApiError | NetworkError | null,
     // GET /media/{id} of these uploads fails so, whatever the above say.
     mediaRefused: new Map<string, ApiError>(),
+    // When GET /usage says the day ends (Unix seconds).
+    resetsAt: 1_800_028_800,
   };
   let nextCode = 0;
   const take = (queue: Outcome[] | undefined) => {
@@ -258,9 +263,10 @@ function fakeServer(
       if (method === 'GET' && path === '/usage') {
         take(outcomes.usage);
         const item = (used: number, limit: number) => ({ used, limit });
-        return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
+        return check({ resetsAt: state.resetsAt, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
       }
       if (method === 'GET' && path === '/invitations') {
+        take(outcomes.reads);
         const maxUses = state.admin ? 1000 : state.member ? 2 : 0;
         return check({
           inviteOnly: state.inviteOnly,
@@ -289,7 +295,10 @@ function fakeServer(
         state.member = true;
         return check({ level: 1 });
       }
-      if (path === '/admin/levels' && method === 'GET') return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
+      if (path === '/admin/levels' && method === 'GET') {
+        take(outcomes.reads);
+        return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
+      }
       if (path === '/admin/levels' && method === 'PUT') {
         needsSignature();
         take(outcomes.admin);
@@ -946,12 +955,13 @@ describe('syncing', () => {
       expect(inbox()).toBe(before + 1);
 
       // The server is fine again: once a sync gets through, the poll is
-      // back to every 20 seconds.
+      // back to every 20 seconds (a poll within 10 seconds of a sync is
+      // answered by it).
       trouble.length = 0;
       show({ is_visible: true });
       await vi.advanceTimersByTimeAsync(0);
       const fine = inbox();
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(80_000);
       expect(inbox() - fine).toBeGreaterThanOrEqual(3);
       await app.home();
     } finally {
@@ -1029,7 +1039,7 @@ describe('syncing', () => {
       expect(inbox()).toBe(before + 1);
 
       // No answer while the device says it's offline doesn't count: the
-      // next push syncs at once.
+      // next push syncs as soon as the device's pace allows.
       trouble.length = 0;
       listeners.get('online')!();
       await vi.advanceTimersByTimeAsync(0);
@@ -1037,14 +1047,16 @@ describe('syncing', () => {
       trouble.push(new NetworkError('request failed'), new NetworkError('request failed'));
       before = inbox();
       socket.hint();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(SYNC_GAP_MS);
+      expect(inbox()).toBe(before + 1);
       socket.hint();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2 * SYNC_GAP_MS);
       expect(inbox()).toBe(before + 2);
       online = true;
 
       // A sync asked for while one is failing doesn't run right after it,
       // but when the wait is over.
+      await vi.advanceTimersByTimeAsync(2 * SYNC_GAP_MS);
       trouble.push(unavailable(), unavailable());
       let release!: () => void;
       server.state.inboxGate = new Promise((resolve) => (release = resolve));
@@ -1064,6 +1076,250 @@ describe('syncing', () => {
       Reflect.deleteProperty(navigator, 'onLine');
     }
   });
+});
+
+describe('the syncs the app asks for by itself', () => {
+  // The server's limits on a device's requests with a session
+  // (backend/internal/api/devices.go): 180 a minute, 1,200 a quarter of an
+  // hour. Pushes, however many, and however many copies are open, must
+  // stay well under half of each, so nobody writing to someone can use
+  // them up.
+  const PER_MINUTE = 180;
+  const PER_QUARTER = 1200;
+  // What storage does between fake ticks (it runs on real ones: Node's
+  // setImmediate, which fake timers leave alone).
+  const { setImmediate: immediate } = globalThis as unknown as { setImmediate: (fn: () => void) => void };
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise<void>((resolve) => immediate(resolve));
+  };
+  /** Moves the fake clock on by ms, at most a second at a time, letting storage work. */
+  const pass = async (ms: number) => {
+    for (let left = ms; left > 0; left -= 1000) {
+      await vi.advanceTimersByTimeAsync(Math.min(1000, left));
+      await settle();
+    }
+  };
+
+  /**
+   * A device with `count` copies of the app open, each with its push
+   * socket, on fake timers from the start of a quarter of an hour, and its
+   * inbox as the server keeps it until confirmed, with its limit on
+   * fetches that read something (30 a minute, InboxUnitsPerMinute).
+   * fetchMs: how long each fetch takes; tellMs: how late the copies hear
+   * of each other (the broadcast channel); refuse: an answer instead for
+   * the nth fetch that would read something (1 is the first). The caller
+   * undoes the fake timers and the stubs (done).
+   */
+  async function device(count: number, options: { fetchMs?: number; tellMs?: number; refuse?: (n: number) => ApiError | null } = {}) {
+    const base = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(base.api, { issuer });
+    const waiting = new Map<string, number>(); // item ID -> when delivered
+    const waited: number[] = []; // how long each confirmed item waited
+    const reads = new Map<number, number>();
+    const requests: number[] = []; // when each request with a session went
+    const fetches: number[] = []; // when each fetch of the inbox started
+    const events: SyncEvent[] = [];
+    let read = 0;
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      async request(method, path, init, check) {
+        if (init.headers?.['X-Session']) requests.push(Date.now());
+        if (method === 'GET' && path.startsWith('/inbox')) {
+          fetches.push(Date.now());
+          if (options.fetchMs) await new Promise((resolve) => setTimeout(resolve, options.fetchMs));
+          if (waiting.size === 0) return check({ items: [], more: false });
+          const refused = options.refuse?.(++read);
+          if (refused) throw refused;
+          const minute = Math.floor(Date.now() / 60_000);
+          if ((reads.get(minute) ?? 0) >= 30) throw new ApiError(429, 'rate_limited');
+          reads.set(minute, (reads.get(minute) ?? 0) + 1);
+          const ids = [...waiting.keys()].slice(0, 50);
+          const more = waiting.size > ids.length;
+          return check({ items: ids.map((id) => ({ id, mailbox: 'MMMMMMMMMMMMMMMMMMMMMM', envelope: 'AAAA' })), more, ...(more ? { next: 'NNNNNNNNNNNNNNNNNNNNNN' } : {}) });
+        }
+        if (method === 'POST' && path === '/ack') {
+          for (const id of (JSON.parse(init.body!) as { ids: string[] }).ids) {
+            const at = waiting.get(id);
+            if (at !== undefined) waited.push(Date.now() - at);
+            waiting.delete(id);
+          }
+          return check({});
+        }
+        return base.api.request(method, path, init, check);
+      },
+    };
+    const sockets: FakeSocket[] = [];
+    class FakeSocket {
+      static OPEN = 1;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        sockets.push(this);
+        void Promise.resolve().then(() => {
+          this.readyState = 1;
+          this.onopen?.();
+        });
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal('window', { addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(Math.ceil(Date.now() / (15 * 60_000)) * 15 * 60_000);
+    // The copies tell each other what they do, as the broadcast channel
+    // does, tellMs late.
+    const copies: ReturnType<typeof createApp>[] = [];
+    const tell = (from: number) => (e: SyncEvent) => {
+      events.push(e);
+      const deliver = () =>
+        copies.forEach((c, i) => {
+          if (i === from) return;
+          if (e.type === 'sync-started') c.syncStarted(e.at, e.paced);
+          if (e.type === 'data-changed') void c.refresh();
+        });
+      if (options.tellMs) setTimeout(deliver, options.tellMs);
+      else deliver();
+    };
+    for (let i = 0; i < count; i++) {
+      const { app } = await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(''), db, issuer, background: true, config: { ...config, wsUrl: 'wss://ws.example/live' }, broadcast: tell(i) });
+      copies.push(app);
+    }
+    // Starting syncs, which may wait for the fake clock (fetchMs).
+    let started = false;
+    const starting = Promise.all(copies.map((c) => c.start())).then(() => (started = true));
+    while (!started) {
+      await vi.advanceTimersByTimeAsync(100);
+      await settle();
+    }
+    await starting;
+    let n = 0;
+    return {
+      copies,
+      sockets,
+      waiting,
+      waited,
+      requests,
+      fetches,
+      events,
+      /** Delivers `messages` messages, each pushing a hint to every open copy. */
+      push(messages = 1) {
+        for (let i = 0; i < messages; i++) {
+          waiting.set(`m${n++}`, Date.now());
+          for (const ws of sockets) if (ws.readyState === 1) ws.onmessage?.({ data: '{"t":"sync"}' });
+        }
+      },
+    };
+  }
+
+  const done = () => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  };
+
+  it('costs the device under half of its request limits, with two copies open, for a whole quarter of an hour', async () => {
+    try {
+      const d = await device(2);
+      expect(d.sockets.length).toBeGreaterThanOrEqual(2);
+      const start = Date.now();
+      d.requests.length = 0;
+      // Four senders, each at the cap of one mailbox (a message every 2
+      // seconds), for 15 minutes: 1,800 messages, 3,600 pushes.
+      for (let second = 0; second < 15 * 60; second++) {
+        if (second % 2 === 0) d.push(4);
+        await pass(1000);
+      }
+      const minutes = new Map<number, number>();
+      for (const at of d.requests) {
+        const minute = Math.floor((at - start) / 60_000);
+        minutes.set(minute, (minutes.get(minute) ?? 0) + 1);
+      }
+      const busiest = Math.max(...minutes.values());
+      const slowest = Math.max(...d.waited);
+      // Every message was taken in, a few seconds after it came.
+      expect(d.waited).toHaveLength(1800 - d.waiting.size);
+      expect(d.waiting.size).toBeLessThanOrEqual(8 * 4);
+      expect(slowest).toBeLessThanOrEqual(3 * SYNC_GAP_MS);
+      // A sync every 5 seconds, a fetch and a confirmation each: 24 a
+      // minute, well under half of the quarter and of any minute.
+      expect(d.requests.length).toBeLessThan(PER_QUARTER / 2);
+      expect(busiest).toBeLessThanOrEqual(26);
+      expect(busiest).toBeLessThan(PER_MINUTE / 2);
+      for (const c of d.copies) await c.home();
+    } finally {
+      done();
+    }
+  }, 300_000);
+
+  it('takes turns across copies that hear of each other late, and a push that comes while another copy waits is answered by its sync', async () => {
+    try {
+      const d = await device(2, { fetchMs: 200, tellMs: 50 });
+      await pass(2 * SYNC_GAP_MS);
+      d.fetches.length = 0;
+      const t = Date.now();
+      // Both copies hear each push at once.
+      d.push();
+      await pass(1000);
+      d.push();
+      await pass(11_000);
+      // One copy synced at once; the other waited the gap, then synced; the
+      // second push came while they waited, and made no fetch of its own.
+      expect(d.fetches.map((f) => f - t)).toEqual([0, SYNC_GAP_MS]);
+      for (const c of d.copies) await c.home();
+    } finally {
+      done();
+    }
+  }, 60_000);
+
+  it('still syncs on pushes after the clock was set back, or another copy said it synced later than now', async () => {
+    try {
+      const d = await device(1);
+      await pass(2 * SYNC_GAP_MS);
+      d.push();
+      await pass(SYNC_GAP_MS);
+      // The clock set back ten minutes: pushes are still fetched for.
+      vi.setSystemTime(Date.now() - 10 * 60_000);
+      let before = d.fetches.length;
+      for (let i = 0; i < 3; i++) {
+        d.push();
+        await pass(2 * SYNC_GAP_MS);
+      }
+      expect(d.fetches.length - before).toBe(3);
+      // A start said to be ten minutes from now (sent before the clock was
+      // set back) is ignored.
+      d.copies[0]!.syncStarted(Date.now() + 10 * 60_000, true);
+      before = d.fetches.length;
+      d.push();
+      await pass(2 * SYNC_GAP_MS);
+      expect(d.fetches.length - before).toBe(1);
+      await d.copies[0]!.home();
+    } finally {
+      done();
+    }
+  }, 60_000);
+
+  it("doesn't start syncs that can't fetch while the inbox is paused", async () => {
+    try {
+      // The second page is refused: fetching pauses, 30 to 60 seconds.
+      const d = await device(1, { refuse: (n) => (n === 2 ? new ApiError(429, 'rate_limited') : null) });
+      await pass(2 * SYNC_GAP_MS);
+      d.events.length = 0;
+      d.push(80);
+      await pass(25_000);
+      // The first page, then the refused one: no more while paused.
+      const paced = d.events.filter((e) => e.type === 'sync-started' && e.paced);
+      expect(paced.length).toBeLessThanOrEqual(3);
+      await d.copies[0]!.home();
+    } finally {
+      done();
+    }
+  }, 60_000);
 });
 
 describe('an open chat', () => {
@@ -2250,6 +2506,94 @@ describe("the server's limit on this device's logins and signed requests", () =>
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   }, 10_000);
+
+  it("says so on home when the device's requests are refused, for as long as the server says", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    // Home reads the account: refused, so shown as it was, with the notice.
+    server.outcomes.account = [deviceLimit()];
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit' });
+    server.outcomes.account = [deviceLimit(600)];
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit-later' });
+    // The invitations refused alone: the account is shown, home online.
+    server.outcomes.reads = [deviceLimit()];
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: false, invitations: null, notice: 'device-limit' });
+    expect(home(owner.app.screen.value).account).not.toBeNull();
+    // What brought the user home says it first, and the refusal shows in
+    // place of "offline" (the server was reached).
+    await owner.app.home();
+    server.outcomes.account = [deviceLimit()];
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'created', offline: true, limited: 'device-limit' });
+  });
+
+  it('keeps a new invitation code on screen when reading the list again is refused', async () => {
+    const server = fakeServer();
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.invitations();
+    server.outcomes.reads = [deviceLimit()];
+    await admin.app.createInvitation(3);
+    const screen = admin.app.screen.value;
+    expect(screen).toMatchObject({ kind: 'invitations', notice: 'created', created: 'aaaa-aaaa', busy: false });
+    if (screen.kind !== 'invitations') return;
+    expect(screen.info.codes).toMatchObject([{ code: 'aaaa-aaaa', uses: 3, left: 3 }]);
+    // An admin's allowance doesn't run down.
+    expect(screen.info).toMatchObject({ maxUses: 1000, remaining: 0, unlimited: true });
+
+    // A member's does, by the code's uses.
+    const other = fakeServer();
+    other.state.member = true;
+    const member = await registered(other.api);
+    await member.app.invitations();
+    other.outcomes.reads = [deviceLimit()];
+    await member.app.createInvitation(1);
+    expect(member.app.screen.value).toMatchObject({ kind: 'invitations', notice: 'created', info: { maxUses: 1, remaining: 1 } });
+  });
+
+  it('says an admin change was done, with it shown, when reading the screen again is refused, so it is not done twice', async () => {
+    const server = fakeServer();
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.admin();
+    server.outcomes.reads = [deviceLimit()];
+    await admin.app.setLevel(1, 5);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'saved', busy: false, levels: [{ level: 1, invitations: 5 }] });
+    server.outcomes.reads = [deviceLimit()];
+    await admin.app.setSwitch('uploads', true);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'switched', switches: { uploadsPaused: true, downloadsPaused: false } });
+  });
+
+  it('holds its inbox fetches back as long as the server says', async () => {
+    const refused: Outcome[] = [];
+    const server = fakeServer({ inbox: refused });
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(server.api, { issuer });
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    try {
+      // Refused for the next two minutes: polling every 20 seconds would
+      // fetch 6 times; it waits them out, then fetches.
+      for (let i = 0; i < 50; i++) refused.push(deviceLimit(120));
+      const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db, issuer, background: true });
+      await app.start();
+      const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+      const first = inbox();
+      expect(first).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(110_000);
+      expect(inbox()).toBe(first);
+      refused.length = 0;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(inbox()).toBeGreaterThan(first);
+      await app.home();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('after setting up over an account elsewhere', () => {
@@ -2301,6 +2645,17 @@ describe('usage', () => {
       chats: { used: 10, limit: 2000 },
     });
     await vi.waitFor(() => expect(owner.app.messagesLeft.value).toBe(20));
+  });
+
+  it('never shows or remembers more left than the server said before today', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    server.state.resetsAt = (Math.floor(Date.now() / 86_400_000) + 1) * 86_400;
+    // A token batch's answer said 10 left; Usage, maybe older, says 20.
+    await rememberLeft(owner.db, 'send', 10);
+    await owner.app.usage();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'usage', usage: { messages: { left: 10, limit: 1000 } } });
+    await vi.waitFor(() => expect(owner.app.messagesLeft.value).toBe(10));
   });
 });
 

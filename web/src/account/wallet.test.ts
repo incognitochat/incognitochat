@@ -6,10 +6,11 @@ import { ApiError } from '../net/api';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { getMeta, openDatabase } from '../storage/db';
-import { batchFor, budgetLeft, countTokens, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
+import { batchFor, budgetLeft, countTokens, lowerLeft, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
 
 let n = 0;
 const NOW = 1_800_000_000;
+const DAY = 24 * 60 * 60;
 
 /**
  * An issuer with a fresh key, and a fake session whose POST /tokens signs
@@ -212,5 +213,30 @@ describe('token wallet', () => {
     expect(await batchFor(db, 3, NOW)).toBe(3);
     // Another day: unknown again.
     expect(await batchFor(db, 20, NOW + 24 * 60 * 60)).toBe(20);
+  });
+
+  it('lets an answer that may be older (Usage) lower what is left within a day, never raise it', async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    const day = Math.floor(NOW / DAY);
+    expect(await lowerLeft(db, 'send', 40, day, NOW)).toBe(40);
+    await rememberLeft(db, 'send', 10, NOW);
+    expect(await lowerLeft(db, 'send', 49, day, NOW)).toBe(10);
+    expect(await batchFor(db, 20, NOW)).toBe(10);
+    expect(await lowerLeft(db, 'send', 6, day, NOW)).toBe(6);
+    // Kinds apart, and another day starts over.
+    expect(await lowerLeft(db, 'media', 300, day, NOW)).toBe(300);
+    expect(await lowerLeft(db, 'send', 900, day + 1, NOW + DAY)).toBe(900);
+  });
+
+  it("lets Usage replace what is left when the device's day isn't the server's (a clock ahead near midnight)", async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    // A minute into this device's next day, but still the server's day: a
+    // batch said none left, stored as the device's new day.
+    const midnight = (Math.floor(NOW / DAY) + 1) * DAY;
+    await rememberLeft(db, 'send', 0, midnight + 60);
+    expect(await batchFor(db, 20, midnight + 60)).toBe(0);
+    // Usage, for the server's day, says 40: that stands, not 0.
+    expect(await lowerLeft(db, 'send', 40, Math.floor(NOW / DAY), midnight + 60)).toBe(40);
+    expect(await batchFor(db, 20, midnight + 60)).toBe(20);
   });
 });

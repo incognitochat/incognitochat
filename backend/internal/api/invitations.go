@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
@@ -53,30 +54,74 @@ type grantRequest struct {
 // allowance returns how many more invitation uses the caller can give, and
 // whether that's unlimited (admins).
 func (s *Server) allowance(ctx context.Context, d directory.Device) (remaining int, unlimited bool, err error) {
+	return s.allowanceBy(ctx, d, s.Directory.Levels)
+}
+
+func (s *Server) allowanceBy(ctx context.Context, d directory.Device, levelsOf func(context.Context) (map[int]int, error)) (remaining int, unlimited bool, err error) {
 	if s.isAdmin(d) {
 		return invitations.AdminMaxUses, true, nil
 	}
 	if !d.Member {
 		return 0, false, nil
 	}
-	levels, err := s.Directory.Levels(ctx)
+	levels, err := levelsOf(ctx)
 	if err != nil {
 		return 0, false, err
 	}
 	return invitations.Remaining(levels[d.Level], d.Granted, d.Allocated), false, nil
 }
 
+// levelsFresh is how long an instance shows invitations by the levels'
+// allowances it last read (listInvitations).
+const levelsFresh = 30 * time.Second
+
+// levelsCache is one instance's copy of the levels' allowances, for
+// listing invitations: every home screen asks, and they change only when
+// an admin changes them.
+type levelsCache struct {
+	sync.Mutex
+	levels map[int]int
+	read   time.Time
+}
+
+// listedLevels is the levels' allowances as this instance read them in
+// the last levelsFresh, or as it reads them now. Making a code reads them
+// afresh (createInvitation).
+func (s *Server) listedLevels(ctx context.Context) (map[int]int, error) {
+	c := &s.levelsCache
+	c.Lock()
+	defer c.Unlock()
+	now := s.Now()
+	if c.levels != nil && now.Sub(c.read) >= 0 && now.Sub(c.read) < levelsFresh {
+		return c.levels, nil
+	}
+	levels, err := s.Directory.Levels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.levels, c.read = levels, now
+	return levels, nil
+}
+
 // listInvitations shows the caller's invitations: how many they can still
-// give, and their codes with how much each is used.
+// give, and their codes with how much each is used. Any logged-in request
+// may ask (the app does at every home screen), so it reads little: the
+// levels as this instance knows them (listedLevels), and the codes in one
+// query (directory.Store.Invitations), none for an account that never
+// made one (not an admin, no uses put into codes). An admin's codes take
+// no uses, so one no longer an admin who made none as a member has them
+// unlisted (they still work).
 func (s *Server) listInvitations(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
 	const route = "GET /invitations"
-	remaining, unlimited, err := s.allowance(ctx, c.device)
+	remaining, unlimited, err := s.allowanceBy(ctx, c.device, s.listedLevels)
 	if err != nil {
 		return s.internal(route, err)
 	}
-	codes, err := s.Directory.Invitations(ctx, c.AccountID)
-	if err != nil {
-		return s.internal(route, err)
+	var codes []directory.Invitation
+	if unlimited || c.device.Allocated > 0 {
+		if codes, err = s.Directory.Invitations(ctx, c.AccountID); err != nil {
+			return s.internal(route, err)
+		}
 	}
 	out := invitationsResponse{
 		InviteOnly: s.InviteOnly,
@@ -218,6 +263,9 @@ func (s *Server) adminSetLevel(ctx context.Context, req httpapi.Request, _ calle
 	if in.Level < 1 || in.Level > invitations.MaxLevel || in.Invitations < 0 || in.Invitations > invitations.MaxAllowance {
 		return httpapi.Error(http.StatusBadRequest, "bad_request")
 	}
+	s.levelsCache.Lock()
+	s.levelsCache.levels = nil
+	s.levelsCache.Unlock()
 	if err := s.Directory.SetLevel(ctx, in.Level, in.Invitations); err != nil {
 		return s.internal("PUT /admin/levels", err)
 	}

@@ -19,6 +19,13 @@ type usageItem struct {
 // link changes, counted per Telegram user and reset at 00:00 UTC, and the
 // mailboxes the account owns against the most it may. It reads the counters
 // the limits keep anyway; nothing is stored.
+//
+// It costs little, since anyone with a session may ask again and again: the
+// mailboxes owned come from the account item already read for the request
+// (authenticate), and each counter is what this instance learnt of it in
+// the last half a minute, or else read eventually consistent (UsedAt), at
+// most two read units in all. A count may so miss what another instance
+// counted in about the last half a minute; the app only shows them.
 func (s *Server) usage(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
 	const route = "GET /usage"
 	const day = 24 * time.Hour
@@ -51,10 +58,6 @@ func (s *Server) usage(ctx context.Context, _ httpapi.Request, c caller) httpapi
 			return s.internal(route, err)
 		}
 	}
-	owned, err := s.Directory.MailboxCount(ctx, c.AccountID, now)
-	if err != nil {
-		return s.internal(route, err)
-	}
-	out.Owned = usageItem{Used: owned, Limit: MaxMailboxes}
+	out.Owned = usageItem{Used: c.device.Mailboxes, Limit: MaxMailboxes}
 	return httpapi.JSON(http.StatusOK, out)
 }

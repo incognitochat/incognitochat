@@ -12,7 +12,7 @@
 //	daily_limit                           429: a daily limit is used up; try after Retry-After, when the UTC day ends
 //	link_busy                             429: POST /send to a link's intro mailbox, past the link's first messages for the hour; try after Retry-After, when the hour ends
 //	download_limit                        429: GET /media/{id}, past the file's downloads for the day; try after Retry-After, when the UTC day ends
-//	device_limit                          429: POST /session or a signed request, past the device's logins or signed requests for a minute, a quarter of an hour or the UTC day (devices.go); try after Retry-After, when that window ends. Only once the signature checks out
+//	device_limit                          429: POST /session or a signed request, past the device's logins or signed requests for a minute, a quarter of an hour or the UTC day (devices.go), only once the signature checks out; or any request with a session, past the device's requests, only once the token checks out and before anything is read; try after Retry-After, when that window ends
 //	clock_skew                            401: a timestamp, or a new account's device list, is too far from the server's clock, which "now" gives; sign again
 //	login_refused                         the device can't log in
 //	account_replaced                      the account was replaced by a new registration
@@ -103,7 +103,6 @@ type Directory interface {
 	// as Recipients does, at the same cost, and finds none.
 	NoRecipients(ctx context.Context, now time.Time) error
 	Mailboxes(ctx context.Context, accountID string) ([]string, error)
-	MailboxCount(ctx context.Context, accountID string, now time.Time) (int, error)
 	// MarkDeleting marks an account as being deleted: from then on it
 	// makes and takes nothing (directory.Store.MarkDeleting).
 	MarkDeleting(ctx context.Context, accountID string) error
@@ -162,8 +161,9 @@ type Limiter interface {
 	// FullAt reports whether key's window is known to have reached limit,
 	// from memory only, so refusing costs nothing.
 	FullAt(key string, limit int, window time.Duration, at time.Time) bool
-	// UsedAt reports how many uses the window has counted, as the database
-	// says now.
+	// UsedAt reports how many uses the window has counted: as the database
+	// told this instance in the last half a minute, or else read now,
+	// eventually consistent (ephemeral.Limiter.UsedAt).
 	UsedAt(ctx context.Context, key string, window time.Duration, at time.Time) (int, error)
 	// CountedAt is the count the database last returned for the window to
 	// this instance, such as just now to AllowNAt.
@@ -181,7 +181,9 @@ type Limiter interface {
 	// SpendAt counts one use of b in key's row for the UTC day that holds
 	// at, if it fits in b's minute, quarter of an hour and day; otherwise
 	// it counts nothing and returns the longest of those windows that is
-	// used up. What memory knows is used up is refused for free
+	// used up. What memory knows is used up is refused for free. A budget
+	// with a Batch is written in batches, and a use refused by the write
+	// that found a window past its limit stays counted
 	// (ephemeral.Limiter.SpendAt).
 	SpendAt(ctx context.Context, key string, b ephemeral.Budget, at time.Time) (time.Duration, error)
 }
@@ -232,6 +234,8 @@ type Server struct {
 	// pause uploads or downloads of attachments (switches.go).
 	Switches    SwitchStore
 	switchCache switchCache
+	// levelsCache keeps the invitation levels for listing (listedLevels).
+	levelsCache levelsCache
 	// paged remembers devices whose inbox needed more than a first read
 	// here lately (listInbox).
 	paged paged

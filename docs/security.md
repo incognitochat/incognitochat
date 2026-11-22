@@ -223,7 +223,7 @@ it. This is how close it gets.
   so they say what AWS's own per-minute metrics of the functions and tables
   already say, by route. The lines also count, for public statistics, the
   messages sent (sends that aren't quiet) and the padded bytes of the
-  uploads paid for. The lines are kept 7 days. The 29 metrics made from
+  uploads paid for. The lines are kept 7 days. The 35 metrics made from
   them (registrations, token batches, 429s overall and by route, three kinds
   of refusal, messages sent and media bytes) are kept by CloudWatch for 15
   days a minute at a time, 63 days 5 minutes at a time and 15 months an
@@ -297,10 +297,11 @@ it. This is how close it gets.
     through each link per hour, what each device fetches per minute, and
     what each person uses per day (so that no one can flood a mailbox or a
     link, or use up the capacity everyone shares);
-  - for each device, one record a UTC day of how often it logged in and
-    made signed requests (link changes and key rotations, invitations,
-    admin changes, and the steps of a deletion or cleanup) in the current
-    minute, quarter of an hour and day, and the minute of its last of each,
+  - for each device, one record a UTC day of how often it logged in, made
+    signed requests (link changes and key rotations, invitations, admin
+    changes, and the steps of a deletion or cleanup) and made any request
+    with its session (written ten at a time) in the current minute,
+    quarter of an hour and day, and the minute of its last of each,
     overwritten as it goes: so that no device can use up the capacity
     everyone shares;
   - a record of each open app's socket, for pushes, and the minute it
@@ -330,8 +331,9 @@ it. This is how close it gets.
   every mailbox, link and account in the directory, and so see which
   mailboxes got messages in which minute (and so, by timing, who likely
   writes to whom), and which accounts had the app open in which minute;
-  and from the devices' records, how often each account logged in and
-  made signed requests each day, and the minute of its last of each (a
+  and from the devices' records, how often each account logged in, made
+  signed requests and made requests with its session each day (so about
+  how long its app was open), and the minute of its last of each (a
   deletion's or cleanup's steps included). That is part of what watching live shows
   them anyway (What users still have to trust, 2.).
 - **Who invited whom.** Using an invitation code is a request from the
@@ -392,9 +394,9 @@ it. This is how close it gets.
   of the device's app storage (a forensic copy of an unlocked phone, or a copy
   of Telegram Desktop's folder) clones the account: it opens the whole
   history and can use the account as this device. It can also use up the
-  device's limits on logins and signed requests
+  device's limits on logins, signed requests and requests with a session
   ([protocol.md](protocol.md#registration-and-sessions)), so that its
-  owner's logins, link changes and deletion wait; the server can't tell
+  owner's logins, inbox, link changes and deletion wait; the server can't tell
   the two apart. The remedy is setting up again, which those limits don't
   hold up: the copy is then refused, `410 account_replaced`, and writes
   nothing. Deleting the account or
@@ -476,7 +478,11 @@ it. This is how close it gets.
   40 minutes after the token expires: meanwhile the app learns of new
   messages only when it polls, every 2 minutes, and no notice goes out. The
   same token can already fetch the account's waiting envelopes, and confirm
-  them, which deletes them.
+  them, which deletes them. It can also use up the device's requests with
+  a session ([protocol.md](protocol.md#registration-and-sessions)), so
+  that its app's inbox and other requests wait until the quarter of an
+  hour in which the token expires ends: at most about half an hour, and it
+  ends by itself, with nothing to do.
 - **What `notify` can reach.** It holds the key that opens chat IDs, so its
   role is narrowed ([infra/functions.tf](../infra/functions.tf)). In the
   directory it may only read and update items in account partitions

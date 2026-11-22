@@ -146,16 +146,17 @@ func (m *memDirectory) Mailbox(_ context.Context, id string) (directory.Mailbox,
 	return b, nil
 }
 
-func (m *memDirectory) MailboxCount(_ context.Context, account string, _ time.Time) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// mailboxCount is how many pool and conversation mailboxes an account
+// owns, as the account item counts them (directory.Device.Mailboxes).
+// Callers hold m.mu.
+func (m *memDirectory) mailboxCount(account string) int {
 	n := 0
 	for _, b := range m.boxes {
 		if b.Owner == account && b.Link == "" {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 func (m *memDirectory) Mailboxes(_ context.Context, account string) ([]string, error) {
@@ -696,7 +697,8 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 	return directory.Device{
 		Key: a.devices[device], Replaced: a.replaced, TelegramHash: a.th,
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
-		Notices: a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
+		Mailboxes: m.mailboxCount(account),
+		Notices:   a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
 		NoticeLanguage: map[bool]string{true: a.language}[a.chat != nil && !a.noticesOff],
 		Deleting:       a.deleting, Leftovers: slices.Clone(a.leftovers), LastUse: a.lastUse,
 	}, nil

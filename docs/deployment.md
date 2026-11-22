@@ -1083,13 +1083,13 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 | `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
 | `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 29 metrics is billed as a custom
+Metric filters are free. Each of the 35 metrics is billed as a custom
 metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
 month for the five counted whenever the app is used, next to nothing for
-the others until something goes wrong, and at most $8.70 if all of them got
+the others until something goes wrong, and at most $10.50 if all of them got
 data every hour. The six alarms cost $0.70 a month (the token alarm reads
 two metrics), and the lines, under 1 KB a minute per busy instance, cents.
-So about $2.20 a month per environment, at most about $9.
+So about $2.20 a month per environment, at most about $11.
 
 **When a count alarm fires:**
 
@@ -1131,13 +1131,15 @@ So about $2.20 a month per environment, at most about $9.
 3. `limit-hits`: `Limited.<route>` says which limit. A rise on one route
    without more traffic is someone pushing at that limit, which is holding;
    a rise with more traffic everywhere is real use outgrowing the limits.
-   `device_limit` (on `post_session` or a signed route) is a device past its
-   own limits on logins and signed requests
+   `device_limit` (on `post_session`, a signed route or any logged-in route)
+   is a device past its own limits on logins, signed requests or requests
+   with a session
    ([protocol.md](protocol.md#registration-and-sessions)). The app waits
    after one, so a device that hits a limit makes a few a minute, and one
    that keeps pushing hundreds; the counts can't say which device, by
-   design. The deletion steps' routes aren't in `Limited.<route>` (a point
-   kept 15 months would date a deletion), only in `Limited`. Seen with
+   design. The deletion steps' routes and blocking's
+   (`post_mailboxes_id_discard`) aren't in `Limited.<route>` (a point kept
+   15 months would date a deletion or a block), only in `Limited`. Seen with
    ordinary use, the limits are constants in
    `backend/internal/api/devices.go`, changed by a release.
 4. `invalid-tokens`: forged, replayed or out-of-date tokens on `POST /send`
@@ -1563,13 +1565,50 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   instances, and about 800 over 100. An account in the middle of a deletion
   or cleanup can make about ten times as many while it lasts, still within
   its day, and accounts spending a minute's limits at once can make a
-  short spike. Logins of random devices read half a
-  directory unit each and write nothing; filling its 400 reads a second
-  takes about 480 addresses. Still open, for a change of its own: every
-  request with a session reads the directory before any limit (one unit;
-  `GET /usage` two, and four on the ephemeral table), refused ones
-  included, so one account and about 30 addresses can still use up the
-  directory's reads.
+  short spike.
+
+  Every request with a session, signed or not, first reads the device and
+  its account from the directory (one unit), which logins, sends and
+  every logged-in request need. So the `api` function limits each
+  device's too, once its token checks out and before that read: 180 a
+  minute, 1,200 a quarter of an hour and 30,000 a UTC day. One past a
+  limit reads nothing, and writes nothing once the instance knows. The
+  counts are kept in memory and written ten at a time, so an instance
+  that hasn't heard yet lets up to 9 more through a window another has
+  used up, and learns it from one write (two if its picture of the row is
+  old); a device that sends fewer than ten a minute to each of many
+  instances is written only as their batches fill, so there the minute
+  holds little, and the quarter does. So each account kept at its limits
+  reads about 1,200 directory units a quarter of an hour on a few
+  instances, and up to about 2,100
+  spread over all 100: filling the directory's 400 reads a second takes
+  about 290 accounts, or about 170 (for a whole day, about 1,100 either
+  way), where one account and about 30 addresses did before. One account
+  can read 180 units in a minute, or about 1,000 spread over 100
+  instances, so a few dozen spending their minute at once can make a
+  spike of a minute or two. `GET /usage` reads no more of the directory
+  than any logged-in request, and at most two units of the ephemeral
+  table (eventually consistent, and nothing again for half a minute on an
+  instance); it read two and four. `GET /invitations` reads half a unit
+  more for an account's invitation codes, however many (it read a unit a
+  code), and nothing more for one that never made any; codes made before
+  this change still cost half a unit each, as they keep their counts on
+  their own items only. Counting adds about
+  150 write units a quarter of an hour per account kept at its limits on
+  a few instances, up to about 600 over 100: with the logins' and signed
+  requests', filling the ephemeral table's 200 writes a second takes about
+  460 accounts, or about 120 over 100. If the counts can't be written
+  (whoever throttles the ephemeral table's writes), each instance lets a
+  device make 30 a minute uncounted, and all devices 80 a minute (then
+  `503 unavailable`), each at most 1.5 units: so at most about 200
+  directory reads a second over 100 instances, whatever the number of
+  accounts, plus, once per instance, fewer than ten per device made
+  before any of its counts first failed to be written. After such a
+  failure an instance holds no count back and tries to write again only
+  after 5 seconds.
+
+  Logins of random devices read half a directory unit each and write
+  nothing; filling its 400 reads a second takes about 480 addresses.
 
   Sends and uploads that replay tokens spent already are the same kind of
   flood: tokens say nothing about whose they are, so only these limits hold

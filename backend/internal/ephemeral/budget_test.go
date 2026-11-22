@@ -2,6 +2,7 @@ package ephemeral
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strconv"
@@ -251,6 +252,287 @@ func TestSpendAtFails(t *testing.T) {
 	if full, err := l.SpendAt(context.Background(), "k", budget, start); err == nil || full != 0 {
 		t.Fatalf("full %v, err %v", full, err)
 	}
+}
+
+// A budget with a Batch is written a batch at a time, and at once when the
+// uses this instance holds might, with what the row last said, fill a
+// window: so one instance alone lets through just a window's limit, as
+// SpendAt does without batches, for a write a batch. The use that finds a
+// window past its limit is refused, and stays counted; what memory knows
+// is used up costs nothing.
+func TestSpendAtBatched(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	table := dynamotest.Table(t, client)
+	clock := start // 08:00 UTC, on a quarter
+	l := &Limiter{DB: meter, Table: table, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	spend := func(key string, b Budget, want time.Duration) {
+		t.Helper()
+		if full, err := l.SpendAt(ctx, key, b, clock); err != nil || full != want {
+			t.Fatalf("%s at %v: full %v, %v; want %v", key, clock.Sub(start), full, err, want)
+		}
+	}
+	writes := func(want float64) {
+		t.Helper()
+		if u := meter.Units(table); u.Write != want || u.Read != 0 {
+			t.Fatalf("at %v: cost %+v, want %v writes", clock.Sub(start), u, want)
+		}
+		meter.Reset()
+	}
+
+	// A minute of 13, in batches of 5: four on memory alone, the fifth
+	// writes all five; at 11, 12 and 13 the minute might fill, so the 14th
+	// writes, and is refused.
+	minute := Budget{Kind: "t", Day: "t", PerMinute: 13, PerQuarter: 100, PerDay: 100, Batch: 5}
+	for range 4 {
+		spend("m", minute, 0)
+	}
+	writes(0)
+	spend("m", minute, 0)
+	writes(1)
+	for range 8 {
+		spend("m", minute, 0)
+	}
+	writes(1)
+	spend("m", minute, time.Minute)
+	writes(1)
+	for range 5 {
+		spend("m", minute, time.Minute)
+	}
+	writes(0)
+	if got := rowOf(t, client, table, "m", start); got["tn"] != 14 || got["tq"] != 14 || got["td"] != 14 || got["tm"] != start.Unix() {
+		t.Fatalf("row %v", got)
+	}
+	clock = start.Add(time.Minute)
+	spend("m", minute, 0)
+
+	// A quarter of 12: uses held over a minute's end count in the minute
+	// they're written in.
+	clock = start
+	quarter := Budget{Kind: "t", Day: "t", PerMinute: 100, PerQuarter: 12, PerDay: 100, Batch: 5}
+	for range 8 {
+		spend("q", quarter, 0)
+	}
+	clock = start.Add(time.Minute)
+	for range 4 {
+		spend("q", quarter, 0)
+	}
+	spend("q", quarter, Quarter)
+	clock = start.Add(14 * time.Minute)
+	spend("q", quarter, Quarter)
+	if got := rowOf(t, client, table, "q", start); got["tq"] != 13 || got["tn"] != 8 || got["tm"] != start.Add(time.Minute).Unix() {
+		t.Fatalf("row %v", got)
+	}
+	clock = start.Add(Quarter)
+	spend("q", quarter, 0)
+
+	// A day of 7, then the next day's row.
+	clock = start
+	day := Budget{Kind: "t", Day: "t", PerMinute: 100, PerQuarter: 100, PerDay: 7, Batch: 5}
+	for range 7 {
+		spend("d", day, 0)
+	}
+	spend("d", day, 24*time.Hour)
+	clock = start.Add(3 * Quarter)
+	spend("d", day, 24*time.Hour)
+	clock = start.Truncate(24 * time.Hour).Add(24 * time.Hour)
+	for range day.Batch {
+		spend("d", day, 0)
+	}
+	if n := len(rowsOf(t, client, table, "d")); n != 2 {
+		t.Fatalf("%d rows for two days", n)
+	}
+
+	// It shares the row with budgets counted use by use, and holds its own
+	// attributes only.
+	clock = start.Add(2 * time.Hour)
+	signed := Budget{Kind: "s", Day: "s", PerMinute: 10, PerQuarter: 10, PerDay: 10}
+	spend("m", signed, 0)
+	rows := rowsOf(t, client, table, "m")
+	if names := slices.Sorted(maps.Keys(rows[0])); len(rows) != 1 || !slices.Equal(names, []string{"e", "pk", "sd", "sk", "sm", "sn", "sq", "td", "tm", "tn", "tq"}) {
+		t.Fatalf("rows %v", rows)
+	}
+}
+
+// Across instances, a window lets through, past its limit, no more than
+// what the other instances hold unwritten (fewer than a Batch each); each
+// that learns the window is used up then refuses for free.
+func TestSpendAtBatchedInstances(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	table := dynamotest.Table(t, client)
+	now := func() time.Time { return start }
+	instances := []*Limiter{
+		{DB: meter, Table: table, Now: now},
+		{DB: meter, Table: table, Now: now},
+		{DB: meter, Table: table, Now: now},
+	}
+	ctx := context.Background()
+	b := Budget{Kind: "t", Day: "t", PerMinute: 20, PerQuarter: 1000, PerDay: 1000, Batch: 5}
+	allowed := 0
+	for i := range 60 {
+		full, err := instances[i%3].SpendAt(ctx, "k", b, start)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if full == 0 {
+			allowed++
+		}
+	}
+	if most := b.PerMinute + 2*(b.Batch-1); allowed < b.PerMinute || allowed > most {
+		t.Fatalf("let %d through, want %d to %d", allowed, b.PerMinute, most)
+	}
+	meter.Reset()
+	for i := range 30 {
+		if full, _ := instances[i%3].SpendAt(ctx, "k", b, start); full != time.Minute {
+			t.Fatalf("full %v", full)
+		}
+	}
+	if u := meter.Units(table); u.Write != 0 {
+		t.Fatalf("refusals known in memory cost %+v", u)
+	}
+}
+
+// A batch that can't be written (the table throttled, say) is an error,
+// and counts nothing; the uses let through before it wait, and go with
+// the next batch written. After it, the instance tries no batch for a few
+// seconds: due ones fail at once (ErrResting), without asking the table.
+func TestSpendAtBatchedFails(t *testing.T) {
+	client := dynamotest.Client(t)
+	table := dynamotest.Table(t, client)
+	db := &failingSometimes{DB: client}
+	clock := start
+	l := &Limiter{DB: db, Table: table, Now: func() time.Time { return clock }}
+	ctx := context.Background()
+	b := Budget{Kind: "t", Day: "t", PerMinute: 100, PerQuarter: 100, PerDay: 100, Batch: 5}
+	db.down = true
+	for range 4 {
+		if full, err := l.SpendAt(ctx, "k", b, clock); err != nil || full != 0 {
+			t.Fatalf("held: full %v, err %v", full, err)
+		}
+	}
+	if full, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, errThrottled) || full != 0 {
+		t.Fatalf("down: full %v, err %v", full, err)
+	}
+	tried := db.updates
+	clock = start.Add(restAfterFailure - time.Second)
+	for range 3 {
+		if full, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, ErrResting) || full != 0 {
+			t.Fatalf("resting: full %v, err %v", full, err)
+		}
+	}
+	if db.updates != tried {
+		t.Fatalf("resting, it tried %d writes", db.updates-tried)
+	}
+	db.down = false
+	clock = start.Add(restAfterFailure)
+	if full, err := l.SpendAt(ctx, "k", b, clock); err != nil || full != 0 {
+		t.Fatalf("up: full %v, err %v", full, err)
+	}
+	if got := rowOf(t, client, table, "k", start); got["td"] != 5 {
+		t.Fatalf("row %v: want the four held and the last", got)
+	}
+
+	// Any count that fails to be written starts the rest (here another
+	// kind's), and while it lasts nothing is held: every use is the
+	// caller's to allow.
+	db.down = true
+	if _, err := l.AllowNAt(ctx, "other", 1, 10, time.Minute, clock); err == nil {
+		t.Fatal("a write to a table that is down went through")
+	}
+	tried = db.updates
+	if _, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, ErrResting) {
+		t.Fatalf("resting after another count failed: %v", err)
+	}
+	if db.updates != tried {
+		t.Fatal("resting, it tried a write")
+	}
+	// After the rest, it writes at once, holding nothing, until a write
+	// goes through; then it holds again.
+	db.down = false
+	clock = clock.Add(restAfterFailure)
+	if _, err := l.SpendAt(ctx, "k", b, clock); err != nil {
+		t.Fatal(err)
+	}
+	if db.updates != tried+1 {
+		t.Fatalf("after the rest, %d writes", db.updates-tried)
+	}
+	if got := rowOf(t, client, table, "k", start); got["td"] != 6 {
+		t.Fatalf("row %v: want one more, written at once", got)
+	}
+	if _, err := l.SpendAt(ctx, "k", b, clock); err != nil || db.updates != tried+1 {
+		t.Fatalf("held again: %v, %d writes", err, db.updates-tried)
+	}
+}
+
+// failingSometimes fails every call while down, as a throttled table does,
+// and counts the updates asked of it.
+type failingSometimes struct {
+	DB
+	down    bool
+	updates int
+}
+
+func (f *failingSometimes) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.updates++
+	if f.down {
+		return nil, errThrottled
+	}
+	return f.DB.UpdateItem(ctx, in, opts...)
+}
+
+// UsedAt answers from what the table told this instance in the last half a
+// minute, counting or reading; else it reads, eventually consistent, half
+// a read unit.
+func TestUsedAt(t *testing.T) {
+	client := dynamotest.Client(t)
+	meter := dynamotest.NewMeter(client)
+	table := dynamotest.Table(t, client)
+	clock := start
+	now := func() time.Time { return clock }
+	l := &Limiter{DB: meter, Table: table, Now: now}
+	other := &Limiter{DB: meter, Table: table, Now: now}
+	ctx := context.Background()
+	day := 24 * time.Hour
+	used := func(l *Limiter, want int, reads float64) {
+		t.Helper()
+		meter.Reset()
+		if n, err := l.UsedAt(ctx, "k", day, clock); err != nil || n != want {
+			t.Fatalf("at %v: used %d, %v; want %d", clock.Sub(start), n, err, want)
+		}
+		if u := meter.Units(table); u.Read != reads || u.Write != 0 {
+			t.Fatalf("at %v: cost %+v, want %v read units", clock.Sub(start), u, reads)
+		}
+	}
+	if ok, err := l.AllowNAt(ctx, "k", 3, 100, day, clock); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	used(l, 3, 0)
+	if ok, err := other.AllowNAt(ctx, "k", 2, 100, day, clock); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	clock = start.Add(30 * time.Second)
+	used(l, 3, 0) // what another instance counted meanwhile isn't seen yet
+	clock = start.Add(31 * time.Second)
+	used(l, 5, 0.5)
+	used(l, 5, 0)
+	fresh := &Limiter{DB: meter, Table: table, Now: now}
+	used(fresh, 5, 0.5)
+
+	// A refusal teaches only a guess, maybe lower than the count (10 more
+	// refused: at least 91, where 95 were counted): never served, but read
+	// again.
+	if ok, err := other.AllowNAt(ctx, "k", 90, 100, day, clock); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if ok, err := fresh.AllowNAt(ctx, "k", 10, 100, day, clock); ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if fresh.CountedAt("k", day, clock) != 91 {
+		t.Fatalf("guessed %d", fresh.CountedAt("k", day, clock))
+	}
+	used(fresh, 95, 0.5)
 }
 
 func rowsOf(t *testing.T, client *dynamodb.Client, table, key string) []map[string]types.AttributeValue {

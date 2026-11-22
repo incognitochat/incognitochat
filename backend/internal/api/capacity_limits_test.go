@@ -57,11 +57,17 @@ func TestAckReplayCapacity(t *testing.T) {
 	// What the logins write to the ephemeral table (each its nonce and the
 	// device's count of logins, devices.go) is theirs, not the replays'.
 	logins := 0.0
+	tb.devWrites()
+	dev := 0.0
 	for minute := range 30 {
 		if minute%10 == 0 {
+			// The device's rows: the session's batches so far are kept, the
+			// login's count is the login's.
+			dev += tb.devWrites()
 			before := tb.meter.Units(tb.ephemeral).Write
 			owner.token = h.token(t, owner.d) // sessions last 15 minutes
 			logins += tb.meter.Units(tb.ephemeral).Write - before
+			tb.devWrites()
 		}
 		for range 20 {
 			switch status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false); status {
@@ -78,21 +84,24 @@ func TestAckReplayCapacity(t *testing.T) {
 		t.Fatal("the replays ran into the next UTC day, which allows its own misses")
 	}
 	m, e := tb.cost(t, "POST /ack, a confirmed page replayed for 30 minutes")
-	t.Logf("  %d replays answered 200; the 3 logins wrote %.0f of the ephemeral units", answered, logins)
+	dev += tb.devWrites()
+	t.Logf("  %d replays answered 200; the 3 logins wrote %.0f of the ephemeral units, the session's batches %.0f", answered, logins, dev)
 	// A replay misses 5 to 14 items (AckMissesPerRequest, and the deletes
 	// already under way when the fifth comes back), as its parallel deletes
 	// happen to finish. The misses are written at once on the first
 	// replay, then in batches of at least 50, and at once when they may
 	// use up the day: so in at most AckMissesPerDay/50+1 writes, however
-	// many each replay missed.
-	if m.Write > AckMissesPerDay+AckBatch || e.Write-logins > AckMissesPerDay/AckBatch+1 {
-		t.Fatalf("30 minutes of replays cost messages %v, ephemeral %v (of which the logins %.0f)", m, e, logins)
+	// many each replay missed. The device's requests are written in
+	// batches of SessionBatch.
+	if m.Write > AckMissesPerDay+AckBatch || e.Write-logins-dev > AckMissesPerDay/AckBatch+1 || dev > 600/SessionBatch+1 {
+		t.Fatalf("30 minutes of replays cost messages %v, ephemeral %v (of which the logins %.0f, the session's batches %.0f)", m, e, logins, dev)
 	}
 }
 
 // Confirming one gone ID over and over costs the messages table a write
 // unit each, up to the person's day of misses, and the ephemeral table a
-// write per batch of them; past the day's misses, nothing.
+// write per batch of them; past the day's misses, nothing. (75 a minute
+// for 20 minutes, within the device's requests: SessionRequestsPerQuarter.)
 func TestAckOneIDCapacity(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)
@@ -101,20 +110,31 @@ func TestAckOneIDCapacity(t *testing.T) {
 		t.Fatalf("ack: %d %v", status, out)
 	}
 	tb.meter.Reset()
-	for range 1500 {
+	tb.devWrites()
+	for i := range 1500 {
+		if i%750 == 0 && i > 0 {
+			owner.token = h.token(t, owner.d) // sessions last 15 minutes
+		}
 		if status, _ := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": one}, false); status != http.StatusOK {
-			t.Fatalf("ack: %d", status)
+			t.Fatalf("ack %d: %d", i, status)
+		}
+		if i%75 == 74 {
+			h.now = h.now.Add(time.Minute)
 		}
 	}
 	m, e := tb.cost(t, "POST /ack, one gone ID, 1,500 times")
-	if m.Write > AckMissesPerDay+1 || e.Write > AckMissesPerDay/AckBatch+2 {
-		t.Fatalf("messages %v, ephemeral %v", m, e)
+	dev := tb.devWrites()
+	// The login's nonce aside, the device's requests (in batches) and the
+	// login's count aside.
+	if m.Write > AckMissesPerDay+1 || e.Write-dev > AckMissesPerDay/AckBatch+2+1 || dev > 1500/SessionBatch+1+1 {
+		t.Fatalf("messages %v, ephemeral %v, of which the device's %v", m, e, dev)
 	}
 }
 
 // An honest message: delivered, fetched alone (a push each), confirmed.
 // The fetch writes its minute's counter; the day is written in batches;
-// the confirmation writes nothing on the ephemeral table.
+// the confirmation writes nothing on the ephemeral table of its own. Both
+// count in the device's requests, written a batch at a time.
 func TestHonestMessageWrites(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)
@@ -123,6 +143,7 @@ func TestHonestMessageWrites(t *testing.T) {
 	env := clientEnvelope(t)
 	const n = 100
 	var send, fetch, ack dynamotest.Units
+	var dev float64
 	tb.meter.Reset()
 	for i := range n {
 		if i%25 == 0 {
@@ -132,29 +153,33 @@ func TestHonestMessageWrites(t *testing.T) {
 			t.Fatalf("send: %d %v", status, out)
 		}
 		_, e := tb.meter.Units(tb.messages), tb.meter.Units(tb.ephemeral)
-		send.Write += e.Write
+		send.Write += e.Write - tb.devWrites()
 		tb.meter.Reset()
 		status, out := h.as(t, owner, http.MethodGet, "/inbox", nil, false)
 		items, _ := out["items"].([]any)
 		if status != http.StatusOK || len(items) != 1 {
 			t.Fatalf("inbox: %d %v", status, out)
 		}
-		fetch.Write += tb.meter.Units(tb.ephemeral).Write
+		d := tb.devWrites()
+		dev += d
+		fetch.Write += tb.meter.Units(tb.ephemeral).Write - d
 		fetch.Read += tb.meter.Units(tb.ephemeral).Read
 		tb.meter.Reset()
 		id := items[0].(map[string]any)["id"].(string)
 		if status, out := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": []string{id}}, false); status != http.StatusOK {
 			t.Fatalf("ack: %d %v", status, out)
 		}
-		ack.Write += tb.meter.Units(tb.ephemeral).Write
+		d = tb.devWrites()
+		dev += d
+		ack.Write += tb.meter.Units(tb.ephemeral).Write - d
 		ack.Read += tb.meter.Units(tb.ephemeral).Read
 		tb.meter.Reset()
 		h.now = h.now.Add(20 * time.Second) // a message every 20 seconds
 	}
-	t.Logf("ephemeral writes per message: send %.2f, fetch %.2f, confirm %.2f (reads: fetch %.2f, confirm %.2f)",
-		send.Write/n, fetch.Write/n, ack.Write/n, fetch.Read/n, ack.Read/n)
-	if (fetch.Write+ack.Write)/n > 1.1 {
-		t.Fatalf("fetch and confirm wrote %.2f a message", (fetch.Write+ack.Write)/n)
+	t.Logf("ephemeral writes per message: send %.2f, fetch %.2f, confirm %.2f, the device's requests %.2f (reads: fetch %.2f, confirm %.2f)",
+		send.Write/n, fetch.Write/n, ack.Write/n, dev/n, fetch.Read/n, ack.Read/n)
+	if (fetch.Write+ack.Write)/n > 1.1 || dev/n > 2.0/SessionBatch+0.02 {
+		t.Fatalf("fetch and confirm wrote %.2f a message, and %.2f for the device's requests", (fetch.Write+ack.Write)/n, dev/n)
 	}
 }
 
@@ -165,12 +190,18 @@ func TestDailyLimitAfterOutage(t *testing.T) {
 	owner := h.account(t, userID)
 	db := &switchable{DB: tb.meter, down: true}
 	h.server.Limits = &ephemeral.Limiter{DB: db, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
-	for range 50 {
+	// Over two minutes: uncounted, a device makes 30 a minute on an
+	// instance (SessionRequestsLocalPerMinute).
+	for i := range 50 {
+		if i == 25 {
+			h.now = h.now.Add(time.Minute)
+		}
 		if status, _ := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusInternalServerError {
 			t.Fatalf("during the outage: %d", status)
 		}
 	}
 	db.down = false
+	h.now = h.now.Add(time.Minute)
 	if status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
 		t.Fatalf("after it: %d %v", status, out)
 	}
@@ -568,7 +599,9 @@ func TestAckMissCapAcrossInstances(t *testing.T) {
 }
 
 // Without the ephemeral table, misses are limited per instance and minute
-// (AckLocalMissesPerMinute), not let through.
+// (AckLocalMissesPerMinute), not let through. The device's requests are
+// too (SessionRequestsLocalPerMinute, after the first batch it couldn't
+// write), so the last are refused before anything is read.
 func TestAckMissesWithoutEphemeral(t *testing.T) {
 	h, tb := newDeliveryTables(t)
 	owner := h.account(t, userID)
@@ -579,14 +612,19 @@ func TestAckMissesWithoutEphemeral(t *testing.T) {
 	}
 	h.server.Limits = &ephemeral.Limiter{DB: throttled{}, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
 	tb.meter.Reset()
+	answered := 0
 	for range 100 {
-		if status, _ := h.as(t, owner, http.MethodPost, "/ack", ack, false); status != http.StatusOK {
-			t.Fatalf("replay: %d", status)
+		switch status, out := h.as(t, owner, http.MethodPost, "/ack", ack, false); {
+		case status == http.StatusOK:
+			answered++
+		case status != http.StatusTooManyRequests || out["error"] != "device_limit":
+			t.Fatalf("replay: %d %v", status, out)
 		}
 	}
 	m, _ := tb.cost(t, "POST /ack, a gone page 100 times, ephemeral table down")
-	if m.Write > AckLocalMissesPerMinute+AckMissesPerRequest+9 {
-		t.Fatalf("100 replays deleted %v units", m.Write)
+	t.Logf("  %d answered 200", answered)
+	if answered != SessionBatch-1+SessionRequestsLocalPerMinute || m.Write > AckLocalMissesPerMinute+AckMissesPerRequest+9 {
+		t.Fatalf("%d replays answered; they deleted %v units", answered, m.Write)
 	}
 }
 
