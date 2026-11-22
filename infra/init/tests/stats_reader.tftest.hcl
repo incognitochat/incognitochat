@@ -85,23 +85,43 @@ run "production_reads_metrics_and_costs" {
     error_message = "The stats role is misnamed."
   }
 
-  # Only that environment of that repository, by GitHub's OIDC, for STS.
+  # One statement: GitHub's OIDC provider, for STS, only that environment
+  # of that repository.
   assert {
-    condition = jsondecode(data.aws_iam_policy_document.stats_trust[0].json).Statement[0].Condition == {
-      StringEquals = {
-        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub" = "repo:site@3/website@4:environment:stats"
+    condition     = length(jsondecode(data.aws_iam_policy_document.stats_trust[0].json).Statement) == 1
+    error_message = "The stats role's trust policy has more than one statement."
+  }
+  assert {
+    condition = jsondecode(data.aws_iam_policy_document.stats_trust[0].json).Statement[0] == {
+      Effect    = "Allow"
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Principal = { Federated = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" }
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          "token.actions.githubusercontent.com:sub" = "repo:site@3/website@4:environment:stats"
+        }
       }
     }
     error_message = "The stats role trusts more than the stats environment of the website repository."
   }
 
-  # Exactly these two reads, and nothing else.
+  # Exactly these two reads, each in its own region, and nothing else.
   assert {
     condition = sort(flatten([
       for s in jsondecode(data.aws_iam_policy_document.stats[0].json).Statement : s.Action if s.Effect == "Allow"
     ])) == tolist(["ce:GetCostAndUsage", "cloudwatch:GetMetricData"])
     error_message = "The production stats role may do more than read costs and metrics."
+  }
+  assert {
+    condition = {
+      for s in jsondecode(data.aws_iam_policy_document.stats[0].json).Statement :
+      s.Action => s.Condition
+      } == {
+      "ce:GetCostAndUsage"       = { StringEquals = { "aws:RequestedRegion" = "us-east-1" } }
+      "cloudwatch:GetMetricData" = { StringEquals = { "aws:RequestedRegion" = "eu-west-1" } }
+    }
+    error_message = "The stats role's reads aren't each limited to their region."
   }
 }
 
@@ -124,6 +144,11 @@ run "dev_reads_costs_only" {
     ]) == ["ce:GetCostAndUsage"]
     error_message = "The dev stats role may do more than read costs."
   }
+
+  assert {
+    condition     = jsondecode(data.aws_iam_policy_document.stats_trust[0].json).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:site@3/website@4:environment:stats"
+    error_message = "The dev stats role trusts the wrong subject."
+  }
 }
 
 run "no_subject_no_role" {
@@ -144,6 +169,27 @@ run "another_environment_is_refused" {
 
   variables {
     stats_github_oidc_subject = "repo:site@3/website@4:ref:refs/heads/main"
+  }
+
+  expect_failures = [var.stats_github_oidc_subject]
+}
+
+# A subject without IDs would match a repository made again under the name.
+run "a_subject_without_ids_is_refused" {
+  command = plan
+
+  variables {
+    stats_github_oidc_subject = "repo:site/website:environment:stats"
+  }
+
+  expect_failures = [var.stats_github_oidc_subject]
+}
+
+run "a_wildcard_is_refused" {
+  command = plan
+
+  variables {
+    stats_github_oidc_subject = "repo:site@3/*@4:environment:stats"
   }
 
   expect_failures = [var.stats_github_oidc_subject]

@@ -145,23 +145,41 @@ That adds a read-only role, `<prefix>-github-stats`
 ([infra/init/stats_reader.tf](../infra/init/stats_reader.tf)):
 
 - Only jobs in that repository's `stats` GitHub environment may assume it,
-  through GitHub's OIDC, matched by the subject GitHub sends for them
-  (`<sub_claim_prefix>:environment:stats`; with immutable subjects it names
-  the owner's and the repository's IDs, which a rename doesn't change). The
-  bootstrap makes that environment take only `main`.
-- In production it may read costs (`ce:GetCostAndUsage`) and metrics
-  (`cloudwatch:GetMetricData`); elsewhere costs only. Nothing else, and it
-  writes nothing. Neither call can be narrowed in IAM: it can read every
-  metric in the account (counts and sums, nothing about anyone) and every
-  cost. The workflow, public too, decides what's published.
-- The bootstrap stores, in that `stats` environment, the role's ARN as a
-  secret and the region and the counts' namespace as variables, each named
-  for the account (`STATS_ROLE_ARN_PRODUCTION`, `STATS_REGION_DEV`,
-  `STATS_NAMESPACE_PRODUCTION`…). The gh login running it needs admin
-  rights on that repository too.
+  through GitHub's OIDC, matched exactly by the subject GitHub sends for
+  them (`<sub_claim_prefix>:environment:stats`). The repository must send
+  the immutable kind, with its owner's and its own IDs, so a repository
+  made again under the same name doesn't match; the bootstrap refuses one
+  that doesn't (turn it on in the repository's Actions OIDC settings).
+  Renaming the repository changes the subject too: rerun with `STATS_REPO`.
+- Before the role exists, the bootstrap makes that environment, or keeps it
+  with its protection settings, and limits it to `main`. Any workflow on
+  that repository's `main` naming the environment can assume the role, so
+  the repository must keep such jobs to its own triggers (a schedule, a
+  manual run), never `pull_request_target`, `workflow_run` or
+  `issue_comment`, which run untrusted input in `main`'s context.
+- In production it may read metrics (`cloudwatch:GetMetricData`) in the
+  app's region, and everywhere costs (`ce:GetCostAndUsage`, which answers
+  in us-east-1 only); nothing else, and it writes nothing. Neither call
+  can be narrowed to resources: it can read every metric of the app's
+  region (counts and sums, nothing about anyone) and every cost of the
+  account. The workflow, public too, decides what's published. The calls
+  cost money (Cost Explorer $0.01 each), so the workflow reads costs once
+  a day.
+- The bootstrap refuses an AWS Organization's management account, whose
+  Cost Explorer shows every member account's costs.
+- It then stores, in that `stats` environment, the role's ARN as a secret
+  and the region as a variable, each named for the account
+  (`STATS_ROLE_ARN_PRODUCTION`, `STATS_REGION_DEV`…), and in production the
+  counts' namespace (`STATS_NAMESPACE_PRODUCTION`). The gh login running it
+  needs admin rights on that repository too.
+- Access Analyzer finds the role (GitHub's OIDC provider may assume it):
+  read the finding once and archive it, as the deploy role's
+  ([below](#audit-trail-and-change-alerts)).
 
-A later run without `STATS_REPO` keeps the role (and leaves the other
-repository alone); `STATS_REPO=none` removes it.
+A later run without `STATS_REPO` keeps the role, and leaves the other
+repository alone (it doesn't check its environment again: rerun with
+`STATS_REPO` for that). `STATS_REPO=none` removes the role; delete its
+secret and variables from the other repository by hand.
 
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
@@ -1303,8 +1321,8 @@ Analyzer's first findings, and one for each finding archived.
 **Access Analyzer.** An analyzer, `<prefix>-access`, in the app's region,
 reads the policies of the account's roles, buckets, functions, topics and
 so on, and makes a finding for each that lets another account, or anyone,
-in. Some are on purpose, and are found at first: the deploy role (GitHub's
-OIDC provider may assume it); while their URLs need no auth, `api` and
+in. Some are on purpose, and are found at first: the deploy role, and the
+stats role where there is one (GitHub's OIDC provider may assume them); while their URLs need no auth, `api` and
 `bot` (anyone may call them); and any role admins sign in through from
 another account (an AWS Organization's `OrganizationAccountAccessRole`, or
 the roles IAM Identity Center makes). Read each once (IAM, Access

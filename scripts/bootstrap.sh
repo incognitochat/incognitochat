@@ -37,9 +37,12 @@
 #        STATS_REPO=<owner>/<repo> ... the website repository whose "stats" environment may read
 #                                  this account's public statistics: a read-only role
 #                                  (infra/init/stats_reader.tf) that reads costs, and in
-#                                  production the counts too. Its role ARN, region and
-#                                  metrics namespace are stored in that environment. Without
-#                                  it, a role made before is kept; STATS_REPO=none removes it.
+#                                  production the counts too. The repository must send
+#                                  immutable OIDC subjects; never an AWS Organization's
+#                                  management account. Its environment is limited to main
+#                                  first, then the role's ARN and region (and production's
+#                                  counts namespace) are stored there. Without STATS_REPO,
+#                                  a role made before is kept; STATS_REPO=none removes it.
 #
 # Nothing environment-specific is written to the repository: names are
 # computed at runtime and stored as GitHub environment secrets and variables.
@@ -82,24 +85,92 @@ tf_vars=(
 apply_args=(-input=false "${tf_vars[@]}")
 
 # The stats role (infra/init/stats_reader.tf): trusted only for STATS_REPO's
-# "stats" environment, by the subject GitHub sends for it (with immutable
-# subjects, its owner's and its own IDs, which a rename doesn't change).
-# Without STATS_REPO, the subject from the last run is kept, so running this
-# again for another reason doesn't remove the role. Call after tf init.
+# "stats" environment, by the subject GitHub sends for it, which must be the
+# immutable kind, with the owner's and the repository's IDs: a repository
+# made again under the same name doesn't match. Without STATS_REPO, the
+# subject from the last run is kept (stats_vars), so running this again for
+# another reason doesn't remove the role; STATS_REPO=none removes it.
 stats_repo=${STATS_REPO:-}
-stats_args() {
-  local subject=''
-  if [[ $stats_repo == none ]]; then
-    subject=''
-  elif [[ -n $stats_repo ]]; then
-    subject="$(gh api "repos/${stats_repo}/actions/oidc/customization/sub" --jq .sub_claim_prefix):environment:stats"
-  else
-    subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
-    [[ $subject == *:environment:stats ]] || subject=''
+stats_subject=''
+stats_metrics=false
+[[ $environment == production ]] && stats_metrics=true
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  if [[ ! $stats_repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "STATS_REPO must be <owner>/<repo>, or none" >&2
+    exit 1
   fi
-  local metrics=false
-  [[ $environment == production ]] && metrics=true
-  printf '%s\n' -var "stats_github_oidc_subject=${subject}" -var "stats_read_metrics=${metrics}"
+  stats_prefix=$(gh api "repos/${stats_repo}/actions/oidc/customization/sub" --jq .sub_claim_prefix)
+  if [[ ! $stats_prefix =~ ^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$ ]]; then
+    echo "${stats_repo} doesn't send immutable OIDC subjects (it sends ${stats_prefix}), so a" >&2
+    echo "repository made again under its name could assume the stats role. Turn them on" >&2
+    echo "(the repository's Actions OIDC settings) and rerun this." >&2
+    exit 1
+  fi
+  stats_subject="${stats_prefix}:environment:stats"
+  # Never the organization's management account: its Cost Explorer shows
+  # every member account's costs.
+  if org_admin=$(aws organizations describe-organization --query Organization.MasterAccountId --output text 2>&1); then
+    if [[ $org_admin == "$account_id" ]]; then
+      echo "This is the AWS Organization's management account: no stats role here." >&2
+      exit 1
+    fi
+  elif [[ $org_admin != *AWSOrganizationsNotInUseException* ]]; then
+    echo "Couldn't tell whether this is an AWS Organization's management account, so nothing" >&2
+    echo "was applied. AWS said: ${org_admin}" >&2
+    exit 1
+  fi
+fi
+
+# Sets stats, the stats role's Terraform variables. After tf init.
+stats_vars() {
+  if [[ -z $stats_repo ]]; then
+    stats_subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
+    [[ $stats_subject == *:environment:stats ]] || stats_subject=''
+  fi
+  stats=(-var "stats_github_oidc_subject=${stats_subject}" -var "stats_read_metrics=${stats_metrics}")
+}
+
+# STATS_REPO's "stats" environment: made, or kept with its protection
+# settings, and limited to its main branch, before the role that trusts it
+# exists. Fails on any error from GitHub.
+stats_environment() {
+  local current err body found=0 id type name policies
+  err=$(mktemp)
+  if current=$(gh api "repos/${stats_repo}/environments/stats" 2>"$err"); then
+    rm -f "$err"
+  elif grep -q 'HTTP 404' "$err"; then
+    rm -f "$err"
+    current='{}'
+  else
+    echo "Couldn't read ${stats_repo}'s 'stats' environment, so nothing was applied:" >&2
+    cat "$err" >&2
+    rm -f "$err"
+    exit 1
+  fi
+  # The PUT replaces the protection settings: send back the current ones.
+  # shellcheck disable=SC2016 # jq's own variables
+  body=$(jq -c 'def rule: [.protection_rules[]? | select(.type == "required_reviewers")][0];
+    {deployment_branch_policy: {protected_branches: false, custom_branch_policies: true},
+     reviewers: [rule | .reviewers[]? | {type, id: .reviewer.id}]}
+    + (if has("can_admins_bypass") then {can_admins_bypass} else {} end)
+    + (rule // {} | if has("prevent_self_review") then {prevent_self_review} else {} end)
+    + ([.protection_rules[]? | select(.type == "wait_timer") | {wait_timer}][0] // {})' <<<"$current")
+  gh api --method PUT "repos/${stats_repo}/environments/stats" --input - <<<"$body" >/dev/null
+  policies=$(gh api --paginate "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+    --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')
+  while read -r id type name; do
+    [[ -z "$id" ]] && continue
+    if [[ $type == branch && $name == main ]]; then
+      found=1
+    else
+      gh api --method DELETE "repos/${stats_repo}/environments/stats/deployment-branch-policies/${id}" >/dev/null
+    fi
+  done <<<"$policies"
+  if [[ $found == 0 ]]; then
+    gh api --method POST "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+      -f name=main -f type=branch >/dev/null
+  fi
+  echo "${stats_repo}'s 'stats' environment takes only main"
 }
 [[ "${AUTO_APPROVE:-}" == "1" ]] && apply_args+=(-auto-approve)
 
@@ -159,10 +230,13 @@ check_cost_explorer() {
 
 # --- AWS (Terraform) ----------------------------------------------------------
 check_cost_explorer
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  stats_environment
+fi
 if aws s3api head-bucket --bucket "$state_bucket" --region "$region" 2>/dev/null; then
   tf init -input=false -reconfigure "${backend_args[@]}"
   roles=$(existing_function_roles)
-  mapfile -t stats < <(stats_args)
+  stats_vars
   tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
 else
   # First run: the state bucket doesn't exist yet. Apply with local state,
@@ -173,7 +247,7 @@ else
   printf 'terraform {\n  backend "local" {}\n}\n' >"$override"
   tf init -input=false -reconfigure
   roles=$(existing_function_roles)
-  mapfile -t stats < <(stats_args)
+  stats_vars
   tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
   rm -f "$override"
   tf init -input=false -migrate-state -force-copy "${backend_args[@]}"
@@ -271,32 +345,24 @@ printf '%s' "$signing_profile" | gh secret set LAMBDA_SIGNING_PROFILE --env "$en
 printf '%s' "$code_signing_config" | gh secret set LAMBDA_CODE_SIGNING_CONFIG --env "$environment" --repo "$repo"
 gh variable set AWS_REGION --env "$environment" --repo "$repo" --body "$region"
 
-# The stats repository's "stats" environment: only its main branch, and per
-# account (suffixed with this environment's name in capitals) the role to
-# assume, the region and the namespace of the counts.
+# The stats role's ARN, region and (production) counts namespace, in
+# STATS_REPO's "stats" environment, named for this account.
 stats_role_arn=$(tf output -raw stats_role_arn 2>/dev/null || true)
-if [[ -n $stats_repo && $stats_repo != none && $stats_role_arn == arn:* ]]; then
-  echo "Configuring ${stats_repo}'s 'stats' environment"
-  suffix=$(tr '[:lower:]' '[:upper:]' <<<"$environment")
-  gh api --method PUT "repos/${stats_repo}/environments/stats" --input - >/dev/null \
-    <<<'{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}'
-  stats_main=0
-  while read -r id type name; do
-    [[ -z "$id" ]] && continue
-    if [[ $type == branch && $name == main ]]; then
-      stats_main=1
-    else
-      gh api --method DELETE "repos/${stats_repo}/environments/stats/deployment-branch-policies/${id}" >/dev/null
-    fi
-  done <<<"$(gh api "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
-    --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')"
-  if [[ $stats_main == 0 ]]; then
-    gh api --method POST "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
-      -f name=main -f type=branch >/dev/null
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  if [[ $stats_role_arn != arn:* ]]; then
+    echo "The stats role wasn't made, so ${stats_repo} wasn't given its ARN." >&2
+    exit 1
   fi
+  suffix=$(tr '[:lower:]' '[:upper:]' <<<"$environment")
   printf '%s' "$stats_role_arn" | gh secret set "STATS_ROLE_ARN_${suffix}" --env stats --repo "$stats_repo"
   gh variable set "STATS_REGION_${suffix}" --env stats --repo "$stats_repo" --body "$region"
-  gh variable set "STATS_NAMESPACE_${suffix}" --env stats --repo "$stats_repo" --body "${environment_prefix}/api"
+  if [[ $stats_metrics == true ]]; then
+    gh variable set "STATS_NAMESPACE_${suffix}" --env stats --repo "$stats_repo" --body "${environment_prefix}/api"
+  fi
+  echo "Stored the stats role for ${environment} in ${stats_repo}'s 'stats' environment"
+elif [[ $stats_repo == none ]]; then
+  echo "No stats role. Delete its secret and variables (STATS_*_${environment^^}) from the" \
+    "website repository's 'stats' environment by hand if they're still there."
 fi
 
 if [[ $policy_type == tag ]]; then

@@ -41,8 +41,8 @@ variable "stats_github_oidc_subject" {
   description = <<-EOT
     The OIDC "sub" claim of the jobs that may read this account's public
     statistics (stats_reader.tf): the website repository's "stats" GitHub
-    environment, "<its sub_claim_prefix>:environment:stats", e.g.
-    "repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:stats".
+    environment, "<its sub_claim_prefix>:environment:stats", the immutable
+    kind only, with IDs: "repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:stats".
     scripts/bootstrap.sh sets it from STATS_REPO. Empty (the default): no
     stats role.
   EOT
@@ -50,8 +50,8 @@ variable "stats_github_oidc_subject" {
   default     = ""
 
   validation {
-    condition     = var.stats_github_oidc_subject == "" || can(regex("^repo:[^:]+/[^:]+:environment:stats$", var.stats_github_oidc_subject))
-    error_message = "stats_github_oidc_subject must be empty or look like repo:<owner>/<repo>:environment:stats (optionally with @<id> suffixes)."
+    condition     = var.stats_github_oidc_subject == "" || can(regex("^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+:environment:stats$", var.stats_github_oidc_subject))
+    error_message = "stats_github_oidc_subject must be empty or an immutable subject: repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:stats."
   }
 }
 

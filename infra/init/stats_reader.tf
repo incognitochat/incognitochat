@@ -5,9 +5,12 @@
 # metrics; production only) and costs (Cost Explorer). It can read nothing
 # else and change nothing.
 #
-# Neither call can be narrowed in IAM: GetMetricData reads every metric in
-# the account (all counts and sums, nothing about anyone), GetCostAndUsage
-# every cost. What's published is decided by the workflow, which is public.
+# Neither call can be narrowed to resources in IAM, only to a region:
+# GetMetricData reads every metric in the app's region (counts and sums,
+# nothing about anyone), GetCostAndUsage every cost of the account (Cost
+# Explorer answers only in us-east-1). What's published is decided by the
+# workflow, which is public. The calls cost money (Cost Explorer $0.01 each),
+# so the workflow reads costs once a day.
 #
 # scripts/bootstrap.sh sets stats_github_oidc_subject from STATS_REPO; with
 # none, there is no role.
@@ -56,6 +59,12 @@ data "aws_iam_policy_document" "stats" {
     sid       = "Costs"
     actions   = ["ce:GetCostAndUsage"]
     resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = ["us-east-1"]
+    }
   }
 
   dynamic "statement" {
@@ -64,6 +73,12 @@ data "aws_iam_policy_document" "stats" {
       sid       = "Counts"
       actions   = ["cloudwatch:GetMetricData"]
       resources = ["*"]
+
+      condition {
+        test     = "StringEquals"
+        variable = "aws:RequestedRegion"
+        values   = [var.aws_region]
+      }
     }
   }
 }
