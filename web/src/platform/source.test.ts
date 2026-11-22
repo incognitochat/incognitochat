@@ -46,7 +46,20 @@ describe('findSourceUrl', () => {
       return new Response(JSON.stringify({ repository: 'example/app', commit }));
     };
     expect(await findSourceUrl('https://example.github.io/', fetcher)).toBe(`https://github.com/example/app/tree/${commit}`);
-    expect(asked).toEqual([{ url: 'https://example.github.io/manifest.json', init: { cache: 'no-store', credentials: 'omit' } }]);
+    expect(asked).toEqual([
+      { url: 'https://example.github.io/manifest.json', init: { cache: 'no-store', credentials: 'omit', signal: expect.any(AbortSignal) } },
+    ]);
+  });
+
+  it('reads it beside the app when the app is served from a path', async () => {
+    const asked: string[] = [];
+    const fetcher: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response('{}');
+    };
+    await findSourceUrl('https://example.github.io/app/', fetcher);
+    await findSourceUrl('https://example.github.io/app/index.html', fetcher);
+    expect(asked).toEqual(['https://example.github.io/app/manifest.json', 'https://example.github.io/app/manifest.json']);
   });
 
   it('has nothing to give without a good manifest', async () => {

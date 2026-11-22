@@ -2571,10 +2571,13 @@ describe('typed confirmation', () => {
 
 describe('the source link', () => {
   const commit = '41ee5804e4fcf04c74d650cc44541da131336d60';
+  const manifest = () => new Response(JSON.stringify({ repository: 'example/app', commit }));
 
-  // The app is served from its origin's path; the manifest sits beside it.
-  async function withLocation(run: () => Promise<void>): Promise<void> {
-    vi.stubGlobal('location', { origin: 'https://app.example', pathname: '/' });
+  // The app served from a path of its origin, with the manifest beside it,
+  // and the network answering with fetcher.
+  async function served(fetcher: typeof fetch, run: () => Promise<void>): Promise<void> {
+    vi.stubGlobal('location', { origin: 'https://app.example', pathname: '/app/' });
+    vi.stubGlobal('fetch', fetcher);
     try {
       await run();
     } finally {
@@ -2582,32 +2585,100 @@ describe('the source link', () => {
     }
   }
 
-  it("opens the source tree the build's manifest names, in the device's browser", () =>
-    withLocation(async () => {
-      const { bridge, posted } = fakeBridge();
-      const asked: string[] = [];
-      const fetcher: typeof fetch = async (input) => {
+  it("opens the source tree the build's manifest names, in the device's browser", async () => {
+    const asked: string[] = [];
+    await served(
+      async (input) => {
         asked.push(String(input));
-        return new Response(JSON.stringify({ repository: 'example/app', commit }));
-      };
-      const { app } = await setup({ api: null, bridge, fetch: fetcher });
-      expect(await app.openSource()).toBe('opened');
-      expect(asked).toEqual(['https://app.example/manifest.json']);
-      expect(posted.filter((p) => p.type === 'web_app_open_link')).toEqual([
-        { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
-      ]);
-    }));
-
-  it('opens nothing when the build names no source', () =>
-    withLocation(async () => {
-      for (const fetcher of [
-        (async () => new Response('', { status: 404 })) as typeof fetch,
-        (async () => new Response(JSON.stringify({ repository: 'evil.example/x', commit }))) as typeof fetch,
-      ]) {
+        return manifest();
+      },
+      async () => {
         const { bridge, posted } = fakeBridge();
-        const { app } = await setup({ api: null, bridge, fetch: fetcher });
+        const { app } = await setup({ api: null, bridge });
+        app.prepareSource();
+        expect(await app.openSource()).toBe('opened');
+        expect(await app.openSource()).toBe('opened');
+        // Looked up once, when the home screen showed.
+        expect(asked).toEqual(['https://app.example/app/manifest.json']);
+        expect(posted.filter((p) => p.type === 'web_app_open_link')).toEqual([
+          { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
+          { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
+        ]);
+      },
+    );
+  });
+
+  it('opens it once for a second tap while the first still waits', async () => {
+    let answer: (r: Response) => void = () => {};
+    await served(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        const { app } = await setup({ api: null, bridge });
+        const first = app.openSource();
+        expect(await app.openSource()).toBe('waiting');
+        answer(manifest());
+        expect(await first).toBe('opened');
+        expect(posted.filter((p) => p.type === 'web_app_open_link')).toHaveLength(1);
+      },
+    );
+  });
+
+  it('opens nothing for a tap that waited while the app was hidden', async () => {
+    let answer: (r: Response) => void = () => {};
+    await served(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        let visibility: (data: { is_visible: boolean }) => void = () => {};
+        bridge.on = ((type: string, handler: typeof visibility) => {
+          if (type === 'visibility_changed') visibility = handler;
+          return () => {};
+        }) as Bridge['on'];
+        const { app } = await setup({ api: null, bridge });
+        const tap = app.openSource();
+        visibility({ is_visible: false });
+        answer(manifest());
+        expect(await tap).toBe('waiting');
+        expect(posted.some((p) => p.type === 'web_app_open_link')).toBe(false);
+      },
+    );
+  });
+
+  it('opens nothing when the build names no source, and looks again next time', async () => {
+    const answers = [
+      new Response('', { status: 404 }),
+      new Response(JSON.stringify({ repository: 'evil.example/x', commit })),
+      manifest(),
+    ];
+    await served(
+      async () => answers.shift()!,
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        const { app } = await setup({ api: null, bridge });
+        app.prepareSource();
+        expect(await app.openSource()).toBe('unknown');
         expect(await app.openSource()).toBe('unknown');
         expect(posted.some((p) => p.type === 'web_app_open_link')).toBe(false);
-      }
-    }));
+        expect(await app.openSource()).toBe('opened');
+        expect(answers).toEqual([]);
+      },
+    );
+  });
+
+  it('looks nothing up outside Telegram', async () => {
+    let asked = 0;
+    await served(
+      async () => {
+        asked++;
+        return manifest();
+      },
+      async () => {
+        const { app } = await setup({ api: null });
+        app.prepareSource();
+        expect(await app.openSource()).toBe('unknown');
+        expect(asked).toBe(0);
+      },
+    );
+  });
 });

@@ -391,8 +391,6 @@ export interface Deps {
   background?: boolean;
   /** The pause between steps of a deletion or cleanup, instead of a second (tests). */
   stepPauseMs?: number;
-  /** Fetches the app's own manifest, for the source link (tests). */
-  fetch?: typeof fetch;
 }
 
 /** How often an open app checks its inbox while it has no push socket. */
@@ -490,6 +488,16 @@ export function createApp(deps: Deps) {
   // How many times the app was hidden, so a tap that first waits (on the
   // network, or storage) can tell whether it still counts.
   let hides = 0;
+  // Where the running build's source code is (openSource): looked up once
+  // the home screen shows, so a tap can open it at once, while the touch
+  // still lets the page open a link. Looked up again after a failure.
+  let sourceLookup: Promise<string | null> | null = null;
+  let sourceOpening = false;
+  const lookUpSource = (): Promise<string | null> =>
+    (sourceLookup ??= findSourceUrl(location.origin + location.pathname).then((url) => {
+      if (!url) sourceLookup = null;
+      return url;
+    }));
   const hidden = () => {
     attending = false;
     hides++;
@@ -2445,14 +2453,30 @@ export function createApp(deps: Deps) {
         showBack();
       };
     },
+    /** Starts looking up the source link, for when it's tapped (the home screen). */
+    prepareSource: (): void => {
+      if (deps.bridge) void lookUpSource();
+    },
     /**
      * The running build's source code (AGPL-3.0, section 13), in the
      * device's browser: the repository and commit its signed manifest names
-     * (platform/source). 'unknown' when the build has none to name.
+     * (platform/source). 'unknown' when the build has none to name, or it
+     * couldn't be read; 'waiting' for a tap while another one still waits.
      */
-    openSource: async (): Promise<'opened' | 'unknown'> => {
-      const url = deps.bridge ? await findSourceUrl(location.origin + location.pathname, deps.fetch) : null;
-      if (!url || !deps.bridge) return 'unknown';
+    openSource: async (): Promise<'opened' | 'unknown' | 'waiting'> => {
+      if (!deps.bridge) return 'unknown';
+      if (sourceOpening) return 'waiting';
+      sourceOpening = true;
+      const tapped = hides;
+      let url: string | null;
+      try {
+        url = await lookUpSource();
+      } finally {
+        sourceOpening = false;
+      }
+      if (!url) return 'unknown';
+      // Hidden while it waited: the tap no longer counts.
+      if (tapped !== hides) return 'waiting';
       deps.bridge.post('web_app_open_link', { url });
       return 'opened';
     },

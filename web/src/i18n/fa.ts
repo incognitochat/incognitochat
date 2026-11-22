@@ -230,8 +230,6 @@ export const fa = {
 
   storageTitle: 'داده و فضای ذخیره',
   usageTitle: 'مصرف',
-  sourceCode: 'کد منبع',
-  sourceCodeUnknown: 'جای کد منبع این نسخه از برنامه پیدا نشد.',
   usageDaily: 'امروز',
   usageTotal: 'در کل',
   usageResets: 'ساعت {time} از نو شروع می‌شود ({in}).',
@@ -247,6 +245,8 @@ export const fa = {
   usageLeftOf: '{left} از {limit} باقی مانده',
   usageOf: '{used} از {limit}',
   usageCount: '{count}',
+  sourceCode: 'کد منبع',
+  sourceCodeUnknown: 'کد منبع این نسخه از برنامه پیدا نشد.',
   messagesLeftToday: 'پیام‌های باقی‌ماندهٔ امروز: {count}. از ساعت {time} دوباره.',
   storageMedia: 'رسانه روی این دستگاه: {size}',
   storageApp: 'برنامه روی این دستگاه روی‌هم {size} جا گرفته، همراه با گفت‌وگوها و کلیدهای شما.',

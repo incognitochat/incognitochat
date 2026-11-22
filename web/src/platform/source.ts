@@ -2,9 +2,10 @@
  * Where the running build's source code is, for the "Source code" link
  * (AGPL-3.0, section 13): the repository and commit its manifest names. The
  * hosting workflow writes manifest.json next to the app and signs it with
- * everything else (docs/verifying.md), so the link names the exact code
- * that's running; a copy of the app run by anyone else names its own. A
- * build served without a manifest (local development) has no link to give.
+ * everything else (docs/verifying.md), so the link names the code that's
+ * running (read when the home screen first shows, so a deploy in between
+ * is rare); a copy of the app run by anyone else names its own. A build
+ * served without a manifest (local development) has no link to give.
  *
  * Only a GitHub repository name and a full commit are taken from it, so a
  * manifest can't send anyone anywhere but a source tree on GitHub.
@@ -24,13 +25,20 @@ export function sourceUrl(manifest: unknown): string | null {
   return `https://github.com/${repository}/tree/${commit}`;
 }
 
+/** How long the manifest may take to arrive. */
+const TIMEOUT_MS = 10_000;
+
 /**
  * Reads the manifest served next to the app at base (its URL without query
  * or fragment), and returns the source tree it names, or null.
  */
 export async function findSourceUrl(base: string, fetcher: typeof fetch = fetch): Promise<string | null> {
   try {
-    const response = await fetcher(new URL('manifest.json', base).href, { cache: 'no-store', credentials: 'omit' });
+    const response = await fetcher(new URL('manifest.json', base).href, {
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
     if (!response.ok) return null;
     return sourceUrl(await response.json());
   } catch {

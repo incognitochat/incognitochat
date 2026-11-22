@@ -354,6 +354,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
+  useEffect(() => app.prepareSource(), [app]);
   // Signed out, the chats are read-only; Try again asks the server again.
   // A deletion that couldn't finish: read-only too; Try again carries on with it.
   const status = screen.deletionPaused ? (
