@@ -265,6 +265,8 @@ export const ar = {
   usageLeftOf: 'تبقّى {left} من {limit}',
   usageOf: '{used} من {limit}',
   usageCount: '{count}',
+  sourceCode: 'الشيفرة المصدرية',
+  sourceCodeUnknown: 'تعذّر العثور على الشيفرة المصدرية لهذه النسخة من التطبيق.',
   messagesLeftToday: 'الرسائل المتبقية اليوم: {count}. المزيد بدءًا من {time}.',
   storageMedia: 'الوسائط على هذا الجهاز: {size}',
   storageApp: 'يستخدم التطبيق {size} على هذا الجهاز إجمالًا، مع محادثاتك ومفاتيحك.',
