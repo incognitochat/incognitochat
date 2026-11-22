@@ -48,6 +48,7 @@ const ERROR_TEXT: Record<ErrorKind, Key> = {
   network: 'errorNetwork',
   expired: 'errorExpired',
   'rate-limited': 'errorRateLimited',
+  'device-limit': 'errorDeviceLimit',
   clock: 'errorClock',
   generic: 'errorGeneric',
 };
@@ -76,6 +77,7 @@ const NOTICE_TEXT: Record<HomeNotice, Key> = {
   'already-member': 'noticeAlreadyMember',
   'own-invitation': 'noticeOwnInvitation',
   'rate-limited': 'noticeRateLimited',
+  'device-limit': 'errorDeviceLimit',
   'new-signing-key': 'noticeNewSigningKey',
   network: 'errorNetwork',
   generic: 'errorGeneric',
@@ -84,6 +86,7 @@ const NOTICE_TEXT: Record<HomeNotice, Key> = {
 const INVITATIONS_NOTICE_TEXT: Record<InvitationsNotice, Key> = {
   created: 'noticeInvitationCreated',
   'none-left': 'noticeNoneLeft',
+  'device-limit': 'errorDeviceLimit',
   network: 'errorNetwork',
   generic: 'errorGeneric',
 };
@@ -93,6 +96,7 @@ const SEND_ERROR_TEXT: Record<Extract<SendError, string>, Key> = {
   'no-mailboxes': 'errorNoMailboxes',
   'mailbox-limit': 'errorMailboxLimit',
   'rate-limited': 'errorTooFast',
+  'device-limit': 'errorDeviceLimit',
   'media-paused': 'errorMediaPaused',
   outdated: 'errorOutdated',
   network: 'errorNetwork',
@@ -123,6 +127,7 @@ const ADMIN_NOTICE_TEXT: Record<AdminNotice, Key> = {
   'not-member': 'noticeNotMember',
   'not-found': 'noticeLinkUnknown',
   'bad-link': 'noticeLinkUnknown',
+  'device-limit': 'errorDeviceLimit',
   network: 'errorNetwork',
   generic: 'errorGeneric',
 };

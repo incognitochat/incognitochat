@@ -235,34 +235,34 @@ func TestCheck(t *testing.T) {
 	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-0123456789abc"})
 
 	nonces := newMemoryNonces(func() time.Time { return now })
-	if err := Check(ctx, login, &key.PublicKey, nonces, now); err != nil {
+	if err := Check(ctx, login, &key.PublicKey, nonces, now, nil); err != nil {
 		t.Fatalf("valid login refused: %v", err)
 	}
-	if err := Check(ctx, login, &key.PublicKey, nonces, now); !errors.Is(err, ErrLogin) {
+	if err := Check(ctx, login, &key.PublicKey, nonces, now, nil); !errors.Is(err, ErrLogin) {
 		t.Fatalf("replayed login: err = %v", err)
 	}
 
 	later := func(d time.Duration) *memoryNonces { return newMemoryNonces(func() time.Time { return now.Add(d) }) }
 	// A timestamp outside the window is told apart (the device's clock is
 	// off), and is still a refused login for callers that don't.
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second)); !errors.Is(err, ErrClockSkew) || !errors.Is(err, ErrLogin) {
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(MaxSkew+time.Second), nil); !errors.Is(err, ErrClockSkew) || !errors.Is(err, ErrLogin) {
 		t.Fatalf("stale timestamp: err = %v", err)
 	}
-	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second)); !errors.Is(err, ErrClockSkew) {
+	if err := Check(ctx, login, &key.PublicKey, later(0), now.Add(-MaxSkew-time.Second), nil); !errors.Is(err, ErrClockSkew) {
 		t.Fatalf("timestamp from the future: err = %v", err)
 	}
 	// Other refusals aren't clock skew.
-	if err := Check(ctx, login, &key.PublicKey, nonces, now); errors.Is(err, ErrClockSkew) {
+	if err := Check(ctx, login, &key.PublicKey, nonces, now, nil); errors.Is(err, ErrClockSkew) {
 		t.Fatal("a replayed login was taken for clock skew")
 	}
 
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	fresh := newMemoryNonces(func() time.Time { return now })
-	if err := Check(ctx, login, &other.PublicKey, fresh, now); !errors.Is(err, ErrLogin) {
+	if err := Check(ctx, login, &other.PublicKey, fresh, now, nil); !errors.Is(err, ErrLogin) {
 		t.Fatal("accepted another device's signature")
 	}
 	// The refused login must not have used up the nonce.
-	if err := Check(ctx, login, &key.PublicKey, fresh, now); err != nil {
+	if err := Check(ctx, login, &key.PublicKey, fresh, now, nil); err != nil {
 		t.Fatalf("nonce was consumed by a refused login: %v", err)
 	}
 
@@ -275,7 +275,7 @@ func TestCheck(t *testing.T) {
 		"short nonce":      {AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: "short", Signature: login.Signature},
 		"nonce charset":    {AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: "nonce with spaces!!", Signature: login.Signature},
 	} {
-		if err := Check(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+		if err := Check(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now, nil); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -338,10 +338,10 @@ func TestCheckRequest(t *testing.T) {
 		Body: []byte(`{"id":"x"}`), Timestamp: now.Unix(), Nonce: "nonce-request-0123",
 	})
 	nonces := newMemoryNonces(func() time.Time { return now })
-	if err := CheckRequest(ctx, r, &key.PublicKey, nonces, now); err != nil {
+	if err := CheckRequest(ctx, r, &key.PublicKey, nonces, now, nil); err != nil {
 		t.Fatalf("valid request refused: %v", err)
 	}
-	if err := CheckRequest(ctx, r, &key.PublicKey, nonces, now); !errors.Is(err, ErrLogin) {
+	if err := CheckRequest(ctx, r, &key.PublicKey, nonces, now, nil); !errors.Is(err, ErrLogin) {
 		t.Fatal("replayed request accepted")
 	}
 
@@ -355,7 +355,7 @@ func TestCheckRequest(t *testing.T) {
 		bad.Nonce = "nonce-" + strings.ReplaceAll(name, " ", "-") + "-0123"
 		bad = signRequest(t, key, bad)
 		change(&bad)
-		if err := CheckRequest(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+		if err := CheckRequest(ctx, bad, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now, nil); !errors.Is(err, ErrLogin) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -363,7 +363,60 @@ func TestCheckRequest(t *testing.T) {
 	// A login signature is never a request signature.
 	login := signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: now.Unix(), Nonce: "nonce-login-012345"})
 	asRequest := SignedRequest{AccountID: account, DeviceID: device, Timestamp: login.Timestamp, Nonce: login.Nonce, Signature: login.Signature}
-	if err := CheckRequest(ctx, asRequest, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now); !errors.Is(err, ErrLogin) {
+	if err := CheckRequest(ctx, asRequest, &key.PublicKey, newMemoryNonces(func() time.Time { return now }), now, nil); !errors.Is(err, ErrLogin) {
 		t.Fatal("login signature accepted for a request")
+	}
+}
+
+// The gate runs only for a signature that checks out, before the nonce is
+// recorded: refusing there records nothing, and a replay reaches it too
+// (it's the nonce that refuses the replay, after the gate).
+func TestGateRunsAfterTheSignatureAndBeforeTheNonce(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ctx := context.Background()
+	stop := errors.New("stopped by the gate")
+	runs := 0
+	gate := func(refuse bool) Gate {
+		return func() error {
+			runs++
+			if refuse {
+				return stop
+			}
+			return nil
+		}
+	}
+
+	for _, kind := range []string{"login", "request"} {
+		runs = 0
+		nonces := newMemoryNonces(func() time.Time { return now })
+		check := func(pub *ecdsa.PublicKey, timestamp int64, g Gate) error {
+			if kind == "login" {
+				return Check(ctx, signLogin(t, key, Login{AccountID: account, DeviceID: device, Timestamp: timestamp, Nonce: "nonce-gate-0123456"}), pub, nonces, now, g)
+			}
+			return CheckRequest(ctx, signRequest(t, key, SignedRequest{AccountID: account, DeviceID: device, Method: "POST", Path: "/links", Timestamp: timestamp, Nonce: "nonce-gate-0123456"}), pub, nonces, now, g)
+		}
+		// Another key's signature, or a stale timestamp: the gate never runs.
+		if err := check(&other.PublicKey, now.Unix(), gate(false)); !errors.Is(err, ErrLogin) || runs != 0 {
+			t.Fatalf("%s, bad signature: err = %v, gate ran %d times", kind, err, runs)
+		}
+		if err := check(&key.PublicKey, now.Add(-2*MaxSkew).Unix(), gate(false)); !errors.Is(err, ErrClockSkew) || runs != 0 {
+			t.Fatalf("%s, stale: err = %v, gate ran %d times", kind, err, runs)
+		}
+		// Refused by the gate: its error, and the nonce stays unused.
+		if err := check(&key.PublicKey, now.Unix(), gate(true)); err != stop || runs != 1 {
+			t.Fatalf("%s, refused by the gate: err = %v, gate ran %d times", kind, err, runs)
+		}
+		if len(nonces.used) != 0 {
+			t.Fatalf("%s: a nonce was recorded for a request the gate refused", kind)
+		}
+		// Let through: recorded once; the replay passes the gate, then the
+		// nonce refuses it.
+		if err := check(&key.PublicKey, now.Unix(), gate(false)); err != nil || runs != 2 {
+			t.Fatalf("%s: err = %v, gate ran %d times", kind, err, runs)
+		}
+		if err := check(&key.PublicKey, now.Unix(), gate(false)); !errors.Is(err, ErrLogin) || runs != 3 {
+			t.Fatalf("%s, replayed: err = %v, gate ran %d times", kind, err, runs)
+		}
 	}
 }

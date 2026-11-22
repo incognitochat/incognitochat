@@ -44,7 +44,16 @@ async function backend() {
   // tokens signed; keyRetired: the issuer keys the apps' build names are
   // replaced, and no longer held; mailboxesFull: accounts hold all the
   // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
-  const state = { tokensLeft: Infinity, uploadsPaused: false, mediaSigned: 0, keyRetired: false, mailboxesFull: false, sendRefused: null as ApiError | null };
+  // tokensRefused: how every token request is refused, if set.
+  const state = {
+    tokensLeft: Infinity,
+    uploadsPaused: false,
+    mediaSigned: 0,
+    keyRetired: false,
+    mailboxesFull: false,
+    sendRefused: null as ApiError | null,
+    tokensRefused: null as ApiError | null,
+  };
   // An older server says no notice language; languageRefused: how a change of it is refused, if set.
   const noticeState = { languageSaid: true, languageRefused: null as Error | null };
   /** Requests to the media routes. */
@@ -126,6 +135,7 @@ async function backend() {
         // Signed with the key the request names, the only one held here
         // until it is retired.
         if (state.keyRetired || body.keyId !== toBase64Url(issuer.keyId)) throw new ApiError(409, 'unknown_issuer_key');
+        if (state.tokensRefused) throw state.tokensRefused;
         const blinded = body.blinded as string[];
         if (blinded.length > state.tokensLeft) throw new ApiError(429, 'rate_limited');
         state.tokensLeft -= blinded.length;
@@ -965,6 +975,24 @@ describe('conversations in the app', () => {
     await owner.sync();
     await owner.openConversation(screenOf(owner.screen.value, 'home').conversations[0]!.id);
     expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => [m.id, m.text])).toEqual([[failed.id, 'hello']]);
+  });
+
+  // A send that has to fetch tokens first, while the server refuses this
+  // device's logins for a minute: as that request's own refusal, never as
+  // the day's tokens used up.
+  it('says to try again in a minute when the device is refused for now, not that the day is used up', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    b.state.tokensLeft = 0;
+    b.state.tokensRefused = new ApiError(429, 'device_limit', undefined, undefined, 30);
+    await sender.writeToLink('hello');
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('device-limit');
+    expect(conv.messages.map((m) => [m.text, m.status])).toEqual([['hello', 'failed']]);
+    expect(canResend(conv.messages[0]!, Date.now())).toBe(true);
   });
 
   it('says when a link takes no more first messages for now, and from when it does, apart from a busy mailbox', async () => {

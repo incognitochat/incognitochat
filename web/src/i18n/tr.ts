@@ -210,6 +210,7 @@ export const tr = {
   errorNoMailboxes: 'Bugün çok sayıda yeni sohbet başlattınız ya da yanıtladınız. Yarın tekrar deneyin.',
   errorMailboxLimit: '4.000 sohbet sınırına ulaştınız. Birini engellemek bir yer açar; bir sohbeti silmek açmaz. Kullanım bölümüne bakın.',
   errorTooFast: 'Şu anda bu kişiye çok fazla mesaj gönderiliyor. Bir dakika sonra tekrar deneyin.',
+  errorDeviceLimit: 'Çok fazla deneme yapıldı. Bir dakika sonra tekrar deneyin.',
   errorLinkBusy: 'Şu anda bu bağlantı üzerinden çok fazla mesaj gönderiliyor. Saat {time} itibarıyla tekrar deneyin.',
   errorDownloadLimit: 'Bu dosya bugün çok fazla kez indirildi. Saat {time} itibarıyla tekrar deneyin.',
   errorMediaPaused: 'Ekler şimdilik duraklatıldı; daha sonra tekrar deneyin.',

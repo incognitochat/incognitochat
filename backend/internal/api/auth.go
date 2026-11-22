@@ -77,7 +77,10 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 }
 
 // withSignature is withDevice plus a fresh device signature over the request,
-// for sensitive actions: a stolen session token alone can't make them.
+// for sensitive actions: a stolen session token alone can't make them. In
+// order: the timestamp (nothing read yet), the token and the device (read),
+// the signature, the account's state (replaced, being deleted), the
+// device's limits (counted), the nonce (written), the handler.
 func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFunc {
 	return func(ctx context.Context, req httpapi.Request) httpapi.Response {
 		// One reading of the clock for both checks of the timestamp, so one
@@ -109,15 +112,25 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 		if err != nil {
 			return s.internal(route, err)
 		}
-		err = session.CheckRequest(ctx, signed, key, s.Nonces, now)
+		// Once the signature checks out, and before the nonce is written: a
+		// replaced account, or one being deleted, is refused writing
+		// nothing; any other request counts against the device's limits
+		// (deviceLimit), a replayed one too.
+		err = session.CheckRequest(ctx, signed, key, s.Nonces, now, func() error {
+			if resp, no := refused(route, c); no {
+				return refusal{resp}
+			}
+			return s.deviceLimit(ctx, route, budgetFor(route, c.device), c.AccountID, c.DeviceID, now)
+		})
+		var stopped refusal
+		if errors.As(err, &stopped) {
+			return stopped.resp
+		}
 		if errors.Is(err, session.ErrLogin) {
 			return httpapi.Error(http.StatusUnauthorized, "signature_rejected")
 		}
 		if err != nil {
 			return s.internal(route, err)
-		}
-		if resp, no := refused(route, c); no {
-			return resp
 		}
 		return h(ctx, req, c)
 	}

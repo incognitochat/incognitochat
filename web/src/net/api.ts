@@ -16,6 +16,7 @@ type ErrorCode =
   | 'daily_limit'
   | 'link_busy'
   | 'download_limit'
+  | 'device_limit'
   | 'login_refused'
   | 'clock_skew'
   | 'account_replaced'
@@ -57,6 +58,7 @@ const CODES = new Set<string>([
   'daily_limit',
   'link_busy',
   'download_limit',
+  'device_limit',
   'login_refused',
   'clock_skew',
   'account_replaced',

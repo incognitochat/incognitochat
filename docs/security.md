@@ -54,7 +54,7 @@ device.
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
 | Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times). |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
-| A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once. |
+| A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once (and with it a copy's logins and signed requests, below). |
 
 ## What users still have to trust
 
@@ -223,7 +223,7 @@ it. This is how close it gets.
   so they say what AWS's own per-minute metrics of the functions and tables
   already say, by route. The lines also count, for public statistics, the
   messages sent (sends that aren't quiet) and the padded bytes of the
-  uploads paid for. The lines are kept 7 days. The 22 metrics made from
+  uploads paid for. The lines are kept 7 days. The 29 metrics made from
   them (registrations, token batches, 429s overall and by route, three kinds
   of refusal, messages sent and media bytes) are kept by CloudWatch for 15
   days a minute at a time, 63 days 5 minutes at a time and 15 months an
@@ -297,6 +297,11 @@ it. This is how close it gets.
     through each link per hour, what each device fetches per minute, and
     what each person uses per day (so that no one can flood a mailbox or a
     link, or use up the capacity everyone shares);
+  - for each device, one record a UTC day of how often it logged in and
+    made signed requests (link changes, invitations, steps of a deletion)
+    in the current minute, quarter of an hour and day, and the minute of
+    its last of each, overwritten as it goes: so that no device can use up
+    the capacity everyone shares;
   - a record of each open app's socket, for pushes, and the minute it
     opened;
   - when each account last got a notice, for the 3 minutes until the next
@@ -323,9 +328,11 @@ it. This is how close it gets.
   items within a few days, usually much sooner): recompute the names for
   every mailbox, link and account in the directory, and so see which
   mailboxes got messages in which minute (and so, by timing, who likely
-  writes to whom), and which accounts had the app open in which minute.
-  That is part of what watching live shows them anyway (What users still
-  have to trust, 2.).
+  writes to whom), and which accounts had the app open in which minute;
+  and from the devices' records, how often each account logged in and
+  made signed requests each day, and the minute of its last of each (a
+  deletion's steps included). That is part of what watching live shows
+  them anyway (What users still have to trust, 2.).
 - **Who invited whom.** Using an invitation code is a request from the
   person's session that names the code, and the code names whose it is, so
   the server sees who invited whom. It doesn't store it: the person keeps
@@ -383,7 +390,13 @@ it. This is how close it gets.
   Windows and Linux the web view writes them to disk as they are. So an image
   of the device's app storage (a forensic copy of an unlocked phone, or a copy
   of Telegram Desktop's folder) clones the account: it opens the whole
-  history and can use the account as this device. Deleting the account or
+  history and can use the account as this device. It can also use up the
+  device's limits on logins and signed requests
+  ([protocol.md](protocol.md#registration-and-sessions)), so that its
+  owner's logins, link changes and deletion wait; the server can't tell
+  the two apart. The remedy is setting up again, which those limits don't
+  hold up: the copy is then refused, `410 account_replaced`, and writes
+  nothing. Deleting the account or
   setting up again clears the app's storage, but that isn't erasure: on some
   systems (Android and Windows at least, with Chromium's engine) the cleared
   keys and records stay in the storage files until the engine compacts them,

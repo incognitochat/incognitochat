@@ -12,6 +12,7 @@
 //	daily_limit                           429: a daily limit is used up; try after Retry-After, when the UTC day ends
 //	link_busy                             429: POST /send to a link's intro mailbox, past the link's first messages for the hour; try after Retry-After, when the hour ends
 //	download_limit                        429: GET /media/{id}, past the file's downloads for the day; try after Retry-After, when the UTC day ends
+//	device_limit                          429: POST /session or a signed request, past the device's logins or signed requests for a minute, a quarter of an hour or the UTC day (devices.go); try after Retry-After, when that window ends. Only once the signature checks out
 //	clock_skew                            401: a timestamp, or a new account's device list, is too far from the server's clock, which "now" gives; sign again
 //	login_refused                         the device can't log in
 //	account_replaced                      the account was replaced by a new registration
@@ -54,6 +55,7 @@ import (
 
 	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/links"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
@@ -176,6 +178,12 @@ type Limiter interface {
 	// LocalAt counts n uses in this instance's memory only, for when the
 	// database can't be reached, and reports whether they fit in limit.
 	LocalAt(key string, n, limit int, window time.Duration, at time.Time) bool
+	// SpendAt counts one use of b in key's row for the UTC day that holds
+	// at, if it fits in b's minute, quarter of an hour and day; otherwise
+	// it counts nothing and returns the longest of those windows that is
+	// used up. What memory knows is used up is refused for free
+	// (ephemeral.Limiter.SpendAt).
+	SpendAt(ctx context.Context, key string, b ephemeral.Budget, at time.Time) (time.Duration, error)
 }
 
 // Server holds what the handlers need.
