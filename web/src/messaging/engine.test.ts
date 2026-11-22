@@ -1361,6 +1361,40 @@ describe('blocks', () => {
     expect((await listMessages(owner.db, mine)).map((m) => m.text)).toEqual(['hello']);
   });
 
+  it('ask once more, 2 seconds later, when the server finds no such mailbox', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    const mailbox = (await getConversation(owner.db, mine))!.myMailbox!;
+
+    // The first answer is not_found (a mailbox made a moment ago, not seen
+    // yet), the second discards it.
+    const call = owner.session.call.bind(owner.session);
+    let discards = 0;
+    owner.session.call = async function (...args) {
+      if (args[0] === 'POST' && args[1] === `/mailboxes/${mailbox}/discard` && ++discards === 1) {
+        throw new ApiError(404, 'not_found');
+      }
+      return call(...args);
+    } as typeof call;
+    await owner.messaging.block(mine);
+    expect(discards).toBe(2);
+    expect(backend.waits).toEqual([2000]);
+    expect(backend.mailboxes.has(mailbox)).toBe(false);
+    expect((await getConversation(owner.db, mine))!.status).toBe('blocked');
+
+    // Gone already: not_found twice, and it's blocked all the same.
+    await owner.messaging.block(mine);
+    expect(discards).toBe(4);
+    expect(backend.waits).toEqual([2000, 2000]);
+    expect((await getConversation(owner.db, mine))!.status).toBe('blocked');
+  });
+
   it('let a sender block a conversation too', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');

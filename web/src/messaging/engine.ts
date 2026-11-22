@@ -137,6 +137,13 @@ const UPLOAD_DELETE_BATCH = 50;
  * firewall's limit on everyone's batches together (deletes-total).
  */
 const UPLOAD_DELETE_PAUSE_MS = 2_000;
+/**
+ * How long a block answered not_found waits before asking once more. The
+ * server reads the mailbox eventually consistent, so one made in about the
+ * last second may not be found yet; not_found twice is a mailbox that is
+ * gone (discarded already) or was never ours.
+ */
+const BLOCK_RETRY_MS = 2_000;
 /** How many uploads are deleted at once, one per request, from an older server without POST /media/delete. */
 const UPLOAD_DELETE_PARALLEL = 6;
 /**
@@ -1371,16 +1378,23 @@ export function createMessaging(deps: MessagingDeps) {
     const c = await getConversation(db, conv);
     if (!c) return;
     if (c.role === 'owner' && c.tag) await addBlockedTag(c.link.fingerprint, c.tag);
-    // Under the chat's lock: a reply of ours going out takes its mailbox
-    // first, and that's the one discarded. Again if blocking is tried again.
+    // Under the chat's lock: anything of ours going out that takes a mailbox
+    // (a message, an edit, a reaction, a key update) takes it first, and
+    // that's the one discarded. Again if blocking is tried again.
     await update(conv, async (current) => {
       if (current.myMailbox) {
-        try {
-          await session.call('POST', `/mailboxes/${current.myMailbox}/discard`, undefined, checkObject);
-          // One fewer: the pool may be topped up again.
-          atMailboxLimit = false;
-        } catch (err) {
-          if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
+        for (let tries = 1; ; tries++) {
+          try {
+            await session.call('POST', `/mailboxes/${current.myMailbox}/discard`, undefined, checkObject);
+            // One fewer: the pool may be topped up again.
+            atMailboxLimit = false;
+            break;
+          } catch (err) {
+            if (!(err instanceof ApiError && err.code === 'not_found')) throw err;
+            // Gone already, or, if it was made a moment ago, not seen yet.
+            if (tries === 2) break;
+            await wait(BLOCK_RETRY_MS);
+          }
         }
       }
       // Nothing more of theirs is taken in: in a chat we never answered,
