@@ -11,7 +11,7 @@ export const nl = {
 
   welcomeTitle: 'Welkom',
   welcomeBody:
-    'Hier kunnen mensen je berichten sturen zonder te weten wie je bent, en de server kan niet lezen wat ze schrijven. Bij het instellen worden je sleutels op dit apparaat aangemaakt.',
+    'Hier kunnen mensen je berichten sturen zonder dat jij weet wie ze zijn, en de server kan niet lezen wat ze schrijven. Bij het instellen worden je sleutels op dit apparaat aangemaakt.',
   setUp: 'Instellen',
   setupMismatch: 'Die instellink hoorde bij een andere poging. Begin hier opnieuw.',
   reopening: 'Telegram opent de app opnieuw om het instellen af te ronden…',

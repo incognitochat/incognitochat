@@ -11,7 +11,7 @@ export const es = {
 
   welcomeTitle: 'Te damos la bienvenida',
   welcomeBody:
-    'Aquí la gente puede escribirte sin saber quién eres, y el servidor no puede leer lo que escriben. La configuración crea tus claves en este dispositivo.',
+    'Aquí la gente puede escribirte sin que sepas quiénes son, y el servidor no puede leer lo que escriben. La configuración crea tus claves en este dispositivo.',
   setUp: 'Configurar',
   setupMismatch: 'Ese enlace era de otra configuración. Empieza de nuevo aquí.',
   reopening: 'Telegram está volviendo a abrir la app para terminar la configuración…',

@@ -11,7 +11,7 @@ export const id = {
 
   welcomeTitle: 'Selamat datang',
   welcomeBody:
-    'Di sini orang bisa mengirim pesan kepada Anda tanpa tahu siapa Anda, dan server tidak bisa membaca apa yang mereka tulis. Penyiapan akan membuat kunci Anda di perangkat ini.',
+    'Di sini orang bisa mengirim pesan kepada Anda, dan Anda tidak tahu siapa mereka. Server tidak bisa membaca apa yang mereka tulis. Penyiapan akan membuat kunci Anda di perangkat ini.',
   setUp: 'Siapkan',
   setupMismatch: 'Tautan penyiapan itu untuk penyiapan lain. Mulai lagi di sini.',
   reopening: 'Telegram sedang membuka ulang aplikasi untuk menyelesaikan penyiapan…',

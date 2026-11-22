@@ -11,7 +11,7 @@ export const ptBR = {
 
   welcomeTitle: 'Boas-vindas',
   welcomeBody:
-    'Aqui, as pessoas podem enviar mensagens para você sem saber quem você é, e o servidor não consegue ler o que elas escrevem. A configuração cria suas chaves neste dispositivo.',
+    'Aqui, as pessoas podem enviar mensagens para você sem que você saiba quem elas são, e o servidor não consegue ler o que elas escrevem. A configuração cria suas chaves neste dispositivo.',
   setUp: 'Configurar',
   setupMismatch: 'Esse link de configuração era de outra configuração. Comece de novo aqui.',
   reopening: 'O Telegram está reabrindo o app para terminar a configuração…',
