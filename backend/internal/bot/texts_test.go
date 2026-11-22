@@ -25,7 +25,7 @@ type fakeTexts struct {
 	calls   []string
 	bodies  map[string]map[string]any // the last set's body, by method and language_code
 	delay   time.Duration
-	refuse  string // a set method refused with 429
+	refuse  string // a method refused with 429, for the default language only
 	started atomic.Int32
 }
 
@@ -186,7 +186,7 @@ func TestSetTextsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	report := Setup{Token: "1:T", API: telegram.URL}.SetTexts(ctx, languages(9))
-	if report.OK || report.Failed == 0 || report.Set+report.Unchanged+report.Failed != 27 {
+	if report.OK || report.Failed == 0 || report.Set+report.Unchanged+report.Failed != 27 || report.Err == nil {
 		t.Fatalf("report: %+v", report)
 	}
 }

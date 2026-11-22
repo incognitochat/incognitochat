@@ -92,6 +92,9 @@ func (s Setup) SetTexts(ctx context.Context, languages []i18n.Language) TextsRep
 			<-slots
 			mu.Lock()
 			report.Failed++
+			if report.Err == nil && ctx.Err() != nil {
+				report.Err = ctx.Err()
+			}
 			mu.Unlock()
 			continue
 		}
