@@ -11,10 +11,11 @@
 //
 // Two more counts are for the public statistics: messages sent (Sent) and
 // the padded size of the uploads paid for (Uploaded), added to the line
-// only when there were any, so a line without them is as before. They're
-// dated by the time the handler read when it started, and the answer by
-// when it's given, so a request that spans the end of a minute can log its
-// message or bytes in a line of their own, with count 0.
+// only when there were any, so a line without them is as before. They go
+// in the minute of the time the handler read early on, before payment, and
+// the answer in the minute it's given, so a request that spans the end of
+// a minute can log its message or bytes in a line of their own, with count
+// 0.
 //
 // Counts are all it holds: route patterns (never paths, which carry IDs),
 // statuses and the handlers' error codes, never anything that identifies a
