@@ -211,6 +211,7 @@ export const nl = {
   errorMailboxLimit: 'Je hebt de limiet van 4.000 chats bereikt. Iemand blokkeren maakt er een vrij; een chat verwijderen niet. Zie Gebruik.',
   errorTooFast: 'Te veel berichten aan deze persoon op dit moment. Probeer het over een minuut opnieuw.',
   errorDeviceLimit: 'Te veel pogingen. Probeer het over een minuut opnieuw.',
+  errorDeviceLimitLater: 'Te veel pogingen. Probeer het later opnieuw.',
   errorLinkBusy: 'Te veel berichten via deze link op dit moment. Probeer het om {time} opnieuw.',
   errorDownloadLimit: 'Dit bestand is vandaag te vaak gedownload. Probeer het om {time} opnieuw.',
   errorMediaPaused: 'Bijlagen zijn even gepauzeerd; probeer het later opnieuw.',

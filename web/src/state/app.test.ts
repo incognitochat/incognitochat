@@ -100,6 +100,8 @@ function fakeServer(
     inbox?: Outcome[];
     cleanup?: Outcome[];
     invitations?: Outcome[];
+    admin?: Outcome[];
+    usage?: Outcome[];
     elsewhere?: boolean;
   } = {},
 ) {
@@ -224,6 +226,7 @@ function fakeServer(
         });
       }
       if (method === 'GET' && path === '/usage') {
+        take(outcomes.usage);
         const item = (used: number, limit: number) => ({ used, limit });
         return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
       }
@@ -259,6 +262,7 @@ function fakeServer(
       if (path === '/admin/levels' && method === 'GET') return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
       if (path === '/admin/levels' && method === 'PUT') {
         needsSignature();
+        take(outcomes.admin);
         state.levels.set(body.level as number, body.invitations as number);
         return check({});
       }
@@ -1960,6 +1964,70 @@ describe("the server's limit on this device's logins and signed requests", () =>
     await admin.app.createInvitation(3);
     expect(admin.app.screen.value).toMatchObject({ kind: 'invitations', notice: 'device-limit' });
   });
+
+  it('says "later" when the wait is longer than a minute, or unsaid', async () => {
+    const server = fakeServer({ createLink: [deviceLimit(600), new ApiError(429, 'device_limit'), deviceLimit(60)] });
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit-later', links: [] });
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit-later', links: [] });
+    // A minute, exactly, is still "in a minute".
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'device-limit', links: [] });
+  });
+
+  it('says so for an invitation whose login is refused, and the screen that would show it', async () => {
+    // The session lapsed: logging in again is refused for now, so is
+    // reading the invitations again after.
+    const server = fakeServer({ invitations: [new ApiError(401, 'session_expired')] });
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.invitations();
+    server.outcomes.session = [deviceLimit()];
+    await admin.app.createInvitation(3);
+    expect(home(admin.app.screen.value)).toMatchObject({ notice: 'device-limit' });
+  });
+
+  it("says so for an admin's change refused, and for one whose login is refused", async () => {
+    const server = fakeServer({ admin: [deviceLimit(), new ApiError(401, 'session_expired')] });
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.admin();
+    await admin.app.setLevel(1, 5);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'device-limit' });
+    server.outcomes.session = [deviceLimit(600)];
+    await admin.app.setLevel(1, 5);
+    expect(home(admin.app.screen.value)).toMatchObject({ notice: 'device-limit-later' });
+  });
+
+  it('says so on Usage', async () => {
+    const server = fakeServer({ usage: [deviceLimit(600)] });
+    const owner = await registered(server.api);
+    await owner.app.usage();
+    expect(owner.app.screen.value).toEqual({ kind: 'usage', usage: null, error: 'device-limit-later' });
+  });
+
+  it('says so on the signed-out screen when asking again is refused for now', async () => {
+    // The first login is the one registered() makes.
+    const server = fakeServer({ session: ['ok', new ApiError(401, 'login_refused')] });
+    const { db } = await registered(server.api);
+    const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: false });
+    server.outcomes.session = [deviceLimit()];
+    await app.recheck();
+    expect(app.screen.value).toEqual({ kind: 'signed-out', reason: 'refused', busy: false, offline: true, limited: 'device-limit' });
+  });
+
+  it("says so when a deletion stalls on the device's limit", async () => {
+    const server = fakeServer({ deleteAccount: Array.from({ length: 401 }, () => deviceLimit(0)) });
+    const owner = await registered(server.api, { stepPauseMs: 0 });
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'deleting', error: 'device-limit' });
+    expect(server.calls.filter((c) => c === 'DELETE /account')).toHaveLength(400);
+  }, 60_000);
 
   it("says so on the deletion's screen for a login refused at launch, and carries on when asked", async () => {
     const server = fakeServer({ deleteAccount: [new NetworkError('lost')] });
