@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Możesz zaprosić jeszcze 0 osób.
+  1: Możesz zaprosić jeszcze 1 osobę.
+  2: Możesz zaprosić jeszcze 2 osoby.
+  3: Możesz zaprosić jeszcze 3 osoby.
+  5: Możesz zaprosić jeszcze 5 osób.
+  11: Możesz zaprosić jeszcze 11 osób.
+  21: Możesz zaprosić jeszcze 21 osób.
+  100: Możesz zaprosić jeszcze 100 osób.
+  101: Możesz zaprosić jeszcze 101 osób.
+  102: Możesz zaprosić jeszcze 102 osoby.
+  1000000: Możesz zaprosić jeszcze 1 000 000 osób.
+levelLine:
+  0: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Poziom xxxxxxxxxxxxxxxxxxxxxxxx: 1 000 000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1 000 000
+unreadMessagesCount:
+  0: 0 nieprzeczytanych
+  1: 1 nieprzeczytana
+  2: 2 nieprzeczytane
+  3: 3 nieprzeczytane
+  5: 5 nieprzeczytanych
+  11: 11 nieprzeczytanych
+  21: 21 nieprzeczytanych
+  100: 100 nieprzeczytanych
+  101: 101 nieprzeczytanych
+  102: 102 nieprzeczytane
+  1000000: 1 000 000 nieprzeczytanych
+newMessages:
+  0: 0 nowych wiadomości
+  1: 1 nowa wiadomość
+  2: 2 nowe wiadomości
+  3: 3 nowe wiadomości
+  5: 5 nowych wiadomości
+  11: 11 nowych wiadomości
+  21: 21 nowych wiadomości
+  100: 100 nowych wiadomości
+  101: 101 nowych wiadomości
+  102: 102 nowe wiadomości
+  1000000: 1 000 000 nowych wiadomości
+blockedCount:
+  0: Zablokowani (0)
+  1: Zablokowani (1)
+  2: Zablokowani (2)
+  3: Zablokowani (3)
+  5: Zablokowani (5)
+  11: Zablokowani (11)
+  21: Zablokowani (21)
+  100: Zablokowani (100)
+  101: Zablokowani (101)
+  102: Zablokowani (102)
+  1000000: Zablokowani (1 000 000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1 000 000
+messagesLeftToday:
+  0: Pozostałe wiadomości na dziś: 0. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Pozostałe wiadomości na dziś: 1. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Pozostałe wiadomości na dziś: 2. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Pozostałe wiadomości na dziś: 3. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Pozostałe wiadomości na dziś: 5. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Pozostałe wiadomości na dziś: 11. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Pozostałe wiadomości na dziś: 21. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Pozostałe wiadomości na dziś: 100. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Pozostałe wiadomości na dziś: 101. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Pozostałe wiadomości na dziś: 102. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Pozostałe wiadomości na dziś: 1 000 000. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.

@@ -11,7 +11,8 @@
     "tr",
     "uk",
     "fr",
-    "de"
+    "de",
+    "pl"
   ],
   "pick": {
     "en": "en",
@@ -96,6 +97,11 @@
     "de-CH": "de",
     "DE": "de",
     "de_CH": "de",
-    "deu": "en"
+    "deu": "en",
+    "pl": "pl",
+    "pl-PL": "pl",
+    "PL": "pl",
+    "pl_PL": "pl",
+    "pol": "en"
   }
 }
