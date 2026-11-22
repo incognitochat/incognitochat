@@ -1008,23 +1008,70 @@ export function createApp(deps: Deps) {
     return { ...page, quoted };
   }
 
+  type ChatScreen = Extract<Screen, { kind: 'conversation' }>;
+  type ChatPage = Awaited<ReturnType<typeof chatPage>>;
+  type ChatChanges = { error?: SendError | null };
+
+  // The open chat's messages are drawn one draw at a time, in the order
+  // asked for (inTurn): opening it, redrawing it (showChat) and loading
+  // older ones (loadOlder). Each builds its page from the screen as the
+  // draw before left it, and from storage read after that one drew. Side by
+  // side, one could draw a page built from a screen another had since
+  // replaced, and older messages loaded on purpose would go. A draw waits
+  // for storage only: nothing it waits for may wait for a draw.
+  let chatDraws: Promise<unknown> = Promise.resolve();
+  // A redraw waiting its turn, last in line: redraws of its chat asked for
+  // meanwhile join it.
+  let waitingRedraw: { conv: string; changes: ChatChanges; done: Promise<void> } | null = null;
+  function inTurn<T>(draw: () => Promise<T>): Promise<T> {
+    waitingRedraw = null;
+    const run = chatDraws.then(draw);
+    chatDraws = run.catch(() => {});
+    return run;
+  }
+
+  /**
+   * Draws the page build makes from the open chat as it's shown, with these
+   * changes, if it's still `conv`. If its messages are shown otherwise once
+   * the page is built (a reaction shown at once: the one change that doesn't
+   * wait its turn), it's built again from that: a page is only ever drawn on
+   * the screen it was built from. Returns that screen and the page; null if
+   * `conv` is no longer open.
+   */
+  async function drawChat(conv: string, build: (shown: ChatScreen) => Promise<ChatPage>, changes: ChatChanges = {}): Promise<{ shown: ChatScreen; page: ChatPage } | null> {
+    for (;;) {
+      const before = currentScreen();
+      if (before.kind !== 'conversation' || before.id !== conv) return null;
+      const page = await build(before);
+      const now = currentScreen();
+      if (now.kind !== 'conversation' || now.id !== conv) return null;
+      if (now.messages !== before.messages) continue;
+      screen.value = { ...now, ...changes, ...page };
+      return { shown: now, page };
+    }
+  }
+
   /**
    * Redraws the open chat from storage, if it's still `conv`, with these
-   * changes: on the screen as it is once its messages are read, and with
-   * the messages it shows then (older ones loaded meanwhile stay).
+   * changes: in its turn (inTurn), from the messages it shows then (older
+   * ones loaded before stay). Asked for while a redraw of it waits its turn:
+   * that one, with these changes too.
    */
-  async function showChat(conv: string, changes: { error?: SendError | null } = {}): Promise<void> {
-    for (let tries = 0; ; tries++) {
-      const before = currentScreen();
-      if (before.kind !== 'conversation' || before.id !== conv) return;
-      const page = await chatPage(conv, before);
-      const now = currentScreen();
-      if (now.kind !== 'conversation' || now.id !== conv) return;
-      // Shown otherwise meanwhile (older ones loaded, say): read again for that.
-      if (now.messages !== before.messages && tries < 2) continue;
-      screen.value = { ...now, ...changes, ...page };
-      return;
+  function showChat(conv: string, changes: ChatChanges = {}): Promise<void> {
+    const current = currentScreen();
+    if (current.kind !== 'conversation' || current.id !== conv) return Promise.resolve();
+    const waiting = waitingRedraw;
+    if (waiting?.conv === conv) {
+      waiting.changes = { ...waiting.changes, ...changes };
+      return waiting.done;
     }
+    const redraw = { conv, changes, done: Promise.resolve() };
+    redraw.done = inTurn(async () => {
+      if (waitingRedraw === redraw) waitingRedraw = null;
+      await drawChat(conv, (shown) => chatPage(conv, shown), redraw.changes);
+    });
+    waitingRedraw = redraw;
+    return redraw.done;
   }
 
   /**
@@ -1064,20 +1111,20 @@ export function createApp(deps: Deps) {
   let loadingOlder = false;
   /**
    * Shows older messages in the open chat: PAGE more, or all from the one
-   * with this ID on (a quote's, to jump to it). Returns whether any came.
+   * with this ID on (a quote's, to jump to it), in its turn (inTurn), more
+   * than it shows then. Returns whether any came.
    */
   async function loadOlder(until?: string): Promise<boolean> {
     const current = screen.value;
     if (current.kind !== 'conversation' || !current.more || loadingOlder) return false;
+    const conv = current.id;
     loadingOlder = true;
     try {
-      const page = await chatPage(current.id, current, until ?? true);
-      const now = currentScreen();
-      if (now.kind !== 'conversation' || now.id !== current.id) return false;
-      screen.value = { ...now, ...page };
+      const drawn = await inTurn(() => drawChat(conv, (shown) => chatPage(conv, shown, until ?? true)));
+      if (!drawn) return false;
       // Their attachments shown now download as they would have when the chat opened.
-      autoFetch(current.id);
-      return page.messages[0]?.id !== now.messages[0]?.id;
+      autoFetch(conv);
+      return drawn.page.messages[0]?.id !== drawn.shown.messages[0]?.id;
     } finally {
       loadingOlder = false;
     }
@@ -1148,18 +1195,21 @@ export function createApp(deps: Deps) {
     // In the background: it waits for a send of ours still going out in this chat.
     void messaging?.markRead(id).catch(() => {});
     backButton(true);
-    screen.value = {
-      kind: 'conversation',
-      id,
-      label: c.label,
-      role: c.role,
-      ended: c.status === 'ended',
-      blocked: c.status === 'blocked',
-      readOnly: signedOut !== null || deletionPaused,
-      ...(await chatPage(id, null)),
-      busy: false,
-      error: null,
-    };
+    // In its turn (inTurn): a draw under way, of this chat as it was shown before, finishes first.
+    await inTurn(async () => {
+      screen.value = {
+        kind: 'conversation',
+        id,
+        label: c.label,
+        role: c.role,
+        ended: c.status === 'ended',
+        blocked: c.status === 'blocked',
+        readOnly: signedOut !== null || deletionPaused,
+        ...(await chatPage(id, null)),
+        busy: false,
+        error: null,
+      };
+    });
     if (attending) seen(id);
     autoFetch(id);
   }
@@ -1353,10 +1403,11 @@ export function createApp(deps: Deps) {
     const now = currentScreen();
     if (now.kind === 'conversation') {
       // A tap says it's paused or past the day's downloads, or that it no
-      // longer is.
-      let error = now.error;
-      if (!auto && now.id === m.conv) error = paused ? 'media-paused' : (limited ?? (downloadError(error) ? null : error));
-      await showChat(now.id, { error });
+      // longer is. Any other error shown is left as it is when the chat is
+      // drawn (in its turn), not set back to the one shown now.
+      const onTap = !auto && now.id === m.conv;
+      const changes: ChatChanges = !onTap ? {} : paused ? { error: 'media-paused' } : limited ? { error: limited } : downloadError(now.error) ? { error: null } : {};
+      await showChat(now.id, changes);
     }
   }
 

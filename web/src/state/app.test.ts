@@ -5,7 +5,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge, OutgoingEvents } from '../platform/telegram';
 import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db';
-import { addMessage, deleteMessage, getMedia, listMessages, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
+import { addMessage, deleteMessage, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
 import type { TokenIssuer } from '../account/wallet';
@@ -38,6 +38,10 @@ vi.mock('../messaging/engine', async (importOriginal) => {
 const storeFaults = vi.hoisted(() => ({ putMedia: null as Error | null }));
 // How many times where the user first wrote in a chat was looked up (and the lookup over).
 const lookups = vi.hoisted(() => ({ answered: 0 }));
+// How many times an open chat's page was read, and what happens on the
+// screen while one is (pageReads.during): as when another draw or a tap
+// lands while IndexedDB is slow.
+const pageReads = vi.hoisted(() => ({ count: 0, during: null as (() => void) | null }));
 vi.mock('../messaging/store', async (importOriginal) => {
   const original = await importOriginal<typeof import('../messaging/store')>();
   return {
@@ -45,6 +49,12 @@ vi.mock('../messaging/store', async (importOriginal) => {
     putMedia: async (...args: Parameters<typeof original.putMedia>) => {
       if (storeFaults.putMedia) throw storeFaults.putMedia;
       return original.putMedia(...args);
+    },
+    pageMessages: async (...args: Parameters<typeof original.pageMessages>) => {
+      pageReads.count++;
+      const page = await original.pageMessages(...args);
+      pageReads.during?.();
+      return page;
     },
     answeredAt: async (...args: Parameters<typeof original.answeredAt>) => {
       try {
@@ -990,6 +1000,60 @@ describe('an open chat', () => {
     await addMessage(db, { id: 'first', conv: 'c1', at: S, out: false, status: 'received' }, { text: 'first' });
     await app.refresh();
     expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'first' }, { id: 'second' }], more: false });
+  });
+
+  it('keeps older messages loaded on purpose, however often the chat changes while it is drawn again', async () => {
+    const { app, db } = await registered(fakeServer().api);
+    await chatOnDevice(db);
+    const S = 1_800_000_000_000;
+    const ids = ['m1', ...Array.from({ length: PAGE + 5 }, (_, i) => `n${i}`)];
+    for (const [i, id] of ids.slice(1).entries()) await addMessage(db, { id, conv: 'c1', at: S + i * 1000, out: false, status: 'read' }, { text: id });
+    type Chat = Extract<Screen, { kind: 'conversation' }>;
+    const chat = (): Chat => {
+      const s = app.screen.value;
+      if (s.kind !== 'conversation') throw new Error(`expected conversation, got ${s.kind}`);
+      return s;
+    };
+    const shown = () => [chat().messages.map((m) => m.id), chat().more];
+    await app.openConversation('c1');
+    expect(shown()).toEqual([ids.slice(-PAGE), true]);
+    // Scrolled up: the rest. What that draws stands in below for older ones
+    // that load while the chat is being drawn again.
+    expect(await app.loadOlder()).toBe(true);
+    const loaded = chat();
+    expect(shown()).toEqual([ids, false]);
+
+    // Opened again, at its newest. While a redraw reads its page (slowly, as
+    // when a write holds IndexedDB up), the chat is drawn again, twice, then
+    // the older ones load: each time it has read, the screen has changed.
+    await app.openConversation('c1');
+    const meanwhile: ((s: Chat) => Chat)[] = [
+      (s) => ({ ...s, messages: [...s.messages] }),
+      (s) => ({ ...s, messages: [...s.messages] }),
+      (s) => ({ ...s, messages: loaded.messages, more: loaded.more, quoted: loaded.quoted }),
+    ];
+    pageReads.during = () => {
+      const change = meanwhile.shift();
+      if (change) app.screen.value = change(chat());
+    };
+    try {
+      await app.refresh();
+    } finally {
+      pageReads.during = null;
+    }
+    expect(meanwhile).toHaveLength(0);
+    expect(shown()).toEqual([ids, false]);
+
+    // The app's own draws, asked for all at once (a refresh, a scroll up,
+    // two more refreshes): drawn one at a time, each from the screen the one
+    // before left, so the older ones stay and a new one shows. Those asked
+    // for while another waits its turn are read once, with it.
+    await app.openConversation('c1');
+    await addMessage(db, { id: 'new', conv: 'c1', at: S + ids.length * 1000, out: false, status: 'read' }, { text: 'new' });
+    pageReads.count = 0;
+    expect(await Promise.all([app.refresh(), app.loadOlder(), app.refresh(), app.refresh()])).toEqual([undefined, true, undefined, undefined]);
+    expect(shown()).toEqual([[...ids, 'new'], false]);
+    expect(pageReads.count).toBe(3);
   });
 
   it('shows ours left sending as not sent: at start, and in the open chat after a while, but not while a copy sends them', async () => {
