@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/incognitochat/incognitochat/backend/internal/i18n"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
 
@@ -17,9 +16,10 @@ const DefaultAPI = botapi.DefaultAPI
 // ErrWebhookURL is returned for a webhook address that isn't a Lambda function URL.
 var ErrWebhookURL = errors.New("bot: webhook URL must be an https Lambda function URL")
 
-// Setup points the bot at its webhook and sets its menu button and command.
-// The deploy runs it by invoking the function directly, so the token and the
-// webhook secret never leave the function.
+// Setup points the bot at its webhook and sets its menu button (Run), and
+// sets its texts in each language (SetTexts). The deploy runs each by
+// invoking the function directly, so the token and the webhook secret never
+// leave the function.
 type Setup struct {
 	Token  string
 	Secret string
@@ -28,7 +28,8 @@ type Setup struct {
 	Client *http.Client // nil for a client with a timeout
 }
 
-// Run applies the bot's settings. It is safe to run on every deploy.
+// Run points the bot at its webhook and sets its menu button. It is safe
+// to run on every deploy. The bot's texts are SetTexts'.
 func (s Setup) Run(ctx context.Context, webhookURL string) error {
 	if !lambdaURL(webhookURL) {
 		return ErrWebhookURL
@@ -48,15 +49,6 @@ func (s Setup) Run(ctx context.Context, webhookURL string) error {
 			"menu_button": map[string]any{"type": "web_app", "text": "Open", "web_app": map[string]string{"url": s.AppURL}},
 		}},
 	}
-	// The /start command in each language: English as the default, every
-	// other language under its two-letter code.
-	for _, l := range i18n.Languages() {
-		params := map[string]any{"commands": []map[string]string{{"command": "start", "description": l.Texts.Command}}}
-		if l.BotCode != "" {
-			params["language_code"] = l.BotCode
-		}
-		calls = append(calls, call{"setMyCommands", params})
-	}
 	for _, c := range calls {
 		if err := s.call(ctx, c.method, c.params); err != nil {
 			return err
@@ -67,7 +59,11 @@ func (s Setup) Run(ctx context.Context, webhookURL string) error {
 
 // call runs one Bot API method.
 func (s Setup) call(ctx context.Context, method string, params map[string]any) error {
-	return botapi.Client{Token: s.Token, API: s.API, HTTP: s.Client}.Call(ctx, method, params, nil)
+	return s.client().Call(ctx, method, params, nil)
+}
+
+func (s Setup) client() botapi.Client {
+	return botapi.Client{Token: s.Token, API: s.API, HTTP: s.Client}
 }
 
 func lambdaURL(raw string) bool {

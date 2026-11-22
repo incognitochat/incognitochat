@@ -49,7 +49,8 @@ locals {
       }
     }
     # Telegram webhook: opens the app, cleans up service messages. The deploy
-    # invokes it once with a setup event to register the webhook.
+    # invokes it with a setup event to register the webhook, then with a
+    # texts event to set the bot's texts in each language.
     bot = {
       timeout     = 10
       concurrency = 5

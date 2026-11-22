@@ -24,9 +24,11 @@ the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
   ([what it may do](#what-the-deploy-role-may-do)).
 - It checks that each function runs the attested bundle plus its signature
   ([verifying.md](verifying.md#the-backend)).
-- It then sets up the bot (the function registers its own webhook, menu
-  button and commands, so the calls to Telegram are made inside it, not in
-  CI, though the bot token reaches CI too: [secrets at rest](#secrets-at-rest)),
+- It then sets up the bot (the function registers its own webhook and menu
+  button, and in a step of its own, which only warns if it fails, sets the
+  bot's command, description and short description in each language; so the
+  calls to Telegram are made inside it, not in CI, though the bot token
+  reaches CI too: [secrets at rest](#secrets-at-rest)),
   and runs smoke tests: the API, the webhook and the socket refuse what they
   should, and `notify` may make its directory calls (below).
 - Last, it asks the hosting repository to build and deploy the app from the
@@ -394,6 +396,12 @@ In BotFather, for the environment's bot:
 - a privacy policy, which Telegram's bot developer terms require. Whoever
   runs the environment publishes it, outside this repository;
   [data.md](data.md) is the technical part it can point to.
+
+The bot's description, short description and `/start` command come from
+the code (`backend/internal/i18n`, the same in every environment), in each
+of the app's languages: every deploy sets those that differ ("Set the bot's
+texts", which only warns if Telegram refuses, and the next deploy tries
+again). Changes made to them in BotFather are undone by the next deploy.
 
 ### The app's hosting
 

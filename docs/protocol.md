@@ -1373,7 +1373,9 @@ stickers from it.
 The bot can tell someone that a message is waiting: a generic "New message"
 with a button that opens the app, never who wrote or what. `notify` holds
 the bot token to send notices, and `bot` holds it too, used only when the
-deploy sets the bot up (its webhook, menu button and command).
+deploy sets the bot up (its webhook and menu button), then its texts in
+each of the app's languages: the `/start` command, the description and the
+short description (`backend/internal/i18n`), each set only if it differs.
 
 - The app turns notices on with `POST /notices {initData}`, sending its
   Telegram launch data. The server accepts only a plain launch or a

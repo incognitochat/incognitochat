@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,7 +22,11 @@ import (
 func TestHandleRoutesEvents(t *testing.T) {
 	b := &bot.Bot{Secret: "s", AppURL: "https://example.github.io/"}
 	var setupURL string
-	setup := func(_ context.Context, url string) error { setupURL = url; return nil }
+	textsRan := false
+	setup := steps{
+		setup: func(_ context.Context, url string) error { setupURL = url; return nil },
+		texts: func(context.Context) bot.TextsReport { textsRan = true; return bot.TextsReport{OK: true, Set: 3} },
+	}
 
 	out, err := handle(context.Background(), json.RawMessage(`{"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`), b, setup)
 	if err != nil || setupURL != "https://x.lambda-url.us-east-1.on.aws/" {
@@ -42,6 +47,31 @@ func TestHandleRoutesEvents(t *testing.T) {
 	if _, err := handle(context.Background(), json.RawMessage(`[`), b, setup); err == nil {
 		t.Fatal("accepted a broken event")
 	}
+
+	// The texts step answers with its report.
+	out, err = handle(context.Background(), json.RawMessage(`{"texts":{}}`), b, setup)
+	if report, ok := out.(bot.TextsReport); err != nil || !ok || !textsRan || report.Set != 3 {
+		t.Fatalf("texts: %#v, %v", out, err)
+	}
+	// One step per event.
+	setupURL, textsRan = "", false
+	if _, err := handle(context.Background(), json.RawMessage(`{"texts":{},"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`), b, setup); err == nil || setupURL != "" || textsRan {
+		t.Fatalf("ran two steps: %v %q %v", err, setupURL, textsRan)
+	}
+}
+
+// The texts step's report reaches the deploy as the function's output, with
+// the keys the workflow reads.
+func TestInvocationReportsTexts(t *testing.T) {
+	b := &bot.Bot{Secret: "s", AppURL: "https://example.github.io/"}
+	var buf bytes.Buffer
+	s := steps{texts: func(context.Context) bot.TextsReport {
+		return bot.TextsReport{OK: false, Set: 2, Unchanged: 20, Failed: 5, Err: errors.New("x")}
+	}}
+	out, err := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, s)).Invoke(context.Background(), []byte(`{"texts":{}}`))
+	if err != nil || string(out) != `{"ok":false,"set":2,"unchanged":20,"failed":5}` {
+		t.Fatalf("texts: %s, %v", out, err)
+	}
 }
 
 // A failed setup reaches Lambda as awsconf.ErrFailed's constant text, and
@@ -53,7 +83,7 @@ func TestInvocationFailsWithConstantText(t *testing.T) {
 	failing := func(context.Context, string) error {
 		return fmt.Errorf("123:SECRET-TOKEN: %w", &botapi.Error{Method: "setWebhook", Status: 401, Code: 401})
 	}
-	h := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, failing))
+	h := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, steps{setup: failing}))
 	_, err := h.Invoke(context.Background(), []byte(`{"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`))
 	if err != awsconf.ErrFailed {
 		t.Fatalf("Lambda got %v", err)
@@ -64,7 +94,7 @@ func TestInvocationFailsWithConstantText(t *testing.T) {
 		t.Fatalf("logged %s", logged)
 	}
 	ok := func(context.Context, string) error { return nil }
-	out, err := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, ok)).Invoke(context.Background(), []byte(`{"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`))
+	out, err := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, steps{setup: ok})).Invoke(context.Background(), []byte(`{"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`))
 	if err != nil || string(out) != `{"ok":true}` {
 		t.Fatalf("setup: %s, %v", out, err)
 	}
