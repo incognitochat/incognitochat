@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Anda bisa mengundang 0 orang lagi.
+  1: Anda bisa mengundang 1 orang lagi.
+  2: Anda bisa mengundang 2 orang lagi.
+  3: Anda bisa mengundang 3 orang lagi.
+  5: Anda bisa mengundang 5 orang lagi.
+  11: Anda bisa mengundang 11 orang lagi.
+  21: Anda bisa mengundang 21 orang lagi.
+  100: Anda bisa mengundang 100 orang lagi.
+  101: Anda bisa mengundang 101 orang lagi.
+  102: Anda bisa mengundang 102 orang lagi.
+  1000000: Anda bisa mengundang 1.000.000 orang lagi.
+levelLine:
+  0: Level xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Level xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Level xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Level xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Level xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Level xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Level xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Level xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Level xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Level xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Level xxxxxxxxxxxxxxxxxxxxxxxx: 1.000.000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+unreadMessagesCount:
+  0: 0 belum dibaca
+  1: 1 belum dibaca
+  2: 2 belum dibaca
+  3: 3 belum dibaca
+  5: 5 belum dibaca
+  11: 11 belum dibaca
+  21: 21 belum dibaca
+  100: 100 belum dibaca
+  101: 101 belum dibaca
+  102: 102 belum dibaca
+  1000000: 1.000.000 belum dibaca
+newMessages:
+  0: 0 pesan baru
+  1: 1 pesan baru
+  2: 2 pesan baru
+  3: 3 pesan baru
+  5: 5 pesan baru
+  11: 11 pesan baru
+  21: 21 pesan baru
+  100: 100 pesan baru
+  101: 101 pesan baru
+  102: 102 pesan baru
+  1000000: 1.000.000 pesan baru
+blockedCount:
+  0: Diblokir (0)
+  1: Diblokir (1)
+  2: Diblokir (2)
+  3: Diblokir (3)
+  5: Diblokir (5)
+  11: Diblokir (11)
+  21: Diblokir (21)
+  100: Diblokir (100)
+  101: Diblokir (101)
+  102: Diblokir (102)
+  1000000: Diblokir (1.000.000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+messagesLeftToday:
+  0: Sisa pesan hari ini: 0. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Sisa pesan hari ini: 1. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Sisa pesan hari ini: 2. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Sisa pesan hari ini: 3. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Sisa pesan hari ini: 5. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Sisa pesan hari ini: 11. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Sisa pesan hari ini: 21. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Sisa pesan hari ini: 100. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Sisa pesan hari ini: 101. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Sisa pesan hari ini: 102. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Sisa pesan hari ini: 1.000.000. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
