@@ -111,7 +111,12 @@ describe('i18n', () => {
     expect([1, 2, 5, 21].map((count) => t('ru', 'newMessages', { count }))).toEqual(['1 новое сообщение', '2 новых сообщения', '5 новых сообщений', '21 новое сообщение']);
   });
 
-  it('sets right-to-left for Persian', () => {
+  it('counts in Arabic with its six forms, in Western digits', () => {
+    expect([0, 1, 2, 3, 11, 100].map((count) => t('ar', 'newMessages', { count }))).toEqual(['0 رسالة جديدة', '1 رسالة جديدة', '2 رسالتان جديدتان', '3 رسائل جديدة', '11 رسالة جديدة', '100 رسالة جديدة']);
+  });
+
+  it('sets right-to-left for Persian and Arabic', () => {
+    expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');
     expect(DIRECTION.en).toBe('ltr');
   });
