@@ -82,3 +82,51 @@ func TestBounded(t *testing.T) {
 		t.Fatalf("%d names, total %d, get_r0_200 %d", len(c.routes), c.total, c.routes["get_r0_200"])
 	}
 }
+
+// Messages sent and media uploaded are added to the minute's line, only
+// when there were any, so a line without them is as before
+// (TestOneLinePerMinute).
+func TestPublicCounts(t *testing.T) {
+	var buf bytes.Buffer
+	c := New(logx.New(&buf, "api"))
+	start := time.Date(2026, 11, 18, 10, 2, 0, 0, time.UTC)
+
+	c.Sent(start.Add(time.Second))
+	c.Add(start.Add(time.Second), "POST /send", 200, "")
+	c.Add(start.Add(2*time.Second), "POST /send", 200, "") // a receipt: not Sent
+	c.Uploaded(start.Add(3*time.Second), 2<<20)
+	c.Add(start.Add(3*time.Second), "POST /media", 201, "")
+	c.Uploaded(start.Add(4*time.Second), 16<<10)
+	c.Add(start.Add(4*time.Second), "POST /media", 201, "")
+	c.Uploaded(start.Add(5*time.Second), 0) // nothing to add
+	c.Uploaded(start.Add(5*time.Second), -1)
+	c.Flush()
+	want := `{"time":"2026-11-18T10:02:00Z","level":"WARN","msg":"request counts","fn":"api","count":4,` +
+		`"messages":1,"media_bytes":2113536,"routes":{"post_media_201":2,"post_send_200":2}}` + "\n"
+	if buf.String() != want {
+		t.Fatalf("logged\n%s\nwant\n%s", buf.String(), want)
+	}
+
+	// A minute that only counted an upload (its answer fell in the next
+	// minute) is logged too, and a new minute's count logs the last one.
+	buf.Reset()
+	c.Uploaded(start.Add(time.Minute+59*time.Second), 16<<10)
+	c.Sent(start.Add(2 * time.Minute))
+	want = `{"time":"2026-11-18T10:03:00Z","level":"WARN","msg":"request counts","fn":"api","count":0,` +
+		`"media_bytes":16384}` + "\n"
+	if buf.String() != want {
+		t.Fatalf("logged\n%s\nwant\n%s", buf.String(), want)
+	}
+	buf.Reset()
+	c.Flush()
+	want = `{"time":"2026-11-18T10:04:00Z","level":"WARN","msg":"request counts","fn":"api","count":0,` +
+		`"messages":1}` + "\n"
+	if buf.String() != want {
+		t.Fatalf("flushed\n%s\nwant\n%s", buf.String(), want)
+	}
+	buf.Reset()
+	c.Flush()
+	if buf.Len() != 0 {
+		t.Fatalf("flushed twice: %s", buf.String())
+	}
+}

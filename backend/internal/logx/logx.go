@@ -27,12 +27,15 @@ const (
 	KeyTelegramStatus = "tg_status"   // HTTP status of Telegram's answer to a failed Bot API call
 	KeyErrorCode      = "error_code"  // Telegram's error_code for a failed Bot API call
 	KeyPanicAt        = "panic_at"    // where a recovered panic happened: function and line
+	KeyMessages       = "messages"    // messages sent in a minute (internal/tally), a count
+	KeyMediaBytes     = "media_bytes" // padded bytes of uploads paid for in a minute (internal/tally), a sum
 )
 
 var allowed = map[string]bool{
 	KeyFunction: true, KeyRoute: true, KeyStatus: true,
 	KeyErrorKind: true, KeyDuration: true, KeyCount: true,
 	KeyMethod: true, KeyTelegramStatus: true, KeyErrorCode: true, KeyPanicAt: true,
+	KeyMessages: true, KeyMediaBytes: true,
 }
 
 // Allowed groups, of counts only (internal/tally writes them). Each member
@@ -65,6 +68,10 @@ func New(w io.Writer, function string) *slog.Logger {
 			if !allowed[a.Key] {
 				return slog.Attr{}
 			}
+			// The public counts are integers, nothing else.
+			if (a.Key == KeyMessages || a.Key == KeyMediaBytes) && !isInt(a) {
+				return slog.Attr{}
+			}
 			if a.Value.Kind() == slog.KindString && len(a.Value.String()) > 100 {
 				a.Value = slog.StringValue(a.Value.String()[:100])
 			}
@@ -74,9 +81,15 @@ func New(w io.Writer, function string) *slog.Logger {
 	return slog.New(h).With(slog.String(KeyFunction, function))
 }
 
+// isInt is whether a's value is an integer.
+func isInt(a slog.Attr) bool {
+	k := a.Value.Kind()
+	return k == slog.KindInt64 || k == slog.KindUint64
+}
+
 // isCount is whether a may be a member of the count group named group.
 func isCount(group string, a slog.Attr) bool {
-	if k := a.Value.Kind(); k != slog.KindInt64 && k != slog.KindUint64 {
+	if !isInt(a) {
 		return false
 	}
 	name := a.Key

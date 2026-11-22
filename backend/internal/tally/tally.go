@@ -9,6 +9,14 @@
 // per instance for each minute it answered anything, and none while idle.
 // The line's time is the start of the minute it counts.
 //
+// Two more counts are for the public statistics: messages sent (Sent) and
+// the padded size of the uploads paid for (Uploaded), added to the line
+// only when there were any, so a line without them is as before. They go
+// in the minute of the time the handler read early on, before payment, and
+// the answer in the minute it's given, so a request that spans the end of
+// a minute can log its message or bytes in a line of their own, with count
+// 0.
+//
 // Counts are all it holds: route patterns (never paths, which carry IDs),
 // statuses and the handlers' error codes, never anything that identifies a
 // person, device, account, link, mailbox, address or request.
@@ -45,6 +53,9 @@ type Counter struct {
 	total  int
 	routes map[string]int // by route and status, e.g. "post_send_429"
 	errors map[string]int // by error code, e.g. "rate_limited"
+
+	messages   int   // messages sent (Sent)
+	mediaBytes int64 // padded bytes of uploads paid for (Uploaded)
 }
 
 // New returns a counter that logs to log.
@@ -56,17 +67,46 @@ func New(log *slog.Logger) *Counter {
 // status, and error code ("" if none). If the minute being counted has
 // ended, its counts are logged first.
 func (c *Counter) Add(now time.Time, route string, status int, code string) {
-	minute := now.UTC().Truncate(time.Minute)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !minute.Equal(c.minute) {
-		c.flush()
-		c.minute = minute
-	}
+	c.at(now)
 	c.total++
 	bump(c.routes, RouteName(route, status))
 	if code != "" {
 		bump(c.errors, code)
+	}
+}
+
+// Sent counts a message sent at now: a send answered 200 that isn't quiet.
+// Seen receipts, reactions, edits, deletes and key updates are quiet
+// (POST /send), so they aren't counted.
+func (c *Counter) Sent(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at(now)
+	c.messages++
+}
+
+// Uploaded adds the size of an upload paid for at now (POST /media
+// answered 201), padded as the app pads every upload (media.PaddedSize):
+// the size of the link given, not of a finished upload.
+func (c *Counter) Uploaded(now time.Time, size int64) {
+	if size <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at(now)
+	c.mediaBytes += size
+}
+
+// at makes now's minute the one being counted, logging the one before if
+// it has ended. c.mu must be held.
+func (c *Counter) at(now time.Time) {
+	minute := now.UTC().Truncate(time.Minute)
+	if !minute.Equal(c.minute) {
+		c.flush()
+		c.minute = minute
 	}
 }
 
@@ -79,17 +119,25 @@ func (c *Counter) Flush() {
 }
 
 func (c *Counter) flush() {
-	if c.total == 0 {
+	if c.total == 0 && c.messages == 0 && c.mediaBytes == 0 {
 		return
 	}
 	r := slog.NewRecord(c.minute, slog.LevelWarn, Message, 0)
+	r.AddAttrs(slog.Int(logx.KeyCount, c.total))
+	if c.messages > 0 {
+		r.AddAttrs(slog.Int(logx.KeyMessages, c.messages))
+	}
+	if c.mediaBytes > 0 {
+		r.AddAttrs(slog.Int64(logx.KeyMediaBytes, c.mediaBytes))
+	}
 	r.AddAttrs(
-		slog.Int(logx.KeyCount, c.total),
 		group(logx.KeyErrors, c.errors),
 		group(logx.KeyRoutes, c.routes),
 	)
 	_ = c.log.Handler().Handle(context.Background(), r)
 	c.total = 0
+	c.messages = 0
+	c.mediaBytes = 0
 	clear(c.routes)
 	clear(c.errors)
 }

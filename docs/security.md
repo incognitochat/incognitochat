@@ -221,17 +221,22 @@ it. This is how close it gets.
   code ([deployment.md](deployment.md#request-counts)), for the alarms on
   abuse. Counts only: no IDs, IP addresses, paths or content, per minute,
   so they say what AWS's own per-minute metrics of the functions and tables
-  already say, by route. The lines are kept 7 days. The 19 metrics made from
-  them (registrations, token batches, 429s overall and by route, and three
-  kinds of refusal) are kept by CloudWatch for 15 days a minute at a time,
-  63 days 5 minutes at a time and 15 months an hour at a time, and can't be
-  deleted. On a quiet deployment, a minute with one `POST /send` says that
-  one message was sent then, not by or to whom.
+  already say, by route. The lines also count, for public statistics, the
+  messages sent (sends that aren't quiet) and the padded bytes of the
+  uploads paid for. The lines are kept 7 days. The 21 metrics made from
+  them (registrations, token batches, 429s overall and by route, three kinds
+  of refusal, messages sent and media bytes) are kept by CloudWatch for 15
+  days a minute at a time, 63 days 5 minutes at a time and 15 months an
+  hour at a time, and can't be deleted. On a quiet deployment, a minute with
+  one `POST /send` says that one send was made then, and whether it was a
+  message or a receipt, reaction, edit, delete or key update (quiet); a
+  minute with one upload, its padded size; never by or to whom.
 - **When some single requests came.** Lambda freezes an instance between
   requests, so only a request can write its line: the instance's first one
   after the minute. The log dates the line by that request, to the
   millisecond. On a quiet instance it is often the only request the next
-  line counts, which then gives its route too, and the metrics made from
+  line counts, which then gives its route too (for a send, whether it was a
+  message; for an upload, its padded size), and the metrics made from
   those lines carry the same times, to the minute. So the logs can show when
   a lone request came and what it was, never who made it. That is small,
   and comes with counting at all without a clock of its own.

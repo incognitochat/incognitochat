@@ -315,6 +315,12 @@ func (s *Server) send(ctx context.Context, req httpapi.Request) httpapi.Response
 	// from the ws function, which this doesn't wait for. Receipts are
 	// pushed too (they update check marks), but never noticed.
 	s.push(ctx, owner, in.Quiet)
+	// Counted whoever it went to, an ended mailbox too: the answer is the
+	// same, on purpose. Quiet sends (receipts, reactions, edits, deletes)
+	// aren't messages.
+	if !in.Quiet && s.Counts != nil {
+		s.Counts.Sent(now)
+	}
 	return accepted()
 }
 

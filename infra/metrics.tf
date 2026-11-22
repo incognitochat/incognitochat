@@ -1,6 +1,8 @@
 # Metrics from the api function's request counts (backend/internal/tally):
 # each instance logs one line a minute while it answers requests, with
-# counts only, by route and status ("routes") and by error code ("errors").
+# counts only, by route and status ("routes") and by error code ("errors"),
+# and for the public statistics, the messages sent ("messages") and the
+# padded bytes of uploads paid for ("media_bytes").
 # Metric filters are free. Each metric is billed as a custom metric, $0.30
 # a month, but only for the hours it gets data: no default value is set,
 # so a metric with nothing to count costs nothing. The alarms on these
@@ -13,16 +15,20 @@ locals {
   # the line. Four filters add to Limited, one for each code a 429 answer
   # has.
   count_metrics = {
-    registrations      = { metric = "Registrations", count = "routes.post_register_200" }
-    send-tokens        = { metric = "SendTokenRequests", count = "routes.post_tokens_200" }
-    media-tokens       = { metric = "MediaTokenRequests", count = "routes.post_tokens_media_200" }
-    rate-limited       = { metric = "Limited", count = "errors.rate_limited" }
-    daily-limit        = { metric = "Limited", count = "errors.daily_limit" }
-    link-busy          = { metric = "Limited", count = "errors.link_busy" }
-    download-limit     = { metric = "Limited", count = "errors.download_limit" }
-    invalid-token      = { metric = "InvalidToken", count = "errors.invalid_token" }
-    init-data-rejected = { metric = "InitDataRejected", count = "errors.init_data_rejected" }
-    signature-rejected = { metric = "SignatureRejected", count = "errors.signature_rejected" }
+    registrations      = { metric = "Registrations", count = "routes.post_register_200", unit = "Count" }
+    send-tokens        = { metric = "SendTokenRequests", count = "routes.post_tokens_200", unit = "Count" }
+    media-tokens       = { metric = "MediaTokenRequests", count = "routes.post_tokens_media_200", unit = "Count" }
+    rate-limited       = { metric = "Limited", count = "errors.rate_limited", unit = "Count" }
+    daily-limit        = { metric = "Limited", count = "errors.daily_limit", unit = "Count" }
+    link-busy          = { metric = "Limited", count = "errors.link_busy", unit = "Count" }
+    download-limit     = { metric = "Limited", count = "errors.download_limit", unit = "Count" }
+    invalid-token      = { metric = "InvalidToken", count = "errors.invalid_token", unit = "Count" }
+    init-data-rejected = { metric = "InitDataRejected", count = "errors.init_data_rejected", unit = "Count" }
+    signature-rejected = { metric = "SignatureRejected", count = "errors.signature_rejected", unit = "Count" }
+    # For the public statistics: messages sent (sends that aren't quiet),
+    # and the padded size of the uploads paid for, in bytes.
+    messages    = { metric = "Messages", count = "messages", unit = "Count" }
+    media-bytes = { metric = "MediaBytes", count = "media_bytes", unit = "Bytes" }
   }
 
   # The routes that answer 429 (rate_limited, daily_limit, link_busy or
@@ -48,7 +54,7 @@ locals {
 resource "aws_cloudwatch_log_metric_filter" "counts" {
   for_each = merge(local.count_metrics, {
     for route in local.limited_routes :
-    "limited-${route}" => { metric = "Limited.${route}", count = "routes.${route}_429" }
+    "limited-${route}" => { metric = "Limited.${route}", count = "routes.${route}_429", unit = "Count" }
   })
 
   name           = "${local.prefix}-api-${each.key}"
@@ -59,7 +65,7 @@ resource "aws_cloudwatch_log_metric_filter" "counts" {
     namespace = local.counts_namespace
     name      = each.value.metric
     value     = "$.${each.value.count}"
-    unit      = "Count"
+    unit      = each.value.unit
   }
 }
 

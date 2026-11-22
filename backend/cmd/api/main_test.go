@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 
+	"github.com/incognitochat/incognitochat/backend/internal/api"
 	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
 	"github.com/incognitochat/incognitochat/backend/internal/logx"
@@ -98,5 +100,28 @@ func TestScheduleRunsTheExpiry(t *testing.T) {
 	out, err = h.Invoke(context.Background(), []byte(`{"expireAccounts":null}`))
 	if err != nil || runs != 0 || !strings.Contains(string(out), `"statusCode":404`) {
 		t.Fatalf("null: %s, %v, %d runs", out, err, runs)
+	}
+}
+
+// The counts are wired in: the router's answers, and the messages and
+// uploads the server reports, go to one counter, whose line Flush logs.
+func TestCountsAreWired(t *testing.T) {
+	var buf bytes.Buffer
+	server := &api.Server{}
+	router := httpapi.NewRouter()
+	router.Handle(http.MethodPost, "/send", func(context.Context, httpapi.Request) httpapi.Response {
+		server.Counts.Sent(time.Now())
+		server.Counts.Uploaded(time.Now(), 16<<10)
+		return httpapi.JSON(http.StatusOK, map[string]string{})
+	})
+	counts := count(logx.New(&buf, "api"), server, router)
+	if _, err := router.Serve(context.Background(), httpapi.Request{RawPath: "/send", RequestContext: events.LambdaFunctionURLRequestContext{HTTP: events.LambdaFunctionURLRequestContextHTTPDescription{Method: "POST"}}}); err != nil {
+		t.Fatal(err)
+	}
+	counts.Flush()
+	for _, want := range []string{`"count":1`, `"messages":1`, `"media_bytes":16384`, `"post_send_200":1`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("logged %s, want %s in it", buf.String(), want)
+		}
 	}
 }
