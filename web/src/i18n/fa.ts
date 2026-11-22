@@ -256,6 +256,7 @@ export const fa = {
   autoPhotos: 'عکس‌ها',
   autoVoice: 'پیام‌های صوتی و ویدیویی',
   autoGifs: 'گیف‌ها',
+  autoDownloadNote: 'فقط چیزهایی که بعد از نوشتن شما در گفت‌وگو می‌رسند. تا آن موقع، برای دریافت روی هرکدام بزنید.',
   languageTitle: 'زبان',
   languageTelegram: 'همان زبان تلگرام',
   storageChats: 'رسانه به تفکیک گفت‌وگو',

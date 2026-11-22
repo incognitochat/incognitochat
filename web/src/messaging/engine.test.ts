@@ -20,6 +20,7 @@ import { POOL_LOW, POOL_REFILL, pooled, poolSize } from './pool';
 import { canResend, createMessaging, LINK_KEY_RETRY_MS, MailboxLimit, NoMailboxes, NoTokens, RESEND_WINDOW_MS, SyncFailed, UPLOAD_REUSE_MS, type MessagingDeps } from './engine';
 import {
   addMessage,
+  answeredAt,
   clearMedia,
   earlyFor,
   failStuck,
@@ -32,6 +33,7 @@ import {
   lastShown,
   listConversations,
   listMessages,
+  listRecords,
   MAX_EARLY,
   MAX_EARLY_BYTES,
   mediaUsage,
@@ -1453,6 +1455,70 @@ describe('deleting a conversation', () => {
     // Replying works as before.
     await owner.messaging.send(mine, 'yes');
     expect(await sender.messaging.sync()).toBe(1);
+  });
+});
+
+describe('where the user first wrote in a chat', () => {
+  it('is their first message the server took, noted at once and kept once it is deleted, and forgotten with the chat', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    // Whoever starts a chat writes in it first.
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    const [hello] = await listRecords(sender.db, conv);
+    expect(await getMeta(sender.db, `answered:${conv}`)).toEqual({ at: hello!.at, order: 0 });
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    expect(await answeredAt(owner.db, mine)).toBeUndefined();
+
+    // A reply that wasn't sent doesn't count.
+    const request = backend.api.request;
+    backend.api.request = async (method, path, init, check) => {
+      if (method === 'POST' && path === '/send') {
+        backend.api.request = request;
+        throw new NetworkError('down');
+      }
+      return request(method, path, init, check);
+    };
+    await expect(owner.messaging.send(mine, 'not sent')).rejects.toThrow(NetworkError);
+    expect(await answeredAt(owner.db, mine)).toBeUndefined();
+    // One that was is noted as it's sent, and stays once it's deleted.
+    await owner.messaging.send(mine, 'hi');
+    const hi = (await listRecords(owner.db, mine)).find((m) => m.out && m.status === 'sent')!;
+    const place = { at: hi.at, order: hi.order ?? 0 };
+    expect(await getMeta(owner.db, `answered:${mine}`)).toEqual(place);
+    // In a chat from before this was kept too: noted before theirs is deleted.
+    await deleteMeta(owner.db, `answered:${mine}`);
+    await owner.messaging.deleteHere(mine, hi.id);
+    expect(await getMeta(owner.db, `answered:${mine}`)).toEqual(place);
+    expect(await answeredAt(owner.db, mine)).toEqual(place);
+
+    // Deleting the chat forgets it: written to again, it's a chat the owner hasn't written in.
+    await owner.messaging.remove(mine);
+    expect(await getMeta(owner.db, `answered:${mine}`)).toBeUndefined();
+    await sender.messaging.send(conv, 'still there?');
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await answeredAt(owner.db, mine)).toBeUndefined();
+  });
+
+  it('counts an attachment of theirs that was sent, and not one whose send failed', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    const photo = crypto.getRandomValues(new Uint8Array(500));
+    const out = { file: photo, media: { t: 'photo', s: photo.length, w: 5, h: 5, m: 'image/jpeg' } };
+    backend.down.uploads = true;
+    await expect(owner.messaging.sendMedia(mine, out)).rejects.toThrow();
+    expect(await answeredAt(owner.db, mine)).toBeUndefined();
+    backend.down.uploads = false;
+    await owner.messaging.sendMedia(mine, out);
+    const sent = (await listRecords(owner.db, mine)).find((m) => m.out && m.status === 'sent')!;
+    expect(await getMeta(owner.db, `answered:${mine}`)).toEqual({ at: sent.at, order: sent.order ?? 0 });
   });
 });
 

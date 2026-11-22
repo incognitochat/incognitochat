@@ -374,23 +374,104 @@ export async function sentEnvelopeAt(db: Database, conv: string, id: string): Pr
 }
 
 /**
- * Deletes when this device last sent something in a conversation, and the
- * IDs and times of the last few things (takeSentAt), within a transaction
- * that writes `meta`: with its chat, or with its record. Whatever deletes a
- * conversation's record deletes these in the same transaction, with what it
- * remembers by keyed hashes.
+ * Deletes when this device last sent something in a conversation, the IDs
+ * and times of the last few things (takeSentAt), and where the user first
+ * wrote there (answeredAt), within a transaction that writes `meta`: with
+ * its chat, or with its record. Whatever deletes a conversation's record
+ * deletes these in the same transaction, with what it remembers by keyed
+ * hashes.
  */
 function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
-  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv))]);
+  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv)), meta.delete(answeredKey(conv))]);
 }
 
-/** Forgets when this device last sent something in a conversation, and what (deleteSentAt): its chat was deleted. */
+/** Forgets when this device last sent something in a conversation, what, and where the user first wrote there (deleteSentAt): its chat was deleted. */
 export function forgetSentAt(db: Database, conv: string): Promise<void> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');
     await deleteSentAt(tx.store, conv);
     await tx.done;
   });
+}
+
+/** A message's place in its conversation (byTime): its `at`, and its `order` among those with the same `at`. */
+export interface Place {
+  at: number;
+  order: number;
+}
+
+function answeredKey(conv: string): string {
+  return `answered:${conv}`;
+}
+
+/**
+ * Where the user first wrote in a conversation: the place of the earliest
+ * of their messages there that was sent (the server took it: it shows as
+ * sent or seen; one still sending, or not sent, doesn't count), or none.
+ * Of the other side's attachments, only those that come after it download
+ * by themselves (comesAfter; state/app.ts, autoFetch): someone who has the
+ * user's link can't fill their device just by sending, and what came before
+ * the user's first message waits too, so answering "stop" doesn't download
+ * it. In a chat the user started, everything of theirs comes after it.
+ *
+ * Kept in `meta` (no content: a time and a place in that second), and only
+ * ever moved earlier: deleting the user's messages doesn't undo it. Each
+ * time it's asked for, the user's earliest sent message on the device is
+ * looked up by the index (only one second's messages are read, none
+ * opened), so a chat from before this was kept counts from the earliest
+ * that's still here, and one shown as sent only later (a "not sent" one
+ * that the other side's receipt showed had arrived) counts too. The engine
+ * asks as soon as one is sent, and before one is deleted, so it's kept
+ * before it can go. Read first, so the chat's own reads needn't wait for
+ * it; written, in a transaction of its own that reads it all again, only
+ * when it changes. Forgotten with the chat (deleteSentAt).
+ */
+export async function answeredAt(db: Database, conv: string): Promise<Place | undefined> {
+  const read = await lookUpAnswered(db, conv, false);
+  return read.changed ? (await lookUpAnswered(db, conv, true)).place : read.place;
+}
+
+/**
+ * Where the user first wrote in a conversation (answeredAt), as kept and as
+ * the messages on the device show it, in one transaction: the earlier of
+ * the two, and whether that isn't what's kept. With write, kept then.
+ */
+async function lookUpAnswered(db: Database, conv: string, write: boolean): Promise<{ place: Place | undefined; changed: boolean }> {
+  const tx = db.transaction(['messages', 'meta'], write ? 'readwrite' : 'readonly');
+  const messages = tx.objectStore('messages');
+  const kept = (await tx.objectStore('meta').get(answeredKey(conv))) as Place | undefined;
+  // The earliest second with one of ours sent (only ours are sent or seen),
+  // then the first of ours in it.
+  let at = Infinity;
+  for (const status of ['sent', 'seen'] as const) {
+    const cursor = await messages.index('byStatus').openKeyCursor(withStatus(conv, status));
+    if (cursor) at = Math.min(at, cursor.key[2]);
+  }
+  let found: Place | undefined;
+  if (at !== Infinity) {
+    const orders = (await messages.index('byConversation').getAll([conv, at])).filter((m) => m.out && (m.status === 'sent' || m.status === 'seen')).map((m) => m.order ?? 0);
+    if (orders.length > 0) found = { at, order: Math.min(...orders) };
+  }
+  const place = found && (!kept || byTime(found, kept) < 0) ? found : kept;
+  const changed = place !== kept;
+  if (write && changed) await tx.objectStore('meta').put!(place, answeredKey(conv));
+  await tx.done;
+  return { place, changed };
+}
+
+/**
+ * Whether a message comes after a place in its conversation, in the order
+ * the chat shows them (byTime): a later `at`, or the same and taken in
+ * later (`order`). Ours is dated when it's written, on the server's clock
+ * and after anything we sent before (engine.ts, stampIn); theirs, no later
+ * than it arrived, and if it arrived after one of ours dated a few seconds
+ * ahead, no earlier than that (engine.ts, shownAt). So what was here before
+ * the user's message comes before it (in its second, it was taken in
+ * first), and theirs that arrived after it comes after it, unless they
+ * dated it earlier: then it waits for a tap, which is the safe way round.
+ */
+export function comesAfter(m: Pick<MessageRecord, 'at' | 'order'>, place: Place): boolean {
+  return byTime(m, place) > 0;
 }
 
 /** Conversations, newest activity first. */

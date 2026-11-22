@@ -518,6 +518,16 @@ async function chatOnDevice(db: Awaited<ReturnType<typeof openDatabase>>) {
   await addMessage(db, { id: 'm1', conv: 'c1', at: 1, out: false, status: 'read' }, { text: 'kept' });
 }
 
+/**
+ * Chat c1 as the user started it: their first message, sent (and seen),
+ * before the other side's. Attachments that come after it download by
+ * themselves (store.ts, answeredAt).
+ */
+async function startedOnDevice(db: Awaited<ReturnType<typeof openDatabase>>) {
+  await chatOnDevice(db);
+  await addMessage(db, { id: 'hi', conv: 'c1', at: 0, out: true, status: 'seen' }, { text: 'hi' });
+}
+
 describe('a device clock that is off', () => {
   it('logs in after one automatic retry when 5 minutes fast, and the user sees no error', async () => {
     const server = fakeServer();
@@ -686,7 +696,7 @@ describe('when the server stops taking this device', () => {
   it('makes no server calls while read-only: reading chats, opening one, seen receipts, downloads', async () => {
     const server = fakeServer({ session: ['ok', refused()] });
     const { db } = await registered(server.api);
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     // A photo not on the device yet, which would download as the chat opens.
     await addMessage(
       db,
@@ -701,7 +711,7 @@ describe('when the server stops taking this device', () => {
 
     await app.readChats();
     await app.openConversation('c1');
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', readOnly: true, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', readOnly: true, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'remote' }] });
     app.markSeen();
     await app.fetchMedia({ conv: 'c1', id: 'p1' });
     await app.home();
@@ -2205,7 +2215,7 @@ describe('fetching attachments by themselves', () => {
   it('fetches photos, voice and video messages and GIFs up to a size for each, and raster images only', async () => {
     const server = fakeServer();
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     await received(db, 'photo', 2, { t: 'photo', s: 5 * MiB, m: 'image/jpeg' });
     await received(db, 'bigPhoto', 3, { t: 'photo', s: 5 * MiB + 1, m: 'image/jpeg' });
     await received(db, 'svg', 4, { t: 'photo', s: 1000, m: 'image/svg+xml' });
@@ -2224,6 +2234,76 @@ describe('fetching attachments by themselves', () => {
     // The rest wait for a tap: a broken one too, which a tap tries again.
     await app.fetchMedia({ conv: 'c1', id: 'broken' });
     expect(downloads().at(-1)).toBe('GET /media/upload-broken');
+  });
+
+  it("downloads nothing by itself in a chat the user hasn't written in; a tap fetches only that one", async () => {
+    const server = fakeServer();
+    const { app, db } = await registered(server.api, { issuer });
+    // The other side's message, then small attachments of each kind that would download by themselves.
+    await chatOnDevice(db);
+    await received(db, 'p1', 2, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await received(db, 'p2', 3, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await received(db, 'voice', 4, { t: 'voice', s: 1000, m: 'audio/mp4' });
+    await received(db, 'gif', 5, { t: 'gif', s: 1000, m: 'image/gif' });
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+    const reopen = async () => {
+      await app.home();
+      await app.openConversation('c1');
+      for (let i = 0; i < 10; i++) await tick();
+    };
+
+    await app.openConversation('c1');
+    for (let i = 0; i < 10; i++) await tick();
+    expect(downloads()).toEqual([]);
+    // A tap fetches that one only: the others still wait, each on its own.
+    await app.fetchMedia({ conv: 'c1', id: 'p2' });
+    expect(downloads()).toEqual(['GET /media/upload-p2']);
+    await reopen();
+    expect(downloads()).toEqual(['GET /media/upload-p2']);
+    // Messages of the user's the server didn't take don't count: not sent, or still sending.
+    await addMessage(db, { id: 'notSent', conv: 'c1', at: 6, out: true, status: 'failed' }, { text: 'stop' });
+    await addMessage(db, { id: 'sending', conv: 'c1', at: 6, out: true, status: 'sending' }, { text: 'please' });
+    await received(db, 'p3', 7, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await reopen();
+    expect(downloads()).toEqual(['GET /media/upload-p2']);
+    // One that was sent: what comes after it downloads by itself, and nothing from before.
+    await addMessage(db, { id: 'sent', conv: 'c1', at: 8, out: true, status: 'sent' }, { text: 'ok' });
+    await received(db, 'p4', 9, { t: 'photo', s: 1000, m: 'image/jpeg' });
+    await app.home();
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(2));
+    await tick();
+    expect(downloads()).toEqual(['GET /media/upload-p2', 'GET /media/upload-p4']);
+  });
+
+  it('downloads by itself only what came after the first message of the user that was sent, also once that one is deleted', async () => {
+    const server = fakeServer();
+    const { app, db } = await registered(server.api, { issuer });
+    const photo = { t: 'photo', s: 1000, m: 'image/jpeg' };
+    await chatOnDevice(db);
+    await received(db, 'before', 2, photo);
+    // In the same second as the user's message, but here before it.
+    await received(db, 'sameSecond', 3, photo);
+    // The user's first message, from before this was kept: found from the messages on the device.
+    await addMessage(db, { id: 'reply', conv: 'c1', at: 3, out: true, status: 'sent' }, { text: 'stop' });
+    await received(db, 'after', 3, photo);
+    await received(db, 'later', 4, photo);
+    const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
+
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(2));
+    await tick();
+    expect(downloads()).toEqual(['GET /media/upload-after', 'GET /media/upload-later']);
+    // Kept: deleting that message doesn't undo it.
+    await deleteMessage(db, 'c1', 'reply');
+    await received(db, 'next', 5, photo);
+    await app.home();
+    await app.openConversation('c1');
+    await vi.waitFor(() => expect(downloads()).toHaveLength(3));
+    await tick();
+    expect(downloads().at(-1)).toBe('GET /media/upload-next');
+    // What came before it still waits for a tap.
+    expect(app.screen.value).toMatchObject({ messages: [{ id: 'm1' }, { id: 'before', file: 'remote' }, { id: 'sameSecond', file: 'remote' }, {}, {}, {}] });
   });
 
   /**
@@ -2255,7 +2335,7 @@ describe('fetching attachments by themselves', () => {
     for (const [minutes, tries] of [[3, 2], [6, 3], [9, 3], [12, 3]] as const) {
       await withDeviceClockOff(minutes * 60_000, () => open(tries));
     }
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'remote' }] });
   }
 
   it.each([
@@ -2266,7 +2346,7 @@ describe('fetching attachments by themselves', () => {
     const server = fakeServer();
     server.state.media = failure;
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     await received(db, 'p1', 2, { t: 'photo', s: 1000, m: 'image/jpeg' });
     await triedThreeTimes(server, app);
     // A tap still asks.
@@ -2277,7 +2357,7 @@ describe('fetching attachments by themselves', () => {
   it('tries one again by itself only a few times while the device is too full to keep it', async () => {
     const server = fakeServer();
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     // A real upload, which downloads and decrypts; only storing it fails.
     const file = crypto.getRandomValues(new Uint8Array(1000));
     const key = newFileKey();
@@ -2307,7 +2387,7 @@ describe('fetching attachments by themselves', () => {
     // Its downloads used up, for the next hour (until the UTC day ends).
     server.state.mediaRefused.set('upload-p1', new ApiError(429, 'download_limit', undefined, undefined, 3600));
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     await received(db, 'p1', 2, { t: 'photo', s: 1000, m: 'image/jpeg' });
     await received(db, 'p2', 3, { t: 'photo', s: 1000, m: 'image/jpeg' });
     const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
@@ -2317,7 +2397,7 @@ describe('fetching attachments by themselves', () => {
     await tick();
     // Quietly, and the next is fetched all the same (here it has expired).
     expect(downloads()).toEqual(['GET /media/upload-p1', 'GET /media/upload-p2']);
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
     // Not fetched by itself again in this run, minutes later either.
     await withDeviceClockOff(3 * 60_000, async () => {
       await app.home();
@@ -2338,7 +2418,7 @@ describe('fetching attachments by themselves', () => {
     // The next day a tap fetches it (here it has expired), and the notice goes.
     server.state.mediaRefused.clear();
     await app.fetchMedia({ conv: 'c1', id: 'p1' });
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'gone' }, { id: 'p2', file: 'gone' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'gone' }, { id: 'p2', file: 'gone' }] });
   });
 });
 
@@ -2349,7 +2429,7 @@ describe('attachments paused by the operator', () => {
     const server = fakeServer();
     server.state.switches.downloadsPaused = true;
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     // Two photos, which would download as the chat opens.
     for (const [id, at] of [['p1', 2], ['p2', 3]] as const) {
       await addMessage(
@@ -2365,7 +2445,7 @@ describe('attachments paused by the operator', () => {
     await tick();
     // One refusal, not one per photo, and quietly: no notice.
     expect(downloads()).toEqual(['GET /media/upload-p1']);
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'remote' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'remote' }] });
     // Opening it again soon after asks nothing.
     await app.home();
     await app.openConversation('c1');
@@ -2382,7 +2462,7 @@ describe('attachments paused by the operator', () => {
     server.state.switches.downloadsPaused = false;
     await app.fetchMedia({ conv: 'c1', id: 'p2' });
     expect(downloads()).toHaveLength(3);
-    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
+    expect(app.screen.value).toMatchObject({ kind: 'conversation', error: null, messages: [{ id: 'hi' }, { id: 'm1' }, { id: 'p1', file: 'remote' }, { id: 'p2', file: 'gone' }] });
     await app.home();
     await app.openConversation('c1');
     await vi.waitFor(() => expect(downloads()).toHaveLength(4));
@@ -2393,7 +2473,7 @@ describe('attachments paused by the operator', () => {
     const server = fakeServer();
     server.state.switches.downloadsPaused = true;
     const { app, db } = await registered(server.api, { issuer });
-    await chatOnDevice(db);
+    await startedOnDevice(db);
     await addMessage(
       db,
       { id: 'p1', conv: 'c1', at: 2, out: false, status: 'received', file: 'remote' },

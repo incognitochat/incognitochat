@@ -41,8 +41,10 @@ import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
 import { createMessaging, isPaused, MailboxLimit, NoMailboxes, NoTokens, resendUploads, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
 import {
+  answeredAt,
   attachmentsOf,
   clearMedia,
+  comesAfter,
   failStuck,
   getConversation,
   getMedia,
@@ -1381,19 +1383,27 @@ export function createApp(deps: Deps) {
    * Photos, voice and video messages and GIFs are fetched as soon as their
    * conversation is open, as in Telegram, up to a size for each kind
    * (fetchesByItself), unless turned off in Data and storage; videos, music,
-   * files and anything larger wait for a tap. Attachments cleared from this
-   * device, gone or broken also wait for a tap.
+   * files and anything larger wait for a tap. Only those that came after
+   * the user first wrote in the chat, though (store.ts, answeredAt and
+   * comesAfter): in a chat they haven't written in, everything waits for a
+   * tap, and so does what came before their first message, each on its own
+   * (a tap fetches that one only). Attachments cleared from this device,
+   * gone or broken also wait for a tap.
    */
   function autoFetch(conv: string): void {
     const now = currentScreen();
     if (now.kind !== 'conversation' || now.id !== conv) return;
     const { auto } = mediaSettings;
+    const candidates = now.messages.filter((m) => m.file === 'remote' && !m.out && m.media && fetchesByItself(m.media, auto));
+    // Nothing to fetch: not even where the user first wrote is looked up.
+    if (candidates.length === 0) return;
     void (async () => {
-      for (const m of now.messages) {
+      const answered = await answeredAt(deps.db, conv).catch(() => undefined);
+      if (!answered) return;
+      for (const m of candidates) {
         // Paused: one refusal, not one per attachment.
         if (Date.now() < downloadsPausedUntil) return;
-        if (m.file !== 'remote' || m.out || !m.media || !fetchesByItself(m.media, auto)) continue;
-        if ((autoFailures.get(messageKey(m)) ?? 0) >= AUTO_TRIES) continue;
+        if (!comesAfter(m, answered) || (autoFailures.get(messageKey(m)) ?? 0) >= AUTO_TRIES) continue;
         await fetchMedia(m, true);
       }
     })();
