@@ -329,7 +329,7 @@ export const ptBR = {
   deletePhrase: 'apagar minha conta',
   deleteAccountConfirm: 'Apagar minha conta',
   deleteChatsForBoth: 'Apagar também meus chats para a outra pessoa',
-  deleteChatsForBothNote: 'Em cada chat da sua lista, o app da outra pessoa recebe um pedido para apagá-lo, e os anexos que você enviou ali são apagados do servidor; os que sobrarem ficam no servidor por no máximo 30 dias. Isso depende do app dela e não apaga cópias ou capturas de tela que ela tenha feito. Os chats que você bloqueou e os que você apagou só para você continuam com a outra pessoa.',
+  deleteChatsForBothNote: 'Em cada chat da sua lista, o app da outra pessoa recebe um pedido para apagá-lo, e os anexos que você enviou ali são apagados do servidor; os que sobrarem ficam no servidor por no máximo 30 dias. Isso depende do app dela e não consegue apagar cópias ou capturas de tela que ela tenha feito. Os chats que você bloqueou e os que você apagou só para você continuam com a outra pessoa.',
   deletingChats: 'Apagando seus chats para a outra pessoa: {done} de {total}…',
   deletingChatsLeft: 'Chats não apagados para a outra pessoa: {count}. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.',
   deletingChatsNoMessages: 'Você já usou todas as mensagens de hoje: apagar cada chat conta como uma. Mais a partir de {time}.',

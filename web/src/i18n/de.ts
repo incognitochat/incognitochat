@@ -318,7 +318,7 @@ export const de = {
   deletePhrase: 'mein Konto löschen',
   deleteAccountConfirm: 'Mein Konto löschen',
   deleteChatsForBoth: 'Auch meine Chats auf der anderen Seite löschen',
-  deleteChatsForBothNote: 'Bei jedem Chat in deiner Liste wird die App der anderen Seite gebeten, ihn zu löschen, und die Anhänge, die du dort gesendet hast, werden vom Server gelöscht; was übrig bleibt, bleibt höchstens 30 Tage auf dem Server. Das hängt von deren App ab und kann keine Kopien oder Screenshots löschen, die dort gemacht wurden. Chats, die du blockiert hast, und Chats, die du nur bei dir gelöscht hast, bleiben auf der anderen Seite.',
+  deleteChatsForBothNote: 'Bei jedem Chat in deiner Liste wird die App der anderen Seite gebeten, ihn zu löschen, und die Anhänge, die du dort gesendet hast, werden vom Server gelöscht; was übrig ist, bleibt höchstens 30 Tage auf dem Server. Das hängt von deren App ab und kann keine Kopien oder Screenshots löschen, die dort gemacht wurden. Chats, die du blockiert hast, und Chats, die du nur bei dir gelöscht hast, bleiben auf der anderen Seite.',
   deletingChats: 'Deine Chats werden auf der anderen Seite gelöscht: {done} von {total}…',
   deletingChatsLeft: 'Auf der anderen Seite nicht gelöschte Chats: {count}. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.',
   deletingChatsNoMessages: 'Deine Nachrichten für heute sind aufgebraucht: Jeder gelöschte Chat zählt als eine. Weitere ab {time}.',

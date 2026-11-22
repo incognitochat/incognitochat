@@ -318,7 +318,7 @@ export const en = {
   deleteAccountConfirm: 'Delete my account',
   deleteChatsForBoth: 'Also delete my chats for the other side',
   deleteChatsForBothNote:
-    "For each chat in your list, the other person's app is asked to delete it, and the attachments you sent there are deleted from the server; any left expire within 30 days. This relies on their app, and can't remove copies or screenshots they made. Chats you blocked, and chats you deleted only for yourself, stay with them.",
+    "For each chat in your list, the other person's app is asked to delete it, and the attachments you sent there are deleted from the server; any that remain expire within 30 days. This relies on their app, and can't remove copies or screenshots they made. Chats you blocked, and chats you deleted only for yourself, stay with them.",
   deletingChats: 'Deleting your chats for the other side: {done} of {total}…',
   deletingChatsLeft:
     'Chats not deleted for the other side: {count}. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.',

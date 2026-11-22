@@ -323,7 +323,7 @@ export const id = {
   deletingChatsLeft: 'Obrolan yang belum dihapus untuk pihak lain: {count}. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.',
   deletingChatsNoMessages: 'Pesan Anda hari ini sudah habis: setiap obrolan yang dihapus dihitung sebagai satu pesan. Bertambah lagi mulai pukul {time}.',
   deleteAccountAnyway: 'Tetap hapus akun saya',
-  keepAccount: 'Jangan hapus akun saya dulu',
+  keepAccount: 'Pertahankan akun saya',
   accountDeleted:
     'Akun Anda telah dihapus dari server, dan aplikasi telah menghapus obrolan dan kunci Anda di perangkat ini. Di beberapa perangkat, semua itu bisa tetap ada di berkas penyimpanan aplikasi, dan cadangan perangkat yang dibuat sebelumnya mungkin masih menyimpannya.',
 
