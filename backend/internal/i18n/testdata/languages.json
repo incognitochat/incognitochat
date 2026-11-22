@@ -1,5 +1,8 @@
 {
-  "languages": ["en", "fa"],
+  "languages": [
+    "en",
+    "fa"
+  ],
   "pick": {
     "en": "en",
     "en-GB": "en",
@@ -12,6 +15,15 @@
     "FA-ir": "fa",
     "qaa": "en",
     "qaa-x": "en",
-    "": "en"
+    "": "en",
+    "fa-": "fa",
+    "-fa": "en",
+    " fa": "en",
+    "fax": "en",
+    "en-": "en",
+    "-": "en",
+    "FA_ir": "fa",
+    "İfa": "en",
+    "fa-IR-x": "fa"
   }
 }

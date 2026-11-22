@@ -116,7 +116,7 @@ describe('i18n', () => {
 /** Counted keys whose number stands alone ("Blocked (3)", "Level 2: 5"): no noun agrees with it, so they may stay plain in any language. */
 const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'blockedCount', 'levelLine', 'messagesLeftToday'];
 
-/** Shown in Telegram's own popups (state/app.ts, popup): at most 256 characters for a message and 64 for a button. */
+/** Shown in Telegram's own popups (app.tsx: confirmSwitch, confirmDeleteHereOnly, confirmReplace, and clearing media): at most 256 characters for a message and 64 for a button. A new popup's keys go here. */
 const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm'];
 const POPUP_BUTTONS: readonly Key[] = ['clearMedia', 'pause', 'resume', 'deleteHereOnly', 'newLink'];
 
@@ -142,7 +142,8 @@ describe('every language', () => {
     expect(ALL).toEqual(vectors.languages);
     const tags = ALL.flatMap((language) => LANGUAGES[language].tags.map((tag) => [tag, language] as const));
     for (const [tag, language] of tags) {
-      expect(tag, language).toBe(tag.toLowerCase());
+      // Lowercase, subtags joined by -, as matchTag compares them.
+      expect(tag, language).toMatch(/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/);
       // Each tag has a vector, so the server is checked to pick it the same way.
       expect((vectors.pick as Record<string, string>)[tag], tag).toBe(language);
     }

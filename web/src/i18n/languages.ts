@@ -34,13 +34,15 @@ export function isLanguage(value: unknown): value is Language {
 }
 
 /**
- * The language a tag picks among a registry's: the whole tag (lowercase,
- * with _ read as -) among their tags, else the tag less its last subtag,
- * down to the first ("zh-hans-cn", "zh-hans", "zh"). Undefined if none.
+ * The language a tag picks among a registry's: the whole tag (its ASCII
+ * letters lowercased, with _ read as -) among their tags, else the tag less
+ * its last subtag, down to the first ("zh-hans-cn", "zh-hans", "zh").
+ * Undefined if none. Only A–Z are lowercased, as the server does: Go and
+ * JavaScript lowercase a few other letters differently (İ).
  */
 export function matchTag<L extends string>(tag: string, registry: Readonly<Record<L, { readonly tags: readonly string[] }>>): L | undefined {
   const entries = Object.entries(registry) as [L, { readonly tags: readonly string[] }][];
-  let rest = tag.toLowerCase().replace(/_/g, '-');
+  let rest = tag.replace(/[A-Z]/g, (c) => c.toLowerCase()).replace(/_/g, '-');
   while (rest !== '') {
     for (const [code, info] of entries) if (info.tags.includes(rest)) return code;
     const cut = rest.lastIndexOf('-');
