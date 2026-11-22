@@ -1576,8 +1576,11 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   counts are kept in memory and written ten at a time, so an instance
   that hasn't heard yet lets up to 9 more through a window another has
   used up, and learns it from one write (two if its picture of the row is
-  old). So each account kept at its limits reads about 1,200 directory
-  units a quarter of an hour on a few instances, and up to about 2,100
+  old); a device that sends fewer than ten a minute to each of many
+  instances is written only as their batches fill, so there the minute
+  holds little, and the quarter does. So each account kept at its limits
+  reads about 1,200 directory units a quarter of an hour on a few
+  instances, and up to about 2,100
   spread over all 100: filling the directory's 400 reads a second takes
   about 290 accounts, or about 170 (for a whole day, about 1,100 either
   way), where one account and about 30 addresses did before. One account
