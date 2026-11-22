@@ -597,7 +597,7 @@ func TestNotifyOnceAtATime(t *testing.T) {
 }
 
 func TestLanguage(t *testing.T) {
-	for code, want := range map[string]string{"fa": "fa", "fa-IR": "fa", "en": "en", "de": "en", "": "en"} {
+	for code, want := range map[string]string{"fa": "fa", "fa-IR": "fa", "en": "en", "qaa": "en", "": "en"} {
 		if Language(code) != want {
 			t.Errorf("Language(%q) = %q", code, Language(code))
 		}

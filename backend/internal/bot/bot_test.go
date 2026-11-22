@@ -56,7 +56,7 @@ func TestHandle(t *testing.T) {
 	})
 
 	t.Run("any text, in English", func(t *testing.T) {
-		out := reply(t, b.Handle(request(secret, `{"message":{"message_id":6,"chat":{"id":42,"type":"private"},"from":{"language_code":"de"},"text":"hello?"}}`)))
+		out := reply(t, b.Handle(request(secret, `{"message":{"message_id":6,"chat":{"id":42,"type":"private"},"from":{"language_code":"qaa"},"text":"hello?"}}`)))
 		if !strings.HasPrefix(out["text"].(string), "Incognito Chat") {
 			t.Fatalf("reply = %v", out)
 		}
