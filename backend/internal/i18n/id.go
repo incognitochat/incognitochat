@@ -6,7 +6,7 @@ var indonesian = Language{
 	BotCode: "id",
 	Tags:    []string{"id", "in"},
 	Texts: Texts{
-		Welcome:    "Dengan Incognito Chat, orang bisa mengirim pesan kepada Anda secara anonim, dengan enkripsi end-to-end. Buka aplikasinya untuk menyiapkan atau membaca pesan Anda.",
+		Welcome:    "Dengan Incognito Chat, orang bisa mengirim pesan kepada Anda secara anonim, dengan enkripsi end-to-end. Buka aplikasinya untuk menyiapkan akun atau membaca pesan Anda.",
 		Open:       "Buka Incognito Chat",
 		Command:    "Buka Incognito Chat",
 		Notice:     "Pesan baru",
