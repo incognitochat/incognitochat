@@ -30,6 +30,7 @@ export const LANGUAGES = {
   // "in" is Indonesian's old code, which some systems still send.
   id: { dir: 'ltr', locale: 'id', unitDisplay: 'short', tags: ['id', 'in'], countInvariant: true },
   tr: { dir: 'ltr', locale: 'tr', unitDisplay: 'short', tags: ['tr'], countInvariant: true },
+  uk: { dir: 'ltr', locale: 'uk', unitDisplay: 'short', tags: ['uk'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;

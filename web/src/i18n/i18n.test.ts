@@ -136,6 +136,10 @@ describe('i18n', () => {
     expect([0, 1, 2, 1000].map((count) => t('tr', 'newMessages', { count }))).toEqual(['0 yeni mesaj', '1 yeni mesaj', '2 yeni mesaj', '1.000 yeni mesaj']);
   });
 
+  it('counts in Ukrainian with its three forms', () => {
+    expect([1, 2, 5, 21].map((count) => t('uk', 'newMessages', { count }))).toEqual(['1 нове повідомлення', '2 нові повідомлення', '5 нових повідомлень', '21 нове повідомлення']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');
