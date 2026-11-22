@@ -216,7 +216,7 @@ export const pl = {
   startedByYou: 'Czat rozpoczęty przez ciebie za pomocą linku tej osoby',
   conversationEnded: 'Ten czat się zakończył.',
   errorNoTokens: 'Dziś wysyłasz już bardzo dużo. Spróbuj jutro.',
-  errorNoMailboxes: 'Dziś zaczynasz lub odpowiadasz w bardzo wielu nowych czatach. Spróbuj jutro.',
+  errorNoMailboxes: 'Dziś masz już bardzo dużo nowych czatów, które zaczynasz lub w których odpowiadasz. Spróbuj jutro.',
   errorMailboxLimit: 'Osiągnięto limit 4000 czatów. Zablokowanie kogoś zwalnia jedno miejsce, a usunięcie czatu nie. Zobacz „Wykorzystanie”.',
   errorTooFast: 'W tej chwili jest zbyt wiele wiadomości do tej osoby. Spróbuj za minutę.',
   errorDeviceLimit: 'Zbyt wiele prób. Spróbuj za minutę.',
