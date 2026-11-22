@@ -354,6 +354,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
   const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
+  useEffect(() => app.prepareSource(), [app]);
   // Signed out, the chats are read-only; Try again asks the server again.
   // A deletion that couldn't finish: read-only too; Try again carries on with it.
   const status = screen.deletionPaused ? (
@@ -479,6 +480,16 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
       </button>
       <button type="button" class="link-button muted-link" disabled={busy || offline} onClick={() => void app.usage()}>
         {tr('usageTitle')}
+      </button>
+      <button
+        type="button"
+        class="link-button muted-link"
+        disabled={busy}
+        onClick={async () => {
+          if ((await app.openSource()) === 'unknown') void app.popup({ message: tr('sourceCodeUnknown'), buttons: [{ id: 'ok', type: 'ok' }] });
+        }}
+      >
+        {tr('sourceCode')}
       </button>
       <button type="button" class="link-button delete-account" disabled={busy || offline} onClick={app.askDeleteAccount}>
         {tr('deleteAccount')}

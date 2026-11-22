@@ -245,6 +245,8 @@ export const fa = {
   usageLeftOf: '{left} از {limit} باقی مانده',
   usageOf: '{used} از {limit}',
   usageCount: '{count}',
+  sourceCode: 'کد منبع',
+  sourceCodeUnknown: 'کد منبع این نسخه از برنامه پیدا نشد.',
   messagesLeftToday: 'پیام‌های باقی‌ماندهٔ امروز: {count}. از ساعت {time} دوباره.',
   storageMedia: 'رسانه روی این دستگاه: {size}',
   storageApp: 'برنامه روی این دستگاه روی‌هم {size} جا گرفته، همراه با گفت‌وگوها و کلیدهای شما.',

@@ -73,6 +73,7 @@ import { createPushSocket } from '../net/socket';
 import { BundleMismatch, checkBundle, linkUrl, parsePayload, verifyBundle, type Bundle, type LinkRef } from '../protocol/link';
 import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
+import { findSourceUrl } from '../platform/source';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
 import type { SyncEvent } from '../sync/locks';
 
@@ -487,6 +488,16 @@ export function createApp(deps: Deps) {
   // How many times the app was hidden, so a tap that first waits (on the
   // network, or storage) can tell whether it still counts.
   let hides = 0;
+  // Where the running build's source code is (openSource): looked up once
+  // the home screen shows, so a tap can open it at once, while the touch
+  // still lets the page open a link. Looked up again after a failure.
+  let sourceLookup: Promise<string | null> | null = null;
+  let sourceOpening = false;
+  const lookUpSource = (): Promise<string | null> =>
+    (sourceLookup ??= findSourceUrl(location.origin + location.pathname).then((url) => {
+      if (!url) sourceLookup = null;
+      return url;
+    }));
   const hidden = () => {
     attending = false;
     hides++;
@@ -2441,6 +2452,34 @@ export function createApp(deps: Deps) {
         if (i >= 0) onTop.splice(i, 1);
         showBack();
       };
+    },
+    /** Starts looking up the source link, for when it's tapped (the home screen). */
+    prepareSource: (): void => {
+      if (deps.bridge) void lookUpSource();
+    },
+    /**
+     * The running build's source code (AGPL-3.0, section 13), in the
+     * device's browser: the repository and commit its signed manifest names
+     * (platform/source). 'unknown' when the build has none to name, or it
+     * couldn't be read; 'waiting' for a tap while another one still waits,
+     * or one that waited while the app was hidden (it opens nothing).
+     */
+    openSource: async (): Promise<'opened' | 'unknown' | 'waiting'> => {
+      if (!deps.bridge) return 'unknown';
+      if (sourceOpening) return 'waiting';
+      sourceOpening = true;
+      const tapped = hides;
+      let url: string | null;
+      try {
+        url = await lookUpSource();
+      } finally {
+        sourceOpening = false;
+      }
+      // Hidden while it waited: the tap no longer counts.
+      if (tapped !== hides) return 'waiting';
+      if (!url) return 'unknown';
+      deps.bridge.post('web_app_open_link', { url });
+      return 'opened';
     },
     /** Data and storage. */
     storage: () => showStorage(),

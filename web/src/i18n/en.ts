@@ -245,6 +245,8 @@ export const en = {
   usageLeftOf: '{left} left of {limit}',
   usageOf: '{used} of {limit}',
   usageCount: '{count}',
+  sourceCode: 'Source code',
+  sourceCodeUnknown: "Couldn't find the source code of this copy of the app.",
   messagesLeftToday: 'Messages left today: {count}. More from {time}.',
   storageMedia: 'Media on this device: {size}',
   storageApp: 'The app uses {size} on this device in all, with your chats and keys.',

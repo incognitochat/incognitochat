@@ -2568,3 +2568,125 @@ describe('typed confirmation', () => {
     }
   });
 });
+
+describe('the source link', () => {
+  const commit = '41ee5804e4fcf04c74d650cc44541da131336d60';
+  const manifest = () => new Response(JSON.stringify({ repository: 'example/app', commit }));
+
+  // The app served from a path of its origin, with the manifest beside it,
+  // and the network answering with fetcher.
+  async function served(fetcher: typeof fetch, run: () => Promise<void>): Promise<void> {
+    vi.stubGlobal('location', { origin: 'https://app.example', pathname: '/app/' });
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      await run();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("opens the source tree the build's manifest names, in the device's browser", async () => {
+    const asked: string[] = [];
+    await served(
+      async (input) => {
+        asked.push(String(input));
+        return manifest();
+      },
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        const { app } = await setup({ api: null, bridge });
+        expect(asked).toEqual([]);
+        app.prepareSource();
+        // Looked up when the home screen shows, before any tap, and once.
+        expect(asked).toEqual(['https://app.example/app/manifest.json']);
+        expect(await app.openSource()).toBe('opened');
+        expect(await app.openSource()).toBe('opened');
+        expect(asked).toHaveLength(1);
+        expect(posted.filter((p) => p.type === 'web_app_open_link')).toEqual([
+          { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
+          { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
+        ]);
+      },
+    );
+  });
+
+  it('opens it once for a second tap while the first still waits', async () => {
+    let answer: (r: Response) => void = () => {};
+    await served(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        const { app } = await setup({ api: null, bridge });
+        const first = app.openSource();
+        expect(await app.openSource()).toBe('waiting');
+        answer(manifest());
+        expect(await first).toBe('opened');
+        expect(posted.filter((p) => p.type === 'web_app_open_link')).toHaveLength(1);
+      },
+    );
+  });
+
+  it('opens nothing for a tap that waited while the app was hidden', async () => {
+    let answer: (r: Response) => void = () => {};
+    await served(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        let visibility: (data: { is_visible: boolean }) => void = () => {};
+        bridge.on = ((type: string, handler: typeof visibility) => {
+          if (type === 'visibility_changed') visibility = handler;
+          return () => {};
+        }) as Bridge['on'];
+        const { app } = await setup({ api: null, bridge });
+        const tap = app.openSource();
+        visibility({ is_visible: false });
+        answer(manifest());
+        expect(await tap).toBe('waiting');
+        // Nor does it say "couldn't find" on return, when the lookup failed.
+        const other = await setup({ api: null, bridge });
+        const failed = other.app.openSource();
+        visibility({ is_visible: false });
+        answer(new Response('', { status: 404 }));
+        expect(await failed).toBe('waiting');
+        expect(posted.some((p) => p.type === 'web_app_open_link')).toBe(false);
+      },
+    );
+  });
+
+  it('opens nothing when the build names no source, and looks again next time', async () => {
+    const answers = [
+      new Response('', { status: 404 }),
+      new Response(JSON.stringify({ repository: 'evil.example/x', commit })),
+      manifest(),
+    ];
+    await served(
+      async () => answers.shift()!,
+      async () => {
+        const { bridge, posted } = fakeBridge();
+        const { app } = await setup({ api: null, bridge });
+        app.prepareSource();
+        expect(await app.openSource()).toBe('unknown');
+        expect(await app.openSource()).toBe('unknown');
+        expect(posted.some((p) => p.type === 'web_app_open_link')).toBe(false);
+        expect(await app.openSource()).toBe('opened');
+        expect(answers).toEqual([]);
+      },
+    );
+  });
+
+  it('looks nothing up outside Telegram', async () => {
+    let asked = 0;
+    await served(
+      async () => {
+        asked++;
+        return manifest();
+      },
+      async () => {
+        const { app } = await setup({ api: null });
+        app.prepareSource();
+        expect(await app.openSource()).toBe('unknown');
+        expect(asked).toBe(0);
+      },
+    );
+  });
+});
