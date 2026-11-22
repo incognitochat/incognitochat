@@ -79,6 +79,7 @@ describe('the language setting', () => {
       'فارسی',
     ]);
   });
+
   it('reads stored values that only look like a language as Same as Telegram', async () => {
     for (const stored of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'EN', 'fa-IR', ['fa'], 1, null, { en: true }]) {
       const db = await openDatabase(`language-${crypto.randomUUID()}`);
