@@ -47,6 +47,8 @@ func TestSameAsTheApp(t *testing.T) {
 	}
 }
 
+var tagShape = regexp.MustCompile(`^[a-z]{2,3}(-[a-z0-9]{2,8})*$`)
+
 func TestTags(t *testing.T) {
 	v := readVectors(t)
 	seen := map[string]string{}
@@ -55,8 +57,9 @@ func TestTags(t *testing.T) {
 			t.Errorf("%s has no tags", l.Code)
 		}
 		for _, tag := range l.Tags {
-			if tag != strings.ToLower(tag) {
-				t.Errorf("%s: tag %q isn't lowercase", l.Code, tag)
+			// Lowercase, subtags joined by -, as Pick compares them.
+			if !tagShape.MatchString(tag) {
+				t.Errorf("%s: tag %q isn't lowercase subtags joined by -", l.Code, tag)
 			}
 			if other, ok := seen[tag]; ok {
 				t.Errorf("tag %q picks both %s and %s", tag, other, l.Code)
