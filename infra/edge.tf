@@ -184,13 +184,17 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
 #                     any limit of their own (a login with a random device,
 #                     a link or upload with a random ID, a batch of uploads
 #                     to delete), or are paid with a token but have no login
-#                     (sends). Not here, though they need no login either:
-#                     POST /media, which spends no table capacity on forged
-#                     media tokens, and POST /media/{id}/delete, which apps
-#                     before batches sent for every received attachment of
-#                     a deleted chat, six at a time without a pause (so a
-#                     chat with a few thousand set off rate-per-ip); the app
-#                     now asks it only of a server without the batch route.
+#                     (sends and uploads). A forged token costs the tables
+#                     nothing, but a genuine one spent already costs a write
+#                     unit each time an api instance that doesn't remember
+#                     it is shown it, and tokens say nothing about whose
+#                     they are: only these per-address limits hold replays.
+#                     Not here, though it needs no login either:
+#                     POST /media/{id}/delete, which apps before batches sent
+#                     for every received attachment of a deleted chat, six
+#                     at a time without a pause (so a chat with a few
+#                     thousand set off rate-per-ip); the app now asks it only
+#                     of a server without the batch route.
 #   lookup_routes     lookups of links and uploads by ID, one a request,
 #                     which anyone can make with random IDs: a link's bundle,
 #                     a download URL, a fresh upload URL, a delete. Never
@@ -214,10 +218,12 @@ resource "aws_lambda_permission" "cloudfront_invoke" {
 # NORMALIZE_PATH (below) keeps back-references at the start of a path, so
 # "/../session" must count too. Another path that merely ends like one of
 # these routes counts as well, which costs nothing (the API answers it 404).
+# But POST /media is anchored at the start, after back-references only, as
+# POST /tokens/media ends like it and has a session.
 locals {
   anonymous_routes = {
     GET  = "(^|/)(links|media)/[^/]+$"
-    POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload|media/delete)$"
+    POST = "(^|/)(session|register|accounts/lookup|send|media/[^/]+/upload|media/delete)$|(^|/[.][.])/media$"
   }
   lookup_routes = {
     GET  = "(^|/)(links|media)/[^/]+$"
@@ -318,8 +324,8 @@ resource "aws_wafv2_ip_set" "ipv6" {
 #                     above what one person's app sends.
 #   anonymous-per-ip  the routes that need no login, per IP address: lower,
 #                     since an app sends few requests there. Logins, sends,
-#                     registrations and account lookups have only this and
-#                     rate-per-ip.
+#                     uploads, registrations and account lookups have only
+#                     this and rate-per-ip.
 #   lookups-total     lookups by ID, everyone together (CONSTANT: every
 #                     matching request goes into one count), over one
 #                     minute: at most half what a table can serve, so a

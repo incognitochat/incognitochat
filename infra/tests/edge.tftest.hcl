@@ -186,6 +186,51 @@ run "firewall" {
     error_message = "POST /media/delete must count towards deletes-total and anonymous-per-ip, not lookups-total; POST /media/{id}/delete towards lookups-total alone."
   }
 
+  # Uploads count towards anonymous-per-ip, as sends do: a media token
+  # spent already costs a write unit each time an instance that doesn't
+  # remember it is shown it. POST /tokens/media, which ends the same way
+  # but has a session, doesn't.
+  assert {
+    condition = alltrue([
+      can(regex(local.anonymous_routes.POST, "/media")),
+      can(regex(local.anonymous_routes.POST, "/../media")),
+      can(regex(local.anonymous_routes.POST, "/../../media")),
+      can(regex(local.anonymous_routes.POST, "/send")),
+      can(regex(local.anonymous_routes.POST, "/media/AAAAAAAAAAAAAAAAAAAAAA/upload")),
+      !can(regex(local.anonymous_routes.POST, "/tokens/media")),
+      !can(regex(local.anonymous_routes.POST, "/tokens")),
+      !can(regex(local.anonymous_routes.POST, "/media/AAAAAAAAAAAAAAAAAAAAAA")),
+      !can(regex(local.lookup_routes.POST, "/media")),
+      !can(regex(local.delete_routes.POST, "/media")),
+    ])
+    error_message = "POST /media must count towards anonymous-per-ip alone, and POST /tokens/media not at all."
+  }
+
+  # anonymous-per-ip matches its two methods' patterns, as an OR of two
+  # ANDs (method, then path), each pattern within WAF's 512 characters.
+  assert {
+    condition = length([
+      for r in aws_wafv2_web_acl.api[0].rule : r.name
+      if r.name == "anonymous-per-ip" && alltrue([
+        length(r.statement[0].rate_based_statement[0].scope_down_statement[0].or_statement[0].statement) == 2,
+        sort([
+          for s in r.statement[0].rate_based_statement[0].scope_down_statement[0].or_statement[0].statement :
+          s.and_statement[0].statement[1].regex_match_statement[0].regex_string
+        ]) == sort(values(local.anonymous_routes)),
+        alltrue([
+          for s in r.statement[0].rate_based_statement[0].scope_down_statement[0].or_statement[0].statement :
+          length(s.and_statement[0].statement) == 2
+        ]),
+      ])
+    ]) == 1
+    error_message = "anonymous-per-ip must be an OR of one AND (method and path) for each of GET and POST, with the patterns of local.anonymous_routes."
+  }
+
+  assert {
+    condition     = alltrue([for p in concat(values(local.anonymous_routes), values(local.lookup_routes), values(local.delete_routes)) : length(p) <= 512])
+    error_message = "AWS WAF takes regex patterns of at most 512 characters."
+  }
+
   # Priority 0 blocks what the IP set holds.
   assert {
     condition = alltrue([

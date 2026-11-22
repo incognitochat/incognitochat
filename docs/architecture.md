@@ -447,18 +447,18 @@ The panel under the message box has emoji and stickers, as in Telegram.
   the bill (about $51 a day in production with all three at their caps).
   In production a firewall in front of the API's CloudFront limits
   requests per IP address: 2,000 in 5 minutes, and 500 on the routes that
-  need no login (logins, registrations, sends, and lookups of accounts,
-  links and attachments). Lookups of links and attachments by ID, which
-  anyone can make with random IDs, are also limited for everyone together
-  (12,000 a minute, at most half what a table can serve); logins and sends
-  never are, so a flood of lookups can't stop them. The API's name has
-  IPv4 addresses only, since the firewall would count each IPv6 address on
-  its own, and the firewall refuses requests that reach an edge over IPv6
-  anyway ([deployment.md](deployment.md#the-firewall)). Nothing caps the
-  edge's bill: CloudFront bills each request the firewall lets through and
-  the firewall each it looks at, so a flood spread over many addresses has
-  no ceiling, and the alerts on it come minutes to a day late. CloudFront's
-  flat-rate plans would cap it, and aren't used
+  need no login (logins, registrations, sends, uploads, and lookups of
+  accounts, links and attachments). Lookups of links and attachments by
+  ID, which anyone can make with random IDs, are also limited for everyone
+  together (12,000 a minute, at most half what a table can serve); logins
+  and sends never are, so a flood of lookups can't stop them. The API's
+  name has IPv4 addresses only, since the firewall would count each IPv6
+  address on its own, and the firewall refuses requests that reach an edge
+  over IPv6 anyway ([deployment.md](deployment.md#the-firewall)). Nothing
+  caps the edge's bill: CloudFront bills each request the firewall lets
+  through and the firewall each it looks at, so a flood spread over many
+  addresses has no ceiling, and the alerts on it come minutes to a day
+  late. CloudFront's flat-rate plans would cap it, and aren't used
   ([deployment.md](deployment.md#flat-rate-plans-not-used)).
 - Secrets live in SSM, written through Terraform's write-only arguments, so they
   never land in Terraform state. Each function's role reads only its own.
