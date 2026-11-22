@@ -15,7 +15,7 @@ export const nl = {
   setUp: 'Instellen',
   setupMismatch: 'Die instellink hoorde bij een andere poging. Begin hier opnieuw.',
   reopening: 'Telegram opent de app opnieuw om het instellen af te ronden…',
-  reopenAgain: 'Gebeurt er niets? Tik nog een keer',
+  reopenAgain: 'Niets gebeurd? Tik opnieuw',
   registering: 'Instellen…',
 
   offline: 'De server is nu niet bereikbaar.',
@@ -43,7 +43,7 @@ export const nl = {
   haveInvitation: 'Heb je een uitnodigingscode?',
   join: 'Deelnemen',
   joinTitle: 'Je hebt een uitnodiging',
-  joinBody: 'Dit is een uitnodiging voor een eigen link. Als je hiermee deelneemt, ziet degene die de uitnodiging heeft gemaakt dat die is gebruikt.',
+  joinBody: 'Dit is een uitnodiging voor een eigen link. Als je hiermee deelneemt, ziet de maker van de uitnodiging dat die is gebruikt.',
   notNow: 'Niet nu',
   noticeJoined: 'Gelukt. Je kunt nu je eigen link maken.',
   noticeInvalidInvitation: 'Die uitnodigingscode bestaat niet of is al opgebruikt.',
@@ -93,7 +93,7 @@ export const nl = {
 
   linkTitle: 'Anonieme link',
   linkChecking: 'Deze link wordt gecontroleerd…',
-  linkVerified: 'Deze link is echt: de sleutels kloppen met de link.',
+  linkVerified: 'Deze link is echt: de sleutels kloppen.',
   linkOwn: 'Dit is je eigen link.',
   linkExisting: 'Je stuurt deze persoon al anoniem berichten.',
   linkExistingHint:
@@ -285,7 +285,7 @@ export const nl = {
   closeApp: 'Sluiten',
   elsewhereLost:
     'Ben je dat apparaat kwijt, of kun je het niet meer gebruiken? Dan kun je hier opnieuw beginnen. Je chats, je link en je blokkeringen op dat apparaat zijn dan voorgoed weg.',
-  elsewhereStartOver: 'Opnieuw beginnen op dit apparaat',
+  elsewhereStartOver: 'Hier opnieuw beginnen',
   replaceTitle: 'Je hebt al een account',
   replaceBody:
     'Je Telegram-account is al ingesteld op een ander apparaat. Hier instellen beëindigt dat account en al zijn links, en mensen hebben dan je nieuwe link nodig om je te bereiken.',
@@ -336,7 +336,7 @@ export const nl = {
     'Opnieuw instellen verwijdert je chats, je sleutels en je link van dit apparaat. Dit kan niet ongedaan worden gemaakt. Daarna stel je een nieuw account in.',
   resetWarning: 'Denk je dat de server zich vergist? Stop dan hier: houd je chats en probeer het later opnieuw.',
   resetPhrase: 'verwijder mijn chats',
-  resetConfirm: 'Verwijderen en opnieuw instellen',
+  resetConfirm: 'Wissen en opnieuw instellen',
 
   errorNetwork: 'Kon de server niet bereiken. Controleer je verbinding en probeer het opnieuw.',
   errorExpired: 'Deze stap van het instellen duurde te lang. Tik op Doorgaan om het opnieuw te proberen.',
