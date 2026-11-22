@@ -106,6 +106,20 @@ run "production_reads_metrics_and_costs" {
     error_message = "The stats role trusts more than the stats environment of the website repository."
   }
 
+  # What the role really gets: that trust, and that policy, on it.
+  assert {
+    condition     = jsondecode(aws_iam_role.stats[0].assume_role_policy) == jsondecode(data.aws_iam_policy_document.stats_trust[0].json)
+    error_message = "The stats role isn't given the stats trust policy."
+  }
+  assert {
+    condition     = aws_iam_role_policy.stats[0].role == aws_iam_role.stats[0].id && jsondecode(aws_iam_role_policy.stats[0].policy) == jsondecode(data.aws_iam_policy_document.stats[0].json)
+    error_message = "The stats policy isn't the one attached to the stats role."
+  }
+  assert {
+    condition     = aws_iam_role.stats[0].max_session_duration == 3600
+    error_message = "The stats role's sessions must last an hour at most."
+  }
+
   # Exactly these two reads, each in its own region, and nothing else.
   assert {
     condition = sort(flatten([
@@ -148,6 +162,11 @@ run "dev_reads_costs_only" {
   assert {
     condition     = jsondecode(data.aws_iam_policy_document.stats_trust[0].json).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:site@3/website@4:environment:stats"
     error_message = "The dev stats role trusts the wrong subject."
+  }
+
+  assert {
+    condition     = one(jsondecode(aws_iam_role_policy.stats[0].policy).Statement).Condition == { StringEquals = { "aws:RequestedRegion" = "us-east-1" } }
+    error_message = "The dev stats role's cost reads aren't limited to us-east-1."
   }
 }
 

@@ -109,14 +109,26 @@ if [[ -n $stats_repo && $stats_repo != none ]]; then
   stats_subject="${stats_prefix}:environment:stats"
   # Never the organization's management account: its Cost Explorer shows
   # every member account's costs.
-  if org_admin=$(aws organizations describe-organization --query Organization.MasterAccountId --output text 2>&1); then
-    if [[ $org_admin == "$account_id" ]]; then
+  # Only the answer on stdout counts, and it must be an account ID: a
+  # warning on stderr, or an empty answer, can't pass for "not this one".
+  org_err=$(mktemp)
+  if org_admin=$(aws organizations describe-organization --query Organization.MasterAccountId --output text 2>"$org_err"); then
+    rm -f "$org_err"
+    if [[ ! $org_admin =~ ^[0-9]{12}$ ]]; then
+      echo "Couldn't read the AWS Organization's management account (got '${org_admin}'), so" >&2
+      echo "nothing was applied." >&2
+      exit 1
+    elif [[ $org_admin == "$account_id" ]]; then
       echo "This is the AWS Organization's management account: no stats role here." >&2
       exit 1
     fi
-  elif [[ $org_admin != *AWSOrganizationsNotInUseException* ]]; then
-    echo "Couldn't tell whether this is an AWS Organization's management account, so nothing" >&2
-    echo "was applied. AWS said: ${org_admin}" >&2
+  elif grep -q 'AWSOrganizationsNotInUseException' "$org_err"; then
+    rm -f "$org_err"
+  else
+    echo "Couldn't tell whether this is an AWS Organization's management account (a policy may" >&2
+    echo "deny organizations:DescribeOrganization), so nothing was applied. AWS said:" >&2
+    cat "$org_err" >&2
+    rm -f "$org_err"
     exit 1
   fi
 fi
@@ -126,6 +138,14 @@ stats_vars() {
   if [[ -z $stats_repo ]]; then
     stats_subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
     [[ $stats_subject == *:environment:stats ]] || stats_subject=''
+    # A role made before whose subject can't be read would be removed by
+    # this apply: stop instead (STATS_REPO=none removes it on purpose).
+    if [[ -z $stats_subject ]] && tf state list 2>/dev/null | grep -qxF 'aws_iam_role.stats[0]'; then
+      echo "The stats role exists, but its subject couldn't be read from the state, and applying" >&2
+      echo "would remove it. Rerun with STATS_REPO=<owner>/<repo> to keep it, or STATS_REPO=none" >&2
+      echo "to remove it." >&2
+      exit 1
+    fi
   fi
   stats=(-var "stats_github_oidc_subject=${stats_subject}" -var "stats_read_metrics=${stats_metrics}")
 }
@@ -319,7 +339,10 @@ if [[ $reviewers == "[]" && $policy_type == tag ]]; then
 fi
 
 # Exactly one deployment policy: the branch, or the release tag pattern.
+# Listed first, so an error stops the run instead of leaving stray policies.
 found=0
+policies=$(gh api --paginate "repos/${repo}/environments/${environment}/deployment-branch-policies" \
+  --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')
 while read -r id type name; do
   [[ -z "$id" ]] && continue
   if [[ "$type" == "$policy_type" && "$name" == "$policy_name" ]]; then
@@ -328,8 +351,7 @@ while read -r id type name; do
     gh api --method DELETE "repos/${repo}/environments/${environment}/deployment-branch-policies/${id}" >/dev/null
     echo "Removed the deployment policy for ${type} ${name}"
   fi
-done <<<"$(gh api "repos/${repo}/environments/${environment}/deployment-branch-policies" \
-  --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')"
+done <<<"$policies"
 if [[ $found == 0 ]]; then
   gh api --method POST "repos/${repo}/environments/${environment}/deployment-branch-policies" \
     -f name="$policy_name" -f type="$policy_type" >/dev/null
