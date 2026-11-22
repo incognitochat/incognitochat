@@ -6,7 +6,8 @@
     "ar",
     "nl",
     "es",
-    "pt-BR"
+    "pt-BR",
+    "id"
   ],
   "pick": {
     "en": "en",
@@ -61,6 +62,12 @@
     "PT": "pt-BR",
     "pt-PT": "pt-BR",
     "pt-AO": "pt-BR",
-    "por": "en"
+    "por": "en",
+    "id": "id",
+    "id-ID": "id",
+    "ID": "id",
+    "in": "id",
+    "in-ID": "id",
+    "ind": "en"
   }
 }

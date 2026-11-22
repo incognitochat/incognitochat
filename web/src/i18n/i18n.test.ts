@@ -127,6 +127,11 @@ describe('i18n', () => {
     expect([1, 2, 1_000_000, 1_500_000].map((count) => t('pt-BR', 'newMessages', { count }))).toEqual(['1 nova mensagem', '2 novas mensagens', '1.000.000 de novas mensagens', '1.500.000 novas mensagens']);
   });
 
+  it('keeps a noun after a number unchanged in Indonesian', () => {
+    expect([0, 1, 2, 1000].map((count) => t('id', 'newMessages', { count }))).toEqual(['0 pesan baru', '1 pesan baru', '2 pesan baru', '1.000 pesan baru']);
+    expect(t('id', 'invitationsRemaining', { count: 3 })).toBe('Anda bisa mengundang 3 orang lagi.');
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');
