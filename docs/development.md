@@ -137,11 +137,7 @@ weekly scan reports a fix in a newer version:
   (`web/src/i18n`; the bot's and the notices' in `backend/internal/i18n`),
   and layout uses logical CSS properties, so right-to-left needs no special
   cases. A new or changed string goes into every language's file (`tsc`
-  fails without it), and into the English and Persian lines of the string
-  baseline, `web/src/i18n/__snapshots__/baseline.test.ts.snap`, which
-  records what readers see so that no change to it goes unnoticed: update
-  it with `npx vitest run src/i18n/baseline.test.ts -u` and check the diff
-  touches only your strings. See [Adding a language](#adding-a-language).
+  fails without it). See [Adding a language](#adding-a-language).
 
 ## Adding a language
 
