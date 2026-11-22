@@ -27,12 +27,15 @@ const (
 	KeyTelegramStatus = "tg_status"   // HTTP status of Telegram's answer to a failed Bot API call
 	KeyErrorCode      = "error_code"  // Telegram's error_code for a failed Bot API call
 	KeyPanicAt        = "panic_at"    // where a recovered panic happened: function and line
+	KeyMessages       = "messages"    // messages sent in a minute (internal/tally), a count
+	KeyMediaBytes     = "media_bytes" // padded bytes of uploads paid for in a minute (internal/tally), a sum
 )
 
 var allowed = map[string]bool{
 	KeyFunction: true, KeyRoute: true, KeyStatus: true,
 	KeyErrorKind: true, KeyDuration: true, KeyCount: true,
 	KeyMethod: true, KeyTelegramStatus: true, KeyErrorCode: true, KeyPanicAt: true,
+	KeyMessages: true, KeyMediaBytes: true,
 }
 
 // Allowed groups, of counts only (internal/tally writes them). Each member

@@ -177,3 +177,13 @@ func TestErrorKindDetails(t *testing.T) {
 		t.Errorf("a plain error: %v", got[1])
 	}
 }
+
+// The public counts are kept at the top level, as integers.
+func TestPublicCountsAreKept(t *testing.T) {
+	var buf bytes.Buffer
+	New(&buf, "api").Warn("request counts", slog.Int(KeyCount, 3), slog.Int(KeyMessages, 2), slog.Int64(KeyMediaBytes, 1<<20))
+	got := lines(t, &buf)[0]
+	if got[KeyMessages] != float64(2) || got[KeyMediaBytes] != float64(1<<20) {
+		t.Fatalf("logged %v", got)
+	}
+}

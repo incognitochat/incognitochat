@@ -208,6 +208,9 @@ type Server struct {
 	// Sockets, if set, holds the records of open apps' sockets; an account's
 	// go when it is deleted.
 	Sockets SocketRecords
+	// Counts, if set, counts the messages sent and the media uploaded, for
+	// the public hourly totals (internal/tally): numbers, never whose.
+	Counts Counts
 
 	// Media and Uploads, if set, hold encrypted attachments.
 	Media   Media
@@ -241,6 +244,14 @@ type Server struct {
 // SocketRecords are the records of open apps' sockets (ephemeral.Sockets).
 type SocketRecords interface {
 	ForgetAll(ctx context.Context, account string) error
+}
+
+// Counts counts what the public statistics show (tally.Counter): each
+// message sent, a send answered 200 that isn't quiet, and the padded size
+// of each upload paid for, POST /media answered 201.
+type Counts interface {
+	Sent(now time.Time)
+	Uploaded(now time.Time, size int64)
 }
 
 // Pusher hands a send to the ws function (push.Client), without waiting:

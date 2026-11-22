@@ -136,6 +136,9 @@ func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Respon
 	if err != nil {
 		return s.internal(route, err)
 	}
+	if s.Counts != nil {
+		s.Counts.Uploaded(now, in.Size)
+	}
 	return httpapi.JSON(http.StatusCreated, map[string]string{"id": id, "url": url})
 }
 

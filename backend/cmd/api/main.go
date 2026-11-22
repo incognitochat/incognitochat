@@ -70,6 +70,9 @@ func main() {
 	// refusals, registrations and tokens. Slow requests are logged, with
 	// only their route and duration, to size the function from data.
 	counts := tally.New(log)
+	// It also counts the messages sent and the media uploaded, for the
+	// public statistics.
+	server.Counts = counts
 	router.Observe = func(route string, status int, code string, elapsed time.Duration) {
 		counts.Add(time.Now(), route, status, code)
 		if elapsed >= slowRequest {
