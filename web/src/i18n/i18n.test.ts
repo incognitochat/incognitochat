@@ -107,6 +107,10 @@ describe('i18n', () => {
     expect(clockTime('en', at)).toMatch(/^\d{1,2}:\d{2}/);
   });
 
+  it('counts in Russian with its three forms', () => {
+    expect([1, 2, 5, 21].map((count) => t('ru', 'newMessages', { count }))).toEqual(['1 новое сообщение', '2 новых сообщения', '5 новых сообщений', '21 новое сообщение']);
+  });
+
   it('sets right-to-left for Persian', () => {
     expect(DIRECTION.fa).toBe('rtl');
     expect(DIRECTION.en).toBe('ltr');
