@@ -454,9 +454,9 @@ The panel under the message box has emoji and stickers, as in Telegram.
   IPv4 addresses only, since the firewall would count each IPv6 address on
   its own, and the firewall refuses requests that reach an edge over IPv6
   anyway ([deployment.md](deployment.md#the-firewall)). Nothing caps the
-  edge's bill: CloudFront bills each request the firewall lets through and the
-  firewall each it looks at, so a flood spread over many addresses has no
-  ceiling, and the alerts on it come minutes to a day late. CloudFront's
+  edge's bill: CloudFront bills each request the firewall lets through and
+  the firewall each it looks at, so a flood spread over many addresses has
+  no ceiling, and the alerts on it come minutes to a day late. CloudFront's
   flat-rate plans would cap it, and aren't used
   ([deployment.md](deployment.md#flat-rate-plans-not-used)).
 - Secrets live in SSM, written through Terraform's write-only arguments, so they

@@ -1336,10 +1336,11 @@ aws lambda remove-permission --function-name incognitochat-<env>-api --statement
 The distribution has IPv6 off: its name has IPv4 addresses only. The
 firewall counts each IPv6 address on its own, and one server can have a /64
 of them (2^64 addresses), so over IPv6 its per-address limits would hold no
-one. Devices with both use IPv4. Devices on networks with IPv6 alone reach it through their network's
-NAT64, sharing an IPv4 address with others there, as they already reach the
-socket API and the media bucket, which have no IPv6 addresses either; a
-network with IPv6 and no NAT64 can't reach the API at all.
+one. Devices with both use IPv4. Devices on networks with IPv6 alone reach
+it through their network's NAT64, sharing an IPv4 address with others
+there, as they already reach the socket API and the media bucket, which
+have no IPv6 addresses either; a network with IPv6 and no NAT64 can't reach
+the API at all.
 
 But turning IPv6 off only keeps it out of DNS: CloudFront gives the
 distribution's name no IPv6 addresses, which is all AWS's documentation
@@ -1518,12 +1519,18 @@ dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:
 `<prefix>-api-anonymous-per-ip`, `<prefix>-api-lookups-total`,
 `<prefix>-api-deletes-total`):
 `BlockedRequests` for each rule, and `AllowedRequests` with Rule `ALL`. The
-metrics are free; no alarm watches them yet.
+metrics are free. No alarm watches each rule's own metric; `firewall-blocks`
+(in the bootstrap) watches them all together.
 
 - `ipv6` blocking at all is someone reaching the API over IPv6 on
   purpose: apps never do. It costs the firewall's fee for each request, and
   nothing else (no CloudFront fee, function run or rate limit counted), and
-  counts towards the `firewall-blocks` alarm. Nothing to change.
+  counts towards the `firewall-blocks` alarm. Nothing to change, with one
+  exception: if its blocks look like ordinary use (steady, following the
+  day's pattern), real users may be arriving over IPv6, and the app shows
+  them as rate-limited. Check that the API's name (the host of the
+  `api_cloudfront_url` output) still has no IPv6 addresses:
+  `dig +short AAAA <host>` should print nothing.
 - `anonymous-per-ip` blocking now and then is one busy address. Blocks
   that recur every day while the tables are far below their caps, and
   `AllowedRequests` looks like ordinary use, may be people behind a shared

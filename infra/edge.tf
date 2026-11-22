@@ -113,11 +113,11 @@ resource "aws_cloudfront_distribution" "api" {
   enabled      = true
   comment      = "Incognito Chat API (${var.environment})"
   http_version = "http2and3"
-  # IPv4 only, while the firewall limits per IP address: it counts each IPv6
-  # address on its own, and one host can have billions of them. IPv6-only
-  # devices still get here through their network's NAT64, as they reach the
-  # socket API and the media bucket, which have no IPv6 addresses either.
-  # This only keeps IPv6 addresses out of DNS: an edge still serves the API
+  # No IPv6 addresses in DNS, while the firewall limits per IP address: it
+  # counts each IPv6 address on its own, and one host can have billions of
+  # them. IPv6-only devices still get here through their network's NAT64,
+  # as they reach the socket API and the media bucket, which have no IPv6
+  # addresses either. DNS is all this changes: an edge still serves the API
   # over IPv6 to a client that connects to the edge's IPv6 address and names
   # this host (found by testing, 2026-11-22). So the firewall refuses IPv6
   # (ipv6, below); turning IPv6 on here would mean removing that rule first.

@@ -115,8 +115,8 @@ run "firewall" {
     table_max_write_units = 200
   }
 
-  # Empty (the plan has an empty set as null), IPv4 (the API answers over
-  # IPv4 alone), for CloudFront.
+  # Empty (the plan has an empty set as null), IPv4 (the firewall refuses
+  # IPv6 outright), for CloudFront.
   assert {
     condition = length(aws_wafv2_ip_set.blocked) == 1 && alltrue([
       aws_wafv2_ip_set.blocked[0].name == "incognitochat-test-blocked",
@@ -194,6 +194,32 @@ run "firewall" {
       if r.priority == 0
     ])
     error_message = "The firewall's first rule must block the addresses in the block list."
+  }
+
+  # No sampled requests, from any rule or the web ACL itself: they would
+  # hold client addresses and headers, which the firewall never keeps.
+  assert {
+    condition = alltrue(concat(
+      [for r in aws_wafv2_web_acl.api[0].rule : !r.visibility_config[0].sampled_requests_enabled],
+      [!aws_wafv2_web_acl.api[0].visibility_config[0].sampled_requests_enabled],
+    ))
+    error_message = "No firewall rule, nor the web ACL, may keep sampled requests (they would hold addresses)."
+  }
+
+  # AWS WAF checks descriptions against this pattern only when applying
+  # (CreateIPSet and CreateWebACL, Description: 1 to 256 characters; no
+  # parentheses or apostrophes, say), while the provider checks only the
+  # length: a plan passes that the apply refuses.
+  assert {
+    condition = alltrue([
+      for d in [
+        aws_wafv2_ip_set.blocked[0].description,
+        aws_wafv2_ip_set.ipv6[0].description,
+        aws_wafv2_web_acl.api[0].description,
+      ] :
+      length(d) <= 256 && can(regex("^[\\w+=:#@/\\-,\\.][\\w+=:#@/\\-,\\.\\s]+[\\w+=:#@/\\-,\\.]$", d))
+    ])
+    error_message = "The IP sets' and the web ACL's descriptions must match AWS WAF's pattern for descriptions (letters, digits, spaces and _+=:#@/-,. only)."
   }
 
   # The block list and ipv6 are the only rules that use IP sets.
