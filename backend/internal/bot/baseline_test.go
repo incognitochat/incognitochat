@@ -30,9 +30,9 @@ func TestBaselineReplies(t *testing.T) {
 		{`"from":{"id":1,"language_code":""},`, enWelcome, enOpen},
 		{`"from":{"id":1},`, enWelcome, enOpen},
 		{``, enWelcome, enOpen},
-		// Telegram writes codes with "-"; one with "_" is English here (notices
-		// read it as Persian).
-		{`"from":{"id":1,"language_code":"fa_IR"},`, enWelcome, enOpen},
+		// Changed on purpose with one table of languages: a code written with
+		// "_" picks Persian here too, as it always did for notices.
+		{`"from":{"id":1,"language_code":"fa_IR"},`, faWelcome, faOpen},
 	} {
 		out := reply(t, b.Handle(request(secret, `{"message":{"message_id":5,"chat":{"id":42,"type":"private"},`+tc.from+`"text":"/start"}}`)))
 		button := out["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)[0].(map[string]any)
