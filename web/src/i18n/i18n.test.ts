@@ -115,6 +115,10 @@ describe('i18n', () => {
     expect([0, 1, 2, 3, 11, 100].map((count) => t('ar', 'newMessages', { count }))).toEqual(['0 رسالة جديدة', '1 رسالة جديدة', '2 رسالتان جديدتان', '3 رسائل جديدة', '11 رسالة جديدة', '100 رسالة جديدة']);
   });
 
+  it('counts in Dutch with one and other', () => {
+    expect([0, 1, 2, 1000].map((count) => t('nl', 'newMessages', { count }))).toEqual(['0 nieuwe berichten', '1 nieuw bericht', '2 nieuwe berichten', '1.000 nieuwe berichten']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');

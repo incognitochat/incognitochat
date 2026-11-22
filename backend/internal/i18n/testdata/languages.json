@@ -3,7 +3,8 @@
     "en",
     "fa",
     "ru",
-    "ar"
+    "ar",
+    "nl"
   ],
   "pick": {
     "en": "en",
@@ -36,6 +37,12 @@
     "ar-EG": "ar",
     "ar_SA": "ar",
     "AR": "ar",
-    "ara": "en"
+    "ara": "en",
+    "nl": "nl",
+    "nl-NL": "nl",
+    "nl-BE": "nl",
+    "NL": "nl",
+    "nl_BE": "nl",
+    "nld": "en"
   }
 }
