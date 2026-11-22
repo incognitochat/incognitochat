@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"maps"
 	"math"
+	mrand "math/rand/v2"
 	"slices"
 	"time"
 )
@@ -218,12 +219,15 @@ func (m *spentMemory) sweep(now uint32) {
 	}
 	// From an empty slot, once round: entries never move back past one, so
 	// removing an entry moves none that was looked at already, and an entry
-	// moved into the slot just emptied is looked at next.
-	start := 0
-	for m.slots[start].exp != 0 {
-		start++
-	}
+	// moved into the slot just emptied is looked at next. The first empty
+	// slot after a random one, so that which of the tokens expiring at cut
+	// go is left to chance at each sweep: a token's slot stays the same
+	// while the instance lasts.
 	mask := len(m.slots) - 1
+	start := mrand.IntN(len(m.slots))
+	for m.slots[start].exp != 0 {
+		start = (start + 1) & mask
+	}
 	for i, seen := (start+1)&mask, 1; seen < len(m.slots); {
 		exp := m.slots[i].exp
 		gone := exp != 0 && (exp <= now || exp < cut)

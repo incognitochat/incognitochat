@@ -12,6 +12,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
 )
 
 // randomKeys returns n distinct keys, the same for the same seed.
@@ -246,6 +248,104 @@ func TestSpentMemoryModel(t *testing.T) {
 	if len(m.slots) <= firstSlots {
 		t.Fatal("the table never grew")
 	}
+}
+
+// Which of the tokens expiring soonest a sweep forgets is left to chance
+// each time, not fixed by where their slots are: otherwise the same tokens
+// would be forgotten at every sweep, and replaying just those would miss
+// every time.
+func TestSpentMemorySweepStartsAnywhere(t *testing.T) {
+	keys := randomKeys(7, 1001)
+	forgotten := map[string]bool{}
+	for range 4 {
+		m := spentMemory{most: 1000}
+		for _, k := range keys {
+			m.add(k, 100, 1) // the last one sets off a sweep
+		}
+		checkMemory(t, &m)
+		var gone []byte
+		for i, k := range keys {
+			if !m.has(k, 1) {
+				gone = fmt.Appendf(gone, "%d,", i)
+			}
+		}
+		forgotten[string(gone)] = true
+	}
+	if len(forgotten) < 2 {
+		t.Fatal("four sweeps of the same table forgot the same tokens")
+	}
+}
+
+// A write that failed for another reason than the token being spent (the
+// table throttled it, say) leaves the token unspent, here too: the app
+// tries the same send again, and it must go through, on this instance as
+// on any other.
+func TestSpentFailedWriteNotRemembered(t *testing.T) {
+	db := &throttlingDB{failures: 1}
+	sp := &Spent{DB: db, Table: "t", Now: func() time.Time { return start }}
+	ctx := context.Background()
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	forget := start.Add(time.Hour)
+	if ok, err := sp.Spend(ctx, nonce, forget); ok || err == nil {
+		t.Fatalf("a throttled write: %v, %v", ok, err)
+	}
+	if ok, err := sp.Spend(ctx, nonce, forget); !ok || err != nil {
+		t.Fatalf("tried again: %v, %v; a failed write was remembered as spent", ok, err)
+	}
+	if ok, err := sp.Spend(ctx, nonce, forget); ok || err != nil {
+		t.Fatalf("replayed: %v, %v", ok, err)
+	}
+	if db.calls != 2 {
+		t.Fatalf("%d writes, want 2 (the replay is refused from memory)", db.calls)
+	}
+	// SpendAll the same.
+	db.failures = 1
+	batch := []TokenNonce{{[]byte("another nonce, 32 bytes long...."), forget}}
+	if ok, err := sp.SpendAll(ctx, batch); ok || err == nil {
+		t.Fatalf("a throttled batch: %v, %v", ok, err)
+	}
+	if ok, err := sp.SpendAll(ctx, batch); !ok || err != nil {
+		t.Fatalf("the batch tried again: %v, %v", ok, err)
+	}
+}
+
+// A token given back is forgotten by the instance that gave it back, so
+// it can be spent again there, not only elsewhere.
+func TestSpentGivenBackForgottenHere(t *testing.T) {
+	client := dynamotest.Client(t)
+	sp := &Spent{DB: client, Table: dynamotest.Table(t, client), Now: func() time.Time { return start }}
+	ctx := context.Background()
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	forget := start.Add(time.Hour)
+	if ok, err := sp.Spend(ctx, nonce, forget); !ok || err != nil {
+		t.Fatalf("first spend: %v, %v", ok, err)
+	}
+	if err := sp.Unspend(ctx, nonce); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := sp.Spend(ctx, nonce, forget); !ok || err != nil {
+		t.Fatalf("spent again on the same instance after it was given back: %v, %v", ok, err)
+	}
+	if ok, _ := sp.Spend(ctx, nonce, forget); ok {
+		t.Fatal("spent a third time")
+	}
+}
+
+// throttlingDB fails its next failures writes as a throttled table does,
+// then accepts every one; it counts them.
+type throttlingDB struct {
+	countingDB
+	failures int
+	calls    int
+}
+
+func (d *throttlingDB) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	d.calls++
+	if d.failures > 0 {
+		d.failures--
+		return nil, errThrottled
+	}
+	return &dynamodb.UpdateItemOutput{}, nil
 }
 
 // A key depends on the nonce and on the instance's salt, nothing else.
