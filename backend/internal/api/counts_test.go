@@ -159,6 +159,12 @@ func (failingPut) Put(context.Context, string, ephemeral.Upload, time.Time) erro
 
 type failingUploadURL struct{ Media }
 
+// lagging is a limiter whose memory hasn't seen the cap fill (another
+// instance filled it), so the refusal comes after the tokens are spent.
+type lagging struct{ Limiter }
+
+func (lagging) FullAt(string, int, time.Duration, time.Time) bool { return false }
+
 func (failingUploadURL) UploadURL(context.Context, string, int64) (string, error) {
 	return "", errors.New("presign failed")
 }
@@ -188,6 +194,12 @@ func TestCountsNoMessageRefusedLate(t *testing.T) {
 	}
 	status, out := send(other)
 	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	// And refused only after paying, when this instance didn't know.
+	limits := h.server.Limits
+	h.server.Limits = lagging{limits}
+	status, out = send(other)
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	h.server.Limits = limits
 	if len(c.sent) != SendsPerMailboxPerMinute {
 		t.Fatalf("counted %d, want %d", len(c.sent), SendsPerMailboxPerMinute)
 	}
@@ -218,9 +230,9 @@ func TestCountsNoMessageRefusedLate(t *testing.T) {
 	}
 }
 
-// Uploads refused after their tokens are checked aren't counted: while
-// uploads are paused, or when recording the upload or presigning its link
-// fails.
+// Refused uploads aren't counted: while uploads are paused (before any
+// token is looked at), or after payment, when recording the upload or
+// presigning its link fails.
 func TestCountsNoUploadRefusedLate(t *testing.T) {
 	h, store, uploads, switches := mediaHarness(t)
 	c := &memCounts{}

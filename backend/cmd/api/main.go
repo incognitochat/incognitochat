@@ -73,7 +73,7 @@ func main() {
 // count wires the request counts in (internal/tally). Answers are counted
 // by route, status and error code, and the counts logged once a minute, for
 // the alarms on limits, refusals, registrations and tokens; with them, the
-// messages sent and the media uploaded (server.Counts), for the public
+// messages sent and the media paid for (server.Counts), for the public
 // statistics. Slow requests are logged, with only their route and duration,
 // to size the function from data.
 func count(log *slog.Logger, server *api.Server, router *httpapi.Router) *tally.Counter {

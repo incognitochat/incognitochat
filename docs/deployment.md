@@ -971,15 +971,16 @@ isn't one.
 - Both are what the server can count, not exact: a send retried after a
   lost answer counts twice, an upload paid for but never made counts, and
   anyone holding send tokens can raise `messages`, within what the tokens
-  allow (the same as sending). They're counted when the handler accepts the
-  request, and the answer when it's given, so a request that spans the end
-  of a minute can log its message or bytes in a line of its own, with
-  `count` 0 and no `routes`.
+  allow (the same as sending). They're dated by the time the handler read
+  when it started, and the answer by when it's given, so a request that
+  spans the end of a minute can log its message or bytes in a line of its
+  own, with `count` 0 and no `routes`.
 - A metric's data point is dated by when its line is written, which on a
   quiet instance can be many minutes after the minute it counts (above): an
-  hour's total can include counts from the hour before, and the last hours
-  can still grow. An instance that ends without shutting down cleanly (a
-  timeout, running out of memory) loses its current minute.
+  hour's total can include counts from the hour before, and counts from
+  the last hours can still arrive, dated later. An instance that ends
+  without shutting down cleanly (a timeout, running out of memory) loses
+  its current minute.
 - Counts only: route patterns, never paths (which carry IDs), statuses and
   error codes. Nothing names a person, device, account, link, mailbox,
   address or request.

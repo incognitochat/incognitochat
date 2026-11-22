@@ -208,7 +208,7 @@ type Server struct {
 	// Sockets, if set, holds the records of open apps' sockets; an account's
 	// go when it is deleted.
 	Sockets SocketRecords
-	// Counts, if set, counts the messages sent and the media uploaded, for
+	// Counts, if set, counts the messages sent and the media paid for, for
 	// the public hourly totals (internal/tally): numbers, never whose.
 	Counts Counts
 
