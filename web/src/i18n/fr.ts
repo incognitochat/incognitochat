@@ -183,7 +183,7 @@ export const fr = {
   errorTooBig: "Les fichiers peuvent faire jusqu'à 50 Mo.",
   errorUnreadable: 'Impossible de lire ce fichier.',
   reply: 'Répondre',
-  replyingTo: 'Répondre à {name}',
+  replyingTo: 'Réponse : {name}',
   cancelReply: 'Annuler la réponse',
   deletedMessage: 'Message supprimé',
   messageActions: 'Actions sur le message',
@@ -209,7 +209,7 @@ export const fr = {
   notSent: 'Non envoyé',
   resend: 'Renvoyer',
   firstMessageHint: 'Écrivez le premier message. Cette personne ne saura pas qui vous êtes.',
-  aboutOwnerConversation: "Vous écrit via votre lien. Vous ne savez pas qui c'est.",
+  aboutOwnerConversation: 'Cette personne vous écrit via votre lien. Vous ne savez pas qui elle est.',
   aboutSenderConversation: 'Vous écrivez via son lien. Cette personne ne sait pas qui vous êtes.',
   startedByThem: "Commencé par quelqu'un via votre lien",
   startedByYou: 'Vous avez commencé cet échange via son lien',
@@ -295,16 +295,16 @@ export const fr = {
 
   elsewhereTitle: 'Votre compte est sur un autre appareil',
   elsewhereBody:
-    "Ce compte Telegram utilise déjà Incognito Chat sur un autre appareil, comme votre téléphone. Vos échanges et votre lien n'existent que là-bas : ouvrez donc l'application sur cet appareil.",
+    "Ce compte Telegram utilise déjà Incognito Chat sur un autre appareil, comme votre téléphone. Vos échanges et votre lien n'existent que sur l'autre appareil : ouvrez donc l'application là-bas.",
   closeApp: 'Fermer',
   elsewhereLost:
-    "Vous avez perdu cet appareil ou ne pouvez plus l'utiliser ? Vous pouvez plutôt recommencer ici. Vos échanges, votre lien et vos blocages sur cet appareil disparaîtront définitivement.",
+    "Vous avez perdu l'autre appareil ou ne pouvez plus l'utiliser ? Vous pouvez plutôt recommencer ici. Vos échanges, votre lien et vos blocages sur l'autre appareil disparaîtront définitivement.",
   elsewhereStartOver: 'Recommencer sur cet appareil',
   replaceTitle: 'Vous avez déjà un compte',
   replaceBody:
-    'Votre compte Telegram est déjà configuré sur un autre appareil. Configurer ici met fin à ce compte et à tous ses liens, et les autres auront besoin de votre nouveau lien pour vous joindre.',
+    "Votre compte Telegram est déjà configuré sur un autre appareil. Configurer ici met fin au compte de l'autre appareil et à tous ses liens, et les autres auront besoin de votre nouveau lien pour vous joindre.",
   replaceWarning: "Si vous ne vous attendiez pas à cette question, arrêtez-vous : quelqu'un essaie peut-être de prendre le contrôle de votre compte.",
-  replaceType: 'Pour continuer, saisissez {phrase}',
+  replaceType: 'Pour continuer, saisissez « {phrase} »',
   replacePhrase: 'recommencer',
   replaceConfirm: 'Y mettre fin et configurer ici',
   cancel: 'Annuler',
@@ -318,8 +318,8 @@ export const fr = {
   deletingElsewhereTitle: 'Votre compte est en cours de suppression',
   deletingElsewhereBody:
     "Le serveur indique que la suppression de ce compte a commencé, mais elle n'a pas été lancée depuis cet appareil. Une autre copie de l'application l'a peut-être lancée, ou il y a peut-être un problème sur le serveur.",
-  finishDeleting: 'Terminer la suppression de mon compte',
-  deleteHereOnly: 'Supprimer de cet appareil uniquement',
+  finishDeleting: 'Finir de supprimer mon compte',
+  deleteHereOnly: 'Supprimer ici seulement',
   deleteHereOnlyNote:
     "Si le serveur ne peut pas la terminer, vous pouvez dès maintenant tout supprimer sur cet appareil. Ce que le serveur conserve encore reste inutilisé jusqu'à ce que vous configuriez à nouveau l'application, ce qui y met fin.",
   accountDeletedHere:
@@ -349,7 +349,7 @@ export const fr = {
   resetBody:
     'Reconfigurer supprime vos échanges, vos clés et votre lien de cet appareil. Cette action est irréversible. Vous configurez ensuite un nouveau compte.',
   resetWarning: 'Si vous pensez que le serveur se trompe, arrêtez-vous ici : gardez vos échanges et réessayez plus tard.',
-  resetPhrase: 'supprimer mes discussions',
+  resetPhrase: 'tout supprimer',
   resetConfirm: 'Supprimer et reconfigurer',
 
   errorNetwork: 'Impossible de joindre le serveur. Vérifiez votre connexion et réessayez.',
