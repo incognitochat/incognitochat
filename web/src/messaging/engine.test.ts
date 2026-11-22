@@ -22,6 +22,7 @@ import {
   addMessage,
   answeredAt,
   clearMedia,
+  comesAfter,
   earlyFor,
   failStuck,
   forgetUploadDeletes,
@@ -1499,6 +1500,30 @@ describe('where the user first wrote in a chat', () => {
     expect(await getMeta(owner.db, `answered:${mine}`)).toBeUndefined();
     await sender.messaging.send(conv, 'still there?');
     expect(await owner.messaging.sync()).toBe(1);
+    expect(await answeredAt(owner.db, mine)).toBeUndefined();
+  });
+
+  it("is forgotten when they delete the whole chat for both sides: their next photo waits for a tap", async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    expect(await answeredAt(owner.db, mine)).toBeDefined();
+    await sender.messaging.sync();
+
+    await sender.messaging.remove(conv, true);
+    await owner.messaging.sync();
+    expect(await listMessages(owner.db, mine)).toEqual([]);
+    expect(await getMeta(owner.db, `answered:${mine}`)).toBeUndefined();
+    // They write again with a photo: the chat has nothing of the owner's, and it waits.
+    const photo = crypto.getRandomValues(new Uint8Array(400));
+    await sender.messaging.sendMedia(conv, { file: photo, media: { t: 'photo', s: photo.length, w: 4, h: 4, m: 'image/jpeg' } });
+    expect(await owner.messaging.sync()).toBe(1);
+    expect(await listMessages(owner.db, mine)).toMatchObject([{ media: { t: 'photo' }, file: 'remote' }]);
     expect(await answeredAt(owner.db, mine)).toBeUndefined();
   });
 
@@ -6232,6 +6257,73 @@ describe('message times', () => {
       S + 3000,
       S - 3 * 3600_000,
     ]);
+  });
+
+  describe('and where the user first wrote', () => {
+    const photo = () => {
+      const file = crypto.getRandomValues(new Uint8Array(300));
+      return { file, media: { t: 'photo', s: file.length, w: 3, h: 3, m: 'image/jpeg' } };
+    };
+    /** The owner's records of their photos, oldest first. */
+    const photos = async (owner: Person, mine: string) => (await listRecords(owner.db, mine)).filter((m) => !m.out && m.file !== undefined);
+
+    it('sent again, counts from where it was sent again: what came while it showed as not sent still waits', async () => {
+      // Their clock a little ahead: their photo shows in the second the owner's reply was first written.
+      const { backend, owner, sender, conv, mine } = await chat({ owner: () => S + 100, sender: () => S + 2100 });
+      const request = backend.api.request;
+      backend.api.request = async (method, path, init, check) => {
+        if (method === 'POST' && path === '/send') {
+          backend.api.request = request;
+          throw new NetworkError('down');
+        }
+        return request(method, path, init, check);
+      };
+      await expect(owner.messaging.send(mine, 'stop')).rejects.toThrow(NetworkError);
+      const failed = (await listRecords(owner.db, mine)).find((m) => m.out)!;
+      expect(failed).toMatchObject({ status: 'failed', at: S });
+      await sender.messaging.sendMedia(conv, photo());
+      await owner.messaging.sync();
+
+      await owner.messaging.resend(mine, failed.id);
+      const sent = (await listRecords(owner.db, mine)).find((m) => m.out)!;
+      expect(sent.status).toBe('sent');
+      expect(sent.at).toBeGreaterThan(failed.at);
+      expect(await answeredAt(owner.db, mine)).toEqual({ at: sent.at, order: sent.order ?? 0 });
+      // The photo that came while it was "Not sent" waits; one after it doesn't.
+      await sender.messaging.sendMedia(conv, photo());
+      await owner.messaging.sync();
+      const [during, after] = await photos(owner, mine);
+      expect(during!.at).toBe(failed.at);
+      const place = (await answeredAt(owner.db, mine))!;
+      expect([comesAfter(during!, place), comesAfter(after!, place)]).toEqual([false, true]);
+    });
+
+    it('goes by where the chat shows what came after the reply: dated earlier, it waits unless it names the reply; sent earlier but dated ahead, it counts as after', async () => {
+      let theirs = S + 100;
+      const { backend, owner, sender, conv, mine } = await chat({ owner: () => S + 100, sender: () => theirs });
+      // Sent before the owner's reply, dated ten minutes ahead (a fast clock), still in the owner's inbox.
+      theirs = S + 10 * 60_000;
+      await sender.messaging.sendMedia(conv, photo());
+      // Sent before it too, dated three seconds back, by an app that doesn't date what it sends apart.
+      const older = copyOf(backend, sender, { now: () => S - 3000, messageNow: () => S - 3000 });
+      await deleteMeta(sender.db, `sent-at:${conv}`);
+      await older.sendMedia(conv, photo());
+      // The owner replies, then takes both in.
+      await owner.messaging.send(mine, 'stop');
+      const stop = (await listRecords(owner.db, mine)).find((m) => m.out)!;
+      await owner.messaging.sync();
+      // After the reply reached them, dated half a minute back by their clock, naming it as the newest of the owner's they had.
+      await sender.messaging.sync();
+      theirs = S - 30_000;
+      await sender.messaging.sendMedia(conv, photo());
+      await owner.messaging.sync();
+
+      const place = (await answeredAt(owner.db, mine))!;
+      expect(place).toEqual({ at: stop.at, order: stop.order ?? 0 });
+      const [backdated, ahead, reply] = await photos(owner, mine);
+      expect([backdated!.at, ahead!.at, reply!.at]).toEqual([S - 3000, stop.at, stop.at]);
+      expect([backdated, ahead, reply].map((m) => comesAfter(m!, place))).toEqual([false, true, true]);
+    });
   });
 
   it('forgets when it last sent something in a chat once the chat is deleted, here or for both sides', async () => {

@@ -1439,7 +1439,8 @@ export function createMessaging(deps: MessagingDeps) {
       // Only the attachments' messages are opened: a flooded chat goes as fast as any.
       const going = (await listRecords(db, conv)).filter((m) => (m.out ? m.at <= upTo.ours : sentAt(m) <= upTo.theirs));
       await discardUploads(await attachmentsOf(db, going));
-      const { left, unread } = await clearMessages(db, conv, upTo);
+      // Where the user first wrote goes with the chat, in the same transaction.
+      const { left, unread } = await clearMessages(db, conv, upTo, { forgetAnswered: true });
       const before = await getIds(db, conv);
       const editsBefore = await getPendingEdits(db, conv);
       let { c: kept, ids, edits } = await tidied(c, now(), before, editsBefore);
@@ -2413,7 +2414,14 @@ export function createMessaging(deps: MessagingDeps) {
     const theirs = conv.theirClear;
     if (theirs && (clear || (had.here && message.at <= theirs.upTo))) {
       const { upTo, here, ours } = theirs;
-      const { left, unread, removed } = await clearMessages(db, conv.id, { theirs: upTo, oursHadBy: upTo, oursWrittenBy: Math.min(here, ours ?? Infinity) });
+      // Their delete itself (not a later receipt that takes more) forgets
+      // where the user first wrote, as ours does: the chat starts over.
+      const { left, unread, removed } = await clearMessages(
+        db,
+        conv.id,
+        { theirs: upTo, oursHadBy: upTo, oursWrittenBy: Math.min(here, ours ?? Infinity) },
+        { forgetAnswered: clear },
+      );
       conv.unread = unread;
       // Out of the list until either side writes again.
       if (left === 0) conv.hidden = true;

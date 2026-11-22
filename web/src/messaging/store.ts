@@ -281,8 +281,9 @@ export async function dropPendingEdits(db: Database, conv: string): Promise<void
 
 /**
  * Deletes a conversation with no messages, and everything kept for it apart
- * from its record (what it remembers by keyed hashes, its pending edits), in
- * one transaction; not if a message came meanwhile. Returns whether it did.
+ * from its record (what it remembers by keyed hashes, its pending edits,
+ * where the user first wrote there), in one transaction; not if a message
+ * came meanwhile. Returns whether it did.
  */
 export async function dropEmptyConversation(db: Database, conv: string): Promise<boolean> {
   const tx = db.transaction(['conversations', 'meta', 'messages'], 'readwrite');
@@ -294,6 +295,7 @@ export async function dropEmptyConversation(db: Database, conv: string): Promise
   for (const kind of ID_KINDS) await tx.objectStore('meta').delete(idsKey(conv, kind));
   await tx.objectStore('meta').delete(editsKey(conv));
   await deleteSentAt(tx.objectStore('meta'), conv);
+  await tx.objectStore('meta').delete(answeredKey(conv));
   await keepBudget(tx.objectStore('conversations'), tx.objectStore('meta'), conv, null);
   await tx.done;
   return true;
@@ -374,18 +376,17 @@ export async function sentEnvelopeAt(db: Database, conv: string, id: string): Pr
 }
 
 /**
- * Deletes when this device last sent something in a conversation, the IDs
- * and times of the last few things (takeSentAt), and where the user first
- * wrote there (answeredAt), within a transaction that writes `meta`: with
- * its chat, or with its record. Whatever deletes a conversation's record
- * deletes these in the same transaction, with what it remembers by keyed
- * hashes.
+ * Deletes when this device last sent something in a conversation, and the
+ * IDs and times of the last few things (takeSentAt), within a transaction
+ * that writes `meta`: with its chat, or with its record. Whatever deletes a
+ * conversation's record deletes these in the same transaction, with what it
+ * remembers by keyed hashes.
  */
 function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
-  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv)), meta.delete(answeredKey(conv))]);
+  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv))]);
 }
 
-/** Forgets when this device last sent something in a conversation, what, and where the user first wrote there (deleteSentAt): its chat was deleted. */
+/** Forgets when this device last sent something in a conversation, and what (deleteSentAt): its chat was deleted. */
 export function forgetSentAt(db: Database, conv: string): Promise<void> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');
@@ -407,7 +408,10 @@ function answeredKey(conv: string): string {
 /**
  * Where the user first wrote in a conversation: the place of the earliest
  * of their messages there that was sent (the server took it: it shows as
- * sent or seen; one still sending, or not sent, doesn't count), or none.
+ * sent or seen; one still sending, or not sent, doesn't count, until
+ * something of the other side's names it and so shows it arrived: noteHad
+ * then shows it as sent), or none. (Not db.ts's unanswered(), which is
+ * whether we took a mailbox for a chat someone started through our link.)
  * Of the other side's attachments, only those that come after it download
  * by themselves (comesAfter; state/app.ts, autoFetch): someone who has the
  * user's link can't fill their device just by sending, and what came before
@@ -420,11 +424,15 @@ function answeredKey(conv: string): string {
  * looked up by the index (only one second's messages are read, none
  * opened), so a chat from before this was kept counts from the earliest
  * that's still here, and one shown as sent only later (a "not sent" one
- * that the other side's receipt showed had arrived) counts too. The engine
- * asks as soon as one is sent, and before one is deleted, so it's kept
- * before it can go. Read first, so the chat's own reads needn't wait for
- * it; written, in a transaction of its own that reads it all again, only
- * when it changes. Forgotten with the chat (deleteSentAt).
+ * that a reply, receipt or reaction of theirs named) counts from where it
+ * shows, when it was written. The engine asks as soon as one is sent, and
+ * before one is deleted, so it's kept before it can go. Read first, so the
+ * chat's own reads needn't wait for it; written, in a transaction of its
+ * own that reads it all again, only when it changes. Forgotten when the whole chat is deleted, here or for
+ * both sides, by either side (clearMessages, in the same transaction), and
+ * with its record (dropEmptyConversation); if any of the user's sent
+ * messages are left (written after the other side's delete), it's found
+ * again from those, as the chat then shows them.
  */
 export async function answeredAt(db: Database, conv: string): Promise<Place | undefined> {
   const read = await lookUpAnswered(db, conv, false);
@@ -461,14 +469,20 @@ async function lookUpAnswered(db: Database, conv: string, write: boolean): Promi
 
 /**
  * Whether a message comes after a place in its conversation, in the order
- * the chat shows them (byTime): a later `at`, or the same and taken in
+ * the chat shows them (byTime): by the time the chat shows it at (`at` on
+ * this device, not their `at` alone), and in the same second, taken in
  * later (`order`). Ours is dated when it's written, on the server's clock
  * and after anything we sent before (engine.ts, stampIn); theirs, no later
  * than it arrived, and if it arrived after one of ours dated a few seconds
  * ahead, no earlier than that (engine.ts, shownAt). So what was here before
  * the user's message comes before it (in its second, it was taken in
- * first), and theirs that arrived after it comes after it, unless they
- * dated it earlier: then it waits for a tap, which is the safe way round.
+ * first). What arrives after it comes after it, unless they dated it
+ * earlier and it names nothing of ours from since: then it waits for a tap.
+ * One they sent earlier but dated ahead, taken in after the user's message,
+ * counts as after it. That's left so: once the user has written, the other
+ * side can send new attachments that download by themselves anyway, so it
+ * gains them nothing. What this keeps waiting is what was already on the
+ * device when the user wrote.
  */
 export function comesAfter(m: Pick<MessageRecord, 'at' | 'order'>, place: Place): boolean {
   return byTime(m, place) > 0;
@@ -1112,15 +1126,21 @@ export function sentAt(m: Pick<MessageRecord, 'at' | 'sent'>): number {
  * transaction: their messages sent up to `theirs` (their clock, sentAt), and
  * ours up to `ours` (our clock) or, if later, up to the newest of ours they
  * had by `oursHadBy` (their clock, MessageRecord.had) among those we wrote
- * by `oursWrittenBy` (our clock). Returns how many messages are left, how
- * many of theirs are unread, and how many went.
+ * by `oursWrittenBy` (our clock). With forgetAnswered (the whole chat
+ * deleted, by either side), where the user first wrote there goes too
+ * (answeredAt), in the same transaction: the chat is never gone with it
+ * kept. Returns how many messages are left, how many of theirs are unread,
+ * and how many went.
  */
 export async function clearMessages(
   db: Database,
   conv: string,
   upTo: { theirs: number; ours?: number; oursHadBy?: number; oursWrittenBy?: number },
+  { forgetAnswered = false }: { forgetAnswered?: boolean } = {},
 ): Promise<{ left: number; unread: number; removed: number }> {
-  const tx = db.transaction(['messages', 'media'], 'readwrite');
+  const stores: ('messages' | 'media' | 'meta')[] = forgetAnswered ? ['messages', 'media', 'meta'] : ['messages', 'media'];
+  const tx = db.transaction(stores, 'readwrite');
+  if (forgetAnswered) await tx.objectStore('meta').delete(answeredKey(conv));
   const index = tx.objectStore('messages').index('byConversation');
   const range = IDBKeyRange.bound([conv, 0], [conv, Number.MAX_SAFE_INTEGER]);
   let ours = upTo.ours ?? -Infinity;

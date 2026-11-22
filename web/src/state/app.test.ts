@@ -36,6 +36,8 @@ vi.mock('../messaging/engine', async (importOriginal) => {
 
 // Storing an attachment can fail as it would on a full device (storeFaults.putMedia).
 const storeFaults = vi.hoisted(() => ({ putMedia: null as Error | null }));
+// How many times where the user first wrote in a chat was looked up (and the lookup over).
+const lookups = vi.hoisted(() => ({ answered: 0 }));
 vi.mock('../messaging/store', async (importOriginal) => {
   const original = await importOriginal<typeof import('../messaging/store')>();
   return {
@@ -43,6 +45,13 @@ vi.mock('../messaging/store', async (importOriginal) => {
     putMedia: async (...args: Parameters<typeof original.putMedia>) => {
       if (storeFaults.putMedia) throw storeFaults.putMedia;
       return original.putMedia(...args);
+    },
+    answeredAt: async (...args: Parameters<typeof original.answeredAt>) => {
+      try {
+        return await original.answeredAt(...args);
+      } finally {
+        lookups.answered++;
+      }
     },
   };
 });
@@ -2246,25 +2255,32 @@ describe('fetching attachments by themselves', () => {
     await received(db, 'voice', 4, { t: 'voice', s: 1000, m: 'audio/mp4' });
     await received(db, 'gif', 5, { t: 'gif', s: 1000, m: 'image/gif' });
     const downloads = () => server.calls.filter((c) => c.startsWith('GET /media/'));
-    const reopen = async () => {
+    /**
+     * Opens c1 (again) and waits until what downloads by itself is decided:
+     * where the user first wrote was looked up, and once that's over, a
+     * download it starts shows at once (fetchMedia marks it under way
+     * before it awaits anything).
+     */
+    const open = async () => {
+      const before = lookups.answered;
       await app.home();
       await app.openConversation('c1');
-      for (let i = 0; i < 10; i++) await tick();
+      await vi.waitFor(() => expect(lookups.answered).toBeGreaterThan(before));
+      expect(app.transfers.value).toEqual({});
     };
 
-    await app.openConversation('c1');
-    for (let i = 0; i < 10; i++) await tick();
+    await open();
     expect(downloads()).toEqual([]);
     // A tap fetches that one only: the others still wait, each on its own.
     await app.fetchMedia({ conv: 'c1', id: 'p2' });
     expect(downloads()).toEqual(['GET /media/upload-p2']);
-    await reopen();
+    await open();
     expect(downloads()).toEqual(['GET /media/upload-p2']);
     // Messages of the user's the server didn't take don't count: not sent, or still sending.
     await addMessage(db, { id: 'notSent', conv: 'c1', at: 6, out: true, status: 'failed' }, { text: 'stop' });
     await addMessage(db, { id: 'sending', conv: 'c1', at: 6, out: true, status: 'sending' }, { text: 'please' });
     await received(db, 'p3', 7, { t: 'photo', s: 1000, m: 'image/jpeg' });
-    await reopen();
+    await open();
     expect(downloads()).toEqual(['GET /media/upload-p2']);
     // One that was sent: what comes after it downloads by itself, and nothing from before.
     await addMessage(db, { id: 'sent', conv: 'c1', at: 8, out: true, status: 'sent' }, { text: 'ok' });

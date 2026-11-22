@@ -18,6 +18,7 @@ import {
 import {
   addMessage,
   answeredAt,
+  clearMessages,
   comesAfter,
   deleteMessage,
   dropEmptyConversation,
@@ -436,14 +437,26 @@ describe('where the user first wrote in a chat', () => {
     expect(await answeredAt(db, 'c')).toEqual({ at: 1000, order: 0 });
   });
 
-  it('is forgotten with the chat: deleted here or for both sides, or its record dropped', async () => {
+  it('is forgotten as the whole chat is cleared, in the same transaction, or with its record', async () => {
     const db = await fresh();
     await putConversation(db, conversation('c'));
     await ours(db, 'reply', 1000, 'sent');
+    await theirs(db, 'photo', 2000);
     await answeredAt(db, 'c');
-    await deleteMessage(db, 'c', 'reply');
+    // Clearing only part of it (a later receipt taking more of ours) keeps it.
+    await clearMessages(db, 'c', { theirs: 2000, ours: 1000 });
+    expect(await getMeta(db, 'answered:c')).toEqual({ at: 1000, order: 0 });
+    // Nor does forgetting when we last sent something there touch it.
     await forgetSentAt(db, 'c');
+    expect(await getMeta(db, 'answered:c')).toEqual({ at: 1000, order: 0 });
+    // The whole chat deleted, by either side: gone with it.
+    await ours(db, 'reply', 1000, 'sent');
+    await ours(db, 'afterTheirDelete', 3000, 'sent');
+    expect(await clearMessages(db, 'c', { theirs: Infinity, ours: 1000 }, { forgetAnswered: true })).toMatchObject({ left: 1 });
     expect(await getMeta(db, 'answered:c')).toBeUndefined();
+    // One of the user's left, written after their delete: found again from that, as the chat shows it.
+    expect(await answeredAt(db, 'c')).toEqual({ at: 3000, order: 0 });
+    await clearMessages(db, 'c', { theirs: Infinity, ours: Infinity }, { forgetAnswered: true });
     expect(await answeredAt(db, 'c')).toBeUndefined();
 
     await ours(db, 'reply', 1000, 'sent');

@@ -341,9 +341,10 @@ the server never sees a key, name or type.
   user has written in, though, and only what arrived after their first
   message there that was sent: before that, everything waits for a tap,
   each on its own, so someone with a link can't fill the recipient's device
-  just by sending. The app keeps where that first message was (a time, on
-  the device only). Only JPEG, PNG, WebP and GIF images show in the chat;
-  any other "photo" (an SVG, say) is a file.
+  just by sending. The app keeps where that first message shows in the chat
+  (a time, on the device only), until the chat is deleted by either side.
+  Only JPEG, PNG, WebP and GIF images show in the chat; any other "photo"
+  (an SVG, say) is a file.
 - Deleting one of our messages while it's still sending (or its chat)
   cancels it: it isn't sent, and an upload already made is deleted.
 - **Data and storage** shows the space attachments take, and clears them from
