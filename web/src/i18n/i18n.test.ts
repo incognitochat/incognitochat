@@ -119,6 +119,10 @@ describe('i18n', () => {
     expect([0, 1, 2, 1000].map((count) => t('nl', 'newMessages', { count }))).toEqual(['0 nieuwe berichten', '1 nieuw bericht', '2 nieuwe berichten', '1.000 nieuwe berichten']);
   });
 
+  it('counts in Spanish, with "de" after a round million', () => {
+    expect([0, 1, 2, 1000, 1_000_000].map((count) => t('es', 'newMessages', { count }))).toEqual(['0 mensajes nuevos', '1 mensaje nuevo', '2 mensajes nuevos', '1000 mensajes nuevos', '1.000.000 de mensajes nuevos']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');

@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Puedes invitar a 0 personas más.
+  1: Puedes invitar a 1 persona más.
+  2: Puedes invitar a 2 personas más.
+  3: Puedes invitar a 3 personas más.
+  5: Puedes invitar a 5 personas más.
+  11: Puedes invitar a 11 personas más.
+  21: Puedes invitar a 21 personas más.
+  100: Puedes invitar a 100 personas más.
+  101: Puedes invitar a 101 personas más.
+  102: Puedes invitar a 102 personas más.
+  1000000: Puedes invitar a 1.000.000 de personas más.
+levelLine:
+  0: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Nivel xxxxxxxxxxxxxxxxxxxxxxxx: 1.000.000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+unreadMessagesCount:
+  0: 0 mensajes sin leer
+  1: 1 mensaje sin leer
+  2: 2 mensajes sin leer
+  3: 3 mensajes sin leer
+  5: 5 mensajes sin leer
+  11: 11 mensajes sin leer
+  21: 21 mensajes sin leer
+  100: 100 mensajes sin leer
+  101: 101 mensajes sin leer
+  102: 102 mensajes sin leer
+  1000000: 1.000.000 de mensajes sin leer
+newMessages:
+  0: 0 mensajes nuevos
+  1: 1 mensaje nuevo
+  2: 2 mensajes nuevos
+  3: 3 mensajes nuevos
+  5: 5 mensajes nuevos
+  11: 11 mensajes nuevos
+  21: 21 mensajes nuevos
+  100: 100 mensajes nuevos
+  101: 101 mensajes nuevos
+  102: 102 mensajes nuevos
+  1000000: 1.000.000 de mensajes nuevos
+blockedCount:
+  0: Bloqueados (0)
+  1: Bloqueados (1)
+  2: Bloqueados (2)
+  3: Bloqueados (3)
+  5: Bloqueados (5)
+  11: Bloqueados (11)
+  21: Bloqueados (21)
+  100: Bloqueados (100)
+  101: Bloqueados (101)
+  102: Bloqueados (102)
+  1000000: Bloqueados (1.000.000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+messagesLeftToday:
+  0: Mensajes restantes hoy: 0. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Mensajes restantes hoy: 1. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Mensajes restantes hoy: 2. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Mensajes restantes hoy: 3. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Mensajes restantes hoy: 5. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Mensajes restantes hoy: 11. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Mensajes restantes hoy: 21. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Mensajes restantes hoy: 100. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Mensajes restantes hoy: 101. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Mensajes restantes hoy: 102. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Mensajes restantes hoy: 1.000.000. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.

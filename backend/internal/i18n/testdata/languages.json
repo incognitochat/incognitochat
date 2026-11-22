@@ -4,7 +4,8 @@
     "fa",
     "ru",
     "ar",
-    "nl"
+    "nl",
+    "es"
   ],
   "pick": {
     "en": "en",
@@ -43,6 +44,13 @@
     "nl-BE": "nl",
     "NL": "nl",
     "nl_BE": "nl",
-    "nld": "en"
+    "nld": "en",
+    "es": "es",
+    "es-ES": "es",
+    "es-419": "es",
+    "es-MX": "es",
+    "ES": "es",
+    "es_AR": "es",
+    "spa": "en"
   }
 }
