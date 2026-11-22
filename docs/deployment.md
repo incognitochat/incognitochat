@@ -130,6 +130,64 @@ that exist instead of creating them (it passes them as
 `existing_function_roles`), and the app stack's next deploy forgets them
 without deleting them.
 
+### Public statistics
+
+The project's website publishes hourly counts and daily costs, read by a
+scheduled workflow in its own repository. To let it, run the bootstrap with
+`STATS_REPO=<owner>/<repo>`, the website's repository:
+
+```shell
+AWS_PROFILE=<profile> STATS_REPO=<owner>/<repo> scripts/bootstrap.sh <aws-region> dev
+AWS_PROFILE=<profile> STATS_REPO=<owner>/<repo> DEPLOY_TAGS='v*.*.*' scripts/bootstrap.sh <aws-region> production
+```
+
+That adds a read-only role, `<prefix>-github-stats`
+([infra/init/stats_reader.tf](../infra/init/stats_reader.tf)):
+
+- Only jobs in that repository's `stats` GitHub environment may assume it,
+  through GitHub's OIDC, matched exactly by the subject GitHub sends for
+  them (`<sub_claim_prefix>:environment:stats`). The repository must send
+  the immutable kind, with its owner's and its own IDs, so a repository
+  made again under the same name doesn't match; the bootstrap refuses one
+  that doesn't (turn on immutable subject claims for the repository or its
+  organization in GitHub). Renaming or moving the repository, or renaming
+  its owner, changes the subject too: rerun with `STATS_REPO`.
+- Before the role exists, the bootstrap makes that environment, or keeps it
+  with its protection settings, and limits it to `main`. So whoever can
+  push or merge to that repository's `main` can assume the role: protect
+  that branch (pull requests only, no force-push). And any workflow on
+  `main` naming the environment can, so jobs using it must run only on a
+  schedule or by hand (`schedule`, `workflow_dispatch`), never on events
+  that carry other people's input in `main`'s context
+  (`pull_request_target`, `workflow_run`, `issue_comment`, `issues`…).
+- In production it may read metrics (`cloudwatch:GetMetricData`) in the
+  app's region, and everywhere costs (`ce:GetCostAndUsage`, which answers
+  in us-east-1 only); nothing else, and it writes nothing. Neither call
+  can be narrowed to resources: it can read every metric of the app's
+  region (counts and sums, nothing about anyone) and every cost of the
+  account. The workflow, public too, decides what's published. The calls
+  cost money (Cost Explorer $0.01 each), so the workflow reads costs once
+  a day.
+- When run with `STATS_REPO`, the bootstrap refuses an AWS Organization's
+  management account, whose Cost Explorer shows every member account's
+  costs, and stops if it can't tell (for example when a policy denies
+  `organizations:DescribeOrganization`).
+- It then stores, in that `stats` environment, the role's ARN as a secret
+  and the region as a variable, each named for the account
+  (`STATS_ROLE_ARN_PRODUCTION`, `STATS_REGION_DEV`…), and in production the
+  counts' namespace (`STATS_NAMESPACE_PRODUCTION`). The gh login running it
+  needs admin rights on that repository too.
+- Access Analyzer finds the role (GitHub's OIDC provider may assume it):
+  read the finding once and archive it, as the deploy role's
+  ([below](#audit-trail-and-change-alerts)).
+
+A later run without `STATS_REPO` keeps the role, and leaves the other
+repository alone (it doesn't check its environment, or the account, again:
+rerun with `STATS_REPO` for that); if it can't read the role's subject from
+the state (or can't list the state), it stops rather than remove the role.
+`STATS_REPO=none` removes the role; delete its secret and variables from the
+other repository by hand.
+
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
 change deploys there. Each deploy checks this with IAM's policy simulator
@@ -1268,18 +1326,18 @@ policy versions, the trail, the analyzer), then the subscriptions, Access
 Analyzer's first findings, and one for each finding archived.
 
 **Access Analyzer.** An analyzer, `<prefix>-access`, in the app's region,
-reads the policies of the account's roles, buckets, functions, topics and
-so on, and makes a finding for each that lets another account, or anyone,
-in. Some are on purpose, and are found at first: the deploy role (GitHub's
-OIDC provider may assume it); while their URLs need no auth, `api` and
-`bot` (anyone may call them); and any role admins sign in through from
-another account (an AWS Organization's `OrganizationAccountAccessRole`, or
-the roles IAM Identity Center makes). Read each once (IAM, Access
-Analyzer) and archive those; each archive is a change, and sends an
-`audit-changes` email. An archived finding stays archived while that
-access stays as it is. They're archived by hand, not by an archive rule:
-one wide enough to take `api`'s and `bot`'s public URLs would also take a
-permission that lets anyone invoke them directly.
+reads the policies of the account's roles, buckets, functions, topics and so
+on, and makes a finding for each that lets another account, or anyone, in.
+Some are on purpose, and are found at first: the deploy role, and the stats
+role where there is one (GitHub's OIDC provider may assume them); while
+their URLs need no auth, `api` and `bot` (anyone may call them); and any
+role admins sign in through from another account (an AWS Organization's
+`OrganizationAccountAccessRole`, or the roles IAM Identity Center makes).
+Read each once (IAM, Access Analyzer) and archive those; each archive is a
+change, and sends an `audit-changes` email. An archived finding stays
+archived while that access stays as it is. They're archived by hand, not by
+an archive rule: one wide enough to take `api`'s and `bot`'s public URLs
+would also take a permission that lets anyone invoke them directly.
 
 **When one fires:**
 

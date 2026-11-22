@@ -34,6 +34,15 @@
 #                                  (default: 50 for production, 15 otherwise).
 #        AUTO_APPROVE=1 ... skips Terraform's interactive approval.
 #        GITHUB_REPO=<owner>/<repo> ... overrides the repo detected by gh.
+#        STATS_REPO=<owner>/<repo> ... the website repository whose "stats" environment may read
+#                                  this account's public statistics: a read-only role
+#                                  (infra/init/stats_reader.tf) that reads costs, and in
+#                                  production the counts too. The repository must send
+#                                  immutable OIDC subjects; never an AWS Organization's
+#                                  management account. Its environment is limited to main
+#                                  first, then the role's ARN and region (and production's
+#                                  counts namespace) are stored there. Without STATS_REPO,
+#                                  a role made before is kept; STATS_REPO=none removes it.
 #
 # Nothing environment-specific is written to the repository: names are
 # computed at runtime and stored as GitHub environment secrets and variables.
@@ -74,6 +83,135 @@ tf_vars=(
   -var "monthly_budget_usd=${monthly_budget}"
 )
 apply_args=(-input=false "${tf_vars[@]}")
+
+# The stats role (infra/init/stats_reader.tf): trusted only for STATS_REPO's
+# "stats" environment, by the subject GitHub sends for it, which must be the
+# immutable kind, with the owner's and the repository's IDs: a repository
+# made again under the same name doesn't match. Without STATS_REPO, the
+# subject from the last run is kept (stats_vars), so running this again for
+# another reason doesn't remove the role; STATS_REPO=none removes it.
+stats_repo=${STATS_REPO:-}
+stats_subject=''
+stats_metrics=false
+[[ $environment == production ]] && stats_metrics=true
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  if [[ ! $stats_repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "STATS_REPO must be <owner>/<repo>, or none" >&2
+    exit 1
+  fi
+  stats_prefix=$(gh api "repos/${stats_repo}/actions/oidc/customization/sub" --jq .sub_claim_prefix)
+  if [[ ! $stats_prefix =~ ^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$ ]]; then
+    echo "${stats_repo} doesn't send immutable OIDC subjects (it sends ${stats_prefix}), so a" >&2
+    echo "repository made again under its name could assume the stats role. Turn on immutable" >&2
+    echo "subject claims (for the repository or its organization in GitHub) and rerun this." >&2
+    exit 1
+  fi
+  stats_subject="${stats_prefix}:environment:stats"
+  # Never the organization's management account: its Cost Explorer shows
+  # every member account's costs.
+  # Only the answer on stdout counts, and it must be an account ID: a
+  # warning on stderr, or an empty answer, can't pass for "not this one".
+  org_err=$(mktemp)
+  if org_admin=$(aws organizations describe-organization --query Organization.MasterAccountId --output text 2>"$org_err"); then
+    rm -f "$org_err"
+    if [[ ! $org_admin =~ ^[0-9]{12}$ ]]; then
+      echo "Couldn't read the AWS Organization's management account (got '${org_admin}'), so" >&2
+      echo "nothing was applied." >&2
+      exit 1
+    elif [[ $org_admin == "$account_id" ]]; then
+      echo "This is the AWS Organization's management account: no stats role here." >&2
+      exit 1
+    fi
+  elif grep -q 'AWSOrganizationsNotInUseException' "$org_err"; then
+    rm -f "$org_err"
+  else
+    echo "Couldn't tell whether this is an AWS Organization's management account (a policy may" >&2
+    echo "deny organizations:DescribeOrganization), so nothing was applied. AWS said:" >&2
+    cat "$org_err" >&2
+    rm -f "$org_err"
+    exit 1
+  fi
+fi
+
+# Sets stats, the stats role's Terraform variables. After tf init; with
+# first-run on the first run's local state, which may not exist yet (then
+# listing it fails, and that's no error).
+stats_vars() {
+  local state err
+  if [[ -z $stats_repo ]]; then
+    stats_subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
+    [[ $stats_subject == *:environment:stats ]] || stats_subject=''
+    # A role made before whose subject can't be read would be removed by
+    # this apply: stop instead (STATS_REPO=none removes it on purpose). The
+    # state is read whole first: grep -q leaving early could make terraform
+    # fail on a closed pipe and the check pass by mistake.
+    if [[ -z $stats_subject ]]; then
+      err=$(mktemp)
+      if ! state=$(tf state list -no-color 2>"$err"); then
+        if [[ ${1:-} != first-run ]]; then
+          echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied." >&2
+          echo "STATS_REPO=<owner>/<repo> keeps a stats role and STATS_REPO=none removes it; either" >&2
+          echo "skips this check. Terraform said:" >&2
+          cat "$err" >&2
+          rm -f "$err"
+          exit 1
+        fi
+        state=''
+      fi
+      rm -f "$err"
+      if grep -qxF 'aws_iam_role.stats[0]' <<<"$state"; then
+        echo "The stats role exists, but its subject couldn't be read from the state, and applying" >&2
+        echo "would remove it. Rerun with STATS_REPO=<owner>/<repo> to keep it, or STATS_REPO=none" >&2
+        echo "to remove it." >&2
+        exit 1
+      fi
+    fi
+  fi
+  stats=(-var "stats_github_oidc_subject=${stats_subject}" -var "stats_read_metrics=${stats_metrics}")
+}
+
+# STATS_REPO's "stats" environment: made, or kept with its protection
+# settings, and limited to its main branch, before the role that trusts it
+# exists. Fails on any error from GitHub.
+stats_environment() {
+  local current err body found=0 id type name policies
+  err=$(mktemp)
+  if current=$(gh api "repos/${stats_repo}/environments/stats" 2>"$err"); then
+    rm -f "$err"
+  elif grep -q 'HTTP 404' "$err"; then
+    rm -f "$err"
+    current='{}'
+  else
+    echo "Couldn't read ${stats_repo}'s 'stats' environment, so nothing was applied:" >&2
+    cat "$err" >&2
+    rm -f "$err"
+    exit 1
+  fi
+  # The PUT replaces the protection settings: send back the current ones.
+  # shellcheck disable=SC2016 # jq's own variables
+  body=$(jq -c 'def rule: [.protection_rules[]? | select(.type == "required_reviewers")][0];
+    {deployment_branch_policy: {protected_branches: false, custom_branch_policies: true},
+     reviewers: [rule | .reviewers[]? | {type, id: .reviewer.id}]}
+    + (if has("can_admins_bypass") then {can_admins_bypass} else {} end)
+    + (rule // {} | if has("prevent_self_review") then {prevent_self_review} else {} end)
+    + ([.protection_rules[]? | select(.type == "wait_timer") | {wait_timer}][0] // {})' <<<"$current")
+  gh api --method PUT "repos/${stats_repo}/environments/stats" --input - <<<"$body" >/dev/null
+  policies=$(gh api --paginate "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+    --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')
+  while read -r id type name; do
+    [[ -z "$id" ]] && continue
+    if [[ $type == branch && $name == main ]]; then
+      found=1
+    else
+      gh api --method DELETE "repos/${stats_repo}/environments/stats/deployment-branch-policies/${id}" >/dev/null
+    fi
+  done <<<"$policies"
+  if [[ $found == 0 ]]; then
+    gh api --method POST "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+      -f name=main -f type=branch >/dev/null
+  fi
+  echo "${stats_repo}'s 'stats' environment takes only main"
+}
 [[ "${AUTO_APPROVE:-}" == "1" ]] && apply_args+=(-auto-approve)
 
 # The functions' roles that exist but aren't in this stack's state, as a
@@ -132,10 +270,14 @@ check_cost_explorer() {
 
 # --- AWS (Terraform) ----------------------------------------------------------
 check_cost_explorer
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  stats_environment
+fi
 if aws s3api head-bucket --bucket "$state_bucket" --region "$region" 2>/dev/null; then
   tf init -input=false -reconfigure "${backend_args[@]}"
   roles=$(existing_function_roles)
-  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
+  stats_vars
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
 else
   # First run: the state bucket doesn't exist yet. Apply with local state,
   # then move that state into the bucket that was just created.
@@ -145,7 +287,8 @@ else
   printf 'terraform {\n  backend "local" {}\n}\n' >"$override"
   tf init -input=false -reconfigure
   roles=$(existing_function_roles)
-  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
+  stats_vars first-run
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
   rm -f "$override"
   tf init -input=false -migrate-state -force-copy "${backend_args[@]}"
   rm -f "$init_dir/terraform.tfstate" "$init_dir/terraform.tfstate.backup"
@@ -216,7 +359,10 @@ if [[ $reviewers == "[]" && $policy_type == tag ]]; then
 fi
 
 # Exactly one deployment policy: the branch, or the release tag pattern.
+# Listed first, so an error stops the run instead of leaving stray policies.
 found=0
+policies=$(gh api --paginate "repos/${repo}/environments/${environment}/deployment-branch-policies" \
+  --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')
 while read -r id type name; do
   [[ -z "$id" ]] && continue
   if [[ "$type" == "$policy_type" && "$name" == "$policy_name" ]]; then
@@ -225,8 +371,7 @@ while read -r id type name; do
     gh api --method DELETE "repos/${repo}/environments/${environment}/deployment-branch-policies/${id}" >/dev/null
     echo "Removed the deployment policy for ${type} ${name}"
   fi
-done <<<"$(gh api "repos/${repo}/environments/${environment}/deployment-branch-policies" \
-  --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')"
+done <<<"$policies"
 if [[ $found == 0 ]]; then
   gh api --method POST "repos/${repo}/environments/${environment}/deployment-branch-policies" \
     -f name="$policy_name" -f type="$policy_type" >/dev/null
@@ -241,6 +386,26 @@ printf '%s' "$builds_bucket" | gh secret set LAMBDA_BUILDS_BUCKET --env "$enviro
 printf '%s' "$signing_profile" | gh secret set LAMBDA_SIGNING_PROFILE --env "$environment" --repo "$repo"
 printf '%s' "$code_signing_config" | gh secret set LAMBDA_CODE_SIGNING_CONFIG --env "$environment" --repo "$repo"
 gh variable set AWS_REGION --env "$environment" --repo "$repo" --body "$region"
+
+# The stats role's ARN, region and (production) counts namespace, in
+# STATS_REPO's "stats" environment, named for this account.
+stats_role_arn=$(tf output -raw stats_role_arn 2>/dev/null || true)
+if [[ -n $stats_repo && $stats_repo != none ]]; then
+  if [[ $stats_role_arn != arn:* ]]; then
+    echo "The stats role wasn't made, so ${stats_repo} wasn't given its ARN." >&2
+    exit 1
+  fi
+  suffix=$(tr '[:lower:]' '[:upper:]' <<<"$environment")
+  printf '%s' "$stats_role_arn" | gh secret set "STATS_ROLE_ARN_${suffix}" --env stats --repo "$stats_repo"
+  gh variable set "STATS_REGION_${suffix}" --env stats --repo "$stats_repo" --body "$region"
+  if [[ $stats_metrics == true ]]; then
+    gh variable set "STATS_NAMESPACE_${suffix}" --env stats --repo "$stats_repo" --body "${environment_prefix}/api"
+  fi
+  echo "Stored the stats role for ${environment} in ${stats_repo}'s 'stats' environment"
+elif [[ $stats_repo == none ]]; then
+  echo "No stats role. Delete its secret and variables (STATS_*_${environment^^}) from the" \
+    "website repository's 'stats' environment by hand if they're still there."
+fi
 
 if [[ $policy_type == tag ]]; then
   how_to_deploy="publish a release (merge the release pull request)"
