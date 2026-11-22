@@ -2,11 +2,12 @@
 # function only what the API reads (finding TF-12): no cookies, none of the
 # headers CloudFront can add on where a viewer is. Where the firewall is
 # on, its first rule blocks the addresses in an IP set an admin fills during
-# an incident, and the rate limits keep their order after it (OPS-8).
-# Without the firewall, neither exists. And the functions' logs are kept
-# only for a period CloudWatch takes, never forever (TF-13). Plans only:
-# the providers have fake credentials and make no calls. Run by CI
-# (terraform test).
+# an incident (OPS-8), its second refuses every IPv6 address, and the rate
+# limits keep their order after them. Without the firewall, none of it
+# exists. And the functions' logs are kept only for a period CloudWatch
+# takes, never forever (TF-13). Plans only: the providers have fake
+# credentials and make no calls (the IPv6 run overrides the IP sets' ARNs).
+# Run by CI (terraform test).
 
 provider "aws" {
   region                      = "eu-west-1"
@@ -90,12 +91,12 @@ run "no_firewall" {
   command = plan
 
   plan_options {
-    target = [aws_wafv2_web_acl.api, aws_wafv2_ip_set.blocked]
+    target = [aws_wafv2_web_acl.api, aws_wafv2_ip_set.blocked, aws_wafv2_ip_set.ipv6]
   }
 
   assert {
-    condition     = length(aws_wafv2_web_acl.api) == 0 && length(aws_wafv2_ip_set.blocked) == 0
-    error_message = "Without the firewall there must be no web ACL and no block list."
+    condition     = length(aws_wafv2_web_acl.api) == 0 && length(aws_wafv2_ip_set.blocked) == 0 && length(aws_wafv2_ip_set.ipv6) == 0
+    error_message = "Without the firewall there must be no web ACL, no block list and no IPv6 set."
   }
 }
 
@@ -126,16 +127,17 @@ run "firewall" {
     error_message = "With the firewall there must be one empty IPv4 block list for CloudFront, named with the prefix."
   }
 
-  # The block list first, then the rate limits in their order.
+  # The block list first, then IPv6, then the rate limits in their order.
   assert {
     condition = jsonencode({ for r in aws_wafv2_web_acl.api[0].rule : tostring(r.priority) => r.name }) == jsonencode({
       "0" = "blocked"
-      "1" = "rate-per-ip"
-      "2" = "anonymous-per-ip"
-      "3" = "lookups-total"
-      "4" = "deletes-total"
+      "1" = "ipv6"
+      "2" = "rate-per-ip"
+      "3" = "anonymous-per-ip"
+      "4" = "lookups-total"
+      "5" = "deletes-total"
     })
-    error_message = "The firewall's rules must be the block list (priority 0), then rate-per-ip, anonymous-per-ip, lookups-total and deletes-total."
+    error_message = "The firewall's rules must be the block list (priority 0), ipv6 (1), then rate-per-ip, anonymous-per-ip, lookups-total and deletes-total."
   }
 
   # Batches of uploads to delete have their own total, sized by the lower
@@ -194,13 +196,101 @@ run "firewall" {
     error_message = "The firewall's first rule must block the addresses in the block list."
   }
 
-  # The block list is the only rule that uses an IP set.
+  # The block list and ipv6 are the only rules that use IP sets.
+  assert {
+    condition = sort([
+      for r in aws_wafv2_web_acl.api[0].rule : r.name
+      if length(r.statement[0].ip_set_reference_statement) > 0
+    ]) == tolist(["blocked", "ipv6"])
+    error_message = "Only the block list's rule and ipv6 may use IP sets."
+  }
+}
+
+# Where the firewall is on, it refuses IPv6 outright, before any rate limit
+# counts it: an edge serves the API over IPv6 to a client that connects to
+# its IPv6 address, though the distribution has IPv6 off (found by testing,
+# 2026-11-22), and one host has billions of IPv6 addresses. The IP sets'
+# ARNs are known in a plan only when overridden.
+run "firewall_ipv6" {
+  command = plan
+
+  plan_options {
+    target = [aws_wafv2_web_acl.api, aws_wafv2_ip_set.blocked, aws_wafv2_ip_set.ipv6]
+  }
+
+  variables {
+    firewall = true
+  }
+
+  override_resource {
+    target          = aws_wafv2_ip_set.blocked
+    override_during = plan
+    values          = { arn = "arn:aws:wafv2:us-east-1:123456789012:global/ipset/incognitochat-test-blocked/blocked" }
+  }
+
+  override_resource {
+    target          = aws_wafv2_ip_set.ipv6
+    override_during = plan
+    values          = { arn = "arn:aws:wafv2:us-east-1:123456789012:global/ipset/incognitochat-test-ipv6/ipv6" }
+  }
+
+  # Every IPv6 address: WAF takes any range but /0, hence two halves.
+  assert {
+    condition = length(aws_wafv2_ip_set.ipv6) == 1 && alltrue([
+      aws_wafv2_ip_set.ipv6[0].name == "incognitochat-test-ipv6",
+      aws_wafv2_ip_set.ipv6[0].scope == "CLOUDFRONT",
+      aws_wafv2_ip_set.ipv6[0].ip_address_version == "IPV6",
+      aws_wafv2_ip_set.ipv6[0].addresses == toset(["::/1", "8000::/1"]),
+    ])
+    error_message = "With the firewall there must be one IPv6 set for CloudFront, named with the prefix, holding exactly ::/1 and 8000::/1."
+  }
+
+  # ipv6 matches the request's own address (not a forwarded header) against
+  # that set, and blocked against the block list, each with its own metric.
   assert {
     condition = length([
       for r in aws_wafv2_web_acl.api[0].rule : r.name
-      if length(r.statement[0].ip_set_reference_statement) > 0
+      if r.name == "ipv6" && alltrue([
+        try(r.statement[0].ip_set_reference_statement[0].arn, "") == aws_wafv2_ip_set.ipv6[0].arn,
+        try(length(r.statement[0].ip_set_reference_statement[0].ip_set_forwarded_ip_config), 1) == 0,
+        r.visibility_config[0].metric_name == "incognitochat-test-api-ipv6",
+      ])
     ]) == 1
-    error_message = "Only the block list's rule may use an IP set."
+    error_message = "The ipv6 rule must match each request's own address against the IPv6 set, with the metric incognitochat-test-api-ipv6."
+  }
+
+  assert {
+    condition = length([
+      for r in aws_wafv2_web_acl.api[0].rule : r.name
+      if r.name == "blocked" && try(r.statement[0].ip_set_reference_statement[0].arn, "") == aws_wafv2_ip_set.blocked[0].arn
+    ]) == 1
+    error_message = "The blocked rule must use the block list."
+  }
+
+  # Answered as a blocked address is: 429 with the API's error and CORS.
+  assert {
+    condition = length([
+      for r in aws_wafv2_web_acl.api[0].rule : r.name
+      if r.name == "ipv6" && alltrue([
+        jsonencode(r.action) == jsonencode(one([for b in aws_wafv2_web_acl.api[0].rule : b.action if b.name == "blocked"])),
+        try(r.action[0].block[0].custom_response[0].response_code, 0) == 429,
+        try(r.action[0].block[0].custom_response[0].custom_response_body_key, "") == local.blocked_body,
+      ])
+    ]) == 1
+    error_message = "The ipv6 rule must block with the block list's response: 429 and the API's rate_limited error."
+  }
+
+  # Before every rate limit, so none of them counts an IPv6 request.
+  assert {
+    condition = (
+      length([for r in aws_wafv2_web_acl.api[0].rule : r.name if length(r.statement[0].rate_based_statement) > 0]) == 4
+      && alltrue([
+        for r in aws_wafv2_web_acl.api[0].rule :
+        one([for v in aws_wafv2_web_acl.api[0].rule : v.priority if v.name == "ipv6"]) < r.priority
+        if length(r.statement[0].rate_based_statement) > 0
+      ])
+    )
+    error_message = "The ipv6 rule must run before every rate-based rule (a lower priority number)."
   }
 }
 

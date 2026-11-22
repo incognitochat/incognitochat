@@ -117,6 +117,10 @@ resource "aws_cloudfront_distribution" "api" {
   # address on its own, and one host can have billions of them. IPv6-only
   # devices still get here through their network's NAT64, as they reach the
   # socket API and the media bucket, which have no IPv6 addresses either.
+  # This only keeps IPv6 addresses out of DNS: an edge still serves the API
+  # over IPv6 to a client that connects to the edge's IPv6 address and names
+  # this host (found by testing, 2026-11-22). So the firewall refuses IPv6
+  # (ipv6, below); turning IPv6 on here would mean removing that rule first.
   is_ipv6_enabled = false
   # The cheapest edge locations; every viewer is still served.
   price_class = "PriceClass_100"
@@ -243,15 +247,16 @@ locals {
   deletes_total_limit = max(10, floor(6 * min(local.table_max_read_units, local.table_max_write_units) / 10))
 
   # Rules run in priority order and a block ends the run, so what an earlier
-  # rule already blocks doesn't count towards a later one. But WAF checks
-  # rates only about every 10 seconds and usually acts within 30, so until
-  # an address is blocked its burst counts in full: one host alone can set
-  # lookups-total or deletes-total off, and lookups, or deletes, are then
-  # refused for everyone for a minute or two.
+  # rule already blocks doesn't count towards a later one: blocked (0) and
+  # ipv6 (1) come before every rate limit, then rate-per-ip (2), then these.
+  # But WAF checks rates only about every 10 seconds and usually acts within
+  # 30, so until an address is blocked its burst counts in full: one host
+  # alone can set lookups-total or deletes-total off, and lookups, or
+  # deletes, are then refused for everyone for a minute or two.
   limits = {
-    anonymous-per-ip = { priority = 2, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300, routes = local.anonymous_routes }
-    lookups-total    = { priority = 3, key = "CONSTANT", limit = local.lookups_total_limit, window = 60, routes = local.lookup_routes }
-    deletes-total    = { priority = 4, key = "CONSTANT", limit = local.deletes_total_limit, window = 60, routes = local.delete_routes }
+    anonymous-per-ip = { priority = 3, key = "IP", limit = var.firewall_anonymous_rate_limit, window = 300, routes = local.anonymous_routes }
+    lookups-total    = { priority = 4, key = "CONSTANT", limit = local.lookups_total_limit, window = 60, routes = local.lookup_routes }
+    deletes-total    = { priority = 5, key = "CONSTANT", limit = local.deletes_total_limit, window = 60, routes = local.delete_routes }
   }
 
   # A blocked request gets 429 and the API's own error, with CORS for the
@@ -281,11 +286,33 @@ resource "aws_wafv2_ip_set" "blocked" {
   }
 }
 
-# The firewall: a block list and four rate limits. $5 a month, plus $1 per
-# rule and $0.60 per million requests, so it is optional.
+# Every IPv6 address, which the firewall refuses (ipv6, below). WAF takes
+# any range but /0, hence two halves. Terraform keeps it exactly so.
+resource "aws_wafv2_ip_set" "ipv6" {
+  count    = var.firewall ? 1 : 0
+  provider = aws.global
+
+  name               = "${local.prefix}-ipv6"
+  description        = "Every IPv6 address, refused by the Incognito Chat API firewall, ${var.environment}"
+  scope              = "CLOUDFRONT"
+  ip_address_version = "IPV6"
+  addresses          = ["::/1", "8000::/1"]
+}
+
+# The firewall: a block list, a rule that refuses IPv6, and four rate
+# limits. $5 a month, plus $1 per rule and $0.60 per million requests, so
+# it is optional.
 #
 #   blocked           the addresses in the block list (above), first, so
 #                     that the rate limits don't count what it refuses.
+#   ipv6              every request that arrives over IPv6, next, so that
+#                     the rate limits never count it either. The
+#                     distribution has IPv6 off, but an edge serves it over
+#                     IPv6 anyway to a client that asks (above). Real users
+#                     arrive over IPv4; over IPv6 one host has billions of
+#                     addresses, which no per-address limit holds and the
+#                     block list (IPv4) can't, and its flood would count in
+#                     full towards lookups-total and deletes-total.
 #   rate-per-ip       any route, per IP address. Many people can share one
 #                     address (a mobile carrier, a VPN), so the limit is far
 #                     above what one person's app sends.
@@ -368,9 +395,41 @@ resource "aws_wafv2_web_acl" "api" {
     }
   }
 
+  # Answered as blocked is.
+  rule {
+    name     = "ipv6"
+    priority = 1
+
+    action {
+      block {
+        custom_response {
+          response_code            = 429
+          custom_response_body_key = local.blocked_body
+
+          response_header {
+            name  = "Access-Control-Allow-Origin"
+            value = local.blocked_origin
+          }
+        }
+      }
+    }
+
+    statement {
+      ip_set_reference_statement {
+        arn = aws_wafv2_ip_set.ipv6[0].arn
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${local.prefix}-api-ipv6"
+      sampled_requests_enabled   = false
+    }
+  }
+
   rule {
     name     = "rate-per-ip"
-    priority = 1
+    priority = 2
 
     action {
       block {

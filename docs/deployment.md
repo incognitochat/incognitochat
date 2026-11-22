@@ -273,7 +273,7 @@ gh variable set CLIENT_ORIGINS --env <env> --body '["https://<org>.github.io"]'
 | `ACCOUNT_EXPIRY` | variable | Deleting accounts nobody has used for 12 months ([account expiry](#account-expiry)): `dry-run` by default (counts and logs how many it would delete; deletes nothing), `on`, or `off`. |
 | `RESERVE_CONCURRENCY` | variable | `true` gives each function its own share of the account's concurrent executions (`api` 100, `ws` 20, `notify` 10, `bot` 5), so a flood on one can't starve the others. Off by default: it needs a Lambda concurrency quota of at least 235 in the account (new accounts start at 10; ask for more in Service Quotas). |
 | `API_ACCESS` | variable | How the app reaches the API (below): `direct` (default), `cloudfront` or `cloudfront-only`. |
-| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with four rate limits and a list of addresses to block ([below](#the-firewall)). Off by default: about $10 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
+| `FIREWALL` | variable | `true` puts a firewall (AWS WAF) in front of CloudFront, with four rate limits, a list of addresses to block and a rule that refuses IPv6 ([below](#the-firewall)). Off by default: about $11 a month, plus $0.60 per million requests. The bootstrap's `firewall` must match where it differs from production's default (on there alone). |
 | `DELETION_PROTECTION` | variable | Protects the tables from deletion. Keep it on in production. |
 | `SESSION_KEY_VERSION`, `WEBHOOK_SECRET_VERSION`, `CHAT_KEY_VERSION`, `TELEGRAM_ID_PEPPER_VERSION` | variables | Unset by default (1). Raise one to replace that generated secret alone: [what each does](#replacing-a-generated-secret). The pepper's is only for starting over. Keep a raised version set: deleting it means 1, which replaces the secret again. |
 | `SECRETS_VERSION` | variable | Retired: leave it unset, or the deploy stops ([below](#replacing-a-generated-secret)). |
@@ -1333,37 +1333,51 @@ aws lambda remove-permission --function-name incognitochat-<env>-api --statement
 aws lambda remove-permission --function-name incognitochat-<env>-api --statement-id FunctionURLAllowInvokeAction
 ```
 
-The distribution answers over IPv4 only. The firewall counts each IPv6
-address on its own, and one server can have a /64 of them (2^64 addresses),
-so over IPv6 its per-address limits would hold no one. Devices with both use
-IPv4. Devices on networks with IPv6 alone reach it through their network's
+The distribution has IPv6 off: its name has IPv4 addresses only. The
+firewall counts each IPv6 address on its own, and one server can have a /64
+of them (2^64 addresses), so over IPv6 its per-address limits would hold no
+one. Devices with both use IPv4. Devices on networks with IPv6 alone reach it through their network's
 NAT64, sharing an IPv4 address with others there, as they already reach the
 socket API and the media bucket, which have no IPv6 addresses either; a
 network with IPv6 and no NAT64 can't reach the API at all.
 
-What turning IPv6 off does is documented only for DNS: CloudFront gives the
-distribution's name no IPv6 addresses. AWS's documentation doesn't say
-whether an edge refuses a request that reaches it over IPv6 anyway, from a
-client that connects to an edge's IPv6 address by hand, and this hasn't been
-tested. If edges serve such requests, one host can still spread a flood
-over many IPv6 addresses past both per-address rules: `lookups-total` and
-`deletes-total` still bound lookups by ID and batches of deletes, and
-nothing at the edge bounds the rest. A rule that
-blocks IPv6 addresses outright would settle it, with an IP set, which the
-deploy role may now manage (`infra/init`).
+But turning IPv6 off only keeps it out of DNS: CloudFront gives the
+distribution's name no IPv6 addresses, which is all AWS's documentation
+says. An edge still serves the API over IPv6 to a client that connects to
+the edge's IPv6 address by hand and names the API's host: found by testing
+on 2026-11-22, when such a request got the API's own answer. So where the
+firewall is on, its rule `ipv6` refuses every IPv6 request before any rate
+limit counts it ([the firewall](#the-firewall)). Without the firewall (dev,
+by default), such requests still reach the API, which has no per-address
+limits there anyway.
 
 ### The firewall
 
 `FIREWALL=true` adds AWS WAF in front of CloudFront with four rate limits,
 and before them a list of addresses to block, empty until an admin fills it
-([blocking addresses](#blocking-addresses)). It only protects the API once
+([blocking addresses](#blocking-addresses)), and a rule that refuses IPv6
+(`ipv6`, below). It only protects the API once
 `API_ACCESS` is `cloudfront-only`: before that, the function URL can be
 called around it. It keeps no sampled requests, which would hold addresses.
 Its metrics are counts only, but AWS adds counts per country and device
 type, which CloudWatch keeps for 15 months; they can't be deleted
 ([data.md](data.md#on-the-server)). It costs $5 a month, $1 a month per
-rule (five, the block list's included), and $0.60 per million requests it
-looks at, blocked ones included: $10 a month plus requests.
+rule (six, the block list's and `ipv6` included), and $0.60 per million
+requests it looks at, blocked ones included: $11 a month plus requests.
+
+`ipv6` refuses every request that arrives over IPv6, right after the block
+list and before the rate limits, so they never count it. The distribution
+has IPv6 off, but CloudFront serves it over IPv6 anyway to a client that
+asks for it by hand (found by testing on 2026-11-22;
+[above](#cloudfront-in-front-of-the-api)). Over IPv6 one host usually has a
+/64 or more, billions of addresses: the per-address rules would hold no
+one, the block list (IPv4) couldn't block it, and its flood would count in
+full towards `lookups-total` and `deletes-total`, refusing those for
+everyone. Real users never arrive over IPv6: the API's name has only IPv4
+addresses, and devices on networks with IPv6 alone reach it over IPv4,
+through their network's NAT64. Its IP set, `<prefix>-ipv6`, holds every
+IPv6 address (`::/1` and `8000::/1`: AWS WAF takes any range but `/0`), and
+Terraform keeps it so.
 
 | Rule | Counts | Limit | Variable |
 |---|---|---|---|
@@ -1500,12 +1514,16 @@ blocked (sometimes longer, AWS says), and a block can outlast it by as long.
 
 **What to watch**, in CloudWatch in us-east-1 (namespace AWS/WAFV2,
 dimension WebACL `<prefix>-api`, and Rule, each rule's metric name:
-`<prefix>-api-blocked`, `<prefix>-api-rate-per-ip`,
+`<prefix>-api-blocked`, `<prefix>-api-ipv6`, `<prefix>-api-rate-per-ip`,
 `<prefix>-api-anonymous-per-ip`, `<prefix>-api-lookups-total`,
 `<prefix>-api-deletes-total`):
 `BlockedRequests` for each rule, and `AllowedRequests` with Rule `ALL`. The
 metrics are free; no alarm watches them yet.
 
+- `ipv6` blocking at all is someone reaching the API over IPv6 on
+  purpose: apps never do. It costs the firewall's fee for each request, and
+  nothing else (no CloudFront fee, function run or rate limit counted), and
+  counts towards the `firewall-blocks` alarm. Nothing to change.
 - `anonymous-per-ip` blocking now and then is one busy address. Blocks
   that recur every day while the tables are far below their caps, and
   `AllowedRequests` looks like ordinary use, may be people behind a shared
@@ -1529,8 +1547,9 @@ limits, so they don't count what it refuses, and answers as they do (429,
 `{"error":"rate_limited"}`): an app caught by a blocked range waits instead
 of asking again at once. A change takes effect within about a minute.
 
-Addresses are IPv4 (the API answers over IPv4 alone), in CIDR form:
-`192.0.2.7/32` for one address, `198.51.100.0/24` for a range. In the
+Addresses are IPv4, in CIDR form: `192.0.2.7/32` for one address,
+`198.51.100.0/24` for a range. The firewall refuses IPv6 outright (`ipv6`,
+right after `blocked`), so the list needs no IPv6 addresses. In the
 console: WAF & Shield, IP sets, region Global (CloudFront), then
 `<prefix>-blocked`, Add IP address. With the CLI, as an admin
 (`update-ip-set` replaces the whole list, so name the addresses already
@@ -1637,7 +1656,9 @@ are only counts, in CloudWatch, a minute at a time:
 The firewall can also list the addresses its per-address rules
 (`rate-per-ip`, `anonymous-per-ip`) are blocking at that moment, up to
 10,000 for each, for the block list (step 1 below). A flood that keeps each
-address under the limits isn't in it. As an admin:
+address under the limits isn't in it. They are all IPv4: IPv6 requests are
+refused outright (`ipv6`) before these rules count them, so the block list
+only ever needs IPv4 addresses. As an admin:
 
 ```shell
 export AWS_PROFILE=<profile>
@@ -1657,7 +1678,8 @@ there has its own step, after the list.
 1. **Block addresses** that stand out
    ([blocking addresses](#blocking-addresses)). It takes effect within
    about a minute, and its rule runs before the rate limits. It helps
-   against a few hosts, not against a flood from many addresses.
+   against a few hosts, not against a flood from many addresses. IPv4
+   only: the firewall already refuses IPv6.
 2. **Lower the firewall's limits**: `FIREWALL_RATE_LIMIT` and
    `FIREWALL_ANONYMOUS_RATE_LIMIT` (per address, in 5 minutes; at least
    100), `FIREWALL_LOOKUPS_TOTAL_LIMIT` (everyone's lookups by ID, in a
@@ -1686,7 +1708,7 @@ there has its own step, after the list.
    `FIREWALL=true` and deploy, as above, and rerun the bootstrap with
    `TF_VAR_firewall=true` for its alarm. It protects the API only once
    `API_ACCESS` is `cloudfront-only` ([the firewall](#the-firewall)). It
-   costs about $10 a month plus $0.60 per million requests; what it blocks
+   costs about $11 a month plus $0.60 per million requests; what it blocks
    then costs that instead of CloudFront's fee and a run of the `api`
    function.
 5. **Last resort: take the API's edge offline** by disabling its
