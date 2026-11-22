@@ -148,7 +148,7 @@ export const ptBR = {
   holdForVoice: 'Segure para gravar uma mensagem de voz. Toque para mudar para vídeo.',
   holdForRound: 'Segure para gravar uma mensagem de vídeo. Toque para mudar para voz.',
   holdToRecord: 'Segure para gravar uma mensagem de voz.',
-  slideToCancel: 'Deslize para cancelar',
+  slideToCancel: 'Deslize: cancelar',
   flipCamera: 'Trocar câmera',
   cameraDenied: 'O acesso à câmera ou ao microfone está desativado. Permita o acesso para o Telegram poder gravar.',
   cameraMissing: 'Nenhuma câmera encontrada.',
