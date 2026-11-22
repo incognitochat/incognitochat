@@ -64,8 +64,9 @@ describe('i18n', () => {
     expect(pickLanguage(undefined, 'fa', 'en-US')).toBe('fa');
     expect(pickLanguage('', 'FA-ir')).toBe('fa');
     expect(pickLanguage('fa_IR')).toBe('fa');
-    expect(pickLanguage('de', 'en-GB', 'fa')).toBe('en');
-    expect(pickLanguage('de', 'ru')).toBe('en');
+    // qaa–qtz are private-use codes: never a real language, so never one the app gains.
+    expect(pickLanguage('qaa', 'en-GB', 'fa')).toBe('en');
+    expect(pickLanguage('qaa', 'qab')).toBe('en');
     expect(pickLanguage()).toBe('en');
   });
 

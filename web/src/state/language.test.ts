@@ -55,7 +55,8 @@ describe('the language setting', () => {
 
   it('reads anything else stored as Same as Telegram', async () => {
     const db = await openDatabase(`language-${crypto.randomUUID()}`);
-    await putMeta(db, 'language', 'de');
+    // A private-use code (qaa–qtz): never a language the app gains.
+    await putMeta(db, 'language', 'qaa');
     expect(await getLanguageChoice(db)).toBe('telegram');
     expect((await loadLanguageSetting(db, ['fa'], page().doc)).language.value).toBe('fa');
   });
