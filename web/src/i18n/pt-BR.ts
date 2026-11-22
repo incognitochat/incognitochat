@@ -217,6 +217,8 @@ export const ptBR = {
   errorNoMailboxes: 'Você iniciou ou respondeu muitos chats novos hoje. Tente de novo amanhã.',
   errorMailboxLimit: 'Você atingiu o limite de 4.000 chats. Bloquear alguém libera um; apagar um chat, não. Veja em Uso.',
   errorTooFast: 'Mensagens demais para esta pessoa agora. Tente de novo em um minuto.',
+  errorDeviceLimit: 'Tentativas demais. Tente de novo em um minuto.',
+  errorDeviceLimitLater: 'Tentativas demais. Tente de novo mais tarde.',
   errorLinkBusy: 'Mensagens demais por este link agora. Tente de novo a partir de {time}.',
   errorDownloadLimit: 'Este arquivo foi baixado vezes demais hoje. Tente de novo a partir de {time}.',
   errorMediaPaused: 'Os anexos estão pausados por enquanto; tente de novo mais tarde.',

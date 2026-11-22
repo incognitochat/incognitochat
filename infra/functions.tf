@@ -516,9 +516,10 @@ resource "aws_lambda_function_url" "api" {
     # body's hash, which Lambda needs once CloudFront signs requests to
     # this URL.
     allow_headers = ["content-type", "x-amz-content-sha256", "x-device-signature", "x-session"]
-    # So the app can read how long to wait after 503 unavailable or
-    # daily_limit, and say when a link_busy or download_limit refusal
-    # ends; a browser hides other headers from a page on another origin.
+    # So the app can read how long to wait after 503 unavailable,
+    # daily_limit or device_limit, and say when a link_busy or
+    # download_limit refusal ends; a browser hides other headers from a
+    # page on another origin.
     expose_headers = ["retry-after"]
     max_age        = 3600
   }

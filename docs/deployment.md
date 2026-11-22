@@ -265,7 +265,7 @@ topics.
 | `firewall-blocks` (us-east-1) | The firewall blocked more than 3,000 requests in 5 minutes (10 a second; `firewall_blocks_alarm`). Only where `firewall` is true: by default in production alone. |
 | `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
 | `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
-| `limit-hits` | The `api` function answered `429` (`rate_limited`, `daily_limit`, `link_busy` or `download_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
+| `limit-hits` | The `api` function answered `429` (`rate_limited`, `daily_limit`, `link_busy`, `download_limit` or `device_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
 | `invalid-tokens`, `init-data-rejected`, `signature-rejected` | More than 50 requests in an hour were refused for that reason (`refusals_alarm`, each alarm on its own): a send or media token that isn't valid (`POST /send`, `POST /media`), Telegram data that doesn't check out (`POST /register`, `POST /accounts/lookup`, `POST /notices`, `POST /notices/language`), or a device signature that doesn't (registrations and every signed request). |
 
 The last six read the `api` function's [request counts](#request-counts).
@@ -1077,19 +1077,19 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 |---|---|
 | `Registrations` | Successful `POST /register`: new accounts, accounts set up again, and registrations retried after a lost answer. |
 | `SendTokenRequests`, `MediaTokenRequests` | Successful `POST /tokens` and `POST /tokens/media`: batches of tokens signed. |
-| `Limited` | Every `429` (`rate_limited`, `daily_limit`, `link_busy`, `download_limit`). |
+| `Limited` | Every `429` (`rate_limited`, `daily_limit`, `link_busy`, `download_limit`, `device_limit`). |
 | `Limited.<route>` | One route's `429`s, e.g. `Limited.post_send`, for each route with a limit (`local.limited_routes`). |
 | `InvalidToken`, `InitDataRejected`, `SignatureRejected` | Answers with that error code. |
 | `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
 | `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 22 metrics is billed as a custom
+Metric filters are free. Each of the 29 metrics is billed as a custom
 metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
 month for the five counted whenever the app is used, next to nothing for
-the others until something goes wrong, and at most $6.60 if all of them got
+the others until something goes wrong, and at most $8.70 if all of them got
 data every hour. The six alarms cost $0.70 a month (the token alarm reads
 two metrics), and the lines, under 1 KB a minute per busy instance, cents.
-So about $2.20 a month per environment, at most about $7.
+So about $2.20 a month per environment, at most about $9.
 
 **When a count alarm fires:**
 
@@ -1106,6 +1106,7 @@ So about $2.20 a month per environment, at most about $7.
            sum(`errors.daily_limit`) as daily_limit,
            sum(`errors.link_busy`) as link_busy,
            sum(`errors.download_limit`) as download_limit,
+           sum(`errors.device_limit`) as device_limit,
            sum(messages) as messages,
            sum(media_bytes) as media_bytes
      by bin(1h)
@@ -1115,8 +1116,9 @@ So about $2.20 a month per environment, at most about $7.
    minute in its `time`, so a few counts can land in the next hour. Or read
    the lines of the minutes that matter (`filter msg = "request counts" and
    (errors.rate_limited > 0 or errors.daily_limit > 0 or errors.link_busy > 0
-   or errors.download_limit > 0)`): `routes` shows where. The four codes are
-   every `429` the `api` answers, which `Limited` adds up.
+   or errors.download_limit > 0 or errors.device_limit > 0)`): `routes` shows
+   where. The five codes are every `429` the `api` answers, which `Limited`
+   adds up.
 2. `registrations`, `token-requests`: real growth (a post that shares the
    bot, say) comes with more of everything, sends and inbox fetches
    included. A campaign of many accounts, each within its own limits, shows
@@ -1129,6 +1131,15 @@ So about $2.20 a month per environment, at most about $7.
 3. `limit-hits`: `Limited.<route>` says which limit. A rise on one route
    without more traffic is someone pushing at that limit, which is holding;
    a rise with more traffic everywhere is real use outgrowing the limits.
+   `device_limit` (on `post_session` or a signed route) is a device past its
+   own limits on logins and signed requests
+   ([protocol.md](protocol.md#registration-and-sessions)). The app waits
+   after one, so a device that hits a limit makes a few a minute, and one
+   that keeps pushing hundreds; the counts can't say which device, by
+   design. The deletion steps' routes aren't in `Limited.<route>` (a point
+   kept 15 months would date a deletion), only in `Limited`. Seen with
+   ordinary use, the limits are constants in
+   `backend/internal/api/devices.go`, changed by a release.
 4. `invalid-tokens`: forged, replayed or out-of-date tokens on `POST /send`
    or `POST /media` (`routes` says which).
 5. `init-data-rejected`, `signature-rejected`: Telegram data or device
@@ -1521,13 +1532,41 @@ normalised (`/%73ession`, `//session` and `/../session` count as
 
   Logins, registrations, account lookups and sends have only the per-address
   rules, so a flood of them spread over many addresses is bounded only by
-  the tables' caps. The cheapest: an account logging its own device in again
-  and again writes a login nonce each time, one write unit on the ephemeral
-  table, and nothing limits that per device; filling production's 200 writes
-  a second that way takes about 120 addresses, each just under 500 in 5
-  minutes. Logins of random devices read half a directory unit each and
-  write nothing; filling its 400 reads a second takes about 480 addresses.
-  A limit on logins per device (backend) would close the first.
+  the tables' caps. Each login and signed request writes its nonce to the
+  ephemeral table, so the `api` function limits each device's, once the
+  signature checks out (`backend/internal/api/devices.go`): logins 20 a
+  minute, 60 a quarter of an hour and 1,000 a UTC day; signed requests 30
+  a minute and 60 a quarter of an hour, and a deletion's or cleanup's steps
+  90 and 900 while there is one; 2,000 a day for all signed requests. They
+  go by the device, so by the account: setting up again (at most 3 times a
+  day per Telegram user) starts a new device with days of its own, about
+  4 days' worth for one person in a day. An allowed one costs two write
+  units (its count and its nonce), or three at a minute's turn on a
+  function instance that hasn't seen that minute yet (its first try
+  guesses wrong); one past a limit costs nothing once the instance knows,
+  which takes it one refused write per window that is used up; a forged
+  one, or a replaced account's, costs nothing. So each account kept at its
+  limits costs 240 to 360 write units a quarter of an hour, plus about 5
+  per function instance it reaches. Filling production's 200 writes a
+  second then takes about 750 Telegram accounts whose requests land on a
+  few instances, and about 210 if they're spread over all 100 that
+  `RESERVE_CONCURRENCY` gives the `api` function (more instances, fewer
+  accounts), where one account and about 30 addresses did before. For a
+  whole day (6,000 to 9,000 write units an account, plus about 120 per
+  instance while it spends its day), about 2,900 accounts on a few
+  instances, and about 800 over 100. An account in the middle of a deletion
+  or cleanup can make about ten times as many while it lasts, still within
+  its day, and accounts spending a minute's limits at once can make a
+  short spike. Logins of random devices read half a
+  directory unit each and write nothing; filling its 400 reads a second
+  takes about 480 addresses. Still open, each for a change of its own:
+  every request with a session reads the directory before any limit (one
+  unit; `GET /usage` two, and four on the ephemeral table), refused ones
+  included, so one account and about 30 addresses can still use up the
+  directory's reads; and spent send and media tokens replayed past what a
+  function instance remembers cost a write unit each, and `POST /media`
+  has only the `rate-per-ip` rule, so about 30 addresses with one or two
+  accounts can still fill the ephemeral table's writes.
 - **`lookups-total`**: everyone's lookups by ID, over one minute so that a
   block ends soon after a flood does. With a random ID, a lookup writes
   nothing and reads half a unit (a link's bundle from the directory; a

@@ -125,8 +125,16 @@ const UPLOAD_DELETE_RETRIES = [1, 2, 4];
 /** The longest wait a step's Retry-After (503 unavailable, 429) is honoured for. */
 const STEP_WAIT_MAX_MS = 30_000;
 
-/** Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without finishing. */
-class DeletionStalled extends Error {}
+/**
+ * Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without
+ * finishing. last: why its last step had to wait, if it did.
+ */
+class DeletionStalled extends Error {
+  constructor(readonly last: unknown) {
+    super('the deletion stalled');
+    this.name = 'DeletionStalled';
+  }
+}
 
 /**
  * How long to wait before the next step after err, or null if err ends the
@@ -141,8 +149,19 @@ function stepWait(err: unknown, pause: number): number | null {
   return null;
 }
 
-/** clock: the device's clock is too far off (more than two days) for the server's to be believed. */
-export type ErrorKind = 'network' | 'expired' | 'rate-limited' | 'clock' | 'generic';
+/**
+ * The server refused this device's login or signed request for now
+ * (deviceLimit): until the minute ends (device-limit, "Try again in a
+ * minute"), or for longer, its quarter of an hour or its day being used up
+ * (device-limit-later, "Try again later").
+ */
+export type DeviceLimit = 'device-limit' | 'device-limit-later';
+
+/**
+ * clock: the device's clock is too far off (more than two days) for the
+ * server's to be believed.
+ */
+export type ErrorKind = 'network' | 'expired' | 'rate-limited' | DeviceLimit | 'clock' | 'generic';
 
 /**
  * Why the server no longer takes this device: it refused the login (the
@@ -170,6 +189,7 @@ export type HomeNotice =
   | 'already-member'
   | 'own-invitation'
   | 'rate-limited'
+  | DeviceLimit
   | 'new-signing-key'
   | 'network'
   | 'generic';
@@ -182,7 +202,7 @@ function withNewKey(notice: HomeNotice | null, newKey: boolean): HomeNotice | nu
   return newKey && (notice === null || ROUTINE_NOTICES.has(notice)) ? 'new-signing-key' : notice;
 }
 
-export type InvitationsNotice = 'created' | 'none-left' | 'network' | 'generic';
+export type InvitationsNotice = 'created' | 'none-left' | DeviceLimit | 'network' | 'generic';
 
 /** What the Data and storage screen shows: attachments on this device, in bytes. */
 interface StorageUsage {
@@ -193,12 +213,15 @@ interface StorageUsage {
   app: { usage: number; quota: number } | null;
 }
 
-export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | 'network' | 'generic';
+export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not-found' | 'bad-link' | DeviceLimit | 'network' | 'generic';
 
 /**
  * Why a message couldn't be sent. mailbox-limit: the account has as many
  * chats as it may (4,000), so no new one can be started or answered.
  * rate-limited: too many messages to this mailbox this minute.
+ * device-limit, device-limit-later: the server refused this device's login
+ * for now (deviceLimit), which a send that needed one (to fetch tokens or a
+ * mailbox) passes on.
  * media-paused: the operator has paused attachments for now (also said
  * when a tapped download is refused for it). outdated: the server no longer
  * holds the issuer key this build names (it was replaced), so the app must
@@ -209,6 +232,7 @@ export type SendError =
   | 'no-mailboxes'
   | 'mailbox-limit'
   | 'rate-limited'
+  | DeviceLimit
   | 'media-paused'
   | 'outdated'
   | 'network'
@@ -232,6 +256,20 @@ export interface LimitError {
 /** The LimitError of a refusal, until when the server said. */
 function limitError(kind: LimitError['kind'], err: ApiError): LimitError {
   return { kind, until: err.retryAfter === undefined ? null : Date.now() + err.retryAfter * 1000 };
+}
+
+/**
+ * Whether the server refused this device's login or signed request for now
+ * (429 device_limit): too many from this device in a minute, a quarter of
+ * an hour or the day, whatever the request was. A request that had to log
+ * in first passes the login's refusal on as its own, so this is never the
+ * route's own limit (a day's tokens or mailboxes, say). Which DeviceLimit
+ * goes by how long the server asked to wait (Retry-After): a minute or
+ * less, or longer (or unsaid).
+ */
+function deviceLimit(err: unknown): DeviceLimit | null {
+  if (!(err instanceof ApiError && err.code === 'device_limit')) return null;
+  return err.retryAfter !== undefined && err.retryAfter <= 60 ? 'device-limit' : 'device-limit-later';
 }
 
 /** Whether an error is one a tapped download shows, which the next tap's outcome replaces. */
@@ -341,7 +379,7 @@ export type Screen =
   /** chat: the conversation already written through this link. */
   | { kind: 'link'; status: 'existing'; canWrite: false; busy: boolean; error: null; chat: string }
   /** An invitation link: joins only on a tap. error: Join failed, and can be tried again. */
-  | { kind: 'invitation'; code: string; busy: boolean; error: 'network' | 'generic' | null }
+  | { kind: 'invitation'; code: string; busy: boolean; error: 'network' | DeviceLimit | 'generic' | null }
   | {
       kind: 'conversation';
       id: string;
@@ -370,7 +408,8 @@ export type Screen =
    * app asks again (Try again, and at every launch). offline: it couldn't
    * be asked just now.
    */
-  | { kind: 'signed-out'; reason: SignedOutReason; busy: boolean; offline: boolean }
+  /** offline: the server couldn't be asked; limited, if set: it was, and refused this device's login for now. */
+  | { kind: 'signed-out'; reason: SignedOutReason; busy: boolean; offline: boolean; limited?: DeviceLimit }
   /** Setting up again from there, which deletes everything on this device: a typed confirmation first. */
   | { kind: 'confirm-reset'; reason: SignedOutReason }
   | { kind: 'error'; error: ErrorKind };
@@ -613,6 +652,8 @@ export function createApp(deps: Deps) {
     // when the app closed.
     const deleting = await deletionConfirmed();
     let offline = false;
+    // The login was refused for now: said on home, as well as offline.
+    let notice: HomeNotice | null = null;
     try {
       session!.use(await logIn(deps.db, deps.api!, clock));
       signedOut = null;
@@ -642,7 +683,7 @@ export function createApp(deps: Deps) {
       // Couldn't ask, with a deletion the user confirmed here: its own
       // screen (Try again, the chats, deleting here only), whatever the
       // server said before.
-      if (deleting) return showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
+      if (deleting) return showDeletionError(err instanceof NetworkError ? 'network' : (deviceLimit(err) ?? 'generic'));
       // Couldn't ask: as the server last said, until it can be asked again.
       const last =
         signedOut ??
@@ -655,9 +696,10 @@ export function createApp(deps: Deps) {
                 ? 'deleting'
                 : 'refused'
             : null);
-      if (last) return showSignedOut(last, true);
+      if (last) return showSignedOut(last, true, deviceLimit(err));
       // Offline or the server is down: the device still works on what it has.
       offline = true;
+      notice = deviceLimit(err);
     }
     // Carried on before anything else is asked: the server takes no other
     // request from an account being deleted.
@@ -666,7 +708,7 @@ export function createApp(deps: Deps) {
     // The first sync found the server no longer takes this device (its
     // account being deleted, say): that screen stays.
     if (signedOut) return;
-    return continueLaunch(offline);
+    return continueLaunch(offline, notice);
   }
 
   /**
@@ -684,13 +726,17 @@ export function createApp(deps: Deps) {
     return false;
   }
 
-  /** The server no longer takes this device: say so, and keep its chats readable. */
-  function showSignedOut(reason: SignedOutReason, offline = false): void {
+  /**
+   * The server no longer takes this device: say so, and keep its chats
+   * readable. offline: it couldn't be asked now; limited: it refused the
+   * login for now.
+   */
+  function showSignedOut(reason: SignedOutReason, offline = false, limited: DeviceLimit | null = null): void {
     signedOut = reason;
     readOnly.value = true;
     stopMessaging();
     backButton(false);
-    screen.value = { kind: 'signed-out', reason, busy: false, offline };
+    screen.value = { kind: 'signed-out', reason, busy: false, offline, ...(limited ? { limited } : {}) };
   }
 
   /**
@@ -1202,7 +1248,7 @@ export function createApp(deps: Deps) {
       if (!forBoth) await messaging.remove(id);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ tab: 'chats', notice: err instanceof NetworkError ? 'network' : 'generic' });
+      return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     deps.broadcast({ type: 'data-changed' });
     return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
@@ -1561,7 +1607,9 @@ export function createApp(deps: Deps) {
       info = await session!.call('GET', '/usage', undefined, checkUsage);
     } catch (err) {
       if (handleGone(err)) return;
-      if (currentScreen().kind === 'usage') screen.value = { kind: 'usage', usage: null, error: err instanceof NetworkError ? 'network' : 'generic' };
+      if (currentScreen().kind === 'usage') {
+        screen.value = { kind: 'usage', usage: null, error: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') };
+      }
       return;
     }
     // What the server will still sign today, for the low-balance notice too.
@@ -1638,7 +1686,7 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       if (current.kind === 'conversation') return showErrorIn(current.id, sendError(err));
       // Only if the user is still on the Blocked list.
-      if (currentScreen().kind === 'blocked') return showBlocked(err instanceof NetworkError ? 'network' : 'generic');
+      if (currentScreen().kind === 'blocked') return showBlocked(deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic'));
       return;
     }
     deps.broadcast({ type: 'data-changed' });
@@ -1663,6 +1711,8 @@ export function createApp(deps: Deps) {
     if (err instanceof MailboxLimit) return 'mailbox-limit';
     if (err instanceof ApiError && err.code === 'link_busy') return limitError('link-busy', err);
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
+    const limited = deviceLimit(err);
+    if (limited) return limited;
     if (isPaused(err)) return 'media-paused';
     // The server no longer holds the issuer key this build names (it was
     // replaced): a fresh copy of the app names the new one.
@@ -1749,7 +1799,7 @@ export function createApp(deps: Deps) {
    * setup) pointed. Only to a screen: a launch can come from anyone's link,
    * so nothing is opened, sent or redeemed until the user taps.
    */
-  async function continueLaunch(offline: boolean): Promise<void> {
+  async function continueLaunch(offline: boolean, notice: HomeNotice | null = null): Promise<void> {
     const param = launchParam ?? (await takePendingLink(deps.db)) ?? '';
     launchParam = null;
     const ref = parsePayload(param);
@@ -1761,7 +1811,7 @@ export function createApp(deps: Deps) {
       screen.value = { kind: 'invitation', code, busy: false, error: null };
       return;
     }
-    return showHome({ offline });
+    return showHome({ offline, notice });
   }
 
   /**
@@ -1844,6 +1894,8 @@ export function createApp(deps: Deps) {
     const prepareUntil = Date.now() + PREPARE_MS;
     let steps = 0;
     let finished = false;
+    // Why the last step had to wait, if it did: said if the run stalls.
+    let waited: unknown = null;
     try {
       // Also when carrying on at a launch, which starts no messaging.
       await createEngine();
@@ -1886,7 +1938,7 @@ export function createApp(deps: Deps) {
       // change interrupted the last step, or another step was running. A
       // pause between steps leaves the database's capacity to everyone else.
       while (await still()) {
-        if (steps++ >= STEPS_PER_RUN || Date.now() > until) throw new DeletionStalled();
+        if (steps++ >= STEPS_PER_RUN || Date.now() > until) throw new DeletionStalled(waited);
         // Shown again each step: nothing else is, until it's done.
         screen.value = { kind: 'deleting', error: null };
         try {
@@ -1896,6 +1948,7 @@ export function createApp(deps: Deps) {
         } catch (err) {
           const wait = stepWait(err, pause);
           if (wait === null) throw err;
+          waited = err;
           await new Promise((resolve) => setTimeout(resolve, wait));
         }
       }
@@ -1914,7 +1967,9 @@ export function createApp(deps: Deps) {
       else if (ours) {
         deletionRunning = false;
         if (handleGone(err)) return;
-        showDeletionError(err instanceof NetworkError ? 'network' : 'generic');
+        // Stalled while the server refused this device's steps for now: that.
+        const limited = deviceLimit(err instanceof DeletionStalled ? err.last : err);
+        showDeletionError(err instanceof NetworkError ? 'network' : (limited ?? 'generic'));
         return;
       }
     }
@@ -2193,11 +2248,10 @@ export function createApp(deps: Deps) {
       else if (err instanceof ApiError && err.code === 'already_member') notice = 'already-member';
       else if (err instanceof ApiError && err.code === 'own_invitation') notice = 'own-invitation';
       else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     // From an invitation link, what can be tried again keeps its Join button.
-    if (current.kind === 'invitation' && (notice === 'network' || notice === 'generic')) {
+    if (current.kind === 'invitation' && (notice === 'network' || notice === 'device-limit' || notice === 'device-limit-later' || notice === 'generic')) {
       screen.value = { ...current, busy: false, error: notice };
       return;
     }
@@ -2211,7 +2265,8 @@ export function createApp(deps: Deps) {
       info = await session!.call('GET', '/invitations', undefined, checkInvitations);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ notice: err instanceof NetworkError ? 'network' : 'generic' });
+      // A login refused for now refuses this reload too (the session waits).
+      return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     const codes = info.codes.map((c) => ({ ...c, url: invitationUrl(config!.botUsername, config!.appName, c.code) }));
     backButton(true);
@@ -2228,7 +2283,9 @@ export function createApp(deps: Deps) {
     } catch (err) {
       if (handleGone(err)) return;
       const notice: InvitationsNotice =
-        err instanceof ApiError && err.code === 'no_invitations_left' ? 'none-left' : err instanceof NetworkError ? 'network' : 'generic';
+        err instanceof ApiError && err.code === 'no_invitations_left'
+          ? 'none-left'
+          : (deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic'));
       return openInvitations(notice);
     }
   }
@@ -2239,7 +2296,8 @@ export function createApp(deps: Deps) {
       levels = await session!.call('GET', '/admin/levels', undefined, checkLevels);
     } catch (err) {
       if (handleGone(err)) return;
-      return showHome({ notice: err instanceof NetworkError ? 'network' : 'generic' });
+      // A login refused for now refuses this reload too (the session waits).
+      return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     // The rest of the screen still works if these can't be read.
     let switches: Switches | null = null;
@@ -2273,8 +2331,7 @@ export function createApp(deps: Deps) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'not_member') notice = 'not-member';
       else if (err instanceof ApiError && err.code === 'not_found') notice = 'not-found';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     return openAdmin(notice);
   }
@@ -2307,8 +2364,7 @@ export function createApp(deps: Deps) {
       if (err instanceof ApiError && err.code === 'invitation_required') notice = 'invitation';
       else if (err instanceof ApiError && err.code === 'link_limit') notice = 'limit';
       else if (err instanceof ApiError && err.code === 'rate_limited') notice = 'rate-limited';
-      else if (err instanceof NetworkError) notice = 'network';
-      else notice = 'generic';
+      else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
     deps.broadcast({ type: 'data-changed' });
     return showHome({ notice, tab: 'links' });

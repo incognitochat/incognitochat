@@ -168,6 +168,8 @@ describe('logins that fail for want of the server', () => {
   it.each([
     ['the firewall turning it away', () => new ApiError(429, 'rate_limited')],
     ['the server failing', () => new ApiError(500, 'internal')],
+    // Overloaded: its Retry-After doesn't shorten the backoff.
+    ['the server overloaded', () => new ApiError(503, 'unavailable', undefined, undefined, 2)],
     ['no answer', () => new NetworkError('request failed')],
   ])('waits, longer each time, after %s', async (_, error) => {
     let down = true;
@@ -205,6 +207,58 @@ describe('logins that fail for want of the server', () => {
     clockMs += LOGIN_RETRY_MAX_MS;
     await get();
     expect(f.tries()).toBe(14);
+  });
+
+  it("waits out this device's limit as long as the server says, no less and not much more", async () => {
+    let refusal: ApiError | null = new ApiError(429, 'device_limit', undefined, undefined, 30);
+    const f = failing(() => refusal);
+    const db = await registeredDb(f.setUpWith);
+    let clockMs = 1_000_000;
+    let jitter = 0;
+    const session = createSession(db, f.api, deviceClock(), () => clockMs, () => jitter);
+    const get = () => session.call('GET', '/account', undefined, checkObject);
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(1);
+    // Not before the 30 seconds; at once after them, and the same again
+    // (not twice as long) after a second refusal.
+    clockMs += 30_000 - 10;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(1);
+    clockMs += 10;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(2);
+    clockMs += 30_000;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(3);
+    // Up to a second more, to spread copies of the app.
+    jitter = 0.999_999;
+    clockMs += 30_000;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(4);
+    clockMs += 30_999;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(4);
+    jitter = 0;
+    // Never sooner than half LOGIN_RETRY_MS, whatever the server says.
+    refusal = new ApiError(429, 'device_limit', undefined, undefined, 1);
+    clockMs += 2;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(5);
+    clockMs += LOGIN_RETRY_MS / 2 - 10;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(5);
+    clockMs += 10;
+    // And never longer than LOGIN_RETRY_MAX_MS: past it, it asks again.
+    refusal = new ApiError(429, 'device_limit', undefined, undefined, 900);
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(6);
+    clockMs += LOGIN_RETRY_MAX_MS - 10;
+    await expect(get()).rejects.toMatchObject({ code: 'device_limit' });
+    expect(f.tries()).toBe(6);
+    refusal = null;
+    clockMs += 10;
+    await get();
+    expect(f.tries()).toBe(7);
   });
 
   it('spreads the waits of apps behind one address', async () => {

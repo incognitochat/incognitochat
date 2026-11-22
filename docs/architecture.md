@@ -438,7 +438,8 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - Nothing in the ephemeral table can be matched with the directory: rows
   about a mailbox, link or account are named by a keyed hash, under a key
   only the functions that use them hold (rate counters: `api`, from the
-  Telegram-ID pepper, a new name every window; socket records: `api` and
+  Telegram-ID pepper, a new name every window, and each device's logins and
+  signed requests in one record per UTC day; socket records: `api` and
   `ws`, derived from the session key; quiet periods: `notify`, derived from
   the chat key).
 - Point-in-time recovery stays off, so deleted data can't be restored.
@@ -451,7 +452,10 @@ The panel under the message box has emoji and stickers, as in Telegram.
   links and attachments). Lookups of links and attachments by ID, which
   anyone can make with random IDs, are also limited for everyone together
   (12,000 a minute, at most half what a table can serve); logins and sends
-  never are, so a flood of lookups can't stop them. The API's name has
+  never are, so a flood of lookups can't stop them. Each login and signed
+  request writes a nonce, so the `api` function limits them per device,
+  once the signature checks out (`429 device_limit`,
+  [protocol.md](protocol.md#registration-and-sessions)). The API's name has
   IPv4 addresses only, since the firewall would count each IPv6 address on
   its own, and the firewall refuses requests that reach an edge over IPv6
   anyway ([deployment.md](deployment.md#the-firewall)). Nothing caps the

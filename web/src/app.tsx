@@ -29,28 +29,18 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
+import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   confirmationMatches,
   messageKey,
-  type AdminNotice,
   type App as AppState,
   type ErrorKind,
-  type HomeNotice,
-  type InvitationsNotice,
   type LinkStatus,
   type LinkView,
   type Screen,
   type SendAs,
   type SendError,
 } from './state/app';
-
-const ERROR_TEXT: Record<ErrorKind, Key> = {
-  network: 'errorNetwork',
-  expired: 'errorExpired',
-  'rate-limited': 'errorRateLimited',
-  clock: 'errorClock',
-  generic: 'errorGeneric',
-};
 
 const LINK_TEXT: Record<LinkStatus, Key> = {
   checking: 'linkChecking',
@@ -60,45 +50,6 @@ const LINK_TEXT: Record<LinkStatus, Key> = {
   'not-found': 'linkNotFound',
   mismatch: 'linkMismatch',
   network: 'errorNetwork',
-};
-
-const NOTICE_TEXT: Record<HomeNotice, Key> = {
-  blocked: 'noticeBlocked',
-  deleted: 'noticeDeleted',
-  unblocked: 'noticeUnblocked',
-  replaced: 'noticeReplaced',
-  created: 'noticeCreated',
-  revoked: 'noticeRevoked',
-  limit: 'noticeLimit',
-  invitation: 'needInvitation',
-  joined: 'noticeJoined',
-  'invalid-invitation': 'noticeInvalidInvitation',
-  'already-member': 'noticeAlreadyMember',
-  'own-invitation': 'noticeOwnInvitation',
-  'rate-limited': 'noticeRateLimited',
-  'new-signing-key': 'noticeNewSigningKey',
-  network: 'errorNetwork',
-  generic: 'errorGeneric',
-};
-
-const INVITATIONS_NOTICE_TEXT: Record<InvitationsNotice, Key> = {
-  created: 'noticeInvitationCreated',
-  'none-left': 'noticeNoneLeft',
-  network: 'errorNetwork',
-  generic: 'errorGeneric',
-};
-
-const SEND_ERROR_TEXT: Record<Extract<SendError, string>, Key> = {
-  'no-tokens': 'errorNoTokens',
-  'no-mailboxes': 'errorNoMailboxes',
-  'mailbox-limit': 'errorMailboxLimit',
-  'rate-limited': 'errorTooFast',
-  'media-paused': 'errorMediaPaused',
-  outdated: 'errorOutdated',
-  network: 'errorNetwork',
-  'too-big': 'errorTooBig',
-  unreadable: 'errorUnreadable',
-  generic: 'errorGeneric',
 };
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -116,16 +67,6 @@ function sendErrorText(language: Language, error: SendError): string {
   return t(language, busy ? 'errorLinkBusy' : 'errorDownloadLimit', { time: clockTime(language, at) });
 }
 
-const ADMIN_NOTICE_TEXT: Record<AdminNotice, Key> = {
-  saved: 'noticeSaved',
-  granted: 'noticeGranted',
-  switched: 'noticeSwitched',
-  'not-member': 'noticeNotMember',
-  'not-found': 'noticeLinkUnknown',
-  'bad-link': 'noticeLinkUnknown',
-  network: 'errorNetwork',
-  generic: 'errorGeneric',
-};
 
 /** What open overlays tell the back button (AppState.onBack). */
 const BackStack = createContext<(close: () => void) => () => void>(() => () => {});
@@ -311,7 +252,7 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
             {tr(replaced ? 'replacedBody' : deleting ? 'deletingElsewhereBody' : expired ? 'expiredBody' : 'signedOutBody')}
           </p>
           <p>{tr('signedOutKept')}</p>
-          {screen.offline && <p class="notice">{tr('offline')}</p>}
+          {screen.offline && <p class="notice">{tr(screen.limited ? ERROR_TEXT[screen.limited] : 'offline')}</p>}
           <Button disabled={screen.busy} onClick={app.recheck}>
             {tr('tryAgain')}
           </Button>
@@ -372,7 +313,8 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
       </button>
     </div>
   ) : (
-    offline && <p class="notice">{tr('offline')}</p>
+    // Refused for now, the server was reached: its notice says so, alone.
+    offline && notice !== 'device-limit' && notice !== 'device-limit-later' && <p class="notice">{tr('offline')}</p>
   );
   const tabs = (
     <div class="tabs" role="tablist">

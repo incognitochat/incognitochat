@@ -18,7 +18,9 @@ const JUST_SET_UP_MS = 10_000;
  * LOGIN_RETRY_MAX_MS; each wait is between half of that and all of it, so
  * copies of the app behind one address don't try together. Every sync and
  * socket would otherwise log in again at once, and the apps behind an
- * address the firewall has turned away would keep it busy themselves.
+ * address the firewall has turned away would keep it busy themselves. A
+ * refusal that says when it ends (429 with Retry-After: this device's
+ * limit) is waited out until then instead (loginWait).
  */
 export const LOGIN_RETRY_MS = 10_000;
 export const LOGIN_RETRY_MAX_MS = 120_000;
@@ -80,12 +82,29 @@ export function createSession(
     } catch (err) {
       if (waitAfter(err)) {
         failures++;
-        const wait = Math.min(LOGIN_RETRY_MS * 2 ** (failures - 1), LOGIN_RETRY_MAX_MS);
-        retryAt = now() + wait * (0.5 + random() / 2);
+        retryAt = now() + loginWait(err);
         failed = err;
       }
       throw err;
     }
+  }
+
+  /**
+   * How long to wait after a failed login (ms). Refused until a set time (a
+   * 429 that says when, Retry-After: this device's limit), until then and
+   * up to a second more, so the next try is neither refused again nor later
+   * than it needs to be; but at least half LOGIN_RETRY_MS, so no answer
+   * makes the app ask again and again, and at most LOGIN_RETRY_MAX_MS, so
+   * none keeps it from asking for long (a try before the end is refused at
+   * no cost). Otherwise the server is in trouble or out of reach: the
+   * backoff above, which a 503's Retry-After doesn't shorten.
+   */
+  function loginWait(err: unknown): number {
+    if (err instanceof ApiError && err.status === 429 && err.retryAfter !== undefined) {
+      return Math.min(Math.max(err.retryAfter * 1000, LOGIN_RETRY_MS / 2), LOGIN_RETRY_MAX_MS) + random() * 1000;
+    }
+    const wait = Math.min(LOGIN_RETRY_MS * 2 ** (failures - 1), LOGIN_RETRY_MAX_MS);
+    return wait * (0.5 + random() / 2);
   }
 
   /** A current session, of expected's account if set (otherwise AccountChanged): its token and the account it is for. */

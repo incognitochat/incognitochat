@@ -27,6 +27,9 @@ type sessionRequest struct {
 // device of a replaced account learns so only after its signature checks out.
 // Whatever can be refused without the device's key (a timestamp out of range,
 // a malformed nonce or signature) is refused before the directory is read.
+// Nothing is written before the signature checks out, and nothing at all
+// for a replaced account; then the device's limits are counted (429
+// device_limit past them), and only then is the nonce written.
 func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /session"
 	var in sessionRequest
@@ -66,15 +69,25 @@ func (s *Server) session(ctx context.Context, req httpapi.Request) httpapi.Respo
 		return s.internal(route, err)
 	}
 
-	err = session.Check(ctx, login, key, s.Nonces, now)
+	// Once the signature checks out, and before the nonce is written: a
+	// replaced account's device is told so, writing nothing; any other
+	// login counts against the device's limits (deviceLimit), a replayed
+	// one too.
+	err = session.Check(ctx, login, key, s.Nonces, now, func() error {
+		if device.Replaced {
+			return refusal{httpapi.Error(http.StatusGone, "account_replaced")}
+		}
+		return s.deviceLimit(ctx, route, loginBudget, in.Account, in.Device, now)
+	})
+	var stopped refusal
+	if errors.As(err, &stopped) {
+		return stopped.resp
+	}
 	if errors.Is(err, session.ErrLogin) {
 		return httpapi.Error(http.StatusUnauthorized, "login_refused")
 	}
 	if err != nil {
 		return s.internal(route, err)
-	}
-	if device.Replaced {
-		return httpapi.Error(http.StatusGone, "account_replaced")
 	}
 	s.recordUse(ctx, route, in.Account, device, now)
 	return s.issue(route, in.Account, in.Device, now)

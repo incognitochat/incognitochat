@@ -12,7 +12,7 @@ locals {
   counts_namespace = "${local.prefix}/api"
 
   # Filter => the metric it adds to, and the count it adds, as a path in
-  # the line. Four filters add to Limited, one for each code a 429 answer
+  # the line. Five filters add to Limited, one for each code a 429 answer
   # has.
   count_metrics = {
     registrations      = { metric = "Registrations", count = "routes.post_register_200", unit = "Count" }
@@ -22,6 +22,7 @@ locals {
     daily-limit        = { metric = "Limited", count = "errors.daily_limit", unit = "Count" }
     link-busy          = { metric = "Limited", count = "errors.link_busy", unit = "Count" }
     download-limit     = { metric = "Limited", count = "errors.download_limit", unit = "Count" }
+    device-limit       = { metric = "Limited", count = "errors.device_limit", unit = "Count" }
     invalid-token      = { metric = "InvalidToken", count = "errors.invalid_token", unit = "Count" }
     init-data-rejected = { metric = "InitDataRejected", count = "errors.init_data_rejected", unit = "Count" }
     signature-rejected = { metric = "SignatureRejected", count = "errors.signature_rejected", unit = "Count" }
@@ -31,15 +32,22 @@ locals {
     media-bytes = { metric = "MediaBytes", count = "media_bytes", unit = "Bytes" }
   }
 
-  # The routes that answer 429 (rate_limited, daily_limit, link_busy or
-  # download_limit), as the line names them: each gets Limited.<route>, to
-  # tell which limit is being hit. A route missing here still counts in
-  # Limited, and shows in the line.
+  # The routes that answer 429 (rate_limited, daily_limit, link_busy,
+  # download_limit or device_limit), as the line names them: each gets
+  # Limited.<route>, to tell which limit is being hit. A route missing here
+  # still counts in Limited, and shows in the line. Logins and signed
+  # requests answer device_limit; not the steps of deleting an account or
+  # what is left of one (delete_account, post_account_cleanup), whose
+  # metric, kept 15 months, would date a deletion on a quiet deployment.
   limited_routes = [
     "post_register",
+    "post_session",
     "post_accounts_lookup",
+    "post_invitations",
     "post_invitations_redeem",
     "post_links",
+    "put_links_id_keys",
+    "delete_links_id",
     "post_mailboxes",
     "post_mailboxes_check",
     "post_notices",
@@ -49,6 +57,9 @@ locals {
     "post_tokens_media",
     "get_inbox",
     "get_media_id",
+    "put_admin_levels",
+    "post_admin_grant",
+    "put_admin_switches",
   ]
 }
 

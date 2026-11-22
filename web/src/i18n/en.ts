@@ -209,6 +209,8 @@ export const en = {
   errorNoMailboxes: "You've started or answered a lot of new chats today. Try again tomorrow.",
   errorMailboxLimit: "You've reached the limit of 4,000 chats. Blocking someone frees one; deleting a chat doesn't. See Usage.",
   errorTooFast: 'Too many messages to this person right now. Try again in a minute.',
+  errorDeviceLimit: 'Too many tries. Try again in a minute.',
+  errorDeviceLimitLater: 'Too many tries. Try again later.',
   errorLinkBusy: 'Too many messages through this link right now. Try again at {time}.',
   errorDownloadLimit: 'This file has been downloaded too many times today. Try again at {time}.',
   errorMediaPaused: 'Attachments are paused for now; try again later.',
