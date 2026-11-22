@@ -184,6 +184,7 @@ func stringLit(e ast.Expr) (string, bool) {
 // level: every one a filter reads must be one the counter logs, and every
 // one the counter logs must have a filter, or the published statistics
 // would read nothing.
+// A new public count needs a call below, so the line logs it.
 func TestMetricFiltersReadThePublicCounts(t *testing.T) {
 	src, err := os.ReadFile("../../../infra/metrics.tf")
 	if err != nil {

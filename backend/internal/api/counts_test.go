@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/ephemeral"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
@@ -137,5 +140,115 @@ func TestCountsUploads(t *testing.T) {
 	}
 	if len(c.uploaded) != 3 {
 		t.Fatalf("uploaded %v, want 3 uploads", c.uploaded)
+	}
+}
+
+// Inbox, Uploads and Media that fail where a send or an upload is refused
+// after its tokens are spent.
+type failingDeliver struct{ Inbox }
+
+func (failingDeliver) Deliver(context.Context, string, []string, string, []byte, time.Time) error {
+	return errors.New("deliver failed")
+}
+
+type failingPut struct{ Uploads }
+
+func (failingPut) Put(context.Context, string, ephemeral.Upload, time.Time) error {
+	return errors.New("put failed")
+}
+
+type failingUploadURL struct{ Media }
+
+func (failingUploadURL) UploadURL(context.Context, string, int64) (string, error) {
+	return "", errors.New("presign failed")
+}
+
+// Sends refused after their tokens are spent aren't counted: at the
+// mailbox's cap, at the link's, or when delivery fails.
+func TestCountsNoMessageRefusedLate(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	c := &memCounts{}
+	h.server.Counts = c
+	owner := h.account(t, userID)
+	l := newLinkKeys(t)
+	_, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true)
+	intro := out["mailbox"].(string)
+	send := func(mb string) (int, map[string]any) {
+		t.Helper()
+		return h.post(t, "/send", map[string]any{"mailbox": mb, "envelope": clientEnvelope(t), "token": mintToken(t, h.now)})
+	}
+
+	// The mailbox's cap.
+	other := ids.New()
+	for range SendsPerMailboxPerMinute {
+		if status, out := send(other); status != http.StatusOK {
+			t.Fatalf("send: %d %v", status, out)
+		}
+	}
+	status, out := send(other)
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if len(c.sent) != SendsPerMailboxPerMinute {
+		t.Fatalf("counted %d, want %d", len(c.sent), SendsPerMailboxPerMinute)
+	}
+
+	// The link's cap, spread over minutes under the mailbox's.
+	for i := range IntroSendsPerHour {
+		if i%SendsPerMailboxPerMinute == 0 {
+			h.now = h.now.Add(time.Minute)
+		}
+		if status, out := send(intro); status != http.StatusOK {
+			t.Fatalf("send %d: %d %v", i, status, out)
+		}
+	}
+	h.now = h.now.Add(time.Minute)
+	status, out = send(intro)
+	wantError(t, status, out, http.StatusTooManyRequests, "link_busy")
+	if want := SendsPerMailboxPerMinute + IntroSendsPerHour; len(c.sent) != want {
+		t.Fatalf("counted %d, want %d", len(c.sent), want)
+	}
+
+	// Delivery failing.
+	h.server.Inbox = failingDeliver{h.server.Inbox}
+	if status, _ := send(ids.New()); status != http.StatusInternalServerError {
+		t.Fatalf("a failed delivery answered %d", status)
+	}
+	if want := SendsPerMailboxPerMinute + IntroSendsPerHour; len(c.sent) != want {
+		t.Fatalf("counted %d after a failed delivery, want %d", len(c.sent), want)
+	}
+}
+
+// Uploads refused after their tokens are checked aren't counted: while
+// uploads are paused, or when recording the upload or presigning its link
+// fails.
+func TestCountsNoUploadRefusedLate(t *testing.T) {
+	h, store, uploads, switches := mediaHarness(t)
+	c := &memCounts{}
+	h.server.Counts = c
+
+	switches.set(directory.Switches{UploadsPaused: true})
+	status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now))
+	wantError(t, status, out, http.StatusServiceUnavailable, "uploads_paused")
+	switches.set(directory.Switches{})
+	h.now = h.now.Add(SwitchesTTL)
+
+	h.server.Uploads = failingPut{uploads}
+	if status, _ := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusInternalServerError {
+		t.Fatalf("a failed record answered %d", status)
+	}
+	h.server.Uploads, h.server.Media = uploads, failingUploadURL{store}
+	if status, _ := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusInternalServerError {
+		t.Fatalf("a failed presign answered %d", status)
+	}
+	if len(c.uploaded) != 0 {
+		t.Fatalf("counted %v for refused uploads", c.uploaded)
+	}
+	// And the same upload, once nothing fails, is.
+	h.server.Media = store
+	if status, out := h.pay(t, 16<<10, mintMediaToken(t, h.now)); status != http.StatusCreated {
+		t.Fatalf("upload: %d %v", status, out)
+	}
+	if len(c.uploaded) != 1 || c.uploaded[0] != 16<<10 {
+		t.Fatalf("counted %v", c.uploaded)
 	}
 }

@@ -186,4 +186,14 @@ func TestPublicCountsAreKept(t *testing.T) {
 	if got[KeyMessages] != float64(2) || got[KeyMediaBytes] != float64(1<<20) {
 		t.Fatalf("logged %v", got)
 	}
+	// Anything but an integer is dropped.
+	buf.Reset()
+	New(&buf, "api").Warn("request counts", slog.String(KeyMessages, "account-123"), slog.Float64(KeyMediaBytes, 1.5))
+	got = lines(t, &buf)[0]
+	if _, ok := got[KeyMessages]; ok {
+		t.Fatalf("a string was logged as messages: %v", got)
+	}
+	if _, ok := got[KeyMediaBytes]; ok {
+		t.Fatalf("a float was logged as media_bytes: %v", got)
+	}
 }

@@ -65,13 +65,19 @@ func main() {
 	server.Log = log
 	router := httpapi.NewRouter()
 	server.Routes(router)
-	// Answers are counted by route, status and error code, and the counts
-	// logged once a minute (internal/tally), for the alarms on limits,
-	// refusals, registrations and tokens. Slow requests are logged, with
-	// only their route and duration, to size the function from data.
+	counts := count(log, server, router)
+	// SIGTERM, when the instance shuts down, logs the last minute's counts.
+	lambda.StartWithOptions(invocation(log, router, server.ExpireAccounts), lambda.WithEnableSIGTERM(counts.Flush))
+}
+
+// count wires the request counts in (internal/tally). Answers are counted
+// by route, status and error code, and the counts logged once a minute, for
+// the alarms on limits, refusals, registrations and tokens; with them, the
+// messages sent and the media uploaded (server.Counts), for the public
+// statistics. Slow requests are logged, with only their route and duration,
+// to size the function from data.
+func count(log *slog.Logger, server *api.Server, router *httpapi.Router) *tally.Counter {
 	counts := tally.New(log)
-	// It also counts the messages sent and the media uploaded, for the
-	// public statistics.
 	server.Counts = counts
 	router.Observe = func(route string, status int, code string, elapsed time.Duration) {
 		counts.Add(time.Now(), route, status, code)
@@ -82,8 +88,7 @@ func main() {
 				slog.Int64(logx.KeyDuration, elapsed.Milliseconds()))
 		}
 	}
-	// SIGTERM, when the instance shuts down, logs the last minute's counts.
-	lambda.StartWithOptions(invocation(log, router, server.ExpireAccounts), lambda.WithEnableSIGTERM(counts.Flush))
+	return counts
 }
 
 // event is what the function is invoked with: a request through its URL,
