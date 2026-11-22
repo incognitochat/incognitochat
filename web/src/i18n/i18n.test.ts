@@ -175,6 +175,11 @@ describe('every language', () => {
     for (const [tag, language] of Object.entries(vectors.pick)) expect(pickLanguage(tag), tag).toBe(language);
   });
 
+  it('picks each language from its own code, as the choice kept on the device is read', () => {
+    // A choice is kept as the code ("pt-BR") and read back through pickLanguage.
+    for (const language of ALL) expect(pickLanguage(language), language).toBe(language);
+  });
+
   it('matches a tag whole, then less its last subtag, down to the first', () => {
     const registry = { hans: { tags: ['zh-hans', 'zh'] }, hant: { tags: ['zh-hant', 'zh-tw'] }, pt: { tags: ['pt', 'pt-br'] } };
     expect(matchTag('zh-Hans-CN', registry)).toBe('hans');
