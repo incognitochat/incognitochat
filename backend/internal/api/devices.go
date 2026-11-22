@@ -69,9 +69,10 @@ const (
 // screen, by taps). What others make it do is paced on the whole device,
 // whatever the copies open (web/src/sync/pace.ts): the syncs pushes ask
 // for, a page and its confirmation, at most one every 5 seconds, and one
-// every 15 once a flood has lasted half an hour; so however many messages
-// come in, at most about 24 a minute, 360 a quarter and 12,000 a day,
-// well under half of each limit. Tapping through links makes about 60 to
+// every 10 once a flood has lasted about 40 minutes; so however many
+// messages come in, at most about 24 a minute and 360 a quarter (13% and
+// 30% of the limits), and about 17,800 a day shown all day (59%). Tapping
+// through links makes about 60 to
 // 90 a minute, 2 copies deleting about 120; a copy left showing all day
 // without a socket about 4,300 a day. Being refused holds up the inbox
 // until the window ends, for the day's limit until UTC midnight, so the

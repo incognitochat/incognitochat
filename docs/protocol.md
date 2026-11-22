@@ -144,18 +144,19 @@ count, so only the token's holder can make them or learn of their count.
 Messages sent to the device make its app make some (a fetch and a
 confirmation), so the app paces those on the whole device, whatever the
 copies open: the syncs it asks for by itself (pushes, the poll) at most
-one every 5 seconds, one every 15 once a flood has lasted half an hour,
-each reading one page. However many messages come in, that is at most
-about 24 a minute, 360 a quarter of an hour and 12,000 a day, under half
-of each limit, and each message waits at most about that gap more than
-it would. Past one, the same `429 device_limit` with `Retry-After`, and
-nothing is read. Each function instance counts them in memory and writes
-them ten at a time, so a window may let a few more through than its
-limit; the request that finds its window past the limit is refused, and
-counts. If they can't be written (then an instance tries again only after
-5 seconds), each instance lets a device make 30 a minute on its own count,
-then `429 device_limit` until the minute ends, and all devices together
-80 a minute, then `503 unavailable` with `Retry-After`.
+one every 5 seconds, one every 10 once a flood has lasted about 40
+minutes, each reading one page. However many messages come in, that is at
+most about 24 a minute and 360 a quarter of an hour (13% and 30% of the
+limits), and about 17,800 a day if the app is shown the whole day (59%);
+each message waits at most about that gap more than it would. Past one,
+the same `429 device_limit` with `Retry-After`, and nothing is read.
+Each function instance counts them in memory and writes them ten at a
+time, so a window may let a few more through than its limit; the request
+that finds its window past the limit is refused, and counts. If they
+can't be written (then an instance tries again only after 5 seconds),
+each instance lets a device make 30 a minute on its own count, then
+`429 device_limit` until the minute ends, and all devices together 80 a
+minute, then `503 unavailable` with `Retry-After`.
 
 The app waits out a login refused so until
 `Retry-After`, but at least 5 seconds and at most 2 minutes at a time (a
