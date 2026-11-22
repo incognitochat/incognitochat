@@ -46,7 +46,7 @@ func TestHandle(t *testing.T) {
 
 	t.Run("start, in Persian", func(t *testing.T) {
 		out := reply(t, b.Handle(request(secret, `{"update_id":1,"message":{"message_id":5,"chat":{"id":42,"type":"private"},"from":{"id":42,"language_code":"fa"},"text":"/start"}}`)))
-		if out["method"] != "sendMessage" || out["chat_id"] != float64(42) || !strings.Contains(out["text"].(string), "چت ناشناس") {
+		if out["method"] != "sendMessage" || out["chat_id"] != float64(42) || !strings.HasPrefix(out["text"].(string), "با Incognito Chat") {
 			t.Fatalf("reply = %v", out)
 		}
 		button := out["reply_markup"].(map[string]any)["inline_keyboard"].([]any)[0].([]any)[0].(map[string]any)

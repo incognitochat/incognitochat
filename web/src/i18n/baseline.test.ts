@@ -1,8 +1,10 @@
 // What English and Persian readers see, recorded before languages came from
 // one registry: every string, the digits and units, times, sizes and which
 // language a tag picks. A difference here is a change people would see:
-// never update these snapshots to make a change pass. (The one exception: a
-// Node upgrade that changes Intl's own wording or data, checked by eye.)
+// never update these snapshots to make a change pass. (The exceptions: a
+// Node upgrade that changes Intl's own wording or data, checked by eye; and
+// a change made on purpose, line by line: the product's name in Persian,
+// "Incognito Chat", in appName, openInTelegram and elsewhereBody.)
 import { describe, expect, it } from 'vitest';
 import { en, type Key } from './en';
 import { clockTime, formatSaveSize, formatSize, locale, pickLanguage, relativeTime, t, type Language, type Text } from './index';

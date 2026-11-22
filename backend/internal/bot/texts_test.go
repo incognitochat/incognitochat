@@ -168,7 +168,7 @@ func TestSetTextsCommandsAsBefore(t *testing.T) {
 	}
 	want := map[string]map[string]any{
 		"setMyCommands ":   {"commands": []any{map[string]any{"command": "start", "description": "Open Incognito Chat"}}},
-		"setMyCommands fa": {"commands": []any{map[string]any{"command": "start", "description": "باز کردن چت ناشناس"}}, "language_code": "fa"},
+		"setMyCommands fa": {"commands": []any{map[string]any{"command": "start", "description": "باز کردن برنامه"}}, "language_code": "fa"},
 	}
 	for key, body := range want {
 		if !reflect.DeepEqual(f.bodies[key], body) {
