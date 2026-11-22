@@ -769,7 +769,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
               busy={screen.busy}
               reply={
                 replying.value
-                  ? { name: replying.value.out ? tr('you') : screen.label, text: contentLine(language, replying.value) }
+                  ? { title: replying.value.out ? tr('replyingToYours') : tr('replyingTo', { name: screen.label }), text: contentLine(language, replying.value) }
                   : null
               }
               onCancelReply={() => (replying.value = null)}
@@ -1357,7 +1357,7 @@ function Composer({
   busy: boolean;
   onSend: (text: string) => Promise<void>;
   /** The message being answered: who wrote it, and its text. */
-  reply?: { name: string; text: string } | null;
+  reply?: { title: string; text: string } | null;
   onCancelReply?: () => void;
   /** One of ours being edited: its text to start from, what the bar shows, and whether it may be emptied (a caption). */
   editing?: { id: string; text: string; preview: string; mayBeEmpty: boolean } | null;
@@ -1471,7 +1471,7 @@ function Composer({
       )}
       {reply && !editing && (
         <div class="reply-bar">
-          <Quote name={t(language, 'replyingTo', { name: reply.name })} text={reply.text} />
+          <Quote name={reply.title} text={reply.text} />
           <button type="button" class="reply-cancel" aria-label={t(language, 'cancelReply')} onClick={onCancelReply}>
             ×
           </button>

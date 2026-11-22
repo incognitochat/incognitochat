@@ -180,6 +180,7 @@ export const nl = {
   errorUnreadable: 'Kon dat bestand niet lezen.',
   reply: 'Antwoorden',
   replyingTo: 'Antwoord: {name}',
+  replyingToYours: 'Antwoord op je eigen bericht',
   cancelReply: 'Antwoord annuleren',
   deletedMessage: 'Verwijderd bericht',
   messageActions: 'Berichtacties',

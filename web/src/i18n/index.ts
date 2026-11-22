@@ -83,18 +83,21 @@ export function formatSize(language: Language, bytes: number): string {
   const unit = bytes === 0 ? 'megabyte' : bytes < 1024 * 1024 ? 'kilobyte' : bytes < 1024 * 1024 * 1024 ? 'megabyte' : 'gigabyte';
   const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : unit === 'megabyte' ? bytes / 1024 / 1024 : bytes / 1024 / 1024 / 1024;
   // Right-to-left languages spell the unit out (کیلوبایت), so it reads in the right direction.
-  return new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: LANGUAGES[language].unitDisplay, maximumFractionDigits: 1 }).format(n);
+  return keepTogether(new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: LANGUAGES[language].unitDisplay, maximumFractionDigits: 1 }).format(n));
 }
 
 /** A file's size on the save page: kB under a MiB (at least 1), else MB. */
 export function formatSaveSize(language: Language, bytes: number): string {
-  return new Intl.NumberFormat(locale(language), {
+  return keepTogether(new Intl.NumberFormat(locale(language), {
     style: 'unit',
     unit: bytes < 1024 * 1024 ? 'kilobyte' : 'megabyte',
     unitDisplay: LANGUAGES[language].unitDisplay,
     maximumFractionDigits: 1,
-  }).format(bytes < 1024 * 1024 ? Math.max(1, Math.round(bytes / 1024)) : bytes / 1024 / 1024);
+  }).format(bytes < 1024 * 1024 ? Math.max(1, Math.round(bytes / 1024)) : bytes / 1024 / 1024));
 }
+
+/** A size never breaks between its number and its unit ("223,7" / "МБ"). */
+const keepTogether = (size: string): string => size.replace(/ /g, '\u00a0');
 
 /** A time of day (Unix ms), in the reader's own time: "3:30 AM" / «۳:۳۰». */
 export function clockTime(language: Language, at: number): string {

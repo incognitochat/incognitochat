@@ -180,6 +180,7 @@ export const tr = {
   errorUnreadable: 'Bu dosya okunamadı.',
   reply: 'Yanıtla',
   replyingTo: 'Yanıtlanan: {name}',
+  replyingToYours: 'Kendi mesajınıza yanıt',
   cancelReply: 'Yanıtı iptal et',
   deletedMessage: 'Silinmiş mesaj',
   messageActions: 'Mesaj işlemleri',

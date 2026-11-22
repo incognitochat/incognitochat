@@ -179,6 +179,7 @@ export const en = {
   errorUnreadable: "Couldn't read that file.",
   reply: 'Reply',
   replyingTo: 'Reply to {name}',
+  replyingToYours: 'Reply to your message',
   cancelReply: 'Cancel reply',
   deletedMessage: 'Deleted message',
   messageActions: 'Message actions',

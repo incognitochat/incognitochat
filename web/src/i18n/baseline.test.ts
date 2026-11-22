@@ -1,8 +1,10 @@
 // What English and Persian readers see, recorded before languages came from
 // one registry: the digits and units, times, sizes and which language a tag
 // picks. A difference here is a change people would see: never update these
-// snapshots to make a change pass. (The exception: a Node upgrade that
-// changes Intl's own wording or data, checked by eye.) The strings
+// snapshots to make a change pass. (The exceptions: a Node upgrade that
+// changes Intl's own wording or data, checked by eye; and a change made on
+// purpose, line by line: a no-break space between a size and its unit, so
+// "1.5 MB" never breaks across lines.) The strings
 // themselves aren't recorded: a missing one fails tsc, and a changed one
 // shows in its pull request's diff.
 import { describe, expect, it } from 'vitest';
