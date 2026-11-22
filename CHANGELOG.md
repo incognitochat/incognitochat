@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.7.0](https://github.com/incognitochat/incognitochat/compare/v2.6.1...v2.7.0) (2026-11-22)
+
+
+### Features
+
+* **api:** count messages sent and media paid for, for public statistics ([#207](https://github.com/incognitochat/incognitochat/issues/207)) ([d2f276f](https://github.com/incognitochat/incognitochat/commit/d2f276fb1b4c86c1db1d3219f92f74f9888d7505))
+* **infra:** a read-only role for the website's public statistics ([#208](https://github.com/incognitochat/incognitochat/issues/208)) ([4b43d6d](https://github.com/incognitochat/incognitochat/commit/4b43d6dc84ef021b47c49795c0793d1d6281f6b6))
+* **infra:** alarm on WebSocket volume and add it to the under-attack runbook ([#203](https://github.com/incognitochat/incognitochat/issues/203)) ([31b4dc3](https://github.com/incognitochat/incognitochat/commit/31b4dc381c069bce6573e29d2bdfc56c0d726b21))
+* **infra:** alert on cost anomalies and CloudFront request volume ([#200](https://github.com/incognitochat/incognitochat/issues/200)) ([ebcf913](https://github.com/incognitochat/incognitochat/commit/ebcf913335691d3ad4dbc17ef5fad5b3f5cd49af))
+* **verify:** check how the live site was deployed, and that it has no custom domain ([#204](https://github.com/incognitochat/incognitochat/issues/204)) ([40dd17b](https://github.com/incognitochat/incognitochat/commit/40dd17ba91942fc86dbeafa7d8d596f00cb6643e))
+
+
+### Bug Fixes
+
+* **infra:** refuse IPv6 requests at the firewall ([#206](https://github.com/incognitochat/incognitochat/issues/206)) ([2dc6c0b](https://github.com/incognitochat/incognitochat/commit/2dc6c0be817762e4535356205c8dd06b116d68a5))
+* **web:** wait for a tap before downloading attachments in chats you haven't answered ([#205](https://github.com/incognitochat/incognitochat/issues/205)) ([501edc5](https://github.com/incognitochat/incognitochat/commit/501edc57955be074d1bed0ff4aedc905ab1670b6))
+
 ## [2.6.1](https://github.com/incognitochat/incognitochat/compare/v2.6.0...v2.6.1) (2026-11-20)
 
 
