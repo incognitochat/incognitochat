@@ -395,8 +395,7 @@ it. This is how close it gets.
   of Telegram Desktop's folder) clones the account: it opens the whole
   history and can use the account as this device. It can also use up the
   device's limits on logins, signed requests and requests with a session
-  ([protocol.md](protocol.md#registration-and-sessions); a session token
-  alone can use up the last, for the 15 minutes it lasts), so that its
+  ([protocol.md](protocol.md#registration-and-sessions)), so that its
   owner's logins, inbox, link changes and deletion wait; the server can't tell
   the two apart. The remedy is setting up again, which those limits don't
   hold up: the copy is then refused, `410 account_replaced`, and writes
@@ -479,7 +478,11 @@ it. This is how close it gets.
   40 minutes after the token expires: meanwhile the app learns of new
   messages only when it polls, every 2 minutes, and no notice goes out. The
   same token can already fetch the account's waiting envelopes, and confirm
-  them, which deletes them.
+  them, which deletes them. It can also use up the device's requests with
+  a session ([protocol.md](protocol.md#registration-and-sessions)), so
+  that its app's inbox and other requests wait until the quarter of an
+  hour in which the token expires ends: at most about half an hour, and it
+  ends by itself, with nothing to do.
 - **What `notify` can reach.** It holds the key that opens chat IDs, so its
   role is narrowed ([infra/functions.tf](../infra/functions.tf)). In the
   directory it may only read and update items in account partitions

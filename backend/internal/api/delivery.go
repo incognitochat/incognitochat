@@ -397,8 +397,10 @@ var errLimited = errors.New("api: rate limited")
 // from ?after=<next of the page before>. A device's fetches are limited by
 // what they read, per minute (InboxUnitsPerMinute) and per person and day
 // (InboxUnitsPerDay):
-//   - A fetch that reads nothing (an empty inbox) isn't counted, so polling
-//     writes nothing.
+//   - A fetch that reads nothing (an empty inbox) isn't counted here, so
+//     polling writes nothing for these limits (each fetch, as any request
+//     with a session, still counts in the device's requests, written in
+//     batches: sessionLimit).
 //   - One whose first read (of two items) is the whole page counts what it
 //     read, at least MinRequestUnits, if the minute has room: one write.
 //   - One that reads on first reserves what a page can cost at most, with a

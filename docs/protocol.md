@@ -1061,6 +1061,9 @@ each mailbox's owner, to deliver, but not who writes to it.
   - If the server can't reach its counters, each of its instances lets a
     device read one page a minute, and confirm 50 envelopes that aren't
     there, without counting the day.
+  - Each fetch and confirmation, as any request with a session, also
+    counts in the device's requests (Limits per device): 180 a minute,
+    1,200 a quarter of an hour, 30,000 a day.
 
   These are per device, however many instances serve it, except where
   said: fetches that start at once on instances that know nothing of the
