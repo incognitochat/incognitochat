@@ -8,7 +8,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
+import { addMessage, listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
 import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase, putMeta } from '../storage/db';
@@ -87,6 +87,9 @@ async function backend() {
     mailboxesFull: false,
     sendRefused: null as ApiError | null,
     tokensRefused: null as ApiError | null,
+    // The accounts deleted (DELETE /account), and the uploads deleted (POST /media/delete), by ID.
+    deletedAccounts: [] as string[],
+    deletedUploads: [] as string[],
   };
   // An older server says no notice language; languageRefused: how a change of it is refused, if set.
   const noticeState = { languageSaid: true, languageRefused: null as Error | null };
@@ -119,6 +122,14 @@ async function backend() {
         return check(token(a));
       }
       if (path === '/session') return check(token(body.account as string));
+      if (method === 'DELETE' && path === '/account') {
+        // All in one step: its link and mailboxes go, so sends to them are dropped.
+        state.deletedAccounts.push(account);
+        for (const [id, b] of bundles) if (owners.get(b.mailbox as string) === account) bundles.delete(id);
+        for (const [mailbox, a] of owners) if (a === account) owners.delete(mailbox);
+        inboxes.set(account, []);
+        return check({});
+      }
       if (path === '/account') {
         const noticeLanguage = noticeState.languageSaid && noticesOn.has(account) ? { noticeLanguage: noticeLanguages.get(account) } : {};
         return check({ canCreateLinks: true, admin: false, links: 0, maxLinks: 5, notices: noticesOn.has(account), noticesRefused: noticesRefused.has(account), ...noticeLanguage });
@@ -188,6 +199,12 @@ async function backend() {
       }
       if (path.startsWith('/media')) {
         mediaCalls.push(`${method} ${path}`);
+        // By the uploads' own secrets, without logging in.
+        if (method === 'POST' && path === '/media/delete') {
+          const items = body.items as { id: string }[];
+          state.deletedUploads.push(...items.map((i) => i.id));
+          return check({ results: items.map(() => 'deleted') });
+        }
         if (state.uploadsPaused && method === 'POST' && path === '/media') throw new ApiError(503, 'uploads_paused');
         // The firewall's answer, before the server sees anything.
         if (state.uploadsTurnedAway && method === 'POST' && path === '/media') throw new ApiError(429, 'rate_limited');
@@ -1247,5 +1264,52 @@ describe('conversations in the app', () => {
     expect(conv.error).toBe('outdated');
     expect(conv.messages.at(-1)).toMatchObject({ text: 'again', status: 'failed' });
     expect(tries).toBe(1);
+  });
+});
+
+describe('deleting the account', () => {
+  /** An attachment on the device in a chat, sent or received, with its upload's ID. */
+  async function attachment(db: Awaited<ReturnType<typeof openDatabase>>, conv: string, id: string, out: boolean) {
+    await addMessage(
+      db,
+      { id, conv, at: Date.now() - 1000, out, status: out ? 'sent' : 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+  }
+
+  it('tells nobody: nothing is sent, the other side keeps the chat, and only the uploads received are deleted', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    const chat = screenOf(sender.screen.value, 'conversation').id;
+    await owner.showTab('chats');
+    await owner.sync();
+    const id = screenOf(owner.screen.value, 'home').conversations[0]!.id;
+    await owner.openConversation(id);
+    await owner.sendMessage('hi back');
+    await sender.sync();
+    await attachment(sender.db, chat, 'mine', true);
+    await attachment(sender.db, chat, 'theirs', false);
+    const record = await readAccount(sender.db);
+    const account = record && 'accountId' in record ? record.accountId : null;
+
+    const sent = b.sends.length;
+    sender.askDeleteAccount();
+    await sender.deleteAccount();
+    expect(sender.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(b.state.deletedAccounts).toEqual([account]);
+    // Nothing went to anyone, and the upload of what they sent was deleted,
+    // not the one of what the user sent: that stays for them to fetch.
+    expect(b.sends.length).toBe(sent);
+    expect(b.state.deletedUploads).toEqual(['upload-theirs']);
+
+    // The other side keeps the whole chat.
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'hi back']);
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.id)).toEqual([id]);
   });
 });
