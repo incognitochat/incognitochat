@@ -1,0 +1,17 @@
+{
+  "languages": ["en", "fa"],
+  "pick": {
+    "en": "en",
+    "en-GB": "en",
+    "en_US": "en",
+    "EN": "en",
+    "fa": "fa",
+    "fa-IR": "fa",
+    "fa_IR": "fa",
+    "FA": "fa",
+    "FA-ir": "fa",
+    "qaa": "en",
+    "qaa-x": "en",
+    "": "en"
+  }
+}

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import vectors from '../../../backend/internal/i18n/testdata/languages.json';
+import { confirmationMatches } from '../state/app';
 import { en, type Key } from './en';
-import { fa } from './fa';
-import { clockTime, DIRECTION, nextUtc, pickLanguage, relativeTime, t, type Language, type Text } from './index';
+import { clockTime, DIRECTION, LANGUAGES, locale, matchTag, nextUtc, pickLanguage, relativeTime, STRINGS, t, type Language, type Text } from './index';
 
-const STRINGS: Record<Language, Record<Key, Text>> = { en, fa };
 const KEYS = Object.keys(en) as Key[];
+const ALL = Object.keys(LANGUAGES) as Language[];
 
 /** Every form of a string: itself, or each of its plural forms. */
 const forms = (text: Text): string[] => (typeof text === 'string' ? [text] : Object.values(text));
@@ -13,9 +14,9 @@ const forms = (text: Text): string[] => (typeof text === 'string' ? [text] : Obj
 const placeholders = (text: Text): string[] => [...new Set(forms(text).flatMap((f) => [...f.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!)))].sort();
 
 describe('i18n', () => {
-  it('has every string in both languages, none empty, with the same placeholders', () => {
-    expect(Object.keys(fa).sort()).toEqual(Object.keys(en).sort());
-    for (const language of ['en', 'fa'] as const) {
+  it('has every string in every language, none empty, with the same placeholders', () => {
+    for (const language of ALL) {
+      expect(Object.keys(STRINGS[language]).sort(), language).toEqual(Object.keys(en).sort());
       for (const key of KEYS) {
         const text = STRINGS[language][key];
         for (const f of forms(text)) expect(f.trim(), `${language} ${key}`).not.toBe('');
@@ -47,10 +48,10 @@ describe('i18n', () => {
     expect(t('fa', 'invitationsRemaining', { count: 3 })).toBe('می‌توانید ۳ نفر دیگر را دعوت کنید.');
   });
 
-  it('fills every counted string, for any count, in both languages', () => {
+  it('fills every counted string, for any count, in every language', () => {
     const counted = KEYS.filter((key) => placeholders(en[key]).includes('count'));
     expect(counted).toEqual(expect.arrayContaining(['newMessages', 'invitationsRemaining', 'unreadMessagesCount', 'messagesLeftToday', 'blockedCount']));
-    for (const language of ['en', 'fa'] as const) {
+    for (const language of ALL) {
       for (const key of counted) {
         for (const count of [0, 1, 2, 3, 5, 11, 21, 101, 1000]) {
           const values = Object.fromEntries(placeholders(en[key]).map((name) => [name, name === 'count' ? count : 'x']));
@@ -109,5 +110,114 @@ describe('i18n', () => {
   it('sets right-to-left for Persian', () => {
     expect(DIRECTION.fa).toBe('rtl');
     expect(DIRECTION.en).toBe('ltr');
+  });
+});
+
+/** Counted keys whose number stands alone ("Blocked (3)", "Level 2: 5"): no noun agrees with it, so they may stay plain in any language. */
+const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'blockedCount', 'levelLine', 'messagesLeftToday'];
+
+/** Shown in Telegram's own popups (state/app.ts, popup): at most 256 characters for a message and 64 for a button. */
+const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm'];
+const POPUP_BUTTONS: readonly Key[] = ['clearMedia', 'pause', 'resume', 'deleteHereOnly', 'newLink'];
+
+/** What the app says about safety and privacy: a translation must keep exactly what each says (checked by back-translation before a language ships). */
+const SECURITY_KEYS: readonly Key[] = [
+  'welcomeBody', 'homeIntro', 'newLinkConfirm', 'revokeConfirm', 'noticeReplaced', 'noticeNewSigningKey', 'joinBody',
+  'linkVerified', 'linkExisting', 'linkExistingHint', 'linkMismatch', 'noticesAsk', 'firstMessageHint',
+  'aboutOwnerConversation', 'aboutSenderConversation', 'deleteConfirm', 'deleteConfirmBoth', 'alsoDeleteFor', 'alsoBlock',
+  'blockConfirmOwner', 'blockConfirmSender', 'noticeBlocked', 'blockedConversation', 'noticeUnblocked', 'storageNote',
+  'deleteMessageConfirm', 'elsewhereBody', 'elsewhereLost', 'replaceBody', 'replaceWarning', 'deleteBody', 'deleteWarning',
+  'deletingAccount', 'deletingElsewhereBody', 'deleteHereOnlyNote', 'accountDeletedHere', 'deleteHereOnlyConfirm',
+  'deletionPausedNotice', 'accountDeleted', 'replacedBody', 'expiredBody', 'signedOutBody', 'signedOutKept', 'resetBody',
+  'resetWarning', 'errorClock',
+];
+
+/** Fills every placeholder of a key with a long value, and {count} with a number. */
+const filled = (language: Language, key: Key, count = 1000) =>
+  t(language, key, Object.fromEntries(placeholders(en[key]).map((name) => [name, name === 'count' ? count : 'x'.repeat(24)])));
+
+describe('every language', () => {
+  it('is listed with its tags, the same as the server lists them', () => {
+    // backend/internal/i18n/testdata/languages.json, which the server's tests read too.
+    expect(ALL).toEqual(vectors.languages);
+    const tags = ALL.flatMap((language) => LANGUAGES[language].tags.map((tag) => [tag, language] as const));
+    for (const [tag, language] of tags) {
+      expect(tag, language).toBe(tag.toLowerCase());
+      // Each tag has a vector, so the server is checked to pick it the same way.
+      expect((vectors.pick as Record<string, string>)[tag], tag).toBe(language);
+    }
+    expect(new Set(tags.map(([tag]) => tag)).size, 'a tag picks one language only').toBe(tags.length);
+  });
+
+  it('picks the same language from a tag as the server does', () => {
+    for (const [tag, language] of Object.entries(vectors.pick)) expect(pickLanguage(tag), tag).toBe(language);
+  });
+
+  it('matches a tag whole, then less its last subtag, down to the first', () => {
+    const registry = { hans: { tags: ['zh-hans', 'zh'] }, hant: { tags: ['zh-hant', 'zh-tw'] }, pt: { tags: ['pt', 'pt-br'] } };
+    expect(matchTag('zh-Hans-CN', registry)).toBe('hans');
+    expect(matchTag('zh_hant_HK', registry)).toBe('hant');
+    expect(matchTag('zh-TW', registry)).toBe('hant');
+    expect(matchTag('zh-HK', registry)).toBe('hans');
+    expect(matchTag('pt-PT', registry)).toBe('pt');
+    expect(matchTag('pt', registry)).toBe('pt');
+    expect(matchTag('qaa-pt', registry)).toBeUndefined();
+    expect(matchTag('', registry)).toBeUndefined();
+    expect(matchTag('-', registry)).toBeUndefined();
+  });
+
+  it('names itself in its own language, each differently', () => {
+    const names = ALL.map((language) => t(language, 'languageName'));
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('has a form for every plural category its counted strings need', () => {
+    const counted = KEYS.filter((key) => placeholders(en[key]).includes('count'));
+    for (const language of ALL) {
+      const categories = new Intl.PluralRules(locale(language)).resolvedOptions().pluralCategories;
+      for (const key of counted) {
+        const text = STRINGS[language][key];
+        // Any counted string written with forms has them all; a missing one would silently read as "other".
+        if (typeof text !== 'string') for (const c of categories) expect(text[c], `${language} ${key} ${c}`).toBeDefined();
+        // Where a noun agrees with its number, each such string needs its forms (not English: the source, which has what it needs).
+        const plainAllowed = language === 'en' || (LANGUAGES[language] as { countInvariant?: boolean }).countInvariant === true || COUNT_STANDS_ALONE.includes(key) || categories.length === 1;
+        if (!plainAllowed) expect(typeof text, `${language} ${key} needs plural forms`).toBe('object');
+      }
+    }
+  });
+
+  it("fits Telegram's popups", () => {
+    for (const language of ALL) {
+      for (const key of POPUP_MESSAGES) expect(filled(language, key).length, `${language} ${key}`).toBeLessThanOrEqual(256);
+      for (const key of POPUP_BUTTONS) expect(filled(language, key).length, `${language} ${key}`).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('has typed phrases that match themselves and not each other', () => {
+    const phrases: Key[] = ['replacePhrase', 'resetPhrase', 'deletePhrase'];
+    for (const language of ALL) {
+      for (const a of phrases) {
+        expect(confirmationMatches(t(language, a), t(language, a)), `${language} ${a}`).toBe(true);
+        for (const b of phrases) if (a !== b) expect(confirmationMatches(t(language, a), t(language, b)), `${language} ${a} ${b}`).toBe(false);
+      }
+    }
+  });
+
+  it('leaves bidi isolation to the code', () => {
+    // The app wraps names and phrases where it shows them; a mark in a string file would wrap them twice.
+    for (const language of ALL) for (const key of KEYS) for (const f of forms(STRINGS[language][key])) expect(f, `${language} ${key}`).not.toMatch(/[\u2066-\u2069]/);
+  });
+
+  it('still has every string that speaks about safety and privacy', () => {
+    for (const key of SECURITY_KEYS) expect(KEYS, key).toContain(key);
+  });
+
+  it('writes each counted string out for reviewers', async () => {
+    const counts = [0, 1, 2, 3, 5, 11, 21, 100, 101, 102, 1_000_000];
+    const counted = KEYS.filter((key) => placeholders(en[key]).includes('count'));
+    for (const language of ALL) {
+      const lines = counted.flatMap((key) => [`${key}:`, ...counts.map((count) => `  ${count}: ${filled(language, key, count)}`)]);
+      await expect(lines.join('\n') + '\n').toMatchFileSnapshot(`__plurals__/${language}.txt`);
+    }
   });
 });

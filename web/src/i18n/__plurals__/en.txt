@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: You can invite 0 more people.
+  1: You can invite 1 more person.
+  2: You can invite 2 more people.
+  3: You can invite 3 more people.
+  5: You can invite 5 more people.
+  11: You can invite 11 more people.
+  21: You can invite 21 more people.
+  100: You can invite 100 more people.
+  101: You can invite 101 more people.
+  102: You can invite 102 more people.
+  1000000: You can invite 1,000,000 more people.
+levelLine:
+  0: Level xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Level xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Level xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Level xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Level xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Level xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Level xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Level xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Level xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Level xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Level xxxxxxxxxxxxxxxxxxxxxxxx: 1,000,000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1,000,000
+unreadMessagesCount:
+  0: 0 unread
+  1: 1 unread
+  2: 2 unread
+  3: 3 unread
+  5: 5 unread
+  11: 11 unread
+  21: 21 unread
+  100: 100 unread
+  101: 101 unread
+  102: 102 unread
+  1000000: 1,000,000 unread
+newMessages:
+  0: 0 new messages
+  1: 1 new message
+  2: 2 new messages
+  3: 3 new messages
+  5: 5 new messages
+  11: 11 new messages
+  21: 21 new messages
+  100: 100 new messages
+  101: 101 new messages
+  102: 102 new messages
+  1000000: 1,000,000 new messages
+blockedCount:
+  0: Blocked (0)
+  1: Blocked (1)
+  2: Blocked (2)
+  3: Blocked (3)
+  5: Blocked (5)
+  11: Blocked (11)
+  21: Blocked (21)
+  100: Blocked (100)
+  101: Blocked (101)
+  102: Blocked (102)
+  1000000: Blocked (1,000,000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1,000,000
+messagesLeftToday:
+  0: Messages left today: 0. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Messages left today: 1. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Messages left today: 2. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Messages left today: 3. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Messages left today: 5. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Messages left today: 11. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Messages left today: 21. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Messages left today: 100. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Messages left today: 101. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Messages left today: 102. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Messages left today: 1,000,000. More from xxxxxxxxxxxxxxxxxxxxxxxx.
