@@ -458,7 +458,25 @@ jobs:
             echo "::error::Bot setup failed"
             exit 1
           fi
-          echo "Webhook, menu button and /start command are set"
+          echo "Webhook and menu button are set"
+
+      # The bot's /start command, description and short description in each
+      # of the app's languages (backend/internal/i18n): the function reads
+      # each and sets only those that differ. Telegram keeps them between
+      # deploys, so a failure here (its flood control, say) leaves the bot
+      # working with the texts it had, and the next deploy tries again: a
+      # warning, not a failed deploy.
+      - name: Set the bot's texts
+        working-directory: infra
+        run: |
+          function=$(terraform output -raw bot_function_name)
+          failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
+            --payload '{"texts":{}}' --query FunctionError --output text "$RUNNER_TEMP/bot-texts.json") || failed=invoke
+          report=$(jq -c '{ok, set, unchanged, failed}' "$RUNNER_TEMP/bot-texts.json" 2>/dev/null || echo '{}')
+          echo "Bot texts: $report"
+          if [ "$failed" != "None" ] || ! jq -e '.ok == true' "$RUNNER_TEMP/bot-texts.json" >/dev/null 2>&1; then
+            echo "::warning::Some of the bot's texts weren't set ($report); the next deploy tries again"
+          fi
 
       - name: Smoke test – API answers with JSON errors
         run: |

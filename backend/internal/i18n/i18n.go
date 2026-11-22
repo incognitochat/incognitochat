@@ -40,6 +40,12 @@ type Texts struct {
 	Notice string
 	// NoticeOpen is the notice's button, which opens the app.
 	NoticeOpen string
+	// Description is the bot's description, shown in an empty chat with it
+	// ("What can this bot do?"): at most 512 characters.
+	Description string
+	// About is the bot's short description, on its profile and where a
+	// link to it is shared: at most 120 characters.
+	About string
 }
 
 // Fallback is the language for a code no language picks.

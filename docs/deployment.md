@@ -395,6 +395,12 @@ In BotFather, for the environment's bot:
   runs the environment publishes it, outside this repository;
   [data.md](data.md) is the technical part it can point to.
 
+The bot's description, short description and `/start` command come from
+the code (`backend/internal/i18n`, the same in every environment), in each
+of the app's languages: every deploy sets those that differ ("Set the bot's
+texts", which only warns if Telegram refuses, and the next deploy tries
+again). Changes made to them in BotFather are undone by the next deploy.
+
 ### The app's hosting
 
 The app is served from `<org>/<org>.github.io` in a GitHub organization of its

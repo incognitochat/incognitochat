@@ -33,11 +33,17 @@ func FuzzWebhookEvent(f *testing.F) {
 			t.Fatal(err)
 		}
 		b := &bot.Bot{Secret: "s", AppURL: "https://example.invalid/"}
-		setup := func(context.Context, string) error {
-			t.Fatalf("a function URL request ran the setup: %s", raw)
-			return nil
+		s := steps{
+			setup: func(context.Context, string) error {
+				t.Fatalf("a function URL request ran the setup: %s", raw)
+				return nil
+			},
+			texts: func(context.Context) bot.TextsReport {
+				t.Fatalf("a function URL request set the bot's texts: %s", raw)
+				return bot.TextsReport{}
+			},
 		}
-		out, err := handle(context.Background(), raw, b, setup)
+		out, err := handle(context.Background(), raw, b, s)
 		if err != nil {
 			t.Fatalf("%s: %v", raw, err)
 		}
@@ -93,27 +99,41 @@ func checkAnswer(t *testing.T, resp httpapi.Response) {
 	}
 }
 
-// Any event the function is invoked with: handle never panics, and runs
-// the setup only for an event that has a setup key.
+// Any event the function is invoked with: handle never panics, runs the
+// setup only for an event that has a setup key, the texts step only for one
+// that has a texts key, and never both.
 func FuzzEvent(f *testing.F) {
 	f.Add(`{"setup":{"webhookUrl":"https://example.invalid/"}}`)
 	f.Add(`{"Setup":{}}`)
 	f.Add(`{"setup":null}`)
+	f.Add(`{"texts":{}}`)
+	f.Add(`{"texts":{},"setup":{"webhookUrl":"https://example.invalid/"}}`)
+	f.Add(`{"texts":null}`)
 	f.Add(`{"rawPath":"/","requestContext":{"http":{"method":"POST"}},"headers":{"x-telegram-bot-api-secret-token":"s"},"body":"{}"}`)
 	f.Add(`[`)
 	f.Fuzz(func(t *testing.T, raw string) {
 		b := &bot.Bot{Secret: "s", AppURL: "https://example.invalid/"}
-		ran := false
-		setup := func(context.Context, string) error { ran = true; return nil }
-		out, err := handle(context.Background(), json.RawMessage(raw), b, setup)
+		ran, setTexts := false, false
+		s := steps{
+			setup: func(context.Context, string) error { ran = true; return nil },
+			texts: func(context.Context) bot.TextsReport { setTexts = true; return bot.TextsReport{OK: true} },
+		}
+		out, err := handle(context.Background(), json.RawMessage(raw), b, s)
+		if ran && setTexts {
+			t.Fatalf("%q: ran both steps", raw)
+		}
 		if err != nil {
 			return
 		}
 		var e event
-		if json.Unmarshal([]byte(raw), &e) != nil || ran != (e.Setup != nil) {
-			t.Fatalf("%q: setup ran %v", raw, ran)
+		if json.Unmarshal([]byte(raw), &e) != nil || ran != (e.Setup != nil) || setTexts != (e.Texts != nil) {
+			t.Fatalf("%q: setup ran %v, texts %v", raw, ran, setTexts)
 		}
-		if !ran {
+		if setTexts {
+			if _, ok := out.(bot.TextsReport); !ok {
+				t.Fatalf("%q: texts answered %#v", raw, out)
+			}
+		} else if !ran {
 			checkAnswer(t, out.(httpapi.Response))
 		}
 	})

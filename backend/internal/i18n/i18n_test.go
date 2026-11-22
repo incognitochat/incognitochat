@@ -125,7 +125,7 @@ func TestBotCodes(t *testing.T) {
 // short; anything else: a message's 4096), and none names an environment:
 // the repository is public, and every environment gets the same texts.
 func TestTexts(t *testing.T) {
-	limits := map[string]int{"Command": 256, "Open": 64, "NoticeOpen": 64}
+	limits := map[string]int{"Command": 256, "Open": 64, "NoticeOpen": 64, "Description": 512, "About": 120}
 	envData := regexp.MustCompile(`(?i)@|t\.me|://|\b[a-z0-9-]+\.[a-z]{2,}\b|\w+_bot\b`)
 	for _, l := range Languages() {
 		texts := reflect.ValueOf(l.Texts)
@@ -146,7 +146,7 @@ func TestTexts(t *testing.T) {
 			}
 		}
 	}
-	if reflect.TypeFor[Texts]().NumField() < 5 {
+	if reflect.TypeFor[Texts]().NumField() < 7 {
 		t.Fatal("Texts lost a field the bot or notices use")
 	}
 }

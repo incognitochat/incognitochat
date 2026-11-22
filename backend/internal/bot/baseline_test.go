@@ -58,13 +58,14 @@ func TestBaselineSetup(t *testing.T) {
 	if err := s.Run(context.Background(), "https://abc.lambda-url.us-east-1.on.aws/"); err != nil {
 		t.Fatal(err)
 	}
+	// Changed on purpose when the bot's texts got a step of their own
+	// (SetTexts): the /start commands moved there, with the same bodies
+	// (TestSetTextsCommandsAsBefore).
 	want := []map[string]any{
 		{"url": "https://abc.lambda-url.us-east-1.on.aws/", "secret_token": secret, "allowed_updates": []any{"message"}, "max_connections": float64(10)},
 		{"menu_button": map[string]any{"type": "web_app", "text": "Open", "web_app": map[string]any{"url": "https://example.github.io/"}}},
-		{"commands": []any{map[string]any{"command": "start", "description": "Open Incognito Chat"}}},
-		{"commands": []any{map[string]any{"command": "start", "description": "باز کردن چت ناشناس"}}, "language_code": "fa"},
 	}
-	if len(paths) != 4 || paths[0] != "/bot1:T/setWebhook" || paths[1] != "/bot1:T/setChatMenuButton" || paths[2] != "/bot1:T/setMyCommands" || paths[3] != "/bot1:T/setMyCommands" {
+	if len(paths) != 2 || paths[0] != "/bot1:T/setWebhook" || paths[1] != "/bot1:T/setChatMenuButton" {
 		t.Fatalf("calls = %v", paths)
 	}
 	if !reflect.DeepEqual(bodies, want) {

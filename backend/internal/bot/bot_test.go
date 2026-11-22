@@ -116,7 +116,7 @@ func TestSetup(t *testing.T) {
 	if err := s.Run(context.Background(), "https://abc123.lambda-url.us-east-1.on.aws/"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/bot123:TOKEN/setWebhook", "/bot123:TOKEN/setChatMenuButton", "/bot123:TOKEN/setMyCommands", "/bot123:TOKEN/setMyCommands"}
+	want := []string{"/bot123:TOKEN/setWebhook", "/bot123:TOKEN/setChatMenuButton"}
 	if strings.Join(calls, " ") != strings.Join(want, " ") {
 		t.Fatalf("calls = %v", calls)
 	}
