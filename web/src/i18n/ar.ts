@@ -184,7 +184,7 @@ export const ar = {
   errorTooBig: 'يمكن أن يصل حجم الملفات إلى 50 ميغابايت.',
   errorUnreadable: 'تعذّرت قراءة هذا الملف.',
   reply: 'رد',
-  replyingTo: 'الرد على {name}',
+  replyingTo: 'الرد: {name}',
   cancelReply: 'إلغاء الرد',
   deletedMessage: 'رسالة محذوفة',
   messageActions: 'إجراءات الرسالة',
