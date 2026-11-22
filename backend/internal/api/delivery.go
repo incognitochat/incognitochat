@@ -171,6 +171,8 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 
 // discardMailbox ends a mailbox (a block, or a conversation ended): sends to
 // it then go nowhere, answered exactly like sends to a mailbox that never existed.
+// An ID that isn't the caller's to discard writes nothing: the mailbox is
+// read first, half a directory unit (directory.Store.DiscardMailbox).
 func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
 	id := httpapi.Param(ctx, "id")
 	if !ids.Valid(id) {

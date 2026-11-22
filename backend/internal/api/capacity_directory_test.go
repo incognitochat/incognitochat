@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -210,6 +211,95 @@ func TestDirectoryCapacity(t *testing.T) {
 	}
 	if d, e := tb.cost(t, "POST /media/{random}/upload"); e.Read != 1 || e.Write != 0 || d.Read != 0 {
 		t.Fatalf("renew lookup: ephemeral %+v, directory %+v", e, d)
+	}
+}
+
+// What blocking costs (POST /mailboxes/{id}/discard), measured. An ID that
+// isn't the caller's to discard (random, someone else's, a link's intro
+// mailbox, one discarded already) reads half a directory unit more than
+// any logged-in request and writes nothing, so a device's requests can't
+// spend the directory's writes this way. Only a mailbox of its own is
+// deleted, which it had to make first (MailboxesPerDay).
+func TestDiscardCapacity(t *testing.T) {
+	h, tb := newDirectoryTables(t)
+	ctx := context.Background()
+	owner := h.account(t, userID)
+	other := h.account(t, userID+1)
+	mailboxes := func(m member) []any {
+		t.Helper()
+		status, out := h.as(t, m, http.MethodPost, "/mailboxes", map[string]any{"count": 2}, false)
+		if status != http.StatusCreated {
+			t.Fatalf("mailboxes: %d %v", status, out)
+		}
+		return out["mailboxes"].([]any)
+	}
+	mine, theirs := mailboxes(owner), mailboxes(other)
+	l := newLinkKeys(t)
+	status, out := h.as(t, owner, http.MethodPost, "/links", l.create(t, h.now), true)
+	if status != http.StatusCreated {
+		t.Fatalf("link: %d %v", status, out)
+	}
+	intro := out["mailbox"].(string)
+
+	// Each reads what any logged-in request does (one unit) and, for a
+	// well-formed ID, the mailbox (half a unit). Only the caller's own
+	// mailbox is then deleted, in one transaction of three small items,
+	// which DynamoDB bills two write units each: 6 (DynamoDB Local reports
+	// 2 for any transaction that goes through, so its items are counted
+	// here instead). Before, every well-formed ID went straight to that
+	// transaction, and a cancelled one is billed as much: 6 write units for
+	// any ID. The ephemeral table takes at most the device's count of
+	// requests, in batches.
+	written := len(tb.meter.Written(tb.directory))
+	for _, c := range []struct {
+		what   string
+		id     string
+		status int
+		read   float64
+		items  int // the transaction's, if any
+	}{
+		{"own mailbox (a block)", mine[0].(string), http.StatusOK, 1.5, 3},
+		{"the same again (a replay)", mine[0].(string), http.StatusNotFound, 1.5, 0},
+		{"someone else's mailbox", theirs[0].(string), http.StatusNotFound, 1.5, 0},
+		{"own link's intro mailbox", intro, http.StatusNotFound, 1.5, 0},
+		{"random ID", ids.New(), http.StatusNotFound, 1.5, 0},
+		{"malformed ID", "x", http.StatusNotFound, 1, 0},
+	} {
+		tb.meter.Reset()
+		status, out := h.as(t, owner, http.MethodPost, "/mailboxes/"+c.id+"/discard", nil, false)
+		calls := tb.meter.Calls()
+		d, e := tb.cost(t, "POST /mailboxes/{id}/discard, "+c.what)
+		if status != c.status || (status != http.StatusOK && out["error"] != "not_found") {
+			t.Errorf("%s: %d %v, want %d", c.what, status, out, c.status)
+		}
+		var transactions int
+		for _, call := range calls {
+			if call == "TransactWriteItems "+tb.directory {
+				transactions++
+			}
+		}
+		items := len(tb.meter.Written(tb.directory)) - written
+		written += items
+		t.Logf("  directory items written %d (%d write units at DynamoDB's prices)", items, 2*items)
+		if d.Read != c.read || items != c.items || (c.items > 0) != (transactions == 1) || (c.items == 0 && d.Write != 0) ||
+			e.Read != 0 || e.Write > 1 {
+			t.Errorf("%s: directory %+v, %d items, calls %v, ephemeral %+v; want directory R %.1f, %d items",
+				c.what, d, items, calls, e, c.read, c.items)
+		}
+	}
+
+	// A block does what it did: the mailbox is gone and its place freed;
+	// someone else's, and the intro mailbox, are untouched.
+	if _, err := h.server.Directory.Mailbox(ctx, mine[0].(string)); !errors.Is(err, directory.ErrNotFound) {
+		t.Fatalf("discarded mailbox: %v", err)
+	}
+	for _, id := range []string{mine[1].(string), theirs[0].(string), intro} {
+		if _, err := h.server.Directory.Mailbox(ctx, id); err != nil {
+			t.Fatalf("mailbox %s: %v", id, err)
+		}
+	}
+	if d, err := h.server.Directory.Device(ctx, owner.d.account, owner.d.id, h.now); err != nil || d.Mailboxes != 1 {
+		t.Fatalf("mailboxes owned after a discard: %d, %v", d.Mailboxes, err)
 	}
 }
 

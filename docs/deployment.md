@@ -1593,7 +1593,21 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   more for an account's invitation codes, however many (it read a unit a
   code), and nothing more for one that never made any; codes made before
   this change still cost half a unit each, as they keep their counts on
-  their own items only. Counting adds about
+  their own items only. A block (`POST /mailboxes/{id}/discard`) reads
+  half a unit more too, the mailbox (eventually consistent), and writes
+  only for a mailbox of the caller's own: a transaction of three items, 6
+  write units, and each such mailbox was made first (at most 100 a day
+  per Telegram user). Any other ID (random, someone else's, a link's
+  intro mailbox, one discarded already) writes nothing. It used to go
+  straight to that transaction, which DynamoDB bills even when its
+  condition cancels it: 6 write units an ID, so about 25 accounts kept at
+  their limits filled the directory's 200 writes a second (about 14 over
+  100 instances, 2 for a minute), and while the counts couldn't be
+  written, one account spread over 100 could. An account making only
+  blocks, or a member with invitation codes only `GET /invitations`,
+  reads about 1.5 units a request: filling the directory's reads that way
+  takes about 200 accounts, or about 115 over 100 instances (about 760
+  for a whole day). Counting adds about
   150 write units a quarter of an hour per account kept at its limits on
   a few instances, up to about 600 over 100: with the logins' and signed
   requests', filling the ephemeral table's 200 writes a second takes about

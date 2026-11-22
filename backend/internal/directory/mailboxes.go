@@ -115,7 +115,28 @@ func (s *Store) Mailboxes(ctx context.Context, accountID string) ([]string, erro
 // sends to it then go nowhere, exactly as to one that never existed. Intro
 // mailboxes go with their link. It returns ErrNotFound unless the account
 // owns the mailbox.
+//
+// The mailbox is read first, eventually consistent (half a read unit), and
+// only one the account may discard goes on to the transaction, which checks
+// again. A transaction is billed for every item it names, twice, even when
+// a condition cancels it: here 6 write units, which any ID cost when it
+// went straight to the transaction. So an ID that isn't the account's to
+// discard (unknown, someone else's, an intro mailbox, one discarded
+// already) writes nothing, and anyone with a session can't spend the
+// directory's writes this way. A mailbox discarded in about the last
+// second may still be read, and then its transaction is cancelled; one
+// made in about the last second may not be read yet, and is answered as
+// unknown. The app discards a mailbox only when its user blocks a chat,
+// and only one a reply has already gone out from.
 func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error {
+	it, err := s.read(ctx, mailboxPK(id), skMailbox, time.Time{}, false)
+	if err != nil {
+		return err
+	}
+	owner, _ := str(it, "o")
+	if _, intro := it["i"]; owner != accountID || intro {
+		return ErrNotFound
+	}
 	writes := []types.TransactWriteItem{
 		{Delete: &types.Delete{
 			TableName:                 &s.Table,
