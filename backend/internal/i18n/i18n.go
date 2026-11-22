@@ -48,16 +48,22 @@ const Fallback = "en"
 // languages are the app's languages, in its order (English first).
 var languages = []Language{english, persian}
 
-// Languages returns the app's languages, in its order, English first.
+// Languages returns the app's languages, in its order, English first: a
+// copy, so a caller can't change what Pick reads.
 func Languages() []Language {
-	return slices.Clone(languages)
+	out := slices.Clone(languages)
+	for i := range out {
+		out[i].Tags = slices.Clone(out[i].Tags)
+	}
+	return out
 }
 
 // Pick returns the code of the language a Telegram language code picks:
-// the whole tag (lowercase, with _ read as -) among the languages' tags,
-// else the tag less its last subtag, down to the first. Fallback if none.
+// the whole tag (with ASCII letters lowercased, as the app does, and _ read
+// as -) among the languages' tags, else the tag less its last subtag, down
+// to the first. Fallback if none.
 func Pick(telegramCode string) string {
-	rest := strings.ReplaceAll(strings.ToLower(telegramCode), "_", "-")
+	rest := strings.ReplaceAll(asciiLower(telegramCode), "_", "-")
 	for rest != "" {
 		for _, l := range languages {
 			if slices.Contains(l.Tags, rest) {
@@ -71,6 +77,18 @@ func Pick(telegramCode string) string {
 		rest = rest[:cut]
 	}
 	return Fallback
+}
+
+// asciiLower lowercases A–Z only. Unicode lowercasing differs between Go
+// and JavaScript for a few letters (İ), and tags are ASCII: lowering only
+// ASCII keeps both sides picking the same language from any input.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
 }
 
 // For returns a language's texts; English for a code it doesn't know (a

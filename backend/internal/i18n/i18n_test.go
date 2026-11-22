@@ -3,6 +3,7 @@ package i18n
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -80,6 +81,20 @@ func TestPick(t *testing.T) {
 	if For("qaa") != english.Texts || For("") != english.Texts || For("fa") != persian.Texts {
 		t.Error("For doesn't fall back to English")
 	}
+	// Only ASCII letters are lowercased, as the app does: Go's own
+	// lowercasing turns İ into i, JavaScript's into i and a dot.
+	if got := asciiLower("İD-Fa_x"); got != "İd-fa_x" {
+		t.Errorf("asciiLower = %q", got)
+	}
+}
+
+func TestLanguagesIsACopy(t *testing.T) {
+	l := Languages()
+	l[1].Tags[0] = "en"
+	l[0].Code = "xx"
+	if Pick("fa") != "fa" || Languages()[0].Code != "en" {
+		t.Fatal("changing what Languages returned changed the table")
+	}
 }
 
 func TestBotCodes(t *testing.T) {
@@ -102,23 +117,33 @@ func TestBotCodes(t *testing.T) {
 	}
 }
 
-// Telegram's limits, and nothing about an environment in any text: the
-// repository is public, and every environment gets the same texts.
+// Every text is there and within its limit, counted in characters (a
+// command description: Telegram's 1–256; buttons: our own 64, to stay
+// short; anything else: a message's 4096), and none names an environment:
+// the repository is public, and every environment gets the same texts.
 func TestTexts(t *testing.T) {
-	envData := regexp.MustCompile(`(?i)@|t\.me|://|\b[a-z0-9-]+\.(com|org|net|me|io|app|dev|bot)\b`)
+	limits := map[string]int{"Command": 256, "Open": 64, "NoticeOpen": 64}
+	envData := regexp.MustCompile(`(?i)@|t\.me|://|\b[a-z0-9-]+\.[a-z]{2,}\b|\w+_bot\b`)
 	for _, l := range Languages() {
-		for name, text := range map[string]string{"Welcome": l.Texts.Welcome, "Open": l.Texts.Open, "Command": l.Texts.Command, "Notice": l.Texts.Notice, "NoticeOpen": l.Texts.NoticeOpen} {
-			n := utf8.RuneCountInString(text)
+		texts := reflect.ValueOf(l.Texts)
+		for i := range texts.NumField() {
+			name, text := texts.Type().Field(i).Name, texts.Field(i).String()
 			if strings.TrimSpace(text) == "" {
 				t.Errorf("%s %s is empty", l.Code, name)
 			}
-			limit := map[string]int{"Welcome": 4096, "Open": 64, "Command": 256, "Notice": 4096, "NoticeOpen": 64}[name]
-			if n > limit {
+			limit, ok := limits[name]
+			if !ok {
+				limit = 4096
+			}
+			if n := utf8.RuneCountInString(text); n > limit {
 				t.Errorf("%s %s: %d characters, more than %d", l.Code, name, n, limit)
 			}
 			if envData.MatchString(text) {
 				t.Errorf("%s %s names an environment: %q", l.Code, name, text)
 			}
 		}
+	}
+	if reflect.TypeFor[Texts]().NumField() < 5 {
+		t.Fatal("Texts lost a field the bot or notices use")
 	}
 }
