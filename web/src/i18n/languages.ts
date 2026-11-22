@@ -25,6 +25,7 @@ export const LANGUAGES = {
   // Western digits (1, 2, 3), pinned: Intl's default for Arabic differs by version.
   ar: { dir: 'rtl', locale: 'ar-u-nu-latn', unitDisplay: 'long', tags: ['ar'] },
   nl: { dir: 'ltr', locale: 'nl', unitDisplay: 'short', tags: ['nl'] },
+  es: { dir: 'ltr', locale: 'es', unitDisplay: 'short', tags: ['es'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;
