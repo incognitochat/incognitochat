@@ -80,16 +80,24 @@ export async function rememberLeft(db: Database, kind: TokenKind, left: number, 
 }
 
 /**
- * Remembers `left` like rememberLeft, but never more than the server said
- * before today: what it will still sign only falls within a day, and this
- * answer may be older than one that came before (GET /usage can miss what
- * was counted in about the last half a minute). Returns what is kept.
+ * Remembers `left`, which the server said for its UTC day `serverDay`
+ * (GET /usage: resetsAt, less a day), like rememberLeft, but never more
+ * than it said before that day: what it will still sign only falls within
+ * a day, and this answer may be older than one that came before (it can
+ * miss what was counted in about the last half a minute). Only when both
+ * clocks are on the same day, though: near midnight with this device's
+ * clock off, the two answers may be for different server days, and this
+ * one replaces the other. Done holding the refill lock, so a batch's
+ * exact answer written meanwhile isn't overwritten. Returns what is kept.
  */
-export async function lowerLeft(db: Database, kind: TokenKind, left: number, now = nowSeconds()): Promise<number> {
-  const known = await signableToday(db, now, kind);
-  const kept = known === null ? left : Math.min(known, left);
-  await rememberLeft(db, kind, kept, now);
-  return kept;
+export function lowerLeft(db: Database, kind: TokenKind, left: number, serverDay: number, now = nowSeconds()): Promise<number> {
+  return withLock(KINDS[kind].refillLock, async () => {
+    const day = Math.floor(now / DAY_SECONDS);
+    const known = serverDay === day ? await signableToday(db, now, kind) : null;
+    const kept = known === null ? left : Math.min(known, left);
+    await rememberLeft(db, kind, kept, now);
+    return kept;
+  });
 }
 
 /** How many more tokens of a kind the server said it will sign today; null if it hasn't said today. */

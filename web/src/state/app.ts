@@ -421,6 +421,8 @@ export type Screen =
   | { kind: 'confirm-reset'; reason: SignedOutReason }
   | { kind: 'error'; error: ErrorKind };
 
+type AdminScreen = Extract<Screen, { kind: 'admin' }>;
+
 export interface Deps {
   config: Config | null;
   api: Api | null;
@@ -997,7 +999,7 @@ export function createApp(deps: Deps) {
           // A sync started after it was asked for, here or in another
           // copy: it took in what was asked for then (and the other copy
           // tells this one of it).
-          if (syncPace.last() > since) {
+          if (syncPace.last(Date.now()) > since) {
             if (wantedSince === since) wantedSince = null;
             continue;
           }
@@ -1705,8 +1707,9 @@ export function createApp(deps: Deps) {
     // What the server will still sign today, for the low-balance notice
     // too: never more than it said before today (a batch's exact answer),
     // since this one may miss what was counted in the last half a minute.
-    const sendLeft = await lowerLeft(deps.db, 'send', info.send.limit - info.send.used);
-    const mediaLeft = await lowerLeft(deps.db, 'media', info.media.limit - info.media.used);
+    const serverDay = Math.floor(info.resetsAt / 86_400) - 1;
+    const sendLeft = await lowerLeft(deps.db, 'send', info.send.limit - info.send.used, serverDay);
+    const mediaLeft = await lowerLeft(deps.db, 'media', info.media.limit - info.media.used, serverDay);
     info = { ...info, send: { ...info.send, used: info.send.limit - sendLeft }, media: { ...info.media, used: info.media.limit - mediaLeft } };
     void refreshBudget();
     const held = {
@@ -2245,20 +2248,24 @@ export function createApp(deps: Deps) {
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
-      try {
-        [account, invitations] = await Promise.all([
-          session!.call('GET', '/account', undefined, checkAccountInfo),
-          session!.call('GET', '/invitations', undefined, checkInvitations),
-        ]);
-      } catch (err) {
-        if (handleGone(err)) return;
+      // Apart: the invitations failing alone leaves the account shown, and
+      // home online, without its invitations section.
+      const [a, i] = await Promise.allSettled([
+        session!.call('GET', '/account', undefined, checkAccountInfo),
+        session!.call('GET', '/invitations', undefined, checkInvitations),
+      ]);
+      for (const r of [a, i]) if (r.status === 'rejected' && handleGone(r.reason)) return;
+      if (a.status === 'fulfilled') account = a.value;
+      else {
         offline = true;
-        // These requests refused for now (any of the device's are, past its
+        // Refused for now (any of the device's requests are, past its
         // limit): said as the notice, unless what brought the user here
         // says something, and then in place of "offline".
-        limited = deviceLimit(err);
+        limited = deviceLimit(a.reason);
         notice ??= limited;
       }
+      if (i.status === 'fulfilled') invitations = i.value;
+      else notice ??= deviceLimit(i.reason);
     }
     if (account?.deleting) return deletingOnServer(account.expired);
     if (account?.cleanup) void cleanUpReplaced();
@@ -2406,17 +2413,22 @@ export function createApp(deps: Deps) {
     }
   }
 
-  async function openAdmin(notice: AdminNotice | null = null): Promise<void> {
+  /**
+   * The admin screen, read afresh. done: what a change just done makes of
+   * the screen as it was, for when it can't be read again now.
+   */
+  async function openAdmin(notice: AdminNotice | null = null, done: (s: AdminScreen) => AdminScreen = (s) => s): Promise<void> {
     let levels: LevelAllowance[];
     try {
       levels = await session!.call('GET', '/admin/levels', undefined, checkLevels);
     } catch (err) {
       if (handleGone(err)) return;
-      // Done, but the screen can't be read again now: it stays, saying it
-      // was done, so it isn't done twice (a grant would be).
+      // Done, but the screen can't be read again now: it stays, with the
+      // change in it, saying it was done, so it isn't done twice (a grant
+      // would be).
       const current = screen.value;
       if ((notice === 'saved' || notice === 'granted' || notice === 'switched') && current.kind === 'admin') {
-        screen.value = { ...current, busy: false, notice };
+        screen.value = done({ ...current, busy: false, notice });
         return;
       }
       // A login refused for now refuses this reload too (the session waits).
@@ -2439,24 +2451,43 @@ export function createApp(deps: Deps) {
    * follows within about half a minute.
    */
   function setSwitch(which: Switch, paused: boolean): Promise<void> {
-    return adminAction(() => session!.call('PUT', '/admin/switches', { switch: which, paused }, checkSwitches, { sign: true }), 'switched');
+    return adminAction(
+      () => session!.call('PUT', '/admin/switches', { switch: which, paused }, checkSwitches, { sign: true }),
+      'switched',
+      (s, switches) => ({ ...s, switches }),
+    );
   }
 
-  /** Runs an admin change, then shows the admin screen again with its outcome. */
-  async function adminAction(action: () => Promise<unknown>, done: AdminNotice): Promise<void> {
+  /** Sets a level's invitation allowance. */
+  function setLevel(level: number, invitations: number): Promise<void> {
+    return adminAction(
+      () => session!.call('PUT', '/admin/levels', { level, invitations }, checkObject, { sign: true }),
+      'saved',
+      (s) => ({ ...s, levels: [...s.levels.filter((l) => l.level !== level), { level, invitations }].sort((a, b) => a.level - b.level) }),
+    );
+  }
+
+  /**
+   * Runs an admin change, then shows the admin screen again with its
+   * outcome. apply: what the change makes of the screen, if it can't be
+   * read again now.
+   */
+  async function adminAction<T>(action: () => Promise<T>, done: AdminNotice, apply: (s: AdminScreen, result: T) => AdminScreen = (s) => s): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'admin' || current.busy) return;
     screen.value = { ...current, busy: true, notice: null };
     let notice: AdminNotice = done;
+    let changed: (s: AdminScreen) => AdminScreen = (s) => s;
     try {
-      await action();
+      const result = await action();
+      changed = (s) => apply(s, result);
     } catch (err) {
       if (handleGone(err)) return;
       if (err instanceof ApiError && err.code === 'not_member') notice = 'not-member';
       else if (err instanceof ApiError && err.code === 'not_found') notice = 'not-found';
       else notice = deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic');
     }
-    return openAdmin(notice);
+    return openAdmin(notice, changed);
   }
 
   /** Grants a member extra invitations, naming them by one of their links. */
@@ -2781,8 +2812,15 @@ export function createApp(deps: Deps) {
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
     showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
     sync: syncNow,
-    /** Another copy started a sync at `at` (paced: one the app asked for by itself). */
-    syncStarted: (at: number, paced: boolean) => syncPace.started(at, paced),
+    /**
+     * Another copy started a sync at `at` (paced: one the app asked for by
+     * itself). One said to start later than a second from now (sent before
+     * the clock was set back) is ignored: it would take every sync asked
+     * for until then as answered.
+     */
+    syncStarted: (at: number, paced: boolean) => {
+      if (at <= Date.now() + 1_000) syncPace.started(at, paced);
+    },
     refresh,
     /** A tap on a chat. */
     openConversation: (id: string) => openConversation(id),
@@ -2800,8 +2838,7 @@ export function createApp(deps: Deps) {
     invitations: () => openInvitations(),
     createInvitation,
     admin: () => openAdmin(),
-    setLevel: (level: number, invitations: number) =>
-      adminAction(() => session!.call('PUT', '/admin/levels', { level, invitations }, checkObject, { sign: true }), 'saved'),
+    setLevel,
     grant,
     setSwitch,
   };

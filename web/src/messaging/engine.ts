@@ -2797,9 +2797,14 @@ export function createMessaging(deps: MessagingDeps) {
     findKey.clear();
   }
 
-  /** Whether the last sync stopped partway through the inbox (its pages, or its time, ran out): the next carries on. */
+  /**
+   * Whether the last sync stopped partway through the inbox (its pages, or
+   * its time, ran out), so the next carries on now. Not while fetching is
+   * paused (rate_limited, daily_limit): the end of the pause carries on
+   * (onResume).
+   */
   function partway(): boolean {
-    return walk !== null;
+    return walk !== null && !paused();
   }
 
   return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
