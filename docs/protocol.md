@@ -613,17 +613,28 @@ for days and is the same in all of a person's conversations, so recipients
 comparing notes could link them ([security.md](security.md), What still
 leaks). Within a conversation, the sender dates each envelope at least a
 second after the last one it sent there, so the other side never gets two
-of its envelopes there with the same `at`; a quick run of them is dated a
-few seconds ahead. The app keeps that last time with the conversation, so
-this holds across reloads and between copies of the app. The one exception
-is a clock that went back by more than a minute (the device's, or the
-server's as the app knows it): then `at` goes back with it. So, for up to
-a minute after the app starts dating messages by the server's clock rather
-than its own (above), what it sends in a conversation where it already sent
-something by its own clock carries on from that time. The inbox gives
-envelopes in no set order, so it's this, not when they arrive, that keeps
-one side's messages, edits and reactions in order. Versions before this
-one sent the device's own clock, to the millisecond; recipients take both.
+of its envelopes there with the same `at`. A quick run of them is dated
+ahead of the clock, a second apart, for as long as it lasts, and what the
+app sends there next carries on after it: it's never dated among the run,
+however long the run was. The app keeps that last time with the
+conversation, and the furthest the clock had got in that run, so this
+holds across reloads and between copies of the app. There are two
+exceptions. If the clock went back a minute or more from the furthest it
+had got in the run (the device's, or the server's as the app knows it),
+`at` goes back with it. So, for up to a minute after the app starts dating
+messages by the server's clock rather than its own (above), what it sends
+in a conversation where it already sent something by its own clock carries
+on from that time. And if a run is an hour ahead of the clock (3,600 more
+sends there than seconds, past what a person sends), what follows is dated
+by the clock again. That hour is within the grace an edit gets (Editing,
+below), so an edit the app offers is never dated past what the other side
+takes. Versions before this one went back to the clock once a run was a
+minute ahead: what they sent next showed among the run, on both sides, and
+a `delete` with `all` sent then left the rest of the run on both sides. The
+inbox gives envelopes in no set order, so it's this, not when they arrive,
+that keeps one side's messages, edits and reactions in order. Versions
+before this one sent the device's own clock, to the millisecond;
+recipients take both.
 
 The recipient shows a message at its `at`, with two bounds. It's shown no
 earlier than what it shows the sender had, as the recipient shows those:
@@ -633,8 +644,8 @@ sent there, whose IDs and times it keeps), and the sender's previous
 message. Written after those, it shows after them, though the sender's
 clock may be a little behind the recipient's. And it's shown no later than
 it arrived: the second it arrived in, or the last thing the recipient sent
-there if a quick run of those was dated ahead of that second, unless that
-is a minute ahead or more (the clock went back, as above). This bound wins
+there if a quick run of those was dated ahead of that second and what the
+recipient sends next carries on from it (as above). This bound wins
 over the first, so a message can't be pushed later than it arrived by
 naming one dated further ahead. Messages with the same time (from both
 sides, or from versions before this one) show in the order they were
@@ -733,10 +744,10 @@ recipient's app doing it.
 attachment's caption, which may become empty; stickers, voice and video
 messages have none, for 24 hours after sending. The recipient applies an
 `edit` only to a message from that side in that conversation, only if its
-`at` is at most 25 hours after the message's (an hour of grace for clocks
-and late arrivals), and keeps the latest by `at` (of two from the same
-second, the one taken in last), so a replayed or late older one changes
-nothing; the message shows as edited. An `edit` that arrives before its
+`at` is at most 25 hours after the message's (an hour of grace for clocks,
+late arrivals and a quick run dated ahead: Times, above), and keeps the
+latest by `at` (of two from the same second, the one taken in last), so a
+replayed or late older one changes nothing; the message shows as edited. An `edit` that arrives before its
 message is kept, sealed under the storage key like any text, for at most 31
 days, and applied when the message comes; not one for a message deleted on
 the recipient's device, nor one from before the conversation was cleared
