@@ -108,7 +108,9 @@ func (s *Server) listedLevels(ctx context.Context) (map[int]int, error) {
 // may ask (the app does at every home screen), so it reads little: the
 // levels as this instance knows them (listedLevels), and the codes in one
 // query (directory.Store.Invitations), none for an account that never
-// made one (not an admin, no uses put into codes).
+// made one (not an admin, no uses put into codes). An admin's codes take
+// no uses, so one no longer an admin who made none as a member has them
+// unlisted (they still work).
 func (s *Server) listInvitations(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
 	const route = "GET /invitations"
 	remaining, unlimited, err := s.allowanceBy(ctx, c.device, s.listedLevels)
