@@ -42,8 +42,13 @@ describe('findSourceUrl', () => {
   it('gives up on the manifest after 10 seconds', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     try {
-      await findSourceUrl('https://example.github.io/', async () => new Response('{}'));
+      const signals: (AbortSignal | null | undefined)[] = [];
+      await findSourceUrl('https://example.github.io/', async (_input, init) => {
+        signals.push(init?.signal);
+        return new Response('{}');
+      });
       expect(timeout).toHaveBeenCalledWith(10_000);
+      expect(signals).toEqual([timeout.mock.results[0]!.value]);
     } finally {
       timeout.mockRestore();
     }

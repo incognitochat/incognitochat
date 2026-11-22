@@ -2595,6 +2595,7 @@ describe('the source link', () => {
       async () => {
         const { bridge, posted } = fakeBridge();
         const { app } = await setup({ api: null, bridge });
+        expect(asked).toEqual([]);
         app.prepareSource();
         // Looked up when the home screen shows, before any tap, and once.
         expect(asked).toEqual(['https://app.example/app/manifest.json']);
