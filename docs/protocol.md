@@ -1605,9 +1605,11 @@ app drops them and never puts them back in its wallet, so a lost answer or
 a refused send costs its tokens, as a sent one does. Media tokens likewise
 are dropped after an upload request that got no answer (they may be spent);
 the only ones that go back to the wallet are those of an upload refused
-because uploads are paused, which the server answers before spending any (an
-upload names no mailbox, so using them again ties nothing anyone receives
-to that try).
+because uploads are paused, which the server answers before spending any,
+and of one the firewall turned away (`429 rate_limited`, which the server
+never answers to `POST /media`), which the server never saw (an upload
+names no mailbox, so using them again ties nothing anyone receives to that
+try).
 
 The app keeps at least 14 send tokens, twice what the longest message
 costs. Once fewer are left after a send, it fetches a batch at a random

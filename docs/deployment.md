@@ -1660,8 +1660,10 @@ failed login waits 5 to 10 seconds, twice as long after each further
 failure up to one to two minutes; a link's keys that couldn't be fetched
 wait 5 to 10 minutes; and attachments stop being fetched by themselves for
 one to two minutes. The waits are jittered, so the apps behind one address
-don't try together and keep it blocked. A blocked CORS preflight (only
-`rate-per-ip` counts those) still looks like a network error to the app.
+don't try together and keep it blocked. An upload turned away keeps its
+media tokens, which the server never saw, and the app says "Too many tries.
+Try again later." A blocked CORS preflight (only `rate-per-ip` counts
+those) still looks like a network error to the app.
 
 AWS WAF checks rates about every 10 seconds and doesn't match a limit
 exactly: a flood usually gets through for up to 30 seconds before it's

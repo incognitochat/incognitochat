@@ -24,3 +24,10 @@ describe("what the server's limit on this device's logins and signed requests sa
     }
   });
 });
+
+describe('what an upload the firewall turned away says', () => {
+  it('says "later", not "in a minute": the block lasts until the address\'s count over 5 minutes falls', () => {
+    expect(SEND_ERROR_TEXT['turned-away']).toBe('errorDeviceLimitLater');
+    expect(SEND_ERROR_TEXT['turned-away']).not.toBe(SEND_ERROR_TEXT['rate-limited']);
+  });
+});

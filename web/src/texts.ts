@@ -51,6 +51,9 @@ export const SEND_ERROR_TEXT: Record<Extract<SendError, string>, Key> = {
   'rate-limited': 'errorTooFast',
   'device-limit': 'errorDeviceLimit',
   'device-limit-later': 'errorDeviceLimitLater',
+  // The firewall's block lasts until this address's count over 5 minutes
+  // falls: "Too many tries. Try again later."
+  'turned-away': 'errorDeviceLimitLater',
   'media-paused': 'errorMediaPaused',
   outdated: 'errorOutdated',
   network: 'errorNetwork',
