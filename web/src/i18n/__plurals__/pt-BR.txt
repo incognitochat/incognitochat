@@ -1,6 +1,6 @@
 invitationsRemaining:
-  0: Convites restantes: 0.
-  1: Convites restantes: 1.
+  0: Você pode convidar mais 0 pessoa.
+  1: Você pode convidar mais 1 pessoa.
   2: Você pode convidar mais 2 pessoas.
   3: Você pode convidar mais 3 pessoas.
   5: Você pode convidar mais 5 pessoas.
@@ -35,8 +35,8 @@ unreadCount:
   102: 102
   1000000: 1.000.000
 unreadMessagesCount:
-  0: Mensagens não lidas: 0
-  1: Mensagens não lidas: 1
+  0: 0 mensagem não lida
+  1: 1 mensagem não lida
   2: 2 mensagens não lidas
   3: 3 mensagens não lidas
   5: 5 mensagens não lidas
@@ -47,8 +47,8 @@ unreadMessagesCount:
   102: 102 mensagens não lidas
   1000000: 1.000.000 de mensagens não lidas
 newMessages:
-  0: Novas mensagens: 0
-  1: Novas mensagens: 1
+  0: 0 nova mensagem
+  1: 1 nova mensagem
   2: 2 novas mensagens
   3: 3 novas mensagens
   5: 5 novas mensagens

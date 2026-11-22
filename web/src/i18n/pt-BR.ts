@@ -53,7 +53,7 @@ export const ptBR = {
 
   invitationsTitle: 'Convites',
   invitationsRemaining: {
-    one: 'Convites restantes: {count}.',
+    one: 'Você pode convidar mais {count} pessoa.',
     many: 'Você pode convidar mais {count} de pessoas.',
     other: 'Você pode convidar mais {count} pessoas.',
   },
@@ -182,7 +182,7 @@ export const ptBR = {
   errorTooBig: 'Os arquivos podem ter até 50 MB.',
   errorUnreadable: 'Não foi possível ler esse arquivo.',
   reply: 'Responder',
-  replyingTo: 'Respondendo a {name}',
+  replyingTo: 'Resposta: {name}',
   cancelReply: 'Cancelar resposta',
   deletedMessage: 'Mensagem apagada',
   messageActions: 'Ações da mensagem',
@@ -197,7 +197,7 @@ export const ptBR = {
   alsoDeleteFor: 'Apagar também para {name}',
   unreadCount: '{count}',
   unreadMessagesCount: {
-    one: 'Mensagens não lidas: {count}',
+    one: '{count} mensagem não lida',
     many: '{count} de mensagens não lidas',
     other: '{count} mensagens não lidas',
   },
@@ -223,7 +223,7 @@ export const ptBR = {
   errorOutdated: 'Esta versão do app está desatualizada. Feche e abra de novo para enviar.',
   seen: 'Visualizada',
   newMessages: {
-    one: 'Novas mensagens: {count}',
+    one: '{count} nova mensagem',
     many: '{count} de novas mensagens',
     other: '{count} novas mensagens',
   },
@@ -280,7 +280,7 @@ export const ptBR = {
   clearMediaConfirm: 'Limpar esta mídia deste dispositivo? As mensagens continuam.',
   storageCleared: 'Liberado: {size}.',
   storageNote:
-    'Fotos, vídeos e arquivos limpos continuam nos chats com um botão de download. Eles só podem ser baixados de novo enquanto o servidor ainda os guardar: no máximo 30 dias depois do envio, e não depois que o destinatário os apagar.',
+    'Fotos, vídeos e arquivos que você limpou continuam nos chats com um botão de download. Eles só podem ser baixados de novo enquanto o servidor ainda os guardar: no máximo 30 dias depois do envio, e não depois que o destinatário os apagar.',
   blockedConversation: 'Você bloqueou este chat. Nada do que a pessoa enviar chega, e ela não é avisada.',
   noticeUnblocked: 'Desbloqueado. A pessoa pode escrever para você de novo; o que ela enviou durante o bloqueio foi perdido.',
   block: 'Bloquear',
