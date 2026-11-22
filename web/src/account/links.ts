@@ -139,11 +139,17 @@ export interface AccountInfo {
   expired: boolean;
   /** What is left of an account this one replaced is still to be deleted (the app asks for it). */
   cleanup: boolean;
+  /**
+   * While notices are on: their language, which the server picked from
+   * Telegram's (one of the app's languages). Missing from a server that
+   * doesn't say.
+   */
+  noticeLanguage?: string;
 }
 
 export function checkAccountInfo(value: unknown): AccountInfo {
   const v = checkObject(value);
-  const { canCreateLinks, admin, links, notices, noticesRefused, deleting, expired, cleanup } = v;
+  const { canCreateLinks, admin, links, notices, noticesRefused, deleting, expired, cleanup, noticeLanguage } = v;
   if (typeof canCreateLinks !== 'boolean' || typeof admin !== 'boolean') throw new Error('bad account');
   if (!Number.isSafeInteger(links)) throw new Error('bad account');
   return {
@@ -155,6 +161,7 @@ export function checkAccountInfo(value: unknown): AccountInfo {
     deleting: deleting === true,
     expired: deleting === true && expired === true,
     cleanup: cleanup === true,
+    ...(typeof noticeLanguage === 'string' && noticeLanguage !== '' ? { noticeLanguage } : {}),
   };
 }
 

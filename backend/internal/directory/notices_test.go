@@ -314,3 +314,79 @@ func within(k map[string]types.AttributeValue, allowed []string, names map[strin
 	}
 	return true
 }
+
+// SetNoticeLanguage changes the language alone, only while notices are on,
+// and never turns them back on: a refusal by Telegram holds, even when it
+// lands between the app's look at the account and its change.
+func TestSetNoticeLanguage(t *testing.T) {
+	s, _ := store(t)
+	ctx := context.Background()
+	a := registered(t, s)
+	device := func() Device {
+		t.Helper()
+		d, err := s.Device(ctx, a.ID, a.DeviceID, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
+	// Never set up.
+	if err := s.SetNoticeLanguage(ctx, a.ID, "fa"); !errors.Is(err, ErrNoticesOff) {
+		t.Fatalf("never set up: %v", err)
+	}
+	if d := device(); d.NoticeLanguage != "" || d.Notices {
+		t.Fatalf("never set up: %+v", d)
+	}
+
+	if err := s.SetNotices(ctx, a.ID, []byte("sealed"), "en"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.NoticeSent(ctx, a.ID, 77); err != nil {
+		t.Fatal(err)
+	}
+	if d := device(); d.NoticeLanguage != "en" {
+		t.Fatalf("on: %q", d.NoticeLanguage)
+	}
+	if err := s.SetNoticeLanguage(ctx, a.ID, "fa"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.Notices(ctx, a.ID)
+	if err != nil || n.Language != "fa" || !bytes.Equal(n.SealedChat, []byte("sealed")) || n.LastMessage != 77 || n.Off {
+		t.Fatalf("after the change: %+v, %v", n, err)
+	}
+	if d := device(); d.NoticeLanguage != "fa" || !d.Notices {
+		t.Fatalf("device after the change: %+v", d)
+	}
+
+	// Refused by Telegram: the change fails, the refusal stays, and the
+	// device says no language.
+	if err := s.NoticesOff(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNoticeLanguage(ctx, a.ID, "en"); !errors.Is(err, ErrNoticesOff) {
+		t.Fatalf("refused: %v", err)
+	}
+	if n, _ := s.Notices(ctx, a.ID); !n.Off || n.Language != "fa" {
+		t.Fatalf("refused notices changed: %+v", n)
+	}
+	if d := device(); d.Notices || !d.NoticesRefused || d.NoticeLanguage != "" {
+		t.Fatalf("device while refused: %+v", d)
+	}
+
+	// Forgotten (the api removes what notices need once they're off): still off.
+	if err := s.ForgetNotices(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNoticeLanguage(ctx, a.ID, "en"); !errors.Is(err, ErrNoticesOff) {
+		t.Fatalf("forgotten: %v", err)
+	}
+	ghost := ids.New()
+	if err := s.SetNoticeLanguage(ctx, ghost, "en"); !errors.Is(err, ErrNoticesOff) {
+		t.Fatalf("unknown account: %v", err)
+	}
+	// It never creates an item.
+	if _, err := s.Notices(ctx, ghost); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown account: %v", err)
+	}
+}

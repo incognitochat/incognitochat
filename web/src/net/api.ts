@@ -32,6 +32,7 @@ type ErrorCode =
   | 'admin_only'
   | 'invalid_envelope'
   | 'mailbox_limit'
+  | 'notices_off'
   | 'invalid_token'
   | 'tokens_needed'
   | 'unknown_issuer_key'
@@ -72,6 +73,7 @@ const CODES = new Set<string>([
   'admin_only',
   'invalid_envelope',
   'mailbox_limit',
+  'notices_off',
   'invalid_token',
   'tokens_needed',
   'unknown_issuer_key',

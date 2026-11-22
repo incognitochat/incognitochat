@@ -106,7 +106,7 @@ The keyed hashes and the edits are kept apart from the conversation itself
 | Two settings for everyone: whether uploads, and whether downloads, of attachments are paused (the operator's emergency switches). Nothing about any user | So the operator can pause attachments when their cost runs away | Until the operator changes them |
 | One month for everyone: the newest in which a login recorded its account's month of use. Nothing about any user | So the deletion of unused accounts deletes nothing if logins stop recording their month ([below](#accounts-nobody-uses)) | Replaced by the next month's, at the first such login of each month |
 | The admins' Telegram IDs, in an encrypted parameter (SSM Parameter Store), not in the `api` function's settings or the deployment's Terraform state. Whoever may read that parameter can read them: the `api` function, the deploy and the operator's AWS admins | To recognise admins, by the keyed hash of their ID | Until the operator changes them. SSM also keeps the parameter's earlier values, its last 100 |
-| Rate counters: how many messages each mailbox got in a minute, and first messages each link in an hour; how much each device fetched in a minute; and what each person (Telegram user) used in a day (tokens, mailboxes, link changes, notice setups, fetches, confirmations of messages already gone, and so on), and how often each attachment was fetched. Each is named by a keyed hash of what it counts and its window, which changes every window: without the server's secret key, nobody can tell which mailbox, link, device or person a counter is about, or that two counters are about the same one. The daily ones go by the Telegram user, so setting up again doesn't reset them | Rate limits, among them the ones that keep one account from using up the capacity everyone shares | Until their window (minute, hour or UTC day) ends |
+| Rate counters: how many messages each mailbox got in a minute, and first messages each link in an hour; how much each device fetched in a minute; and what each person (Telegram user) used in a day (tokens, mailboxes, link changes, notice setups and language changes, fetches, confirmations of messages already gone, and so on), and how often each attachment was fetched. Each is named by a keyed hash of what it counts and its window, which changes every window: without the server's secret key, nobody can tell which mailbox, link, device or person a counter is about, or that two counters are about the same one. The daily ones go by the Telegram user, so setting up again doesn't reset them | Rate limits, among them the ones that keep one account from using up the capacity everyone shares | Until their window (minute, hour or UTC day) ends |
 | Socket records: a keyed hash of the account (not its ID), the connection ID, and the minute the record expires | Live updates, while the app is open | From opening the app until the server finds the socket closed, the account is deleted, or the record expires, 40 minutes after the minute it opened |
 | Notice quiet periods: a keyed hash of the account, the minute the period ends, and a random token naming who started it | At most one notice every 3 minutes | 3 minutes, rounded up to the minute (as long as Telegram asks, if it refused a notice for sending too many) |
 | Login nonces, spent send and media tokens (and whether one was given back). Nothing about whose they were | Replay protection | Minutes, up to two weeks |
@@ -213,7 +213,11 @@ When a user sets up, Telegram gives the app signed launch data about them
 (their Telegram ID, name, username and language). The server checks Telegram's
 signature, keeps the keyed hash of the ID described above, and forgets the
 rest. When the user allows notices, it also keeps their chat ID, encrypted,
-and their language, while notices stay on. When someone opens a link, the
+and their language (one of the app's languages, picked from Telegram's),
+while notices stay on. When a later launch's Telegram language picks
+another of the app's languages, the app sends that launch's data again (only
+from a launch without a link or invitation in it, at most once per launch),
+so the server can change it. When someone opens a link, the
 app never sends that launch data to the server, so it doesn't learn who
 opened which link.
 
@@ -276,7 +280,8 @@ records go in that same request.
   server still holds it.
 - **Choose the app's language** (Data and storage): English, Persian, or the
   same as Telegram, the default. The choice stays on the device and isn't
-  sent; notices keep the language Telegram gives the server.
+  sent; notices follow the language Telegram gives the server, and the app
+  tells the server again when that changes.
 - **Delete their account** in the app (on the Link tab). First the app
   deletes from the server the attachments they received: those of the
   messages on the device, and of those still waiting for it, which it

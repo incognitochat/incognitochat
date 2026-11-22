@@ -282,3 +282,117 @@ func TestSendHandsPushToWs(t *testing.T) {
 		t.Fatalf("logs: %s", h.logs.String())
 	}
 }
+
+func TestSetNoticeLanguage(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Notices = &memNotices{}
+	m := h.account(t, userID)
+	a := h.dir.accounts[h.dir.telegram[directory.TelegramHash(h.server.Pepper, userID)]]
+	change := func(language string) (int, map[string]any) {
+		return h.as(t, m, http.MethodPost, "/notices/language", map[string]any{"initData": launchIn(userID, "", language, h)}, false)
+	}
+
+	// Off: nothing to change, and the account says no language.
+	if _, out := h.as(t, m, http.MethodGet, "/account", nil, false); out["noticeLanguage"] != nil {
+		t.Fatalf("off: %v", out)
+	}
+	status, out := change("fa")
+	wantError(t, status, out, http.StatusConflict, "notices_off")
+	if a.chat != nil || a.language != "" {
+		t.Fatalf("changed notices that were never set up: %q %q", a.chat, a.language)
+	}
+
+	if status, out := h.as(t, m, http.MethodPost, "/notices", map[string]any{"initData": launchIn(userID, "", "en", h)}, false); status != http.StatusOK {
+		t.Fatalf("notices: %d %v", status, out)
+	}
+	if _, out := h.as(t, m, http.MethodGet, "/account", nil, false); out["noticeLanguage"] != "en" {
+		t.Fatalf("on: %v", out)
+	}
+	if status, out := change("fa-IR"); status != http.StatusOK {
+		t.Fatalf("change: %d %v", status, out)
+	}
+	if a.language != "fa" || string(a.chat) != "sealed:"+strconv.FormatInt(userID, 10) || a.noticesOff {
+		t.Fatalf("stored %q %q %v", a.chat, a.language, a.noticesOff)
+	}
+	if _, out := h.as(t, m, http.MethodGet, "/account", nil, false); out["noticeLanguage"] != "fa" || out["notices"] != true {
+		t.Fatalf("after: %v", out)
+	}
+
+	// Nothing to change is done at once, and isn't counted: no language in
+	// the launch data (never read as English), or the same language.
+	for range NoticeLanguageChangesPerDay + 1 {
+		for _, same := range []string{"", "fa", "FA_ir"} {
+			if status, out := change(same); status != http.StatusOK || a.language != "fa" {
+				t.Fatalf("%q: %d %v, stored %q", same, status, out, a.language)
+			}
+		}
+	}
+
+	// Changes are rate limited.
+	languages := []string{"en", "fa"}
+	for i := range NoticeLanguageChangesPerDay - 1 {
+		if status, out := change(languages[i%2]); status != http.StatusOK {
+			t.Fatalf("change %d: %d %v", i, status, out)
+		}
+	}
+	before := a.language
+	status, out = change(map[string]string{"en": "fa", "fa": "en"}[before])
+	wantError(t, status, out, http.StatusTooManyRequests, "rate_limited")
+	if a.language != before {
+		t.Fatalf("changed while rate limited: %q", a.language)
+	}
+}
+
+func TestSetNoticeLanguageLeavesRefusedNoticesOff(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Notices = &memNotices{}
+	m := h.account(t, userID)
+	a := h.dir.accounts[h.dir.telegram[directory.TelegramHash(h.server.Pepper, userID)]]
+	if status, out := h.as(t, m, http.MethodPost, "/notices", map[string]any{"initData": launchIn(userID, "", "en", h)}, false); status != http.StatusOK {
+		t.Fatalf("notices: %d %v", status, out)
+	}
+	// Telegram refused a notice (the user blocked the bot): a block holds.
+	a.noticesOff = true
+	status, out := h.as(t, m, http.MethodPost, "/notices/language", map[string]any{"initData": launchIn(userID, "", "fa", h)}, false)
+	wantError(t, status, out, http.StatusConflict, "notices_off")
+	if !a.noticesOff || a.language != "en" {
+		t.Fatalf("refused notices changed: off %v, language %q", a.noticesOff, a.language)
+	}
+}
+
+func TestSetNoticeLanguageRejects(t *testing.T) {
+	h := newHarness(t)
+	h.server.InviteOnly = false
+	h.server.Notices = &memNotices{}
+	m := h.account(t, userID)
+	if status, out := h.as(t, m, http.MethodPost, "/notices", map[string]any{"initData": launchIn(userID, "", "en", h)}, false); status != http.StatusOK {
+		t.Fatalf("notices: %d %v", status, out)
+	}
+	a := h.dir.accounts[h.dir.telegram[directory.TelegramHash(h.server.Pepper, userID)]]
+	try := func(initData string) (int, map[string]any) {
+		return h.as(t, m, http.MethodPost, "/notices/language", map[string]any{"initData": initData}, false)
+	}
+	// Launches that name a link or an invitation (they'd tell the server
+	// whose link was opened), another user's, or bad data.
+	for _, bad := range []string{
+		launchIn(userID, "1"+ids.New()[:11]+"x", "fa", h),
+		launchIn(userID, "invABCDEFGH", "fa", h),
+		launchIn(userID+1, "", "fa", h),
+		"auth_date=1&user=%7B%22id%22%3A1%7D&hash=00",
+	} {
+		status, out := try(bad)
+		wantError(t, status, out, http.StatusUnauthorized, "init_data_rejected")
+	}
+	status, out := try("")
+	wantError(t, status, out, http.StatusBadRequest, "bad_request")
+	status, out = h.call(t, nil, "", http.MethodPost, "/notices/language", map[string]any{"initData": launchIn(userID, "", "fa", h)}, false)
+	wantError(t, status, out, http.StatusUnauthorized, "session_expired")
+	h.server.Notices = nil
+	status, out = try(launchIn(userID, "", "fa", h))
+	wantError(t, status, out, http.StatusNotFound, "not_found")
+	if a.language != "en" {
+		t.Fatalf("a rejected request changed the language: %q", a.language)
+	}
+}

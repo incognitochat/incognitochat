@@ -110,6 +110,9 @@ var (
 	ErrNotFound = errors.New("directory: not found")
 	// ErrConflict is returned when a concurrent change won.
 	ErrConflict = errors.New("directory: conflict")
+	// ErrNoticesOff is returned for a change to notices that are off
+	// (turned off, or refused by Telegram) or were never set up.
+	ErrNoticesOff = errors.New("directory: notices are off")
 	// errCutShort is returned when a read meant to take one page didn't:
 	// something unexpected sorts in its range.
 	errCutShort = errors.New("directory: read cut short")
@@ -187,6 +190,9 @@ type Device struct {
 	// ID, the language or the last notice's ID) is still stored, for
 	// ForgetNotices.
 	NoticesLeft bool
+	// NoticeLanguage: the language notices are sent in, while they're on
+	// ("" otherwise).
+	NoticeLanguage string
 	// Deleting: DELETE /account has started (MarkDeleting), and the
 	// account takes no other request.
 	Deleting bool
@@ -1002,9 +1008,12 @@ func accountState(acct map[string]types.AttributeValue) Device {
 	lu, _ := str(acct, "lu")
 	_, member := acct["lv"].(*types.AttributeValueMemberN)
 	_, chat := acct["cid"]
-	_, language := acct["lg"]
+	lg, language := str(acct, "lg")
 	_, last := acct["nm"]
 	_, off := acct["no"]
+	if !chat || off {
+		lg = ""
+	}
 	_, deleting := acct["dl"]
 	return Device{
 		Replaced:       g == goneReplaced,
@@ -1017,6 +1026,7 @@ func accountState(acct map[string]types.AttributeValue) Device {
 		Notices:        chat && !off,
 		NoticesRefused: num(acct, "no") == noticesRefused,
 		NoticesLeft:    off && (chat || language || last),
+		NoticeLanguage: lg,
 		Deleting:       deleting,
 		Expired:        deleting && num(acct, "dl") == deletingUnused,
 		Leftovers:      stringSet(acct, "ro"),
@@ -1204,7 +1214,8 @@ func roundUp(t time.Time) int64 {
 // after a new chat key it sets them up by itself, as at first. cid, lg and
 // nm are kept only while notices are on: once they are off, the api removes
 // them (ForgetNotices) the next time the app asks about the account, and
-// setting notices up again stores cid and lg anew.
+// setting notices up again stores cid and lg anew. While they're on, the
+// app keeps lg in step with Telegram's language (SetNoticeLanguage).
 //
 // The notify function may touch nothing else (infra/functions.tf): it reads
 // cid, lg, nm and no, naming them, and writes nm and no, with conditions on
@@ -1239,6 +1250,26 @@ func (s *Store) SetNotices(ctx context.Context, accountID string, sealedChat []b
 	var failed *types.ConditionalCheckFailedException
 	if errors.As(err, &failed) {
 		return ErrNotFound
+	}
+	return err
+}
+
+// SetNoticeLanguage changes the language of an account's notices, and
+// nothing else, while they're on. ErrNoticesOff if they're off (turned off,
+// or refused by Telegram, even since the caller looked) or were never set
+// up: it never turns them back on, as SetNotices does.
+func (s *Store) SetNoticeLanguage(ctx context.Context, accountID, language string) error {
+	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(accountPK(accountID), skAccount),
+		UpdateExpression:          aws.String("SET lg = :l"),
+		ConditionExpression:       aws.String("attribute_exists(ak) AND attribute_exists(cid) AND attribute_not_exists(#no)"),
+		ExpressionAttributeNames:  map[string]string{"#no": "no"},
+		ExpressionAttributeValues: attrs{":l": sv(language)},
+	})
+	var failed *types.ConditionalCheckFailedException
+	if errors.As(err, &failed) {
+		return ErrNoticesOff
 	}
 	return err
 }

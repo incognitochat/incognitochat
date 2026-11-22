@@ -264,7 +264,7 @@ topics.
 | `registrations` | More than 20 accounts were registered or set up again in an hour (`registrations_alarm`). |
 | `token-requests` | More than 200 batches of send and media tokens were signed in an hour (`token_requests_alarm`). The app asks for 20 send tokens or 30 media tokens at a time. |
 | `limit-hits` | The `api` function answered `429` (`rate_limited`, `daily_limit`, `link_busy` or `download_limit`, any route) more than 100 times in an hour (`limit_hits_alarm`). |
-| `invalid-tokens`, `init-data-rejected`, `signature-rejected` | More than 50 requests in an hour were refused for that reason (`refusals_alarm`, each alarm on its own): a send or media token that isn't valid (`POST /send`, `POST /media`), Telegram data that doesn't check out (`POST /register`, `POST /accounts/lookup`, `POST /notices`), or a device signature that doesn't (registrations and every signed request). |
+| `invalid-tokens`, `init-data-rejected`, `signature-rejected` | More than 50 requests in an hour were refused for that reason (`refusals_alarm`, each alarm on its own): a send or media token that isn't valid (`POST /send`, `POST /media`), Telegram data that doesn't check out (`POST /register`, `POST /accounts/lookup`, `POST /notices`, `POST /notices/language`), or a device signature that doesn't (registrations and every signed request). |
 
 The last six read the `api` function's [request counts](#request-counts).
 Their thresholds are guesses far above an early deployment's use: check
@@ -1075,10 +1075,10 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 | `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
 | `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 21 metrics is billed as a custom
+Metric filters are free. Each of the 22 metrics is billed as a custom
 metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
 month for the five counted whenever the app is used, next to nothing for
-the others until something goes wrong, and at most $6.30 if all of them got
+the others until something goes wrong, and at most $6.60 if all of them got
 data every hour. The six alarms cost $0.70 a month (the token alarm reads
 two metrics), and the lines, under 1 KB a minute per busy instance, cents.
 So about $2.20 a month per environment, at most about $7.
