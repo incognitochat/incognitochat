@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.9.0](https://github.com/incognitochat/incognitochat/compare/v2.8.0...v2.9.0) (2026-11-22)
+
+
+### Features
+
+* add Brazilian Portuguese to the app and the bot ([#226](https://github.com/incognitochat/incognitochat/issues/226)) ([1abe3bb](https://github.com/incognitochat/incognitochat/commit/1abe3bb623540caccc7f631a61500cfa6086f615))
+* add Dutch to the app and the bot ([#224](https://github.com/incognitochat/incognitochat/issues/224)) ([63d53cb](https://github.com/incognitochat/incognitochat/commit/63d53cb667b890e0a0b79e56bd5f4f64b48abb50))
+* add Indonesian to the app and the bot ([#227](https://github.com/incognitochat/incognitochat/issues/227)) ([e6c474e](https://github.com/incognitochat/incognitochat/commit/e6c474ef28edf40716c9645442f4d2a3c185499c))
+* add Spanish to the app and the bot ([#225](https://github.com/incognitochat/incognitochat/issues/225)) ([e5bdfa8](https://github.com/incognitochat/incognitochat/commit/e5bdfa82266c98c6656873ab75f19a009f3f553a))
+* add Turkish to the app and the bot ([#228](https://github.com/incognitochat/incognitochat/issues/228)) ([2c882d5](https://github.com/incognitochat/incognitochat/commit/2c882d59cef667578ffac7415d739db633672c79))
+
+
+### Bug Fixes
+
+* **web:** accept a typed confirmation with İ, I, ı or i alike ([#222](https://github.com/incognitochat/incognitochat/issues/222)) ([0a06dd8](https://github.com/incognitochat/incognitochat/commit/0a06dd87053e2d8f264678e13bb22813b4f3f7f5))
+* **web:** say in Persian that an account's deletion couldn't finish ([#221](https://github.com/incognitochat/incognitochat/issues/221)) ([9f7b69b](https://github.com/incognitochat/incognitochat/commit/9f7b69b55fcb7d3777b3c5c28ce8e8854013e71e))
+
 ## [2.8.0](https://github.com/incognitochat/incognitochat/compare/v2.7.0...v2.8.0) (2026-11-22)
 
 
