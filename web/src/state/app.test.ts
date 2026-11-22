@@ -2544,6 +2544,32 @@ describe('typed confirmation', () => {
     expect(confirmationMatches('', '')).toBe(false);
   });
 
+  it('reads the dotted and dotless i (İ I ı i) as one letter, whatever the device language', () => {
+    // A Turkish keyboard types İ for a capital i; lowercased outside Turkish
+    // it becomes i plus a combining dot, and I becomes ı in Turkish.
+    expect(confirmationMatches('HESAP SİL', 'hesap sil')).toBe(true);
+    expect(confirmationMatches('Sil', 'sil')).toBe(true);
+    expect(confirmationMatches('HESABIMI SIL', 'hesabımı sil')).toBe(true);
+    expect(confirmationMatches('hesabimi sil', 'hesabımı sil')).toBe(true);
+    expect(confirmationMatches('hesap sal', 'hesap sil')).toBe(false);
+  });
+
+  it("doesn't depend on how the device's language lowercases", () => {
+    const lower = String.prototype.toLocaleLowerCase;
+    for (const language of ['tr', 'az', 'lt']) {
+      const spy = vi.spyOn(String.prototype, 'toLocaleLowerCase').mockImplementation(function (this: string) {
+        return lower.call(this, language);
+      });
+      try {
+        expect(confirmationMatches('HESAP SIL', 'hesap sil'), language).toBe(true);
+        expect(confirmationMatches('HESAP SİL', 'hesap sil'), language).toBe(true);
+        expect(confirmationMatches('BORRAR DÍA', 'borrar día'), language).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
   it('takes the phrase however a keyboard types it', () => {
     // A zero-width non-joiner typed as a space, or as nothing.
     const zwnj = 'گفت‌وگو';
