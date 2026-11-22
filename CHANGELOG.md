@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.10.0](https://github.com/incognitochat/incognitochat/compare/v2.9.1...v2.10.0) (2026-11-22)
+
+
+### Features
+
+* add French to the app and the bot ([#239](https://github.com/incognitochat/incognitochat/issues/239)) ([b70f13d](https://github.com/incognitochat/incognitochat/commit/b70f13d665ebca94b1de00b2ec4b03b91eb4acf5))
+* add German to the app and the bot ([#240](https://github.com/incognitochat/incognitochat/issues/240)) ([be1636d](https://github.com/incognitochat/incognitochat/commit/be1636d3087ae376e22084854b6c74961e75f6f8))
+* add Polish to the app and the bot ([#241](https://github.com/incognitochat/incognitochat/issues/241)) ([387668d](https://github.com/incognitochat/incognitochat/commit/387668dbffd020b3c29a8ba6c0c233e7da634511))
+* add Ukrainian to the app and the bot ([#237](https://github.com/incognitochat/incognitochat/issues/237)) ([aa5df86](https://github.com/incognitochat/incognitochat/commit/aa5df863c8ff6c3e98c282771e0286115ff0da0f))
+
+
+### Bug Fixes
+
+* **api:** limit how often one device can log in and sign requests ([#232](https://github.com/incognitochat/incognitochat/issues/232)) ([85389fd](https://github.com/incognitochat/incognitochat/commit/85389fdcc1007645cde8ef59838f416f99ae98a5))
+* **api:** limit how often one device can make logged-in requests ([#235](https://github.com/incognitochat/incognitochat/issues/235)) ([cee8e18](https://github.com/incognitochat/incognitochat/commit/cee8e18a3c1ae11e473759e141ccbfd91a77b03d))
+* remember spent tokens until they expire and limit uploads per address ([#233](https://github.com/incognitochat/incognitochat/issues/233)) ([439d1ac](https://github.com/incognitochat/incognitochat/commit/439d1ac2f7383521cf0d00c8a38f2c58c82971a8))
+* **web:** keep older messages loaded in an open chat when it refreshes ([#229](https://github.com/incognitochat/incognitochat/issues/229)) ([d1921ad](https://github.com/incognitochat/incognitochat/commit/d1921ad9f0776ab92d0c4341f1d2732aba162b4e))
+* **web:** keep the slide-to-cancel hint readable on narrow phones ([#238](https://github.com/incognitochat/incognitochat/issues/238)) ([347a444](https://github.com/incognitochat/incognitochat/commit/347a44457b046c7f91e804bf968e1f794b65186e))
+* **web:** reply bar in Arabic when you reply to your own message ([#236](https://github.com/incognitochat/incognitochat/issues/236)) ([fd60ebc](https://github.com/incognitochat/incognitochat/commit/fd60ebcee52f9623026459648bef26877c05245e))
+
 ## [2.9.1](https://github.com/incognitochat/incognitochat/compare/v2.9.0...v2.9.1) (2026-11-22)
 
 
