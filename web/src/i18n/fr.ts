@@ -149,7 +149,7 @@ export const fr = {
   holdForVoice: 'Maintenez appuyé pour enregistrer un message vocal. Appuyez pour passer à la vidéo.',
   holdForRound: 'Maintenez appuyé pour enregistrer un message vidéo. Appuyez pour passer au vocal.',
   holdToRecord: 'Maintenez appuyé pour enregistrer un message vocal.',
-  slideToCancel: 'Glissez pour annuler',
+  slideToCancel: 'Glisser : annuler',
   flipCamera: 'Changer de caméra',
   cameraDenied: "L'accès à la caméra ou au microphone est désactivé. Autorisez-les pour Telegram afin de pouvoir enregistrer.",
   cameraMissing: 'Aucune caméra trouvée.',
