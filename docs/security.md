@@ -352,7 +352,7 @@ it. This is how close it gets.
 - **A brand-new user's first message** follows their registration closely in
   time.
 - **Deleting an account with its chats for both sides.** When the user
-  ticks that, the deletes go out one after another, about a second apart,
+  ticks that, the deletes go out one after another, a second or more apart,
   right before the account's deletion: the operator or AWS, watching live,
   can tie the mailboxes they go to to the account being deleted, and so
   see whom it was talking to, and the deletes of the uploads the user sent

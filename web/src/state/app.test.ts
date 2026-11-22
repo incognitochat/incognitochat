@@ -1997,7 +1997,7 @@ describe('deleting the account', () => {
     await chatOnDevice(owner.db);
     owner.app.askDeleteAccount();
     await owner.app.deleteAccount(true);
-    expect(owner.app.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'generic', left: 1 } });
+    expect(owner.app.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'outdated', left: 1 } });
     expect(server.calls).not.toContain('DELETE /account');
     expect(await getMeta(owner.db, 'deleting')).toBeUndefined();
   });

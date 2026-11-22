@@ -1636,19 +1636,19 @@ describe('deleting the account', () => {
     expect(screenOf(a.screen.value, 'home').tab).toBe('links');
   });
 
-  it("doesn't delete the account when Cancel is tapped right after the last chat", async () => {
+  it('goes on to the deletion in the same turn as the last chat, so a Cancel a moment later finds nothing to cancel', async () => {
     const b = await backend();
     const { a } = await withChats(b, 1);
     let armed = true;
-    // Whether the tap came while Cancel still showed.
-    let shown: boolean | null = null;
+    // What the screen showed when the tap came.
+    let shown: string | null = null;
     const push = a.broadcasts.push.bind(a.broadcasts);
     a.broadcasts.push = (...e: SyncEvent[]) => {
       if (armed && e[0]?.type === 'data-changed' && a.screen.value.kind === 'deleting-chats') {
         armed = false;
         // A moment later.
         (globalThis as unknown as { setImmediate: (fn: () => void) => void }).setImmediate(() => {
-          shown = a.screen.value.kind === 'deleting-chats';
+          shown = a.screen.value.kind;
           void a.keepAccount();
         });
       }
@@ -1657,12 +1657,9 @@ describe('deleting the account', () => {
     a.askDeleteAccount();
     await a.deleteAccount(true);
     await new Promise((r) => setTimeout(r, 300));
-    expect(shown).not.toBeNull();
-    // A Cancel the screen still showed keeps the account; once on to the deletion, there's none.
-    if (shown) {
-      expect(b.state.deletedAccounts).toEqual([]);
-      expect(await getMeta(a.db, 'deleting')).toBeUndefined();
-    } else expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    // Not the chats' screen, whose Cancel would have kept an account then deleted.
+    expect(shown).toBe('deleting');
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
   it('ignores a tap on Delete anyway once Keep was tapped, while home loads', async () => {
@@ -1687,7 +1684,8 @@ describe('deleting the account', () => {
       b.state.sendRefused = new ApiError(429, code);
       a.askDeleteAccount();
       await a.deleteAccount(true);
-      expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'turned-away', left: 1 } });
+      // A busy link's chat is left for later, the others go on: it stops at the end.
+      expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: code === 'link_busy' ? 1 : 0, total: 1, stopped: { reason: 'turned-away', left: 1 } });
       expect(canRetryChats('turned-away')).toBe(true);
       b.state.sendRefused = null;
       await a.retryDeletingChats();
@@ -1705,6 +1703,66 @@ describe('deleting the account', () => {
     await a.deleteAccount(true);
     expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
     expect(b.sends.length - sent).toBe(1);
+    expect(await hasChat(others[0]!)).toBe(true);
+    expect(await hasChat(others[1]!)).toBe(false);
+  });
+
+  it('keeps the pace across Try again', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 2, { chatDeleteWindow: { count: 2, ms: 600 } });
+    const times: number[] = [];
+    const post = b.api.post.bind(b.api);
+    b.api.post = async (path, body, check) => {
+      if (path !== '/send') return post(path, body, check);
+      times.push(Date.now());
+      // The second goes nowhere.
+      if (times.length === 2) throw new NetworkError('offline');
+      return post(path, body, check);
+    };
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'deleting-chats', stopped: { reason: 'network', left: 1 } });
+    await a.retryDeletingChats();
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(times).toHaveLength(3);
+    expect(times[2]! - times[0]!).toBeGreaterThanOrEqual(595);
+  });
+
+  it('looks at a chat again after waiting its turn: one deleted here meanwhile is left', async () => {
+    const b = await backend();
+    const { a, others, chats } = await withChats(b, 2, { chatDeleteWindow: { count: 1, ms: 500 } });
+    const copy = await a.reopen('');
+    const sent = b.sends.length;
+    const hold = holdSend(b);
+    a.askDeleteAccount();
+    const deleting = a.deleteAccount(true);
+    await hold.atServer;
+    const sending = await Promise.all(chats.map(async (chat) => (await getConversation(a.db, chat))!.sendTo === hold.mailbox()));
+    const other = chats[sending.indexOf(false)]!;
+    hold.release();
+    // While the second one waits its turn (half a second), another copy deletes it here.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(a.screen.value).toMatchObject({ kind: 'deleting-chats', done: 1 });
+    await copy.deleteConversation(other, false);
+    await deleting;
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(b.sends.length - sent).toBe(1);
+    expect(await hasChat(others[sending.indexOf(false)]!)).toBe(true);
+  });
+
+  it('leaves a chat whose link is busy for later, goes on with the others, then asks', async () => {
+    const b = await backend();
+    const { a, others, chats } = await withChats(b, 2);
+    const busyAt = (await getConversation(a.db, chats[0]!))!.sendTo;
+    const post = b.api.post.bind(b.api);
+    b.api.post = async (path, body, check) => {
+      if (path === '/send' && (body as { mailbox?: string }).mailbox === busyAt) throw new ApiError(429, 'link_busy');
+      return post(path, body, check);
+    };
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 2, total: 2, stopped: { reason: 'turned-away', left: 1 } });
+    expect(b.calls).not.toContain('DELETE /account');
     expect(await hasChat(others[0]!)).toBe(true);
     expect(await hasChat(others[1]!)).toBe(false);
   });

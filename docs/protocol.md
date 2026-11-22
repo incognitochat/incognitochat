@@ -345,11 +345,13 @@ blocked, not ended, not deleted on this device only) for both sides,
 exactly as a conversation's own delete for both sides does (`delete`
 with `all`, quiet, one send token; the uploads of its own attachments in
 it are queued and go with the rest above, best effort), one at a time,
-at least a second apart and at most 150 in any 5 minutes: the firewall
-turns an address away from the routes that need no login past 500
-requests in 5 minutes, a conversation the user started that wasn't
-answered first fetches its link's key there too, and the uploads'
-deletes after it need those routes. Nothing of this is recorded: if the
+at least a second apart and at most 150 in any 5 minutes, also across
+Try again: the firewall turns an address away from the routes that need
+no login past 500 requests in 5 minutes (by default), a conversation the
+user started that wasn't answered first fetches its link's key there
+too, and the uploads' deletes after it need those routes. A conversation
+whose link takes no more first messages this hour (`link_busy`) is left
+for later, and the others go on. Nothing of this is recorded: if the
 app closes, or the user cancels or goes back, the account stays, and the
 next try covers the conversations still in the list. A send that fails
 stops it, and the user chooses: try again (not once the day's send

@@ -282,24 +282,25 @@ records go in that same request.
   languages, or the same as Telegram, the default. The choice stays on the device and isn't
   sent; notices follow the language Telegram gives the server, and the app
   tells the server again when that changes.
-- **Delete their account** in the app (on the Link tab). First the app
-  deletes from the server the attachments they received: those of the
-  messages on the device, and of those still waiting for it, which it
-  fetches first. Any it couldn't delete, or never saw (one that arrived
-  later), expire within 30 days, and so do the ones they sent, which stay
-  for the other side to fetch, unless they tick **Also delete my chats for
-  the other side**. Then, before anything else, the app deletes each chat
-  in their list for both sides, as a chat's own Delete does: the other
-  side's app is asked to delete it, and the uploads of what they sent
-  there are deleted from the server with the others above (any it can't
-  delete expire within 30 days). Each costs one of the day's messages;
-  blocked chats, ended ones and those deleted on this device only stay
-  with the other side. Like any delete for both sides, this relies on the
-  other side's app. If a chat can't be done (the day's messages are used
-  up, the server can't be reached), the app stops and asks: delete the
-  account anyway (those chats stay with the other side), keep it, or try
-  again (not when the day's messages are used up, or the app is out of
-  date). Nothing of this is kept: closing the app keeps the account. Then the account ends at once, and
+- **Delete their account** in the app (on the Link tab). If they tick
+  **Also delete my chats for the other side**, the app first deletes each
+  chat in their list for both sides, as a chat's own Delete does: the
+  other side's app is asked to delete it, and the uploads of what they
+  sent there are deleted from the server with the others below (any it
+  can't delete expire within 30 days). Each costs one of the day's
+  messages; blocked chats, ended ones and those deleted on this device
+  only stay with the other side. Like any delete for both sides, this
+  relies on the other side's app. If a chat can't be done (the day's
+  messages are used up, the server can't be reached), the app stops and
+  asks: delete the account anyway (those chats stay with the other side),
+  keep it, or try again (not when the day's messages are used up, or the
+  app is out of date). Nothing of this is kept: closing the app keeps the
+  account. Then the app deletes from the server the attachments they
+  received: those of the messages on the device, and of those still
+  waiting for it, which it fetches first. Any it couldn't delete, or never
+  saw (one that arrived later), expire within 30 days, and so do the ones
+  they sent in chats not deleted for both sides, which stay for the other
+  side to fetch. Then the account ends at once, and
   everything the server holds for it is deleted within minutes (the link,
   mailboxes, waiting messages, invitation codes, keys, and the hash of the
   Telegram ID; only its link IDs and link signing keys' fingerprints stay,

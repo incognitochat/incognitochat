@@ -137,9 +137,11 @@ const STEP_WAIT_MAX_MS = 30_000;
 const CHAT_DELETE_GAP_MS = 1000;
 /**
  * And at most so many of them in so long (CHAT_DELETE_WINDOW_MS), a
- * sliding window: a chat the user started that wasn't answered also fetches
- * its link's key first (GET /links/{id}, a route without login too). With
- * those and the uploads' deletes, at most 450 in any 5 minutes.
+ * sliding window, also across Try again: a chat the user started that
+ * wasn't answered also fetches its link's key first (GET /links/{id}, a
+ * route without login too). With those and the uploads' deletes, at most
+ * 450 in any 5 minutes, under the firewall's default of 500 (an operator
+ * who sets it lower may see a run turned away, and Try again later).
  */
 const CHAT_DELETES_PER_WINDOW = 150;
 const CHAT_DELETE_WINDOW_MS = 5 * 60_000;
@@ -2014,6 +2016,12 @@ export function createApp(deps: Deps) {
    * (not once Keep was tapped, while home loads).
    */
   let chatsStopped: { run: number; accountId: string } | null = null;
+  /**
+   * When each delete for both sides before a deletion went out, or failed
+   * (Unix ms), within the last window: the pace holds across runs (Try
+   * again).
+   */
+  const chatSends: number[] = [];
 
   /**
    * Before deleting the account, as the user asked: deletes each chat in
@@ -2024,7 +2032,9 @@ export function createApp(deps: Deps) {
    * reach: not blocked, not ended, not out of the list (deleted here only).
    * Paced (CHAT_DELETE_GAP_MS, CHAT_DELETES_PER_WINDOW), so the firewall
    * doesn't turn the device away, which would hold up the deletion's
-   * uploads too. Then the deletion itself (confirmDeletion).
+   * uploads too. A chat whose link takes no more first messages this hour
+   * (link_busy) is left for later, and the others go on. Then the deletion
+   * itself (confirmDeletion).
    *
    * One that can't be sent stops it, and the user chooses (deleting-chats'
    * stopped): Try again (the chats still in the list), deleting the account
@@ -2038,6 +2048,8 @@ export function createApp(deps: Deps) {
     chatsStopped = null;
     let done = 0;
     let total = 0;
+    /** Chats left for later: their link takes no more first messages this hour (link_busy). */
+    let busy = 0;
     screen.value = { kind: 'deleting-chats', done, total, stopped: null };
     const ours = () => run === chatsRun && currentScreen().kind === 'deleting-chats';
     const show = () => {
@@ -2046,7 +2058,7 @@ export function createApp(deps: Deps) {
     const stop = (reason: ChatsStop) => {
       if (!ours()) return;
       chatsStopped = { run, accountId };
-      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done } };
+      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done + busy } };
     };
     const open = (c: ConversationRecord | undefined): c is ConversationRecord => !!c && c.status === 'active' && !c.hidden;
     const ids = (await listConversations(deps.db)).filter(open).map((c) => c.id);
@@ -2056,42 +2068,52 @@ export function createApp(deps: Deps) {
     if (total > 0) await createEngine();
     const gap = deps.chatDeleteGapMs ?? CHAT_DELETE_GAP_MS;
     const window = deps.chatDeleteWindow ?? { count: CHAT_DELETES_PER_WINDOW, ms: CHAT_DELETE_WINDOW_MS };
-    /** When each delete of this run went out (Unix ms). */
-    const sent: number[] = [];
     for (const id of ids) {
       if (!ours()) return;
-      // Blocked, deleted, or deleted for both sides meanwhile (another copy): nothing left to do.
+      // Blocked, deleted, or deleted for both sides meanwhile (another copy):
+      // nothing left to do. Looked at again after the wait, which can be long.
       if (open(await getConversation(deps.db, id))) {
-        let wait = sent.length > 0 ? gap : 0;
-        if (sent.length >= window.count) wait = Math.max(wait, sent[sent.length - window.count]! + window.ms - Date.now());
+        while (chatSends.length > 0 && chatSends[0]! <= Date.now() - window.ms) chatSends.shift();
+        let wait = chatSends.length > 0 ? chatSends.at(-1)! + gap - Date.now() : 0;
+        if (chatSends.length >= window.count) wait = Math.max(wait, chatSends[chatSends.length - window.count]! + window.ms - Date.now());
         if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
         const account = await readAccount(deps.db);
+        const still = open(await getConversation(deps.db, id));
         if (!ours()) return;
         // Another copy deleted the account, and set up a new one: start again.
         if (!isSetUp(account) || account.accountId !== accountId) {
           chatsRun++;
           return start();
         }
-        if (!messaging) return stop('generic');
-        sent.push(Date.now());
-        try {
-          await messaging.remove(id, true);
-          deps.broadcast({ type: 'data-changed' });
-          // The list, if it shows by now (Cancel while this was sent).
-          void refresh();
-        } catch (err) {
-          if (!ours()) return;
-          if (handleGone(err)) return;
-          // Not for both sides any more (blocked meanwhile, say): nothing to do.
-          if (open(await getConversation(deps.db, id))) return stop(chatsStop(err));
+        // This build can't send (its token key won't load): a fresh copy of the app can.
+        if (still && !messaging) return stop('outdated');
+        if (still && messaging) {
+          try {
+            await messaging.remove(id, true);
+            deps.broadcast({ type: 'data-changed' });
+            // The list, if it shows by now (Cancel while this was sent).
+            void refresh();
+          } catch (err) {
+            if (!ours()) return;
+            if (handleGone(err)) return;
+            // Not for both sides any more (blocked meanwhile, say): nothing to do.
+            if (open(await getConversation(deps.db, id))) {
+              // Its link is full for this hour: the others go on, and it's left for later.
+              if (err instanceof ApiError && err.code === 'link_busy') busy++;
+              else return stop(chatsStop(err));
+            }
+          } finally {
+            chatSends.push(Date.now());
+          }
         }
       }
       done++;
       show();
     }
+    if (!ours()) return;
+    if (busy > 0) return stop('turned-away');
     // On to the deletion in the same turn as the last look: a Cancel or back
     // from now on finds its screen gone.
-    if (!ours()) return;
     chatsRun++;
     backButton(false);
     screen.value = { kind: 'deleting', error: null };
@@ -2101,8 +2123,8 @@ export function createApp(deps: Deps) {
   /** What stopped the deletes for both sides before the account, for the user. */
   function chatsStop(err: unknown): ChatsStop {
     if (err instanceof NoTokens) return 'no-tokens';
-    // The firewall, a mailbox's cap, or a link's first messages for this hour: later.
-    if (err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'link_busy')) return 'turned-away';
+    // The firewall, or a mailbox's cap: later.
+    if (err instanceof ApiError && err.code === 'rate_limited') return 'turned-away';
     const limited = deviceLimit(err);
     if (limited) return limited;
     if (err instanceof ApiError && err.code === 'unknown_issuer_key') return 'outdated';
