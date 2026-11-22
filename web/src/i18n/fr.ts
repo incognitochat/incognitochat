@@ -257,7 +257,7 @@ export const fr = {
   usageLinkChanges: 'Changements de lien',
   usageChats: 'Échanges',
   usageChatsNote: "Bloquer quelqu'un en libère un ; supprimer un échange, non.",
-  usageLeftOf: 'Il reste {left} sur {limit}',
+  usageLeftOf: 'Reste {left} sur {limit}',
   usageOf: '{used} sur {limit}',
   usageCount: '{count}',
   sourceCode: 'Code source',
