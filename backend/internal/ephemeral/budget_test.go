@@ -433,6 +433,37 @@ func TestSpendAtBatchedFails(t *testing.T) {
 	if got := rowOf(t, client, table, "k", start); got["td"] != 5 {
 		t.Fatalf("row %v: want the four held and the last", got)
 	}
+
+	// Any count that fails to be written starts the rest (here another
+	// kind's), and while it lasts nothing is held: every use is the
+	// caller's to allow.
+	db.down = true
+	if _, err := l.AllowNAt(ctx, "other", 1, 10, time.Minute, clock); err == nil {
+		t.Fatal("a write to a table that is down went through")
+	}
+	tried = db.updates
+	if _, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, ErrResting) {
+		t.Fatalf("resting after another count failed: %v", err)
+	}
+	if db.updates != tried {
+		t.Fatal("resting, it tried a write")
+	}
+	// After the rest, it writes at once, holding nothing, until a write
+	// goes through; then it holds again.
+	db.down = false
+	clock = clock.Add(restAfterFailure)
+	if _, err := l.SpendAt(ctx, "k", b, clock); err != nil {
+		t.Fatal(err)
+	}
+	if db.updates != tried+1 {
+		t.Fatalf("after the rest, %d writes", db.updates-tried)
+	}
+	if got := rowOf(t, client, table, "k", start); got["td"] != 6 {
+		t.Fatalf("row %v: want one more, written at once", got)
+	}
+	if _, err := l.SpendAt(ctx, "k", b, clock); err != nil || db.updates != tried+1 {
+		t.Fatalf("held again: %v, %d writes", err, db.updates-tried)
+	}
 }
 
 // failingSometimes fails every call while down, as a throttled table does,

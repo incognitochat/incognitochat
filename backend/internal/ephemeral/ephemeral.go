@@ -303,7 +303,8 @@ type Limiter struct {
 	local   map[string]int       // key and window start -> uses counted here only (LocalAt)
 	rows    map[string]budgetRow // key and day start -> the row the table last returned (SpendAt)
 	pending map[string]int       // key, day start and budget -> uses let through here, not yet written (SpendAt, Budget.Batch)
-	resting time.Time            // until when batches aren't tried after one failed (SpendAt, Budget.Batch)
+	resting time.Time            // until when batches aren't tried after a write failed (SpendAt, Budget.Batch)
+	failing bool                 // a write failed, and none has gone through since: batches aren't held (SpendAt, Budget.Batch)
 }
 
 type counted struct {
@@ -597,15 +598,31 @@ const spendTries = 3
 // tries: no use was counted, and none must go uncounted.
 var errRowMoving = errors.New("ephemeral: the row kept changing")
 
-// ErrResting is SpendAt's error, for a budget with a Batch, while it rests
-// after a batch it couldn't write (restAfterFailure): nothing was tried.
+// ErrResting is SpendAt's error, for a budget with a Batch, while the
+// instance rests after a write it couldn't make (restAfterFailure):
+// nothing was tried, and the use isn't held.
 var ErrResting = errors.New("ephemeral: resting after a failed write")
 
-// restAfterFailure is how long an instance doesn't try a batch again after
-// one failed (the table throttled, say): while the table can't take them,
-// a write tried at every request would slow every request, and add to the
-// load that throttles it.
+// restAfterFailure is how long an instance tries no batch after any of its
+// writes to the table failed (the table throttled, say): while the table
+// can't take them, a write tried at every request would slow every
+// request, and add to the load that throttles it.
 const restAfterFailure = 5 * time.Second
+
+// wrote notes how a write to the table went: one that failed (not on its
+// condition: the table answered that) starts a rest (restAfterFailure),
+// and until one goes through again, batches aren't held (spendBatched).
+func (l *Limiter) wrote(err error) {
+	if conditionFailed(err) {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failing = err != nil
+	if err != nil {
+		l.resting = l.Now().Add(restAfterFailure)
+	}
+}
 
 // SpendAt counts one use of b in key's row for the UTC day that holds at,
 // if it fits in b's minute, quarter and day that hold at; otherwise it
@@ -662,9 +679,11 @@ func (l *Limiter) SpendAt(ctx context.Context, key string, b Budget, at time.Tim
 // written once a batch, not once a use. Uses written to no table (the
 // instance stopped, or the day ended first) are fewer than a Batch.
 // A call that fails counts nothing (its own use included): the uses let
-// through before it wait for the next write. After a write fails, the
-// instance tries none for restAfterFailure: calls due to write fail at
-// once, ErrResting, and their uses wait too.
+// through before it wait for the next write. After any write of the
+// instance's fails (a count of any kind), every call fails at once for
+// restAfterFailure (ErrResting), holding nothing, so the caller's
+// allowance while the table can't count holds every use; then each writes
+// at once, holding nothing, until one goes through.
 func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day, at time.Time) (time.Duration, error) {
 	row := l.row(k)
 	minute, quarter := b.windows(row, at)
@@ -673,8 +692,15 @@ func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day
 	}
 	pk := k + "#" + b.Kind
 	l.mu.Lock()
+	// A write failed lately: nothing is held, so every use goes through
+	// what the caller allows while the table can't count (ErrResting), or
+	// tries the table at once after the rest.
+	if l.Now().Before(l.resting) {
+		l.mu.Unlock()
+		return 0, ErrResting
+	}
 	n := l.pending[pk] + 1
-	due := n >= b.Batch || b.over(row, minute, quarter, int64(n)) > 0
+	due := l.failing || n >= b.Batch || b.over(row, minute, quarter, int64(n)) > 0
 	if l.pending == nil || (len(l.pending) >= maxKnown && l.pending[pk] == 0) {
 		l.pending = map[string]int{}
 	}
@@ -687,21 +713,12 @@ func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day
 	if !due {
 		return 0, nil
 	}
-	l.mu.Lock()
-	resting := l.Now().Before(l.resting)
-	l.mu.Unlock()
-	err := error(ErrResting)
+	err := errRowMoving
 	for range spendTries {
-		if resting {
-			break
-		}
 		var after map[string]int64
 		var ok bool
 		after, ok, err = l.write(ctx, b.update(key, day, row, minute, quarter, int64(n), false), k, day)
 		if err != nil {
-			l.mu.Lock()
-			l.resting = l.Now().Add(restAfterFailure)
-			l.mu.Unlock()
 			break
 		}
 		if ok {
@@ -731,6 +748,7 @@ func (l *Limiter) write(ctx context.Context, in *dynamodb.UpdateItemInput, k str
 	ctx, cancel := l.deadline(ctx)
 	defer cancel()
 	out, err := l.DB.UpdateItem(ctx, in, fewerRetries)
+	l.wrote(err)
 	var failed *types.ConditionalCheckFailedException
 	if errors.As(err, &failed) {
 		l.learnRow(k, day, failed.Item)
@@ -860,7 +878,9 @@ func (l *Limiter) add(ctx context.Context, key string, n int, start time.Time, w
 	}
 	ctx, cancel := l.deadline(ctx)
 	defer cancel()
-	return l.DB.UpdateItem(ctx, in, fewerRetries)
+	out, err := l.DB.UpdateItem(ctx, in, fewerRetries)
+	l.wrote(err)
+	return out, err
 }
 
 func countOf(out *dynamodb.UpdateItemOutput) int {

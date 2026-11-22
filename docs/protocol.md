@@ -155,8 +155,7 @@ limit; the request that finds its window past the limit is refused, and
 counts. If they can't be written (then an instance tries again only after
 5 seconds), each instance lets a device make 30 a minute on its own count,
 then `429 device_limit` until the minute ends, and all devices together
-120 a minute, then `503 unavailable` with `Retry-After`; and
-`GET /invitations` is `503 unavailable` meanwhile.
+80 a minute, then `503 unavailable` with `Retry-After`.
 
 The app waits out a login refused so until
 `Retry-After`, but at least 5 seconds and at most 2 minutes at a time (a
