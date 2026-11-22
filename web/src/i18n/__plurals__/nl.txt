@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: Je kunt nog 0 mensen uitnodigen.
+  1: Je kunt nog 1 persoon uitnodigen.
+  2: Je kunt nog 2 mensen uitnodigen.
+  3: Je kunt nog 3 mensen uitnodigen.
+  5: Je kunt nog 5 mensen uitnodigen.
+  11: Je kunt nog 11 mensen uitnodigen.
+  21: Je kunt nog 21 mensen uitnodigen.
+  100: Je kunt nog 100 mensen uitnodigen.
+  101: Je kunt nog 101 mensen uitnodigen.
+  102: Je kunt nog 102 mensen uitnodigen.
+  1000000: Je kunt nog 1.000.000 mensen uitnodigen.
+levelLine:
+  0: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Niveau xxxxxxxxxxxxxxxxxxxxxxxx: 1.000.000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+unreadMessagesCount:
+  0: 0 ongelezen berichten
+  1: 1 ongelezen bericht
+  2: 2 ongelezen berichten
+  3: 3 ongelezen berichten
+  5: 5 ongelezen berichten
+  11: 11 ongelezen berichten
+  21: 21 ongelezen berichten
+  100: 100 ongelezen berichten
+  101: 101 ongelezen berichten
+  102: 102 ongelezen berichten
+  1000000: 1.000.000 ongelezen berichten
+newMessages:
+  0: 0 nieuwe berichten
+  1: 1 nieuw bericht
+  2: 2 nieuwe berichten
+  3: 3 nieuwe berichten
+  5: 5 nieuwe berichten
+  11: 11 nieuwe berichten
+  21: 21 nieuwe berichten
+  100: 100 nieuwe berichten
+  101: 101 nieuwe berichten
+  102: 102 nieuwe berichten
+  1000000: 1.000.000 nieuwe berichten
+blockedCount:
+  0: Geblokkeerd (0)
+  1: Geblokkeerd (1)
+  2: Geblokkeerd (2)
+  3: Geblokkeerd (3)
+  5: Geblokkeerd (5)
+  11: Geblokkeerd (11)
+  21: Geblokkeerd (21)
+  100: Geblokkeerd (100)
+  101: Geblokkeerd (101)
+  102: Geblokkeerd (102)
+  1000000: Geblokkeerd (1.000.000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+messagesLeftToday:
+  0: Berichten voor vandaag: nog 0. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  1: Berichten voor vandaag: nog 1. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  2: Berichten voor vandaag: nog 2. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  3: Berichten voor vandaag: nog 3. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  5: Berichten voor vandaag: nog 5. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  11: Berichten voor vandaag: nog 11. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  21: Berichten voor vandaag: nog 21. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  100: Berichten voor vandaag: nog 100. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  101: Berichten voor vandaag: nog 101. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  102: Berichten voor vandaag: nog 102. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+  1000000: Berichten voor vandaag: nog 1.000.000. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
