@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -86,11 +87,18 @@ const (
 	SessionRequestsPerQuarter = 1200
 	SessionRequestsPerDay     = 30000
 	SessionBatch              = 10
-	// SessionRequestsLocalPerMinute is how many requests a minute each
-	// instance lets a device make, on its own count, while the table
-	// can't be written (sessionLimit).
-	SessionRequestsLocalPerMinute = 60
+	// While the counts can't be written (sessionLimit), each instance
+	// lets a device make SessionRequestsLocalPerMinute a minute, and all
+	// devices together UncountedPerMinute, on its own counts: about 2 a
+	// second, so 100 instances read at most half the directory's 400 a
+	// second for them, however many accounts there are.
+	SessionRequestsLocalPerMinute = 30
+	UncountedPerMinute            = 120
 )
+
+// costlyUncounted are the routes refused (503) while requests can't be
+// counted: their reads grow with what the account holds.
+var costlyUncounted = map[string]bool{"GET /invitations": true}
 
 var (
 	loginBudget   = ephemeral.Budget{Kind: "l", Day: "l", PerMinute: LoginsPerMinute, PerQuarter: LoginsPerQuarter, PerDay: LoginsPerDay}
@@ -150,21 +158,36 @@ func (s *Server) deviceLimit(ctx context.Context, route string, b ephemeral.Budg
 // when the window ends) reading nothing; from memory, once this instance
 // knows, writing nothing either. Counts go to the table in batches
 // (SessionBatch). If they can't be written (the table throttled, say), the
-// request goes on if this instance alone has let the device make fewer
-// than SessionRequestsLocalPerMinute this minute, and the uses wait for the
-// next write: refusing them all would turn trouble with the ephemeral
-// table into an outage of every logged-in route (the inbox's own limits
-// let it go on likewise, listInbox), and letting them all through would
-// drop the limit.
+// request goes on, uncounted, if this instance alone has let the device
+// make fewer than SessionRequestsLocalPerMinute this minute (else 429), and
+// all devices fewer than UncountedPerMinute (else 503 unavailable: not the
+// device's doing), and its route doesn't read more for more held
+// (costlyUncounted, 503). Refusing them all would turn trouble with the
+// ephemeral table into an outage of every logged-in route (the inbox's
+// own limits let it go on likewise, listInbox); letting them all through
+// would give the directory away to whoever throttles that table. After a
+// write fails, the instance tries none for a few seconds
+// (ephemeral.ErrResting), which isn't logged again.
 func (s *Server) sessionLimit(ctx context.Context, route, accountID, deviceID string, now time.Time) (httpapi.Response, bool) {
 	name := s.rateName("dev", now, 24*time.Hour, accountID, deviceID)
 	full, err := s.Limits.SpendAt(ctx, name, sessionBudget, now)
 	switch {
 	case err != nil:
-		s.rateFailed(route, err)
+		if !errors.Is(err, ephemeral.ErrResting) {
+			s.rateFailed(route, err)
+		}
+		unavailable := httpapi.Error(http.StatusServiceUnavailable, "unavailable")
+		unavailable.Headers["retry-after"] = strconv.Itoa(RetryAfter)
+		if costlyUncounted[route] {
+			return unavailable, true
+		}
 		minute := s.rateName("dev", now, time.Minute, accountID, deviceID)
 		if !s.Limits.LocalAt(minute, 1, SessionRequestsLocalPerMinute, time.Minute, now) {
 			return limitReached("device_limit", now, time.Minute), true
+		}
+		// Every device's, named by the minute (in memory only).
+		if !s.Limits.LocalAt("uncounted#"+strconv.FormatInt(now.Truncate(time.Minute).Unix(), 10), 1, UncountedPerMinute, time.Minute, now) {
+			return unavailable, true
 		}
 	case full > 0:
 		return limitReached("device_limit", now, full), true

@@ -171,12 +171,18 @@ func TestDailyLimitAfterOutage(t *testing.T) {
 	owner := h.account(t, userID)
 	db := &switchable{DB: tb.meter, down: true}
 	h.server.Limits = &ephemeral.Limiter{DB: db, Table: tb.ephemeral, Now: func() time.Time { return h.now }}
-	for range 50 {
+	// Over two minutes: uncounted, a device makes 30 a minute on an
+	// instance (SessionRequestsLocalPerMinute).
+	for i := range 50 {
+		if i == 25 {
+			h.now = h.now.Add(time.Minute)
+		}
 		if status, _ := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusInternalServerError {
 			t.Fatalf("during the outage: %d", status)
 		}
 	}
 	db.down = false
+	h.now = h.now.Add(time.Minute)
 	if status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": MailboxBatch}, false); status != http.StatusCreated {
 		t.Fatalf("after it: %d %v", status, out)
 	}

@@ -303,6 +303,7 @@ type Limiter struct {
 	local   map[string]int       // key and window start -> uses counted here only (LocalAt)
 	rows    map[string]budgetRow // key and day start -> the row the table last returned (SpendAt)
 	pending map[string]int       // key, day start and budget -> uses let through here, not yet written (SpendAt, Budget.Batch)
+	resting time.Time            // until when batches aren't tried after one failed (SpendAt, Budget.Batch)
 }
 
 type counted struct {
@@ -595,6 +596,16 @@ const spendTries = 3
 // tries: no use was counted, and none must go uncounted.
 var errRowMoving = errors.New("ephemeral: the row kept changing")
 
+// ErrResting is SpendAt's error, for a budget with a Batch, while it rests
+// after a batch it couldn't write (restAfterFailure): nothing was tried.
+var ErrResting = errors.New("ephemeral: resting after a failed write")
+
+// restAfterFailure is how long an instance doesn't try a batch again after
+// one failed (the table throttled, say): while the table can't take them,
+// a write tried at every request would slow every request, and add to the
+// load that throttles it.
+const restAfterFailure = 5 * time.Second
+
 // SpendAt counts one use of b in key's row for the UTC day that holds at,
 // if it fits in b's minute, quarter and day that hold at; otherwise it
 // counts nothing and returns the longest of those windows that is used up
@@ -649,8 +660,10 @@ func (l *Limiter) SpendAt(ctx context.Context, key string, b Budget, at time.Tim
 // instances hold unwritten (fewer than Batch each), and the table is
 // written once a batch, not once a use. Uses written to no table (the
 // instance stopped, or the day ended first) are fewer than a Batch.
-// A call that fails counts nothing: the uses it would have written wait
-// for the next.
+// A call that fails counts nothing (its own use included): the uses let
+// through before it wait for the next write. After a write fails, the
+// instance tries none for restAfterFailure: calls due to write fail at
+// once, ErrResting, and their uses wait too.
 func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day, at time.Time) (time.Duration, error) {
 	row := l.row(k)
 	minute, quarter := b.windows(row, at)
@@ -673,12 +686,21 @@ func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day
 	if !due {
 		return 0, nil
 	}
-	err := errRowMoving
+	l.mu.Lock()
+	resting := l.Now().Before(l.resting)
+	l.mu.Unlock()
+	err := error(ErrResting)
 	for range spendTries {
+		if resting {
+			break
+		}
 		var after map[string]int64
 		var ok bool
 		after, ok, err = l.write(ctx, b.update(key, day, row, minute, quarter, int64(n), false), k, day)
 		if err != nil {
+			l.mu.Lock()
+			l.resting = l.Now().Add(restAfterFailure)
+			l.mu.Unlock()
 			break
 		}
 		if ok {

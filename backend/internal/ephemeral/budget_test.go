@@ -2,6 +2,7 @@ package ephemeral
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strconv"
@@ -395,27 +396,38 @@ func TestSpendAtBatchedInstances(t *testing.T) {
 
 // A batch that can't be written (the table throttled, say) is an error,
 // and counts nothing; the uses let through before it wait, and go with
-// the next batch written.
+// the next batch written. After it, the instance tries no batch for a few
+// seconds: due ones fail at once (ErrResting), without asking the table.
 func TestSpendAtBatchedFails(t *testing.T) {
 	client := dynamotest.Client(t)
 	table := dynamotest.Table(t, client)
 	db := &failingSometimes{DB: client}
-	l := &Limiter{DB: db, Table: table, Now: func() time.Time { return start }}
+	clock := start
+	l := &Limiter{DB: db, Table: table, Now: func() time.Time { return clock }}
 	ctx := context.Background()
 	b := Budget{Kind: "t", Day: "t", PerMinute: 100, PerQuarter: 100, PerDay: 100, Batch: 5}
 	db.down = true
 	for range 4 {
-		if full, err := l.SpendAt(ctx, "k", b, start); err != nil || full != 0 {
+		if full, err := l.SpendAt(ctx, "k", b, clock); err != nil || full != 0 {
 			t.Fatalf("held: full %v, err %v", full, err)
 		}
 	}
-	for range 2 {
-		if full, err := l.SpendAt(ctx, "k", b, start); err == nil || full != 0 {
-			t.Fatalf("down: full %v, err %v", full, err)
+	if full, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, errThrottled) || full != 0 {
+		t.Fatalf("down: full %v, err %v", full, err)
+	}
+	tried := db.updates
+	clock = start.Add(restAfterFailure - time.Second)
+	for range 3 {
+		if full, err := l.SpendAt(ctx, "k", b, clock); !errors.Is(err, ErrResting) || full != 0 {
+			t.Fatalf("resting: full %v, err %v", full, err)
 		}
 	}
+	if db.updates != tried {
+		t.Fatalf("resting, it tried %d writes", db.updates-tried)
+	}
 	db.down = false
-	if full, err := l.SpendAt(ctx, "k", b, start); err != nil || full != 0 {
+	clock = start.Add(restAfterFailure)
+	if full, err := l.SpendAt(ctx, "k", b, clock); err != nil || full != 0 {
 		t.Fatalf("up: full %v, err %v", full, err)
 	}
 	if got := rowOf(t, client, table, "k", start); got["td"] != 5 {
@@ -423,13 +435,16 @@ func TestSpendAtBatchedFails(t *testing.T) {
 	}
 }
 
-// failingSometimes fails every call while down, as a throttled table does.
+// failingSometimes fails every call while down, as a throttled table does,
+// and counts the updates asked of it.
 type failingSometimes struct {
 	DB
-	down bool
+	down    bool
+	updates int
 }
 
 func (f *failingSometimes) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.updates++
 	if f.down {
 		return nil, errThrottled
 	}

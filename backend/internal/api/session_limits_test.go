@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -129,21 +130,42 @@ func TestSessionLimits(t *testing.T) {
 
 // If the count can't be written, each instance lets a device make
 // SessionRequestsLocalPerMinute a minute on its own count, then refuses
-// it (429 device_limit) until the minute ends: neither every logged-in
-// route down with the ephemeral table, nor no limit. Logged without
-// anything about the request.
+// it (429 device_limit) until the minute ends, and all devices together
+// UncountedPerMinute, then 503 unavailable (not the device's doing); and
+// GET /invitations, whose reads grow with the codes, not at all: neither
+// every logged-in route down with the ephemeral table, nor no limit.
+// Logged without anything about the request.
 func TestSessionLimitWithoutTheTable(t *testing.T) {
 	h := newHarness(t)
 	limits := h.server.Limits.(*memLimiter)
 	m := h.account(t, userID)
+	others := make([]member, UncountedPerMinute/SessionRequestsLocalPerMinute)
+	for i := range others {
+		others[i] = h.account(t, userID+1+int64(i))
+	}
 	limits.spendErr = errors.New("throttled")
 	ok := answer{status: http.StatusOK}
+	unavailable := answer{http.StatusServiceUnavailable, strconv.Itoa(RetryAfter), "unavailable"}
+	wantAnswer(t, "GET /invitations", h.send(t, get(m.token, "/invitations")), unavailable)
 	for range SessionRequestsLocalPerMinute {
 		wantAnswer(t, "GET /account", h.send(t, get(m.token, "/account")), ok)
 	}
 	reads := h.dir.deviceReads
 	h.now = start.Add(45 * time.Second)
 	wantAnswer(t, "past this instance's minute", h.send(t, get(m.token, "/account")), limited(15*time.Second))
+	if h.dir.deviceReads != reads {
+		t.Fatal("a refused request read the device")
+	}
+	// Other devices, up to every device's minute on this instance: the
+	// first device's 30 and three others' make 120, and the fifth device
+	// gets 503 from its first.
+	for _, o := range others[:len(others)-1] {
+		for range SessionRequestsLocalPerMinute {
+			wantAnswer(t, "another device", h.send(t, get(o.token, "/account")), ok)
+		}
+	}
+	reads = h.dir.deviceReads
+	wantAnswer(t, "past every device's minute", h.send(t, get(others[len(others)-1].token, "/usage")), unavailable)
 	if h.dir.deviceReads != reads {
 		t.Fatal("a refused request read the device")
 	}

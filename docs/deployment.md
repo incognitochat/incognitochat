@@ -1591,8 +1591,13 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   150 write units a quarter of an hour per account kept at its limits on
   a few instances, up to about 600 over 100: with the logins' and signed
   requests', filling the ephemeral table's 200 writes a second takes about
-  460 accounts, or about 120 over 100. If the counts can't be written, each
-  instance lets a device make 60 a minute on its own count.
+  460 accounts, or about 120 over 100. If the counts can't be written
+  (whoever throttles the ephemeral table's writes), each instance lets a
+  device make 30 a minute uncounted, and all devices 120 a minute (then
+  `503 unavailable`), so at most about 200 directory reads a second over
+  100 instances, whatever the number of accounts; it refuses
+  `GET /invitations` meanwhile, and tries to write again only after 5
+  seconds.
 
   Logins of random devices read half a directory unit each and write
   nothing; filling its 400 reads a second takes about 480 addresses.
