@@ -72,6 +72,11 @@ type uploadRequest struct {
 // MiB), so an upload can't be tied to an account. Only the padded sizes the
 // app makes are accepted. The app then PUTs exactly size bytes of
 // ciphertext to the URL, once, starting within a minute (media.UploadURL).
+//
+// It never answers 429: the app takes a 429 rate_limited here for the
+// firewall's, which the request never got past, and uses its tokens again
+// (web/src/messaging/engine.ts, turnedAway). A refusal that may follow a
+// spend must be another status.
 func (s *Server) upload(ctx context.Context, req httpapi.Request) httpapi.Response {
 	const route = "POST /media"
 	var in uploadRequest

@@ -39,7 +39,7 @@ import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
 import { toBase64Url } from '../crypto/encoding';
-import { createMessaging, isPaused, MailboxLimit, NoMailboxes, NoTokens, resendUploads, SyncFailed, type Messaging, type Outgoing } from '../messaging/engine';
+import { createMessaging, isPaused, MailboxLimit, NoMailboxes, NoTokens, resendUploads, SyncFailed, TurnedAway, type Messaging, type Outgoing } from '../messaging/engine';
 import {
   answeredAt,
   attachmentsOf,
@@ -221,7 +221,8 @@ export type AdminNotice = 'saved' | 'granted' | 'switched' | 'not-member' | 'not
  * rate-limited: too many messages to this mailbox this minute.
  * device-limit, device-limit-later: the server refused this device's login
  * for now (deviceLimit), which a send that needed one (to fetch tokens or a
- * mailbox) passes on.
+ * mailbox) passes on. turned-away: the firewall turned an upload away, too
+ * many requests from this address for now (minutes; "Try again later").
  * media-paused: the operator has paused attachments for now (also said
  * when a tapped download is refused for it). outdated: the server no longer
  * holds the issuer key this build names (it was replaced), so the app must
@@ -233,6 +234,7 @@ export type SendError =
   | 'mailbox-limit'
   | 'rate-limited'
   | DeviceLimit
+  | 'turned-away'
   | 'media-paused'
   | 'outdated'
   | 'network'
@@ -1711,6 +1713,7 @@ export function createApp(deps: Deps) {
     if (err instanceof NoTokens) return 'no-tokens';
     if (err instanceof NoMailboxes) return 'no-mailboxes';
     if (err instanceof MailboxLimit) return 'mailbox-limit';
+    if (err instanceof TurnedAway) return 'turned-away';
     if (err instanceof ApiError && err.code === 'link_busy') return limitError('link-busy', err);
     if (err instanceof ApiError && err.code === 'rate_limited') return 'rate-limited';
     const limited = deviceLimit(err);

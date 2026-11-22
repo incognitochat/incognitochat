@@ -448,13 +448,13 @@ The panel under the message box has emoji and stickers, as in Telegram.
   the bill (about $51 a day in production with all three at their caps).
   In production a firewall in front of the API's CloudFront limits
   requests per IP address: 2,000 in 5 minutes, and 500 on the routes that
-  need no login (logins, registrations, sends, and lookups of accounts,
-  links and attachments). Lookups of links and attachments by ID, which
-  anyone can make with random IDs, are also limited for everyone together
-  (12,000 a minute, at most half what a table can serve); logins and sends
-  never are, so a flood of lookups can't stop them. Each login and signed
-  request writes a nonce, so the `api` function limits them per device,
-  once the signature checks out (`429 device_limit`,
+  need no login (logins, registrations, sends, uploads, and lookups of
+  accounts, links and attachments). Lookups of links and attachments by
+  ID, which anyone can make with random IDs, are also limited for everyone
+  together (12,000 a minute, at most half what a table can serve); logins
+  and sends never are, so a flood of lookups can't stop them. Each login
+  and signed request writes a nonce, so the `api` function limits them per
+  device, once the signature checks out (`429 device_limit`,
   [protocol.md](protocol.md#registration-and-sessions)); and every request
   with a session reads the directory, so it limits those per device too,
   once the token checks out and before that read. The API's name has

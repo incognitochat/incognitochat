@@ -76,9 +76,12 @@ async function backend() {
   // replaced, and no longer held; mailboxesFull: accounts hold all the
   // mailboxes they may (4,000); sendRefused: how every send is refused, if set.
   // tokensRefused: how every token request is refused, if set.
+  // uploadsTurnedAway: the firewall turns uploads away (too many requests
+  // from this address).
   const state = {
     tokensLeft: Infinity,
     uploadsPaused: false,
+    uploadsTurnedAway: false,
     mediaSigned: 0,
     keyRetired: false,
     mailboxesFull: false,
@@ -186,6 +189,8 @@ async function backend() {
       if (path.startsWith('/media')) {
         mediaCalls.push(`${method} ${path}`);
         if (state.uploadsPaused && method === 'POST' && path === '/media') throw new ApiError(503, 'uploads_paused');
+        // The firewall's answer, before the server sees anything.
+        if (state.uploadsTurnedAway && method === 'POST' && path === '/media') throw new ApiError(429, 'rate_limited');
         throw new ApiError(404, 'not_found');
       }
       if (path === '/inbox') return check({ items: [...inboxes.get(account)!], more: false });
@@ -1029,6 +1034,41 @@ describe('conversations in the app', () => {
     await sender.sendMessage('still here');
     expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: null });
     expect(screenOf(sender.screen.value, 'conversation').messages.at(-1)).toMatchObject({ text: 'still here', status: 'sent' });
+  });
+
+  it('says when the firewall turns an upload away, keeps the message and its tokens, and offers to send it again', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    b.state.uploadsTurnedAway = true;
+    const voice = { file: crypto.getRandomValues(new Uint8Array(3000)), type: 'audio/mp4', length: 2, waveform: new Uint8Array([1, 2, 3]) };
+    await sender.sendVoice(voice);
+
+    // "Try again later": the block lasts minutes, not a minute.
+    const conv = screenOf(sender.screen.value, 'conversation');
+    expect(conv.error).toBe('turned-away');
+    const failed = conv.messages.at(-1)!;
+    expect(failed).toMatchObject({ status: 'failed', file: 'local', media: { t: 'voice' } });
+    expect(canResend(failed, Date.now())).toBe(true);
+    // Asked once, and the server never saw its tokens: all still in the wallet.
+    expect(b.mediaCalls).toEqual(['POST /media']);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
+
+    // Again while still turned away: the same notice, nothing lost.
+    await sender.resend(failed.id);
+    expect(screenOf(sender.screen.value, 'conversation')).toMatchObject({ error: 'turned-away' });
+    expect(b.mediaCalls).toEqual(['POST /media', 'POST /media']);
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBe(b.state.mediaSigned);
+
+    // Refused by the server itself, which saw them: they're dropped.
+    b.state.uploadsTurnedAway = false;
+    const before = await countTokens(sender.db, b.issuer.keyId, undefined, 'media');
+    await sender.resend(failed.id);
+    expect(screenOf(sender.screen.value, 'conversation').error).not.toBe('turned-away');
+    expect(await countTokens(sender.db, b.issuer.keyId, undefined, 'media')).toBeLessThan(before);
   });
 
   it("says when the day's tokens are used up", async () => {
