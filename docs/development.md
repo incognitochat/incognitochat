@@ -8,7 +8,7 @@ dependencies. Deploying is in [deployment.md](deployment.md).
 | Path | What |
 |---|---|
 | `backend/` | Go, one module. `cmd/` has one Lambda entry point per trust boundary: `api` (HTTPS API), `bot` (Telegram webhook), `ws` (WebSocket connections and pushes), `notify` (Telegram notices). `internal/` holds the packages: `api` (routes and handlers), `telegram` (launch data and the Bot API), `session` and `devicesig` (logins and signed requests), `envelope`, `inbox`, `links`, `invitations`, `tokens` (blind-signed send and media tokens), `media`, `notices`, `push`, `bot` (the webhook's answers and the deploy's bot setup), `i18n` (what the bot and notices say in each of the app's languages, and which language a Telegram language code picks), `devicelist` (signed device lists), `keyed` (keyed-hash names for short-lived rows), `ids` (random IDs), `httpapi` (routing and JSON answers), `config` (settings and SSM secrets at startup), `logx` (the only logger), `tally` (per-minute request counts), `awsconf` (how AWS calls are retried and cut off), the DynamoDB stores `directory` and `ephemeral`, and `dynamotest` (store tests against DynamoDB Local). |
-| `web/` | The app: TypeScript, Vite, Preact with signals. `src/crypto` (WebCrypto only: keys, HPKE, signatures, blind RSA), `src/protocol` (envelopes, messages, links), `src/messaging` (the engine: sending, syncing, rotation, the history store), `src/media` (preparing, recording, saving attachments), `src/emoji` (the emoji panel's list), `src/stickers`, `src/storage` (IndexedDB), `src/platform` (the Telegram bridge, launch data, theme), `src/net` (API and socket), `src/state` (screens and actions), `src/account` (setup, login, the link, invitations, token wallets, usage), `src/sync` (locks between copies of the app open at once), `src/i18n` (English and Persian), `app.tsx` (the screens), `save.tsx` (the save page, opened in the device's browser), `storage-screen.tsx` (shown when the app's storage can't be opened). |
+| `web/` | The app: TypeScript, Vite, Preact with signals. `src/crypto` (WebCrypto only: keys, HPKE, signatures, blind RSA), `src/protocol` (envelopes, messages, links), `src/messaging` (the engine: sending, syncing, rotation, the history store), `src/media` (preparing, recording, saving attachments), `src/emoji` (the emoji panel's list), `src/stickers`, `src/storage` (IndexedDB), `src/platform` (the Telegram bridge, launch data, theme), `src/net` (API and socket), `src/state` (screens and actions), `src/account` (setup, login, the link, invitations, token wallets, usage), `src/sync` (locks between copies of the app open at once), `src/i18n` (the app's languages: `languages.ts` lists them, with a strings file each), `app.tsx` (the screens), `save.tsx` (the save page, opened in the device's browser), `storage-screen.tsx` (shown when the app's storage can't be opened). |
 | `web/public/` | Files copied into the build as they are: the sticker images and their license. |
 | `infra/` | App Terraform for one environment: tables, the media bucket, SSM parameters, the four functions with function URLs, the WebSocket API. Applied by CI. |
 | `infra/init/` | Bootstrap Terraform, applied once per AWS account by an admin: state bucket, GitHub OIDC provider, deploy role, the functions' roles and their permissions boundary, code signing. CI can't change its own permissions. |
@@ -133,5 +133,38 @@ weekly scan reports a fix in a newer version:
   ([releases](deployment.md#releases)).
 - The protocol is documented in [protocol.md](protocol.md) together with the
   code that implements it; change both in the same pull request.
-- User-facing text is written in English and Persian (`web/src/i18n`), and
-  layout uses logical CSS properties, so right-to-left needs no special cases.
+- User-facing text is written in each of the app's languages
+  (`web/src/i18n`; the bot's and the notices' in `backend/internal/i18n`),
+  and layout uses logical CSS properties, so right-to-left needs no special
+  cases. A new or changed string goes into every language's file (`tsc`
+  fails without it), and into the English and Persian lines of the string
+  baseline, `web/src/i18n/__snapshots__/baseline.test.ts.snap`, which
+  records what readers see so that no change to it goes unnoticed: update
+  it with `npx vitest run src/i18n/baseline.test.ts -u` and check the diff
+  touches only your strings. See [Adding a language](#adding-a-language).
+
+## Adding a language
+
+A language lives in two places, which tests keep in step:
+
+1. **The app:** a strings file `web/src/i18n/<code>.ts` (a copy of `en.ts`,
+   typed `satisfies Record<Key, Text>`), and an entry in
+   `web/src/i18n/languages.ts`: its direction, Intl locale (which sets the
+   digits), unit style, and the lowercase tags that pick it. Add the file to
+   `STRINGS` in `web/src/i18n/index.ts`.
+2. **The bot and notices:** `backend/internal/i18n/<code>.go`, with its
+   texts and its two-letter Bot API code, listed in `languages` in
+   `i18n.go` in the same order as the app's.
+3. **The shared vectors:** the code at the end of `languages` in
+   `backend/internal/i18n/testdata/languages.json`, and a `pick` entry for
+   each of its tags. Never change existing entries: a code, once shipped, is
+   kept on devices and on the server for good.
+
+The tests then check every language: every string and placeholder, a
+plural form for each category the language's rules have (unless a noun
+after a number never changes, `countInvariant`), Telegram's limits on popup
+and bot texts, the typed confirmation phrases, and that the app and the
+server pick the same language from any tag. Run the web tests once
+locally to write `web/src/i18n/__plurals__/<code>.txt`, a table of every
+counted string for reviewers (CI never writes it, and fails without it).
+Add the language to the README's list.
