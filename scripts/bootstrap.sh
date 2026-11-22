@@ -34,6 +34,12 @@
 #                                  (default: 50 for production, 15 otherwise).
 #        AUTO_APPROVE=1 ... skips Terraform's interactive approval.
 #        GITHUB_REPO=<owner>/<repo> ... overrides the repo detected by gh.
+#        STATS_REPO=<owner>/<repo> ... the website repository whose "stats" environment may read
+#                                  this account's public statistics: a read-only role
+#                                  (infra/init/stats_reader.tf) that reads costs, and in
+#                                  production the counts too. Its role ARN, region and
+#                                  metrics namespace are stored in that environment. Without
+#                                  it, a role made before is kept; STATS_REPO=none removes it.
 #
 # Nothing environment-specific is written to the repository: names are
 # computed at runtime and stored as GitHub environment secrets and variables.
@@ -74,6 +80,27 @@ tf_vars=(
   -var "monthly_budget_usd=${monthly_budget}"
 )
 apply_args=(-input=false "${tf_vars[@]}")
+
+# The stats role (infra/init/stats_reader.tf): trusted only for STATS_REPO's
+# "stats" environment, by the subject GitHub sends for it (with immutable
+# subjects, its owner's and its own IDs, which a rename doesn't change).
+# Without STATS_REPO, the subject from the last run is kept, so running this
+# again for another reason doesn't remove the role. Call after tf init.
+stats_repo=${STATS_REPO:-}
+stats_args() {
+  local subject=''
+  if [[ $stats_repo == none ]]; then
+    subject=''
+  elif [[ -n $stats_repo ]]; then
+    subject="$(gh api "repos/${stats_repo}/actions/oidc/customization/sub" --jq .sub_claim_prefix):environment:stats"
+  else
+    subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
+    [[ $subject == *:environment:stats ]] || subject=''
+  fi
+  local metrics=false
+  [[ $environment == production ]] && metrics=true
+  printf '%s\n' -var "stats_github_oidc_subject=${subject}" -var "stats_read_metrics=${metrics}"
+}
 [[ "${AUTO_APPROVE:-}" == "1" ]] && apply_args+=(-auto-approve)
 
 # The functions' roles that exist but aren't in this stack's state, as a
@@ -135,7 +162,8 @@ check_cost_explorer
 if aws s3api head-bucket --bucket "$state_bucket" --region "$region" 2>/dev/null; then
   tf init -input=false -reconfigure "${backend_args[@]}"
   roles=$(existing_function_roles)
-  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
+  mapfile -t stats < <(stats_args)
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
 else
   # First run: the state bucket doesn't exist yet. Apply with local state,
   # then move that state into the bucket that was just created.
@@ -145,7 +173,8 @@ else
   printf 'terraform {\n  backend "local" {}\n}\n' >"$override"
   tf init -input=false -reconfigure
   roles=$(existing_function_roles)
-  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}"
+  mapfile -t stats < <(stats_args)
+  tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
   rm -f "$override"
   tf init -input=false -migrate-state -force-copy "${backend_args[@]}"
   rm -f "$init_dir/terraform.tfstate" "$init_dir/terraform.tfstate.backup"
@@ -241,6 +270,34 @@ printf '%s' "$builds_bucket" | gh secret set LAMBDA_BUILDS_BUCKET --env "$enviro
 printf '%s' "$signing_profile" | gh secret set LAMBDA_SIGNING_PROFILE --env "$environment" --repo "$repo"
 printf '%s' "$code_signing_config" | gh secret set LAMBDA_CODE_SIGNING_CONFIG --env "$environment" --repo "$repo"
 gh variable set AWS_REGION --env "$environment" --repo "$repo" --body "$region"
+
+# The stats repository's "stats" environment: only its main branch, and per
+# account (suffixed with this environment's name in capitals) the role to
+# assume, the region and the namespace of the counts.
+stats_role_arn=$(tf output -raw stats_role_arn 2>/dev/null || true)
+if [[ -n $stats_repo && $stats_repo != none && $stats_role_arn == arn:* ]]; then
+  echo "Configuring ${stats_repo}'s 'stats' environment"
+  suffix=$(tr '[:lower:]' '[:upper:]' <<<"$environment")
+  gh api --method PUT "repos/${stats_repo}/environments/stats" --input - >/dev/null \
+    <<<'{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}'
+  stats_main=0
+  while read -r id type name; do
+    [[ -z "$id" ]] && continue
+    if [[ $type == branch && $name == main ]]; then
+      stats_main=1
+    else
+      gh api --method DELETE "repos/${stats_repo}/environments/stats/deployment-branch-policies/${id}" >/dev/null
+    fi
+  done <<<"$(gh api "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+    --jq '.branch_policies[] | "\(.id) \(.type) \(.name)"')"
+  if [[ $stats_main == 0 ]]; then
+    gh api --method POST "repos/${stats_repo}/environments/stats/deployment-branch-policies" \
+      -f name=main -f type=branch >/dev/null
+  fi
+  printf '%s' "$stats_role_arn" | gh secret set "STATS_ROLE_ARN_${suffix}" --env stats --repo "$stats_repo"
+  gh variable set "STATS_REGION_${suffix}" --env stats --repo "$stats_repo" --body "$region"
+  gh variable set "STATS_NAMESPACE_${suffix}" --env stats --repo "$stats_repo" --body "${environment_prefix}/api"
+fi
 
 if [[ $policy_type == tag ]]; then
   how_to_deploy="publish a release (merge the release pull request)"

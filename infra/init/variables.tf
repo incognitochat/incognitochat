@@ -37,6 +37,30 @@ variable "github_environment" {
   }
 }
 
+variable "stats_github_oidc_subject" {
+  description = <<-EOT
+    The OIDC "sub" claim of the jobs that may read this account's public
+    statistics (stats_reader.tf): the website repository's "stats" GitHub
+    environment, "<its sub_claim_prefix>:environment:stats", e.g.
+    "repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:stats".
+    scripts/bootstrap.sh sets it from STATS_REPO. Empty (the default): no
+    stats role.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.stats_github_oidc_subject == "" || can(regex("^repo:[^:]+/[^:]+:environment:stats$", var.stats_github_oidc_subject))
+    error_message = "stats_github_oidc_subject must be empty or look like repo:<owner>/<repo>:environment:stats (optionally with @<id> suffixes)."
+  }
+}
+
+variable "stats_read_metrics" {
+  description = "Whether the stats role may also read CloudWatch metrics (production, whose counts are published), or only costs (dev, whose total cost alone is)."
+  type        = bool
+  default     = false
+}
+
 variable "audit_retention_days" {
   description = "Days the audit trail's files are kept (audit.tf; docs/data.md says 365); a file deleted or replaced before then stays 30 days more as an older version"
   type        = number

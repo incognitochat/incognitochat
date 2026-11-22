@@ -52,3 +52,13 @@ output "audit_bucket" {
   description = "Bucket holding the audit trail's files, for records older than CloudTrail's 90-day event history"
   value       = aws_s3_bucket.audit.bucket
 }
+
+output "stats_role_arn" {
+  description = "Read-only role the website's stats workflow assumes (stored as a secret of the website repository's stats environment), or null without one"
+  value       = local.stats_reader ? aws_iam_role.stats[0].arn : null
+}
+
+output "stats_github_oidc_subject" {
+  description = "Which jobs may assume the stats role (kept when scripts/bootstrap.sh runs again without STATS_REPO)"
+  value       = var.stats_github_oidc_subject
+}

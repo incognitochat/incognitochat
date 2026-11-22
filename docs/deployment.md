@@ -130,6 +130,39 @@ that exist instead of creating them (it passes them as
 `existing_function_roles`), and the app stack's next deploy forgets them
 without deleting them.
 
+### Public statistics
+
+The project's website publishes hourly counts and daily costs, read by a
+scheduled workflow in its own repository. To let it, run the bootstrap with
+`STATS_REPO=<owner>/<repo>`, the website's repository:
+
+```shell
+AWS_PROFILE=<profile> STATS_REPO=<owner>/<repo> scripts/bootstrap.sh <aws-region> dev
+AWS_PROFILE=<profile> STATS_REPO=<owner>/<repo> DEPLOY_TAGS='v*.*.*' scripts/bootstrap.sh <aws-region> production
+```
+
+That adds a read-only role, `<prefix>-github-stats`
+([infra/init/stats_reader.tf](../infra/init/stats_reader.tf)):
+
+- Only jobs in that repository's `stats` GitHub environment may assume it,
+  through GitHub's OIDC, matched by the subject GitHub sends for them
+  (`<sub_claim_prefix>:environment:stats`; with immutable subjects it names
+  the owner's and the repository's IDs, which a rename doesn't change). The
+  bootstrap makes that environment take only `main`.
+- In production it may read costs (`ce:GetCostAndUsage`) and metrics
+  (`cloudwatch:GetMetricData`); elsewhere costs only. Nothing else, and it
+  writes nothing. Neither call can be narrowed in IAM: it can read every
+  metric in the account (counts and sums, nothing about anyone) and every
+  cost. The workflow, public too, decides what's published.
+- The bootstrap stores, in that `stats` environment, the role's ARN as a
+  secret and the region and the counts' namespace as variables, each named
+  for the account (`STATS_ROLE_ARN_PRODUCTION`, `STATS_REGION_DEV`,
+  `STATS_NAMESPACE_PRODUCTION`…). The gh login running it needs admin
+  rights on that repository too.
+
+A later run without `STATS_REPO` keeps the role (and leaves the other
+repository alone); `STATS_REPO=none` removes it.
+
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that
 change deploys there. Each deploy checks this with IAM's policy simulator
