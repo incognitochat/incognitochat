@@ -2544,6 +2544,16 @@ describe('typed confirmation', () => {
     expect(confirmationMatches('', '')).toBe(false);
   });
 
+  it('reads the dotted and dotless i (İ I ı i) as one letter, whatever the device language', () => {
+    // A Turkish keyboard types İ for a capital i; lowercased outside Turkish
+    // it becomes i plus a combining dot, and I becomes ı in Turkish.
+    expect(confirmationMatches('HESAP SİL', 'hesap sil')).toBe(true);
+    expect(confirmationMatches('Sil', 'sil')).toBe(true);
+    expect(confirmationMatches('HESABIMI SIL', 'hesabımı sil')).toBe(true);
+    expect(confirmationMatches('hesabimi sil', 'hesabımı sil')).toBe(true);
+    expect(confirmationMatches('hesap sı', 'hesap sil')).toBe(false);
+  });
+
   it('takes the phrase however a keyboard types it', () => {
     // A zero-width non-joiner typed as a space, or as nothing.
     const zwnj = 'گفت‌وگو';

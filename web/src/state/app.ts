@@ -2564,12 +2564,15 @@ export function confirmationMatches(typed: string, phrase: string): boolean {
   // zero-width non-joiner or a space or nothing between word parts, and the
   // Arabic kaf and yeh (ك ي ى) that Arabic layouts type for the Persian ک ی.
   // Direction marks (as around the phrase shown, if copied) don't count either.
+  // The dotted and dotless i (İ I ı i) are one letter: lowercasing them
+  // depends on the device's language (Turkish, or not).
   const norm = (s: string) =>
     s
       .normalize('NFC')
       .replace(/[\s‌-‏⁦-⁩]+/g, '')
       .replace(/ك/g, 'ک')
       .replace(/[يى]/g, 'ی')
+      .replace(/[İIı]/g, 'i')
       .toLocaleLowerCase();
   return norm(typed) !== '' && norm(typed) === norm(phrase);
 }
