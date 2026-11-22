@@ -1,7 +1,8 @@
 {
   "languages": [
     "en",
-    "fa"
+    "fa",
+    "ru"
   ],
   "pick": {
     "en": "en",
@@ -24,6 +25,11 @@
     "-": "en",
     "FA_ir": "fa",
     "İfa": "en",
-    "fa-IR-x": "fa"
+    "fa-IR-x": "fa",
+    "ru": "ru",
+    "ru-RU": "ru",
+    "RU": "ru",
+    "ru_UA": "ru",
+    "rus": "en"
   }
 }

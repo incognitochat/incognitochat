@@ -21,6 +21,7 @@ export interface LanguageInfo {
 export const LANGUAGES = {
   en: { dir: 'ltr', locale: 'en', unitDisplay: 'short', tags: ['en'] },
   fa: { dir: 'rtl', locale: 'fa-IR', unitDisplay: 'long', tags: ['fa'], countInvariant: true },
+  ru: { dir: 'ltr', locale: 'ru', unitDisplay: 'short', tags: ['ru'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;

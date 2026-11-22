@@ -54,7 +54,7 @@ describe('the language setting', () => {
   });
 
   it('offers Same as Telegram first, then each language in the registry order', () => {
-    expect(LANGUAGE_CHOICES).toEqual(['telegram', 'en', 'fa']);
+    expect(LANGUAGE_CHOICES).toEqual(['telegram', 'en', 'fa', 'ru']);
   });
 
   it('reads stored values that only look like a language as Same as Telegram', async () => {
