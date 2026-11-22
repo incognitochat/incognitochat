@@ -464,7 +464,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
   and bodies are never logged, and there are no API access logs. Each `api`
   instance logs one line a minute of request counts by route, status and
   error code, counts only, for the alarms, and how many messages were sent
-  and how many bytes of media uploaded, for public statistics
+  and how many bytes of media paid for, for public statistics
   ([deployment.md](deployment.md#request-counts)).
 - Code signing: the functions run only code signed by the environment's AWS
   Signer profile, which the deploy role signs with (whatever it uploads), and
