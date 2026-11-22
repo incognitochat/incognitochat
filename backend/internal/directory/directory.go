@@ -182,7 +182,7 @@ type Device struct {
 	Granted      int    // invitations granted on top of the level's allowance
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
-	Mailboxes    int    // pool and conversation mailboxes owned (MailboxCount)
+	Mailboxes    int    // pool and conversation mailboxes owned (not the link's intro mailbox), as counted against the most allowed
 	Notices      bool   // Telegram notices are set up and not turned off
 	// NoticesRefused: notices are off because Telegram refused one (the
 	// user blocked the bot, say), not set up again since.
