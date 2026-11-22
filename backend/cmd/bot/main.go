@@ -49,13 +49,20 @@ func main() {
 	}
 	lambda.Start(invocation(log, b, steps{
 		setup: setup.Run,
-		texts: func(ctx context.Context) bot.TextsReport { return setup.SetTexts(ctx, i18n.Languages()) },
+		texts: func(ctx context.Context) bot.TextsReport {
+			report := setup.SetTexts(ctx, i18n.Languages())
+			if report.Err != nil {
+				log.Warn("some of the bot's texts weren't set", logx.ErrorKind(report.Err))
+			}
+			return report
+		},
 	}))
 }
 
 // invocation is the function's handler. Lambda gets no error but
 // awsconf.ErrFailed: what failed is logged by its kind (and, for a Bot API
-// call, its method and Telegram's answer).
+// call, its method and Telegram's answer). The texts step never fails: its
+// report says what it did, and its first error is logged the same way.
 func invocation(log *slog.Logger, b *bot.Bot, s steps) func(context.Context, json.RawMessage) (any, error) {
 	return awsconf.Guard(log, awsconf.WithDeadline(textsDeadline, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		out, err := handle(ctx, raw, b, s)

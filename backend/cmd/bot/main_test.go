@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -56,6 +57,20 @@ func TestHandleRoutesEvents(t *testing.T) {
 	setupURL, textsRan = "", false
 	if _, err := handle(context.Background(), json.RawMessage(`{"texts":{},"setup":{"webhookUrl":"https://x.lambda-url.us-east-1.on.aws/"}}`), b, setup); err == nil || setupURL != "" || textsRan {
 		t.Fatalf("ran two steps: %v %q %v", err, setupURL, textsRan)
+	}
+}
+
+// The texts step's report reaches the deploy as the function's output, with
+// the keys the workflow reads.
+func TestInvocationReportsTexts(t *testing.T) {
+	b := &bot.Bot{Secret: "s", AppURL: "https://example.github.io/"}
+	var buf bytes.Buffer
+	s := steps{texts: func(context.Context) bot.TextsReport {
+		return bot.TextsReport{OK: false, Set: 2, Unchanged: 20, Failed: 5, Err: errors.New("x")}
+	}}
+	out, err := lambda.NewHandler(invocation(logx.New(&buf, "bot"), b, s)).Invoke(context.Background(), []byte(`{"texts":{}}`))
+	if err != nil || string(out) != `{"ok":false,"set":2,"unchanged":20,"failed":5}` {
+		t.Fatalf("texts: %s, %v", out, err)
 	}
 }
 

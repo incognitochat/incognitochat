@@ -469,7 +469,10 @@ jobs:
       - name: Set the bot's texts
         working-directory: infra
         run: |
-          function=$(terraform output -raw bot_function_name)
+          function=$(terraform output -raw bot_function_name) || {
+            echo "::warning::The bot's texts weren't set (no function name); the next deploy tries again"
+            exit 0
+          }
           failed=$(aws lambda invoke --function-name "$function" --cli-binary-format raw-in-base64-out \
             --payload '{"texts":{}}' --query FunctionError --output text "$RUNNER_TEMP/bot-texts.json") || failed=invoke
           report=$(jq -c '{ok, set, unchanged, failed}' "$RUNNER_TEMP/bot-texts.json" 2>/dev/null || echo '{}')

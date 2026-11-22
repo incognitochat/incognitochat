@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +19,14 @@ type TextsReport struct {
 	Set       int  `json:"set"`
 	Unchanged int  `json:"unchanged"`
 	Failed    int  `json:"failed"`
+	// Err is the first error, for the function's log (by its kind, and
+	// for a Bot API call, its method and Telegram's answer): never in the
+	// report the deploy prints.
+	Err error `json:"-"`
 }
+
+// errStopped is a text not set because another call failed first.
+var errStopped = errors.New("bot: stopped after an error")
 
 // textsParallel bounds the Bot API calls SetTexts makes at once.
 const textsParallel = 4
@@ -89,13 +97,16 @@ func (s Setup) SetTexts(ctx context.Context, languages []i18n.Language) TextsRep
 		}
 		workers.Go(func() {
 			defer func() { <-slots }()
-			changed, err := s.setText(ctx, t)
+			changed, err := s.setText(ctx, t, &stopped)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
 			case err != nil:
 				stopped.Store(true)
 				report.Failed++
+				if report.Err == nil && !errors.Is(err, errStopped) {
+					report.Err = err
+				}
 			case changed:
 				report.Set++
 			default:
@@ -108,8 +119,9 @@ func (s Setup) SetTexts(ctx context.Context, languages []i18n.Language) TextsRep
 	return report
 }
 
-// setText sets one text if what Telegram has differs, and says whether it did.
-func (s Setup) setText(ctx context.Context, t botText) (bool, error) {
+// setText sets one text if what Telegram has differs, and says whether it
+// did. It doesn't set it if another call failed meanwhile.
+func (s Setup) setText(ctx context.Context, t botText, stopped *atomic.Bool) (bool, error) {
 	var current any
 	if err := s.client().Call(ctx, t.get, t.params, &current); err != nil {
 		return false, err
@@ -121,6 +133,9 @@ func (s Setup) setText(ctx context.Context, t botText) (bool, error) {
 	}
 	if ok && t.same(raw) {
 		return false, nil
+	}
+	if stopped.Load() {
+		return false, errStopped
 	}
 	params := map[string]any{}
 	for k, v := range t.params {

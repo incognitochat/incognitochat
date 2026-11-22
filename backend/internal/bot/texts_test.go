@@ -35,19 +35,22 @@ func newFakeTexts() *fakeTexts {
 
 func (f *fakeTexts) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.started.Add(1)
-	time.Sleep(f.delay)
 	method := r.URL.Path[strings.LastIndexByte(r.URL.Path, '/')+1:]
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
 	lang, _ := body["language_code"].(string)
+	// A refusal comes at once; anything else takes the delay.
+	if method != f.refuse || lang != "" {
+		time.Sleep(f.delay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, method+" "+lang)
 	key := strings.TrimPrefix(strings.TrimPrefix(method, "get"), "set") + " " + lang
 	var result any
 	switch {
-	case method == f.refuse:
+	case method == f.refuse && lang == "":
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":3}}`))
 		return
 	case strings.HasPrefix(method, "set"):
@@ -135,20 +138,22 @@ func TestSetTexts(t *testing.T) {
 	}
 }
 
-// Telegram's flood control refuses a set: no more calls start, and the
-// report says so, as the deploy's output, not an error.
+// Telegram's flood control refuses a call: no more calls start, those
+// running set nothing, and the report says so, as the deploy's output, not
+// an error, with the first error kept for the log.
 func TestSetTextsStopsAtAnError(t *testing.T) {
 	f := newFakeTexts()
-	f.refuse = "setMyDescription"
+	f.refuse = "getMyCommands"
+	f.delay = 50 * time.Millisecond
 	telegram := httptest.NewServer(f)
 	defer telegram.Close()
 	report := Setup{Token: "1:T", API: telegram.URL}.SetTexts(context.Background(), languages(9))
-	if report.OK || report.Failed == 0 || report.Set+report.Unchanged+report.Failed != 27 {
+	if report.OK || report.Set != 0 || report.Failed+report.Unchanged != 27 || report.Err == nil {
 		t.Fatalf("report: %+v", report)
 	}
-	// At most the calls already running when the refusal came finish.
-	if started := int(f.started.Load()); started >= 54 {
-		t.Fatalf("kept calling: %d calls", started)
+	// Only the first few reads, which started together; no set.
+	if started := int(f.started.Load()); started > textsParallel || f.count("set") != 0 {
+		t.Fatalf("kept calling: %d calls, %d sets", started, f.count("set"))
 	}
 }
 
