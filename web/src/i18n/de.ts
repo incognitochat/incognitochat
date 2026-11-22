@@ -36,14 +36,14 @@ export const de = {
   revokeYes: 'Link löschen',
   noticeCreated: 'Dein Link ist bereit.',
   noticeReplaced: 'Dein neuer Link ist bereit. Der alte funktioniert nicht mehr.',
-  noticeNewSigningKey: 'Dein Link hat einen neuen Schlüssel. Wenn du vorher einen Link geteilt hast, teile stattdessen diesen. Leute, die über ihn schreiben, bekommen neue Namen, und Blockierungen werden nicht auf ihn übertragen.',
+  noticeNewSigningKey: 'Dein Link hat einen neuen Schlüssel. Wenn du vorher einen Link geteilt hast, teile stattdessen diesen. Leute, die über diesen Link schreiben, bekommen neue Namen, und Blockierungen werden nicht auf ihn übertragen.',
   noticeRevoked: 'Dein Link wurde gelöscht.',
   noticeLimit: 'Du hast schon einen Link. Tausche ihn stattdessen gegen einen neuen.',
 
   haveInvitation: 'Hast du einen Einladungscode?',
   join: 'Beitreten',
   joinTitle: 'Du hast eine Einladung',
-  joinBody: 'Das ist eine Einladung für einen eigenen Link. Wenn du damit beitrittst, sieht die Person, von der die Einladung stammt, dass sie benutzt wurde.',
+  joinBody: 'Mit dieser Einladung bekommst du einen eigenen Link. Wenn du damit beitrittst, sieht die Person, die sie erstellt hat, dass die Einladung benutzt wurde.',
   notNow: 'Nicht jetzt',
   noticeJoined: 'Du bist dabei. Jetzt kannst du deinen eigenen Link erstellen.',
   noticeInvalidInvitation: 'Diesen Einladungscode gibt es nicht, oder er ist schon aufgebraucht.',
@@ -179,7 +179,7 @@ export const de = {
   errorTooBig: 'Dateien dürfen bis zu 50 MB groß sein.',
   errorUnreadable: 'Diese Datei konnte nicht gelesen werden.',
   reply: 'Antworten',
-  replyingTo: 'Antwort an {name}',
+  replyingTo: 'Antwort: {name}',
   cancelReply: 'Antwort abbrechen',
   deletedMessage: 'Gelöschte Nachricht',
   messageActions: 'Nachrichtenaktionen',
@@ -299,7 +299,7 @@ export const de = {
   deleteAccount: 'Konto löschen',
   deleteTitle: 'Dein Konto löschen?',
   deleteBody:
-    'Dadurch wird dein Konto sofort vom Server gelöscht: dein Link, deine Postfächer und alles, was noch auf dich wartet. Deine Chats auf diesem Gerät verschwinden auch. Wer an deinen alten Link oder in deinen alten Chats schreibt, bekommt keine Antwort und wird nicht informiert, warum.',
+    'Dadurch wird dein Konto sofort vom Server gelöscht: dein Link, deine Postfächer und alles, was noch auf dich wartet. Deine Chats auf diesem Gerät verschwinden auch. Wer über deinen alten Link oder in deinen alten Chats schreibt, bekommt keine Antwort und wird nicht informiert, warum.',
   deleteWarning: 'Das kann nicht rückgängig gemacht werden. Du kannst später ein neues Konto einrichten, mit einem neuen Link.',
   deletingAccount: 'Wird gelöscht… Das kann ein paar Minuten dauern. Wenn die App geschlossen wird, geht es beim nächsten Öffnen weiter.',
   deletingTitle: 'Konto wird gelöscht',
@@ -309,12 +309,12 @@ export const de = {
   finishDeleting: 'Kontolöschung abschließen',
   deleteHereOnly: 'Nur hier löschen',
   deleteHereOnlyNote:
-    'Wenn der Server es nicht abschließen kann, kannst du jetzt alles auf diesem Gerät löschen. Was der Server noch gespeichert hat, bleibt ungenutzt, bis du die App erneut einrichtest; damit endet es.',
+    'Wenn der Server es nicht abschließen kann, kannst du jetzt alles auf diesem Gerät löschen. Was der Server noch gespeichert hat, bleibt ungenutzt, bis du die App erneut einrichtest. Dadurch wird es beendet.',
   accountDeletedHere:
     'Die App hat deine Chats und Schlüssel auf diesem Gerät gelöscht. Auf manchen Geräten können sie in den Speicherdateien der App bleiben, und eine früher erstellte Sicherung des Geräts kann sie noch enthalten. Was der Server noch gespeichert hat, bleibt ungenutzt, bis du die App erneut einrichtest.',
   deleteHereOnlyConfirm: 'Alle deine Chats und Schlüssel jetzt von diesem Gerät löschen? Das kann nicht rückgängig gemacht werden.',
   deletionPausedNotice: 'Das Löschen deines Kontos konnte noch nicht abgeschlossen werden. Bis dahin kannst du deine Chats nur lesen.',
-  deletePhrase: 'mein konto löschen',
+  deletePhrase: 'mein Konto löschen',
   deleteAccountConfirm: 'Mein Konto löschen',
   accountDeleted:
     'Dein Konto wurde vom Server gelöscht, und die App hat deine Chats und Schlüssel auf diesem Gerät gelöscht. Auf manchen Geräten können sie in den Speicherdateien der App bleiben, und eine früher erstellte Sicherung des Geräts kann sie noch enthalten.',
@@ -337,7 +337,7 @@ export const de = {
   resetBody:
     'Beim Neueinrichten werden deine Chats, deine Schlüssel und dein Link von diesem Gerät gelöscht. Das kann nicht rückgängig gemacht werden. Danach richtest du ein neues Konto ein.',
   resetWarning: 'Wenn du glaubst, dass der Server sich irrt, brich hier ab: Behalte deine Chats und versuch es später erneut.',
-  resetPhrase: 'meine chats löschen',
+  resetPhrase: 'meine Chats löschen',
   resetConfirm: 'Löschen und neu einrichten',
 
   errorNetwork: 'Der Server war nicht erreichbar. Prüfe deine Verbindung und versuch es erneut.',
