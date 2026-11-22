@@ -332,10 +332,10 @@ export const pl = {
   deletePhrase: 'skasuj moje konto',
   deleteAccountConfirm: 'Usuń moje konto',
   deleteChatsForBoth: 'Usuń też moje czaty u drugiej strony',
-  deleteChatsForBothNote: 'Aplikacja drugiej strony dostanie prośbę o usunięcie każdego czatu z twojej listy, a załączniki wysłane przez ciebie w tych czatach zostaną usunięte z serwera. To zależy od aplikacji drugiej strony i nie usunie kopii ani zrzutów ekranu, które tam zrobiono. Zablokowane czaty i czaty usunięte tylko u ciebie zostają u drugiej strony.',
+  deleteChatsForBothNote: 'W każdym czacie z twojej listy aplikacja drugiej strony dostanie prośbę o jego usunięcie, a załączniki wysłane przez ciebie w tym czacie zostaną usunięte z serwera; te, które zostaną, pozostaną na serwerze najwyżej 30 dni. To zależy od aplikacji drugiej strony i nie usunie kopii ani zrzutów ekranu, które tam zrobiono. Czaty zablokowane przez ciebie i czaty usunięte tylko u ciebie zostają u drugiej strony.',
   deletingChats: 'Usuwanie twoich czatów u drugiej strony: {done} z {total}…',
-  deletingChatsLeft: 'Czaty nieusunięte u drugiej strony: {count}. Jeśli mimo to usuniesz konto, zostaną u niej, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.',
-  deletingChatsNoMessages: 'Dzisiejsze wiadomości się skończyły: usunięcie każdego czatu liczy się jak jedna wiadomość. Kolejne od {time}.',
+  deletingChatsLeft: 'Czaty nieusunięte u drugiej strony: {count}. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.',
+  deletingChatsNoMessages: 'Na dziś nie masz już wiadomości: usunięcie każdego czatu liczy się jak jedna wiadomość. Kolejne od {time}.',
   deleteAccountAnyway: 'Mimo to usuń moje konto',
   keepAccount: 'Na razie zachowaj moje konto',
   accountDeleted:

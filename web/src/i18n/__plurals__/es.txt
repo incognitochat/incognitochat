@@ -95,14 +95,14 @@ messagesLeftToday:
   102: Mensajes restantes hoy: 102. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Mensajes restantes hoy: 1.000.000. Más a partir de esta hora: xxxxxxxxxxxxxxxxxxxxxxxx.
 deletingChatsLeft:
-  0: Chats no eliminados para la otra persona: 0. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  1: Chats no eliminados para la otra persona: 1. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  2: Chats no eliminados para la otra persona: 2. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  3: Chats no eliminados para la otra persona: 3. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  5: Chats no eliminados para la otra persona: 5. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  11: Chats no eliminados para la otra persona: 11. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  21: Chats no eliminados para la otra persona: 21. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  100: Chats no eliminados para la otra persona: 100. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  101: Chats no eliminados para la otra persona: 101. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  102: Chats no eliminados para la otra persona: 102. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
-  1000000: Chats no eliminados para la otra persona: 1.000.000. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  0: Chats no eliminados para la otra persona: 0. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  1: Chats no eliminados para la otra persona: 1. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  2: Chats no eliminados para la otra persona: 2. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  3: Chats no eliminados para la otra persona: 3. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  5: Chats no eliminados para la otra persona: 5. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  11: Chats no eliminados para la otra persona: 11. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  21: Chats no eliminados para la otra persona: 21. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  100: Chats no eliminados para la otra persona: 100. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  101: Chats no eliminados para la otra persona: 101. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  102: Chats no eliminados para la otra persona: 102. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.
+  1000000: Chats no eliminados para la otra persona: 1.000.000. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.

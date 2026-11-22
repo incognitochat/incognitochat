@@ -330,10 +330,10 @@ export const es = {
   deletePhrase: 'eliminar mi cuenta',
   deleteAccountConfirm: 'Eliminar mi cuenta',
   deleteChatsForBoth: 'Eliminar también mis chats para la otra persona',
-  deleteChatsForBothNote: 'Se le pide a la app de la otra persona que elimine cada chat de tu lista, y los archivos adjuntos que enviaste ahí se eliminan del servidor. Esto depende de su app y no puede borrar las copias o capturas de pantalla que haya hecho. Los chats que bloqueaste y los que eliminaste solo para ti se quedan con la otra persona.',
+  deleteChatsForBothNote: 'En cada chat de tu lista, se le pide a la app de la otra persona que lo elimine, y los archivos adjuntos que enviaste ahí se eliminan del servidor; los que queden permanecen en el servidor 30 días como máximo. Esto depende de su app y no puede borrar las copias o capturas de pantalla que haya hecho. Los chats que bloqueaste y los que eliminaste solo para ti se quedan con la otra persona.',
   deletingChats: 'Eliminando tus chats para la otra persona: {done} de {total}…',
-  deletingChatsLeft: 'Chats no eliminados para la otra persona: {count}. Si eliminas tu cuenta de todos modos, se quedan con ella, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.',
-  deletingChatsNoMessages: 'Ya usaste los mensajes de hoy: eliminar cada chat cuenta como uno. Más a partir de esta hora: {time}.',
+  deletingChatsLeft: 'Chats no eliminados para la otra persona: {count}. Si eliminas tu cuenta de todos modos, la otra persona los conserva, y los archivos adjuntos que enviaste ahí permanecen en el servidor 30 días como máximo.',
+  deletingChatsNoMessages: 'Ya has usado todos los mensajes de hoy: eliminar cada chat cuenta como uno. Más a partir de esta hora: {time}.',
   deleteAccountAnyway: 'Eliminar mi cuenta de todos modos',
   keepAccount: 'Conservar mi cuenta por ahora',
   accountDeleted:

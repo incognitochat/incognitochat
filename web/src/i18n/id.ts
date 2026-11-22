@@ -318,12 +318,12 @@ export const id = {
   deletePhrase: 'hapus akun saya',
   deleteAccountConfirm: 'Hapus akun saya',
   deleteChatsForBoth: 'Hapus juga obrolan saya untuk pihak lain',
-  deleteChatsForBothNote: 'Aplikasi pihak lain diminta menghapus setiap obrolan di daftar Anda, dan lampiran yang Anda kirim di sana dihapus dari server. Ini bergantung pada aplikasi mereka, dan tidak bisa menghapus salinan atau tangkapan layar yang mereka buat. Obrolan yang Anda blokir, dan obrolan yang Anda hapus hanya untuk diri sendiri, tetap ada pada mereka.',
+  deleteChatsForBothNote: 'Untuk setiap obrolan di daftar Anda, aplikasi pihak lain diminta menghapusnya, dan lampiran yang Anda kirim di sana dihapus dari server; yang tersisa tersimpan di server paling lama 30 hari. Ini bergantung pada aplikasi mereka, dan tidak bisa menghapus salinan atau tangkapan layar yang mereka buat. Obrolan yang Anda blokir, dan obrolan yang Anda hapus hanya untuk diri sendiri, tetap ada pada mereka.',
   deletingChats: 'Menghapus obrolan Anda untuk pihak lain: {done} dari {total}…',
-  deletingChatsLeft: 'Obrolan yang belum dihapus untuk pihak lain: {count}. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.',
+  deletingChatsLeft: 'Obrolan yang belum dihapus untuk pihak lain: {count}. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.',
   deletingChatsNoMessages: 'Pesan Anda hari ini sudah habis: setiap obrolan yang dihapus dihitung sebagai satu pesan. Bertambah lagi mulai pukul {time}.',
   deleteAccountAnyway: 'Tetap hapus akun saya',
-  keepAccount: 'Simpan akun saya untuk sekarang',
+  keepAccount: 'Jangan hapus akun saya dulu',
   accountDeleted:
     'Akun Anda telah dihapus dari server, dan aplikasi telah menghapus obrolan dan kunci Anda di perangkat ini. Di beberapa perangkat, semua itu bisa tetap ada di berkas penyimpanan aplikasi, dan cadangan perangkat yang dibuat sebelumnya mungkin masih menyimpannya.',
 

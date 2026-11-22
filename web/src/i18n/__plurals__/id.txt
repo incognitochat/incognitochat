@@ -95,14 +95,14 @@ messagesLeftToday:
   102: Sisa pesan hari ini: 102. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Sisa pesan hari ini: 1.000.000. Bertambah lagi mulai pukul xxxxxxxxxxxxxxxxxxxxxxxx.
 deletingChatsLeft:
-  0: Obrolan yang belum dihapus untuk pihak lain: 0. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  1: Obrolan yang belum dihapus untuk pihak lain: 1. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  2: Obrolan yang belum dihapus untuk pihak lain: 2. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  3: Obrolan yang belum dihapus untuk pihak lain: 3. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  5: Obrolan yang belum dihapus untuk pihak lain: 5. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  11: Obrolan yang belum dihapus untuk pihak lain: 11. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  21: Obrolan yang belum dihapus untuk pihak lain: 21. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  100: Obrolan yang belum dihapus untuk pihak lain: 100. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  101: Obrolan yang belum dihapus untuk pihak lain: 101. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  102: Obrolan yang belum dihapus untuk pihak lain: 102. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
-  1000000: Obrolan yang belum dihapus untuk pihak lain: 1.000.000. Jika Anda tetap menghapus akun, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  0: Obrolan yang belum dihapus untuk pihak lain: 0. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  1: Obrolan yang belum dihapus untuk pihak lain: 1. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  2: Obrolan yang belum dihapus untuk pihak lain: 2. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  3: Obrolan yang belum dihapus untuk pihak lain: 3. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  5: Obrolan yang belum dihapus untuk pihak lain: 5. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  11: Obrolan yang belum dihapus untuk pihak lain: 11. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  21: Obrolan yang belum dihapus untuk pihak lain: 21. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  100: Obrolan yang belum dihapus untuk pihak lain: 100. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  101: Obrolan yang belum dihapus untuk pihak lain: 101. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  102: Obrolan yang belum dihapus untuk pihak lain: 102. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
+  1000000: Obrolan yang belum dihapus untuk pihak lain: 1.000.000. Jika Anda tetap menghapus akun Anda, obrolan itu tetap ada pada mereka, dan lampiran yang Anda kirim di sana tersimpan di server paling lama 30 hari.
