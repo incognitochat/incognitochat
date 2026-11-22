@@ -2,7 +2,8 @@
   "languages": [
     "en",
     "fa",
-    "ru"
+    "ru",
+    "ar"
   ],
   "pick": {
     "en": "en",
@@ -30,6 +31,11 @@
     "ru-RU": "ru",
     "RU": "ru",
     "ru_UA": "ru",
-    "rus": "en"
+    "rus": "en",
+    "ar": "ar",
+    "ar-EG": "ar",
+    "ar_SA": "ar",
+    "AR": "ar",
+    "ara": "en"
   }
 }

@@ -22,6 +22,8 @@ export const LANGUAGES = {
   en: { dir: 'ltr', locale: 'en', unitDisplay: 'short', tags: ['en'] },
   fa: { dir: 'rtl', locale: 'fa-IR', unitDisplay: 'long', tags: ['fa'], countInvariant: true },
   ru: { dir: 'ltr', locale: 'ru', unitDisplay: 'short', tags: ['ru'] },
+  // Western digits (1, 2, 3), pinned: Intl's default for Arabic differs by version.
+  ar: { dir: 'rtl', locale: 'ar-u-nu-latn', unitDisplay: 'long', tags: ['ar'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;
