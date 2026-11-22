@@ -278,8 +278,8 @@ records go in that same request.
   come after the user's first message there in the chat; anything else
   waits for a tap. A cleared attachment can be fetched again only while the
   server still holds it.
-- **Choose the app's language** (Data and storage): English, Persian, or the
-  same as Telegram, the default. The choice stays on the device and isn't
+- **Choose the app's language** (Data and storage): one of the app's
+  languages, or the same as Telegram, the default. The choice stays on the device and isn't
   sent; notices follow the language Telegram gives the server, and the app
   tells the server again when that changes.
 - **Delete their account** in the app (on the Link tab). First the app

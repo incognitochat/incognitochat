@@ -413,9 +413,10 @@ The panel under the message box has emoji and stickers, as in Telegram.
   script sink, and no script may create a policy to let one through), one
   deterministic JavaScript file, and no code or settings loaded from the
   backend.
-- **Languages:** English and Persian, right-to-left included: Telegram's
-  language, unless the user picks one in Data and storage (kept on the
-  device). Telegram's theme is mapped onto the app's own colours.
+- **Languages:** those listed in `web/src/i18n/languages.ts`, right-to-left
+  included: Telegram's language (else the device's, else English), unless
+  the user picks one in Data and storage (kept on the device). Telegram's
+  theme is mapped onto the app's own colours.
 
 ## The backend
 
