@@ -168,9 +168,9 @@ That adds a read-only role, `<prefix>-github-stats`
   account. The workflow, public too, decides what's published. The calls
   cost money (Cost Explorer $0.01 each), so the workflow reads costs once
   a day.
-- The bootstrap refuses an AWS Organization's management account, whose
-  Cost Explorer shows every member account's costs, and stops if it can't
-  tell (for example when a policy denies
+- Run with `STATS_REPO`, the bootstrap refuses an AWS Organization's
+  management account, whose Cost Explorer shows every member account's
+  costs, and stops if it can't tell (for example when a policy denies
   `organizations:DescribeOrganization`).
 - It then stores, in that `stats` environment, the role's ARN as a secret
   and the region as a variable, each named for the account
@@ -182,9 +182,11 @@ That adds a read-only role, `<prefix>-github-stats`
   ([below](#audit-trail-and-change-alerts)).
 
 A later run without `STATS_REPO` keeps the role, and leaves the other
-repository alone (it doesn't check its environment again: rerun with
-`STATS_REPO` for that). `STATS_REPO=none` removes the role; delete its
-secret and variables from the other repository by hand.
+repository alone (it doesn't check its environment, or the account, again:
+rerun with `STATS_REPO` for that); if it can't read the role's subject from
+the state, it stops rather than remove the role. `STATS_REPO=none` removes
+the role; delete its secret and variables from the other repository by
+hand.
 
 CI never changes `infra/init` (it can't change its own permissions). When a
 change touches it, rerun the bootstrap in each environment before that

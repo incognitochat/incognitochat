@@ -102,8 +102,8 @@ if [[ -n $stats_repo && $stats_repo != none ]]; then
   stats_prefix=$(gh api "repos/${stats_repo}/actions/oidc/customization/sub" --jq .sub_claim_prefix)
   if [[ ! $stats_prefix =~ ^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$ ]]; then
     echo "${stats_repo} doesn't send immutable OIDC subjects (it sends ${stats_prefix}), so a" >&2
-    echo "repository made again under its name could assume the stats role. Turn them on" >&2
-    echo "(the repository's Actions OIDC settings) and rerun this." >&2
+    echo "repository made again under its name could assume the stats role. Turn on immutable" >&2
+    echo "subject claims (for the repository or its organization in GitHub) and rerun this." >&2
     exit 1
   fi
   stats_subject="${stats_prefix}:environment:stats"
@@ -133,18 +133,28 @@ if [[ -n $stats_repo && $stats_repo != none ]]; then
   fi
 fi
 
-# Sets stats, the stats role's Terraform variables. After tf init.
+# Sets stats, the stats role's Terraform variables. After tf init; with
+# first-run, on the first run's empty local state.
 stats_vars() {
+  local state
   if [[ -z $stats_repo ]]; then
     stats_subject=$(tf output -raw stats_github_oidc_subject 2>/dev/null || true)
     [[ $stats_subject == *:environment:stats ]] || stats_subject=''
     # A role made before whose subject can't be read would be removed by
-    # this apply: stop instead (STATS_REPO=none removes it on purpose).
-    if [[ -z $stats_subject ]] && tf state list 2>/dev/null | grep -qxF 'aws_iam_role.stats[0]'; then
-      echo "The stats role exists, but its subject couldn't be read from the state, and applying" >&2
-      echo "would remove it. Rerun with STATS_REPO=<owner>/<repo> to keep it, or STATS_REPO=none" >&2
-      echo "to remove it." >&2
-      exit 1
+    # this apply: stop instead (STATS_REPO=none removes it on purpose). The
+    # state is read whole first: grep -q leaving early could make terraform
+    # fail on a closed pipe and the check pass by mistake.
+    if [[ -z $stats_subject && ${1:-} != first-run ]]; then
+      if ! state=$(tf state list 2>/dev/null); then
+        echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied." >&2
+        exit 1
+      fi
+      if grep -qxF 'aws_iam_role.stats[0]' <<<"$state"; then
+        echo "The stats role exists, but its subject couldn't be read from the state, and applying" >&2
+        echo "would remove it. Rerun with STATS_REPO=<owner>/<repo> to keep it, or STATS_REPO=none" >&2
+        echo "to remove it." >&2
+        exit 1
+      fi
     fi
   fi
   stats=(-var "stats_github_oidc_subject=${stats_subject}" -var "stats_read_metrics=${stats_metrics}")
@@ -267,7 +277,7 @@ else
   printf 'terraform {\n  backend "local" {}\n}\n' >"$override"
   tf init -input=false -reconfigure
   roles=$(existing_function_roles)
-  stats_vars
+  stats_vars first-run
   tf apply "${apply_args[@]}" -var "existing_function_roles=${roles}" "${stats[@]}"
   rm -f "$override"
   tf init -input=false -migrate-state -force-copy "${backend_args[@]}"
