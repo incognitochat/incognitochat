@@ -351,6 +351,8 @@ export type Screen =
       tab: 'chats' | 'links';
       conversations: ConversationView[];
       offline: boolean;
+      /** Offline because the server refused home's own requests for now (deviceLimit): said in place of "offline". */
+      limited: DeviceLimit | null;
       account: AccountInfo | null;
       invitations: InvitationsInfo | null;
       links: LinkView[];
@@ -2239,6 +2241,7 @@ export function createApp(deps: Deps) {
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
     let notice = options.notice ?? null;
+    let limited: DeviceLimit | null = null;
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
@@ -2251,8 +2254,10 @@ export function createApp(deps: Deps) {
         if (handleGone(err)) return;
         offline = true;
         // These requests refused for now (any of the device's are, past its
-        // limit): said, unless what brought the user here says something.
-        notice ??= deviceLimit(err);
+        // limit): said as the notice, unless what brought the user here
+        // says something, and then in place of "offline".
+        limited = deviceLimit(err);
+        notice ??= limited;
       }
     }
     if (account?.deleting) return deletingOnServer(account.expired);
@@ -2266,6 +2271,7 @@ export function createApp(deps: Deps) {
       tab,
       conversations: await conversations(),
       offline,
+      limited,
       account,
       invitations,
       links,
@@ -2354,17 +2360,31 @@ export function createApp(deps: Deps) {
     return showHome({ notice });
   }
 
-  async function openInvitations(notice: InvitationsNotice | null = null, created: string | null = null): Promise<void> {
+  /**
+   * The Invitations screen, read afresh. made: the code just made (and its
+   * uses), shown even if the list can't be read again now, so it isn't
+   * made twice.
+   */
+  async function openInvitations(notice: InvitationsNotice | null = null, made: { code: string; uses: number } | null = null): Promise<void> {
     const { config } = deps;
+    const url = (code: string) => invitationUrl(config!.botUsername, config!.appName, code);
+    const created = made?.code ?? null;
     let info: InvitationsInfo;
     try {
       info = await session!.call('GET', '/invitations', undefined, checkInvitations);
     } catch (err) {
       if (handleGone(err)) return;
+      const current = screen.value;
+      if (made && current.kind === 'invitations') {
+        const left = current.info.unlimited ? current.info.maxUses : Math.max(0, current.info.maxUses - made.uses);
+        const codes = [...current.info.codes, { code: made.code, uses: made.uses, left: made.uses, url: url(made.code) }].sort((a, b) => a.code.localeCompare(b.code));
+        screen.value = { ...current, info: { ...current.info, codes, maxUses: left, remaining: current.info.unlimited ? current.info.remaining : left }, busy: false, notice, created };
+        return;
+      }
       // A login refused for now refuses this reload too (the session waits).
       return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
-    const codes = info.codes.map((c) => ({ ...c, url: invitationUrl(config!.botUsername, config!.appName, c.code) }));
+    const codes = info.codes.map((c) => ({ ...c, url: url(c.code) }));
     backButton(true);
     screen.value = { kind: 'invitations', info: { ...info, codes }, busy: false, notice, created };
   }
@@ -2375,7 +2395,7 @@ export function createApp(deps: Deps) {
     screen.value = { ...current, busy: true, notice: null };
     try {
       const code = await session!.call('POST', '/invitations', { uses }, checkCreated, { sign: true });
-      return openInvitations('created', code);
+      return openInvitations('created', { code, uses });
     } catch (err) {
       if (handleGone(err)) return;
       const notice: InvitationsNotice =
@@ -2392,6 +2412,13 @@ export function createApp(deps: Deps) {
       levels = await session!.call('GET', '/admin/levels', undefined, checkLevels);
     } catch (err) {
       if (handleGone(err)) return;
+      // Done, but the screen can't be read again now: it stays, saying it
+      // was done, so it isn't done twice (a grant would be).
+      const current = screen.value;
+      if ((notice === 'saved' || notice === 'granted' || notice === 'switched') && current.kind === 'admin') {
+        screen.value = { ...current, busy: false, notice };
+        return;
+      }
       // A login refused for now refuses this reload too (the session waits).
       return showHome({ notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }

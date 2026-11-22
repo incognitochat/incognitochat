@@ -287,7 +287,7 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
 
 function Home({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'home' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
-  const { account, invitations, links, busy, notice, offline } = screen;
+  const { account, invitations, links, busy, notice, offline, limited } = screen;
   // One link per account (older ones, from before, go when it's replaced).
   const link = links[links.length - 1];
   const canCreate = !offline && !!account?.canCreateLinks && !link;
@@ -314,7 +314,7 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
     </div>
   ) : (
     // Refused for now, the server was reached: its notice says so, alone.
-    offline && notice !== 'device-limit' && notice !== 'device-limit-later' && <p class="notice">{tr('offline')}</p>
+    offline && notice !== 'device-limit' && notice !== 'device-limit-later' && <p class="notice">{tr(limited ? ERROR_TEXT[limited] : 'offline')}</p>
   );
   const tabs = (
     <div class="tabs" role="tablist">

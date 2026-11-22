@@ -133,6 +133,8 @@ function fakeServer(
     invitations?: Outcome[];
     admin?: Outcome[];
     usage?: Outcome[];
+    /** For GET /invitations and GET /admin/levels. */
+    reads?: Outcome[];
     elsewhere?: boolean;
   } = {},
 ) {
@@ -262,6 +264,7 @@ function fakeServer(
         return check({ resetsAt: 1_800_028_800, send: item(980, 1000), media: item(24, 1024), mailboxes: item(10, 100), linkChanges: item(1, 5), owned: item(10, 2000) });
       }
       if (method === 'GET' && path === '/invitations') {
+        take(outcomes.reads);
         const maxUses = state.admin ? 1000 : state.member ? 2 : 0;
         return check({
           inviteOnly: state.inviteOnly,
@@ -290,7 +293,10 @@ function fakeServer(
         state.member = true;
         return check({ level: 1 });
       }
-      if (path === '/admin/levels' && method === 'GET') return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
+      if (path === '/admin/levels' && method === 'GET') {
+        take(outcomes.reads);
+        return check({ levels: [...state.levels].map(([level, invitations]) => ({ level, invitations })) });
+      }
       if (path === '/admin/levels' && method === 'PUT') {
         needsSignature();
         take(outcomes.admin);
@@ -2398,12 +2404,35 @@ describe("the server's limit on this device's logins and signed requests", () =>
     server.outcomes.account = [deviceLimit(600)];
     await owner.app.home();
     expect(home(owner.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit-later' });
-    // What brought the user home says it first.
-    server.outcomes.createLink = [new ApiError(429, 'rate_limited')];
+    // What brought the user home says it first, and the refusal shows in
+    // place of "offline" (the server was reached).
     await owner.app.home();
     server.outcomes.account = [deviceLimit()];
     await owner.app.createLink();
-    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'rate-limited' });
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'created', offline: true, limited: 'device-limit' });
+  });
+
+  it('keeps a new invitation code on screen when reading the list again is refused', async () => {
+    const server = fakeServer();
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.invitations();
+    server.outcomes.reads = [deviceLimit()];
+    await admin.app.createInvitation(3);
+    const screen = admin.app.screen.value;
+    expect(screen).toMatchObject({ kind: 'invitations', notice: 'created', created: 'aaaa-aaaa', busy: false });
+    if (screen.kind !== 'invitations') return;
+    expect(screen.info.codes).toMatchObject([{ code: 'aaaa-aaaa', uses: 3, left: 3 }]);
+  });
+
+  it('says an admin change was done when reading the screen again is refused, so it is not done twice', async () => {
+    const server = fakeServer();
+    server.state.admin = true;
+    const admin = await registered(server.api);
+    await admin.app.admin();
+    server.outcomes.reads = [deviceLimit()];
+    await admin.app.setLevel(1, 5);
+    expect(admin.app.screen.value).toMatchObject({ kind: 'admin', notice: 'saved', busy: false });
   });
 
   it('holds its inbox fetches back as long as the server says', async () => {
