@@ -132,6 +132,10 @@ describe('i18n', () => {
     expect(t('id', 'invitationsRemaining', { count: 3 })).toBe('Anda bisa mengundang 3 orang lagi.');
   });
 
+  it('keeps a noun after a number singular in Turkish', () => {
+    expect([0, 1, 2, 1000].map((count) => t('tr', 'newMessages', { count }))).toEqual(['0 yeni mesaj', '1 yeni mesaj', '2 yeni mesaj', '1.000 yeni mesaj']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');

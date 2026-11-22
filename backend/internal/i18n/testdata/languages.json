@@ -7,7 +7,8 @@
     "nl",
     "es",
     "pt-BR",
-    "id"
+    "id",
+    "tr"
   ],
   "pick": {
     "en": "en",
@@ -68,6 +69,11 @@
     "ID": "id",
     "in": "id",
     "in-ID": "id",
-    "ind": "en"
+    "ind": "en",
+    "tr": "tr",
+    "tr-TR": "tr",
+    "TR": "tr",
+    "tr_CY": "tr",
+    "tur": "en"
   }
 }
