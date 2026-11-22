@@ -1594,20 +1594,32 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   code), and nothing more for one that never made any; codes made before
   this change still cost half a unit each, as they keep their counts on
   their own items only. A block (`POST /mailboxes/{id}/discard`) reads
-  half a unit more too, the mailbox (eventually consistent), and writes
-  only for a mailbox of the caller's own: a transaction of three items, 6
-  write units, and each such mailbox was made first (at most 100 a day
-  per Telegram user). Any other ID (random, someone else's, a link's
-  intro mailbox, one discarded already) writes nothing. It used to go
-  straight to that transaction, which DynamoDB bills even when its
-  condition cancels it: 6 write units an ID, so about 25 accounts kept at
-  their limits filled the directory's 200 writes a second (about 14 over
-  100 instances, 2 for a minute), and while the counts couldn't be
-  written, one account spread over 100 could. An account making only
-  blocks, or a member with invitation codes only `GET /invitations`,
-  reads about 1.5 units a request: filling the directory's reads that way
-  takes about 200 accounts, or about 115 over 100 instances (about 760
-  for a whole day). Counting adds about
+  half a unit more too, the mailbox (eventually consistent). Any ID that
+  isn't the caller's to discard (random, someone else's, a link's intro
+  mailbox, one discarded already) ends there and writes nothing. For a
+  mailbox of the caller's own, one conditional delete of it decides (a
+  write unit), and only the request that wins it removes its record and
+  counts it off (a transaction of two items, 4 units): 5 write units for
+  a block. Copies of a block sent at once all find the mailbox, and each
+  that loses is refused at the delete for a write unit: 20 at once write
+  24 units in all. So a request writes at most a unit, or 5 for the one
+  that discards a mailbox, and those were made first: at most 100 a day
+  per Telegram user, and 4,000 held at once. An account holding 4,000
+  (40 days of making them) and spending them on blocks at its limits
+  writes about 6,000 units a quarter of an hour: about 30 such accounts
+  fill the directory's 200 writes a second (about 17 over 100 instances)
+  until their mailboxes run out, in about 50 minutes (about half an
+  hour). A block used to go straight to one transaction of three items,
+  which DynamoDB bills even when its condition cancels it: 6 write units
+  for any ID, so about 25 accounts kept at their limits, with no
+  mailboxes at all, filled those writes for as long as they liked (about
+  14 over 100 instances, 2 for a minute), and while the counts couldn't
+  be written, one account spread over 100 could; copies sent at once
+  each cost 6 too (20 at once: 120). An account making only blocks, or a
+  member with invitation codes only `GET /invitations`, reads about 1.5
+  units a request: filling the directory's reads that way takes about
+  200 accounts, or about 115 over 100 instances (about 768 for a whole
+  day). Counting adds about
   150 write units a quarter of an hour per account kept at its limits on
   a few instances, up to about 600 over 100: with the logins' and signed
   requests', filling the ephemeral table's 200 writes a second takes about

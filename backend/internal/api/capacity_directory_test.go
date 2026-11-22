@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
 	"github.com/incognitochat/incognitochat/backend/internal/dynamotest"
@@ -243,48 +247,45 @@ func TestDiscardCapacity(t *testing.T) {
 
 	// Each reads what any logged-in request does (one unit) and, for a
 	// well-formed ID, the mailbox (half a unit). Only the caller's own
-	// mailbox is then deleted, in one transaction of three small items,
-	// which DynamoDB bills two write units each: 6 (DynamoDB Local reports
-	// 2 for any transaction that goes through, so its items are counted
-	// here instead). Before, every well-formed ID went straight to that
-	// transaction, and a cancelled one is billed as much: 6 write units for
-	// any ID. The ephemeral table takes at most the device's count of
-	// requests, in batches.
+	// mailbox is then deleted, by one conditional delete (a write unit),
+	// and its record and count go in a transaction of two small items,
+	// which DynamoDB bills two write units each: 5 in all. (DynamoDB Local
+	// reports 2 for any transaction that goes through, so the calls and
+	// the items they name are checked here instead.) Before, every
+	// well-formed ID went straight to one transaction of three items, and a
+	// cancelled one is billed as much: 6 write units for any ID. The
+	// ephemeral table takes at most the device's count of requests, in
+	// batches.
 	written := len(tb.meter.Written(tb.directory))
 	for _, c := range []struct {
 		what   string
 		id     string
 		status int
 		read   float64
-		items  int // the transaction's, if any
+		calls  []string // the directory's
+		items  int      // the directory's items written
 	}{
-		{"own mailbox (a block)", mine[0].(string), http.StatusOK, 1.5, 3},
-		{"the same again (a replay)", mine[0].(string), http.StatusNotFound, 1.5, 0},
-		{"someone else's mailbox", theirs[0].(string), http.StatusNotFound, 1.5, 0},
-		{"own link's intro mailbox", intro, http.StatusNotFound, 1.5, 0},
-		{"random ID", ids.New(), http.StatusNotFound, 1.5, 0},
-		{"malformed ID", "x", http.StatusNotFound, 1, 0},
+		{"own mailbox (a block)", mine[0].(string), http.StatusOK, 1.5, []string{"Query", "GetItem", "DeleteItem", "TransactWriteItems"}, 3},
+		{"the same again (a replay)", mine[0].(string), http.StatusNotFound, 1.5, []string{"Query", "GetItem"}, 0},
+		{"someone else's mailbox", theirs[0].(string), http.StatusNotFound, 1.5, []string{"Query", "GetItem"}, 0},
+		{"own link's intro mailbox", intro, http.StatusNotFound, 1.5, []string{"Query", "GetItem"}, 0},
+		{"random ID", ids.New(), http.StatusNotFound, 1.5, []string{"Query", "GetItem"}, 0},
+		{"malformed ID", "x", http.StatusNotFound, 1, []string{"Query"}, 0},
 	} {
 		tb.meter.Reset()
 		status, out := h.as(t, owner, http.MethodPost, "/mailboxes/"+c.id+"/discard", nil, false)
-		calls := tb.meter.Calls()
+		calls := tb.directoryCalls()
 		d, e := tb.cost(t, "POST /mailboxes/{id}/discard, "+c.what)
 		if status != c.status || (status != http.StatusOK && out["error"] != "not_found") {
 			t.Errorf("%s: %d %v, want %d", c.what, status, out, c.status)
 		}
-		var transactions int
-		for _, call := range calls {
-			if call == "TransactWriteItems "+tb.directory {
-				transactions++
-			}
-		}
 		items := len(tb.meter.Written(tb.directory)) - written
 		written += items
-		t.Logf("  directory items written %d (%d write units at DynamoDB's prices)", items, 2*items)
-		if d.Read != c.read || items != c.items || (c.items > 0) != (transactions == 1) || (c.items == 0 && d.Write != 0) ||
+		t.Logf("  directory calls %v, items written %d: %d write units at DynamoDB's prices", calls, items, billed(calls))
+		if d.Read != c.read || !slices.Equal(calls, c.calls) || items != c.items || (c.items == 0 && d.Write != 0) ||
 			e.Read != 0 || e.Write > 1 {
-			t.Errorf("%s: directory %+v, %d items, calls %v, ephemeral %+v; want directory R %.1f, %d items",
-				c.what, d, items, calls, e, c.read, c.items)
+			t.Errorf("%s: directory %+v, calls %v, %d items, ephemeral %+v; want directory R %.1f, calls %v, %d items",
+				c.what, d, calls, items, e, c.read, c.calls, c.items)
 		}
 	}
 
@@ -300,6 +301,141 @@ func TestDiscardCapacity(t *testing.T) {
 	}
 	if d, err := h.server.Directory.Device(ctx, owner.d.account, owner.d.id, h.now); err != nil || d.Mailboxes != 1 {
 		t.Fatalf("mailboxes owned after a discard: %d, %v", d.Mailboxes, err)
+	}
+}
+
+// directoryCalls returns the operations of the calls made to the directory
+// since the last Reset, in order.
+func (tb *directoryTables) directoryCalls() []string {
+	var ops []string
+	for _, c := range tb.meter.Calls() {
+		if op, table, _ := strings.Cut(c, " "); table == tb.directory {
+			ops = append(ops, op)
+		}
+	}
+	return ops
+}
+
+// billed is what a discard's directory writes cost at DynamoDB's prices: a
+// write unit for a delete of a small item (refused or not), and 4 for the
+// transaction of two small items that forgets a discarded mailbox (billed
+// whether or not it goes through).
+func billed(calls []string) int {
+	units := 0
+	for _, op := range calls {
+		switch op {
+		case "DeleteItem":
+			units++
+		case "TransactWriteItems":
+			units += 4
+		}
+	}
+	return units
+}
+
+// mailboxReads is the directory's DB with the reads of one mailbox failing,
+// or held until n of them are in, so that all of them find it.
+type mailboxReads struct {
+	*dynamotest.Meter
+	pk   string // the mailbox item's
+	fail error
+	n    int
+
+	mu   sync.Mutex
+	seen int
+	all  chan struct{}
+}
+
+func (m *mailboxReads) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	if pk, ok := in.Key["pk"].(*types.AttributeValueMemberS); !ok || pk.Value != m.pk {
+		return m.Meter.GetItem(ctx, in, opts...)
+	}
+	if m.fail != nil {
+		return nil, m.fail
+	}
+	out, err := m.Meter.GetItem(ctx, in, opts...)
+	m.mu.Lock()
+	if m.seen++; m.seen == m.n {
+		close(m.all)
+	}
+	m.mu.Unlock()
+	select {
+	case <-m.all:
+	case <-time.After(10 * time.Second):
+	}
+	return out, err
+}
+
+// Copies of a block of one's own mailbox sent at once all find it when they
+// read it, and one conditional delete decides: one is answered 200, the
+// rest not_found, each refused for a write unit. With one transaction of
+// three items, each copy's was cancelled, and billed 6 write units.
+func TestDiscardRaceCapacity(t *testing.T) {
+	h, tb := newDirectoryTables(t)
+	ctx := context.Background()
+	owner := h.account(t, userID)
+	status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	if status != http.StatusCreated {
+		t.Fatalf("mailboxes: %d %v", status, out)
+	}
+	mailbox := out["mailboxes"].([]any)[0].(string)
+	const copies = 20
+	h.server.Directory = &directory.Store{DB: &mailboxReads{Meter: tb.meter, pk: "M#" + mailbox, n: copies, all: make(chan struct{})}, Table: tb.directory}
+
+	tb.meter.Reset()
+	var wg sync.WaitGroup
+	answers := make(chan int, copies)
+	for range copies {
+		wg.Go(func() {
+			status, err := serve(h.router, owner, http.MethodPost, "/mailboxes/"+mailbox+"/discard", nil)
+			if err != nil {
+				t.Error(err)
+			}
+			answers <- status
+		})
+	}
+	wg.Wait()
+	close(answers)
+	byStatus := map[int]int{}
+	for status := range answers {
+		byStatus[status]++
+	}
+	calls := tb.directoryCalls()
+	d, e := tb.cost(t, "POST /mailboxes/{id}/discard, 20 copies of a block at once")
+	counts := map[string]int{}
+	for _, op := range calls {
+		counts[op]++
+	}
+	t.Logf("  answers %v, directory calls %v: %d write units at DynamoDB's prices (one transaction of three items each: %d)",
+		byStatus, counts, billed(calls), copies*6)
+	if byStatus[http.StatusOK] != 1 || byStatus[http.StatusNotFound] != copies-1 ||
+		counts["DeleteItem"] != copies || counts["TransactWriteItems"] != 1 || billed(calls) > copies+4 ||
+		d.Read != copies*1.5 || e.Read != 0 || e.Write > copies/SessionBatch+1 {
+		t.Fatalf("answers %v, calls %v, directory %+v, ephemeral %+v", byStatus, counts, d, e)
+	}
+	if got, err := h.server.Directory.Device(ctx, owner.d.account, owner.d.id, h.now); err != nil || got.Mailboxes != 0 {
+		t.Fatalf("mailboxes owned after the block: %d, %v", got.Mailboxes, err)
+	}
+}
+
+// A read of the mailbox that fails is answered 503, never not_found: the
+// app takes not_found for a block done, and would record one that
+// discarded nothing.
+func TestDiscardReadFailureAnswersUnavailable(t *testing.T) {
+	h, tb := newDirectoryTables(t)
+	owner := h.account(t, userID)
+	status, out := h.as(t, owner, http.MethodPost, "/mailboxes", map[string]any{"count": 1}, false)
+	if status != http.StatusCreated {
+		t.Fatalf("mailboxes: %d %v", status, out)
+	}
+	mailbox := out["mailboxes"].([]any)[0].(string)
+	store := h.server.Directory
+	throttled := &smithy.OperationError{ServiceID: "DynamoDB", OperationName: "GetItem", Err: &types.ProvisionedThroughputExceededException{}}
+	h.server.Directory = &directory.Store{DB: &mailboxReads{Meter: tb.meter, pk: "M#" + mailbox, fail: throttled}, Table: tb.directory}
+	status, out = h.as(t, owner, http.MethodPost, "/mailboxes/"+mailbox+"/discard", nil, false)
+	wantError(t, status, out, http.StatusServiceUnavailable, "unavailable")
+	if _, err := store.Mailbox(context.Background(), mailbox); err != nil {
+		t.Fatalf("mailbox after a failed read: %v", err)
 	}
 }
 

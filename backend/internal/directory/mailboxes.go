@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
 
@@ -114,20 +116,32 @@ func (s *Store) Mailboxes(ctx context.Context, accountID string) ([]string, erro
 // DiscardMailbox deletes one of an account's pool or conversation mailboxes:
 // sends to it then go nowhere, exactly as to one that never existed. Intro
 // mailboxes go with their link. It returns ErrNotFound unless the account
-// owns the mailbox.
+// owns the mailbox; a read or write that fails is an error, never taken
+// for that.
 //
-// The mailbox is read first, eventually consistent (half a read unit), and
-// only one the account may discard goes on to the transaction, which checks
-// again. A transaction is billed for every item it names, twice, even when
-// a condition cancels it: here 6 write units, which any ID cost when it
-// went straight to the transaction. So an ID that isn't the account's to
-// discard (unknown, someone else's, an intro mailbox, one discarded
-// already) writes nothing, and anyone with a session can't spend the
-// directory's writes this way. A mailbox discarded in about the last
-// second may still be read, and then its transaction is cancelled; one
-// made in about the last second may not be read yet, and is answered as
-// unknown. The app discards a mailbox only when its user blocks a chat,
-// and only one a reply has already gone out from.
+// What it costs is what keeps anyone with a session from spending the
+// directory's writes:
+//   - The mailbox is read first, eventually consistent (half a read unit).
+//     An ID that isn't the account's to discard (unknown, someone else's,
+//     an intro mailbox, one discarded already) ends there, writing nothing.
+//   - Then one conditional delete of the mailbox decides, checking again
+//     that the account owns it and that it isn't an intro mailbox: one
+//     write unit, and only one request wins it. Copies of the request sent
+//     at once all pass the read, and each one that loses is refused here,
+//     a write unit, as is a replay that read the mailbox in about the
+//     second after it was discarded. (One transaction of all three writes
+//     cost each of them 6 write units: DynamoDB bills a cancelled
+//     transaction as one that went through.)
+//   - The one that deleted the mailbox then removes its record from the
+//     account's partition and counts it off (forgetMailbox): 4 write
+//     units, so 5 for a block.
+//
+// A mailbox made in about the last second may not be read yet, and is
+// answered as unknown. The app takes a mailbox for anything but a receipt
+// or a delete it sends in a chat (from its pool, made just before only
+// when the pool is empty), and a block comes behind any send under way and
+// takes two taps; it tries a block answered not_found once more, about 2
+// seconds later.
 func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error {
 	it, err := s.read(ctx, mailboxPK(id), skMailbox, time.Time{}, false)
 	if err != nil {
@@ -137,14 +151,51 @@ func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error 
 	if _, intro := it["i"]; owner != accountID || intro {
 		return ErrNotFound
 	}
+	_, err = s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(mailboxPK(id), skMailbox),
+		ConditionExpression:       aws.String("o = :a AND attribute_not_exists(i)"),
+		ExpressionAttributeValues: attrs{":a": sv(accountID)},
+	})
+	var refused *types.ConditionalCheckFailedException
+	if errors.As(err, &refused) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return s.forgetMailbox(ctx, accountID, id)
+}
+
+// forgetRetries are the waits before forgetMailbox tries again, when it
+// was throttled or a concurrent transaction on the account item (a pool
+// top-up, say) won: the mailbox is gone by then, and its record left
+// behind is worse than a slower answer.
+var forgetRetries = []time.Duration{50 * time.Millisecond, 150 * time.Millisecond, 400 * time.Millisecond}
+
+// forgetMailbox removes a discarded mailbox's record from its owner's
+// partition and counts it off the account's mailboxes (mc), both at once,
+// so the count always matches the records. Only for the one request that
+// deleted the mailbox. It does it once however often it runs: it's
+// conditioned on the record being there (and the SDK sends its retries
+// with the same idempotency token).
+//
+// If it still fails, the block holds (the mailbox is gone) but its record
+// stays, and the count one too high, until the account is deleted, which
+// deletes the record and passes over the mailbox that is gone (deleteOwned).
+// Nothing mends it sooner: telling such a record from a live mailbox's
+// takes reading the mailbox, up to 4,000 for an account at the limit. So
+// each such failure leaves the account one place fewer of MaxMailboxes
+// (the app, refused mailbox_limit, says so, and ending or blocking any
+// chat frees a place); it takes the directory failing in the moment
+// between these two writes, past the retries.
+func (s *Store) forgetMailbox(ctx context.Context, accountID, id string) error {
 	writes := []types.TransactWriteItem{
 		{Delete: &types.Delete{
-			TableName:                 &s.Table,
-			Key:                       key(mailboxPK(id), skMailbox),
-			ConditionExpression:       aws.String("o = :a AND attribute_not_exists(i)"),
-			ExpressionAttributeValues: attrs{":a": sv(accountID)},
+			TableName:           &s.Table,
+			Key:                 key(accountPK(accountID), mailboxPrefix+id),
+			ConditionExpression: aws.String("attribute_exists(pk) AND attribute_not_exists(i)"),
 		}},
-		{Delete: &types.Delete{TableName: &s.Table, Key: key(accountPK(accountID), mailboxPrefix+id)}},
 		{Update: &types.Update{
 			TableName:                 &s.Table,
 			Key:                       key(accountPK(accountID), skAccount),
@@ -153,11 +204,21 @@ func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error 
 			ExpressionAttributeValues: attrs{":zero": nv(0), ":one": nv(1)},
 		}},
 	}
-	reasons, err := s.transactReasons(ctx, writes)
-	if errors.Is(err, ErrConflict) && len(reasons) > 0 && reasons[0] == "ConditionalCheckFailed" {
-		return ErrNotFound
+	for attempt := 0; ; attempt++ {
+		reasons, err := s.transactReasons(ctx, writes)
+		if errors.Is(err, ErrConflict) && len(reasons) > 0 && reasons[0] == "ConditionalCheckFailed" {
+			return nil // forgotten already
+		}
+		again := awsconf.Unavailable(err) || (errors.Is(err, ErrConflict) && slices.Contains(reasons, "TransactionConflict"))
+		if err == nil || !again || attempt == len(forgetRetries) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(forgetRetries[attempt]):
+		}
 	}
-	return err
 }
 
 // Devices returns the IDs of an account's devices that haven't expired,
