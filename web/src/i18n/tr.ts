@@ -11,7 +11,7 @@ export const tr = {
 
   welcomeTitle: 'Hoş geldiniz',
   welcomeBody:
-    'Burada insanlar kim olduğunuzu bilmeden size mesaj gönderebilir ve sunucu yazdıklarını okuyamaz. Kurulum, anahtarlarınızı bu cihazda oluşturur.',
+    'Burada insanlar, siz onların kim olduğunu bilmeden size mesaj gönderebilir ve sunucu yazdıklarını okuyamaz. Kurulum, anahtarlarınızı bu cihazda oluşturur.',
   setUp: 'Kur',
   setupMismatch: 'Bu kurulum bağlantısı başka bir kurulum içindi. Buradan yeniden başlayın.',
   reopening: 'Telegram, kurulumu tamamlamak için uygulamayı yeniden açıyor…',

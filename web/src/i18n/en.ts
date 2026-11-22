@@ -10,7 +10,7 @@ export const en = {
 
   welcomeTitle: 'Welcome',
   welcomeBody:
-    "People can message you here without knowing who you are, and the server can't read what they write. Setting up creates your keys on this device.",
+    "People can message you here without you knowing who they are, and the server can't read what they write. Setting up creates your keys on this device.",
   setUp: 'Set up',
   setupMismatch: 'That setup link was for another setup. Start again here.',
   reopening: 'Telegram is reopening the app to finish setting up…',
