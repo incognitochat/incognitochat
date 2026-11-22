@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, putMeta } from '../storage/db';
-import { getLanguageChoice, loadLanguageSetting } from './language';
+import { getLanguageChoice, LANGUAGE_CHOICES, loadLanguageSetting } from './language';
 
 /** A stand-in for the page: only its language and direction are read. */
 const page = () => {
@@ -53,9 +53,22 @@ describe('the language setting', () => {
     expect((await loadLanguageSetting(db, ['en-GB'], page().doc)).language.value).toBe('en');
   });
 
+  it('offers Same as Telegram first, then each language in the registry order', () => {
+    expect(LANGUAGE_CHOICES).toEqual(['telegram', 'en', 'fa']);
+  });
+
+  it('reads stored values that only look like a language as Same as Telegram', async () => {
+    for (const stored of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'EN', 'fa-IR', ['fa'], 1, null, { en: true }]) {
+      const db = await openDatabase(`language-${crypto.randomUUID()}`);
+      await putMeta(db, 'language', stored);
+      expect(await getLanguageChoice(db), String(stored)).toBe('telegram');
+    }
+  });
+
   it('reads anything else stored as Same as Telegram', async () => {
     const db = await openDatabase(`language-${crypto.randomUUID()}`);
-    await putMeta(db, 'language', 'de');
+    // A private-use code (qaa–qtz): never a language the app gains.
+    await putMeta(db, 'language', 'qaa');
     expect(await getLanguageChoice(db)).toBe('telegram');
     expect((await loadLanguageSetting(db, ['fa'], page().doc)).language.value).toBe('fa');
   });

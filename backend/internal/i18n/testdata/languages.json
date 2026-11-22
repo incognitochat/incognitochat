@@ -1,0 +1,29 @@
+{
+  "languages": [
+    "en",
+    "fa"
+  ],
+  "pick": {
+    "en": "en",
+    "en-GB": "en",
+    "en_US": "en",
+    "EN": "en",
+    "fa": "fa",
+    "fa-IR": "fa",
+    "fa_IR": "fa",
+    "FA": "fa",
+    "FA-ir": "fa",
+    "qaa": "en",
+    "qaa-x": "en",
+    "": "en",
+    "fa-": "fa",
+    "-fa": "en",
+    " fa": "en",
+    "fax": "en",
+    "en-": "en",
+    "-": "en",
+    "FA_ir": "fa",
+    "İfa": "en",
+    "fa-IR-x": "fa"
+  }
+}

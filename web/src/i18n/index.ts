@@ -1,12 +1,13 @@
-// Strings and formatting in English and Persian. Hand-written and typed, so
-// both languages always have every string; numbers, dates and relative times
-// come from Intl (Persian digits and calendar included), and so does which
-// form a counted string takes.
+// Strings and formatting in the app's languages (languages.ts). Hand-written
+// and typed, so every language always has every string; numbers, dates and
+// relative times come from Intl (each language's digits included), and so
+// does which form a counted string takes.
 
 import { en, type Key } from './en';
 import { fa } from './fa';
+import { FALLBACK, LANGUAGES, matchTag, type Language } from './languages';
 
-export type Language = 'en' | 'fa';
+export { FALLBACK, LANGUAGES, isLanguage, matchTag, type Language } from './languages';
 
 /**
  * A string that reads differently by its {count}: a form for each plural
@@ -16,31 +17,31 @@ export type Language = 'en' | 'fa';
  */
 export type Plural = Partial<Record<Intl.LDMLPluralRule, string>> & { other: string };
 
-/** A string as written in en.ts and fa.ts. */
+/** A string as written in en.ts, fa.ts and the other languages' files. */
 export type Text = string | Plural;
 
-const strings: Record<Language, Record<Key, Text>> = { en, fa };
+/** Every language's strings: a language without its file doesn't compile. */
+export const STRINGS: Readonly<Record<Language, Readonly<Record<Key, Text>>>> = { en, fa };
 
-export const DIRECTION: Record<Language, 'ltr' | 'rtl'> = { en: 'ltr', fa: 'rtl' };
+export const DIRECTION = Object.fromEntries(Object.entries(LANGUAGES).map(([code, info]) => [code, info.dir])) as Record<Language, 'ltr' | 'rtl'>;
 
 /**
  * Picks the language: an explicit choice wins, then the language Telegram
- * reports for the user, then the browser's. Anything that isn't Persian is
- * shown in English.
+ * reports for the user, then the browser's; the first the app has
+ * (matchTag). Otherwise English.
  */
 export function pickLanguage(...candidates: (string | null | undefined)[]): Language {
   for (const candidate of candidates) {
     if (!candidate) continue;
-    const tag = candidate.toLowerCase();
-    if (tag === 'fa' || tag.startsWith('fa-') || tag.startsWith('fa_')) return 'fa';
-    if (tag === 'en' || tag.startsWith('en-') || tag.startsWith('en_')) return 'en';
+    const found = matchTag(candidate, LANGUAGES);
+    if (found) return found;
   }
-  return 'en';
+  return FALLBACK;
 }
 
 /** Translates a key, filling {placeholders}; a counted string takes the form its {count} needs. */
 export function t(language: Language, key: Key, values: Record<string, string | number> = {}): string {
-  return form(language, strings[language][key], values.count).replace(/\{(\w+)\}/g, (match, name: string) =>
+  return form(language, STRINGS[language][key], values.count).replace(/\{(\w+)\}/g, (match, name: string) =>
     name in values ? formatValue(language, values[name]!) : match,
   );
 }
@@ -62,7 +63,26 @@ function formatValue(language: Language, value: string | number): string {
 
 /** The BCP 47 locale used with Intl. */
 export function locale(language: Language): string {
-  return language === 'fa' ? 'fa-IR' : 'en';
+  return LANGUAGES[language].locale;
+}
+
+/** A size in bytes, as the app shows it: kB, MB or GB; nothing as 0 MB, anything else as at least 1 kB. */
+export function formatSize(language: Language, bytes: number): string {
+  // Nothing reads as 0 MB; anything else as at least 1 kB.
+  const unit = bytes === 0 ? 'megabyte' : bytes < 1024 * 1024 ? 'kilobyte' : bytes < 1024 * 1024 * 1024 ? 'megabyte' : 'gigabyte';
+  const n = unit === 'kilobyte' ? Math.max(1, Math.round(bytes / 1024)) : unit === 'megabyte' ? bytes / 1024 / 1024 : bytes / 1024 / 1024 / 1024;
+  // Right-to-left languages spell the unit out (کیلوبایت), so it reads in the right direction.
+  return new Intl.NumberFormat(locale(language), { style: 'unit', unit, unitDisplay: LANGUAGES[language].unitDisplay, maximumFractionDigits: 1 }).format(n);
+}
+
+/** A file's size on the save page: kB under a MiB (at least 1), else MB. */
+export function formatSaveSize(language: Language, bytes: number): string {
+  return new Intl.NumberFormat(locale(language), {
+    style: 'unit',
+    unit: bytes < 1024 * 1024 ? 'kilobyte' : 'megabyte',
+    unitDisplay: LANGUAGES[language].unitDisplay,
+    maximumFractionDigits: 1,
+  }).format(bytes < 1024 * 1024 ? Math.max(1, Math.round(bytes / 1024)) : bytes / 1024 / 1024);
 }
 
 /** A time of day (Unix ms), in the reader's own time: "3:30 AM" / «۳:۳۰». */

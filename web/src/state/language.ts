@@ -1,19 +1,19 @@
-// The app's language on this device (Data and storage, Language): English,
-// Persian, or the same as Telegram, the default. The choice is kept in this
+// The app's language on this device (Data and storage, Language): one of the
+// app's languages (i18n/languages.ts), or the same as Telegram, the default. The choice is kept in this
 // profile's meta store and never sent: Telegram notices keep Telegram's
 // language, which the server reads from the signed launch data.
 
 import { computed, signal, type ReadonlySignal } from '@preact/signals';
-import { applyLanguage, pickLanguage, type Language } from '../i18n';
+import { applyLanguage, isLanguage, LANGUAGES, pickLanguage, type Language } from '../i18n';
 import { deleteMeta, getMeta, putMeta, type Database } from '../storage/db';
 
 const NAME = 'language';
 
-/** English, Persian, or 'telegram': the language Telegram reports (else the browser's). */
+/** One of the app's languages, or 'telegram': the language Telegram reports (else the browser's). */
 export type LanguageChoice = Language | 'telegram';
 
 /** The choices, in the order they're offered. */
-export const LANGUAGE_CHOICES: readonly LanguageChoice[] = ['telegram', 'en', 'fa'];
+export const LANGUAGE_CHOICES: readonly LanguageChoice[] = ['telegram', ...(Object.keys(LANGUAGES) as Language[])];
 
 export interface LanguageSetting {
   readonly choice: ReadonlySignal<LanguageChoice>;
@@ -26,7 +26,7 @@ export interface LanguageSetting {
 /** The choice remembered on this device; 'telegram' if none. */
 export async function getLanguageChoice(db: Database): Promise<LanguageChoice> {
   const stored = await getMeta<unknown>(db, NAME);
-  return stored === 'en' || stored === 'fa' ? stored : 'telegram';
+  return isLanguage(stored) ? stored : 'telegram';
 }
 
 /**
