@@ -15,7 +15,7 @@ export const de = {
   setUp: 'Einrichten',
   setupMismatch: 'Dieser Link war für eine andere Einrichtung. Fang hier neu an.',
   reopening: 'Telegram öffnet die App erneut, um die Einrichtung abzuschließen…',
-  reopenAgain: 'Nichts passiert? Tippe noch einmal',
+  reopenAgain: 'Nichts passiert? Erneut tippen',
   registering: 'Wird eingerichtet…',
 
   offline: 'Der Server ist gerade nicht erreichbar.',
@@ -145,7 +145,7 @@ export const de = {
   holdForVoice: 'Gedrückt halten, um eine Sprachnachricht aufzunehmen. Tippen, um zur Videonachricht zu wechseln.',
   holdForRound: 'Gedrückt halten, um eine Videonachricht aufzunehmen. Tippen, um zur Sprachnachricht zu wechseln.',
   holdToRecord: 'Gedrückt halten, um eine Sprachnachricht aufzunehmen.',
-  slideToCancel: 'Zum Abbrechen wischen',
+  slideToCancel: 'Links: Abbrechen',
   flipCamera: 'Kamera wechseln',
   cameraDenied: 'Der Zugriff auf Kamera oder Mikrofon ist aus. Erlaube beides für Telegram, um aufzunehmen.',
   cameraMissing: 'Keine Kamera gefunden.',
