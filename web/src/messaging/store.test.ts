@@ -10,12 +10,16 @@ import {
   MAX_PENDING_EDITS,
   MAX_UNANSWERED_EDIT_BYTES,
   openDatabase,
+  getMeta,
   type ConversationRecord,
   type Database,
   type PendingEdit,
 } from '../storage/db';
 import {
   addMessage,
+  answeredAt,
+  clearMessages,
+  comesAfter,
   deleteMessage,
   dropEmptyConversation,
   dropPendingEdits,
@@ -24,6 +28,7 @@ import {
   earlyFor,
   failStuck,
   forgetEarly,
+  forgetSentAt,
   getConversation,
   getMedia,
   getMessage,
@@ -32,6 +37,7 @@ import {
   keepEarly,
   lastShown,
   listMessages,
+  listRecords,
   MAX_EARLY,
   MAX_EARLY_BYTES,
   MAX_EARLY_DELETE_BYTES,
@@ -45,6 +51,7 @@ import {
   putSweep,
   saveConversation,
   sendingLock,
+  setMessageStatus,
   setReaction,
   setStatuses,
   setText,
@@ -384,6 +391,79 @@ describe('edits waiting in conversations we never answered', () => {
     await save(db, 'd', 4, third);
     await save(db, 'e', 5, third);
     expect([(await getPendingEdits(db, 'b')).length, (await getPendingEdits(db, 'c')).length]).toEqual([1, 0]);
+  });
+});
+
+describe('where the user first wrote in a chat', () => {
+  const theirs = (db: Database, id: string, at: number) => addMessage(db, { id, conv: 'c', at, out: false, status: 'received' }, { text: id });
+  const ours = (db: Database, id: string, at: number, status: 'sending' | 'sent' | 'failed' | 'seen') =>
+    addMessage(db, { id, conv: 'c', at, out: true, status }, { text: id });
+
+  it('is the first of theirs the server took, found from the messages on the device', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await theirs(db, 'first', 1000);
+    // Not sent, or still sending: not written yet.
+    await ours(db, 'notSent', 2000, 'failed');
+    await ours(db, 'sending', 2000, 'sending');
+    expect(await answeredAt(db, 'c')).toBeUndefined();
+    expect(await getMeta(db, 'answered:c')).toBeUndefined();
+    // Sent: in its second, after what was here before it, and before what came after it.
+    await theirs(db, 'before', 3000);
+    await ours(db, 'reply', 3000, 'sent');
+    await theirs(db, 'after', 3000);
+    await ours(db, 'later', 4000, 'seen');
+    await theirs(db, 'next', 5000);
+    const place = { at: 3000, order: 1 };
+    expect(await answeredAt(db, 'c')).toEqual(place);
+    expect(await getMeta(db, 'answered:c')).toEqual(place);
+    const records = await listRecords(db, 'c');
+    expect(records.filter((m) => comesAfter(m, place)).map((m) => m.id)).toEqual(['after', 'later', 'next']);
+  });
+
+  it('stays once their messages are deleted, and moves only earlier', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await ours(db, 'notSent', 1000, 'failed');
+    await ours(db, 'reply', 2000, 'sent');
+    expect(await answeredAt(db, 'c')).toEqual({ at: 2000, order: 0 });
+    await deleteMessage(db, 'c', 'reply');
+    expect(await answeredAt(db, 'c')).toEqual({ at: 2000, order: 0 });
+    // A later one doesn't move it.
+    await ours(db, 'again', 3000, 'sent');
+    expect(await answeredAt(db, 'c')).toEqual({ at: 2000, order: 0 });
+    // One shown as not sent that did arrive (their receipt named it): from then.
+    await setMessageStatus(db, 'c', 'notSent', 'seen');
+    expect(await answeredAt(db, 'c')).toEqual({ at: 1000, order: 0 });
+  });
+
+  it('is forgotten as the whole chat is cleared, in the same transaction, or with its record', async () => {
+    const db = await fresh();
+    await putConversation(db, conversation('c'));
+    await ours(db, 'reply', 1000, 'sent');
+    await theirs(db, 'photo', 2000);
+    await answeredAt(db, 'c');
+    // Clearing only part of it (a later receipt taking more of ours) keeps it.
+    await clearMessages(db, 'c', { theirs: 2000, ours: 1000 });
+    expect(await getMeta(db, 'answered:c')).toEqual({ at: 1000, order: 0 });
+    // Nor does forgetting when we last sent something there touch it.
+    await forgetSentAt(db, 'c');
+    expect(await getMeta(db, 'answered:c')).toEqual({ at: 1000, order: 0 });
+    // The whole chat deleted, by either side: gone with it.
+    await ours(db, 'reply', 1000, 'sent');
+    await ours(db, 'afterTheirDelete', 3000, 'sent');
+    expect(await clearMessages(db, 'c', { theirs: Infinity, ours: 1000 }, { forgetAnswered: true })).toMatchObject({ left: 1 });
+    expect(await getMeta(db, 'answered:c')).toBeUndefined();
+    // One of the user's left, written after their delete: found again from that, as the chat shows it.
+    expect(await answeredAt(db, 'c')).toEqual({ at: 3000, order: 0 });
+    await clearMessages(db, 'c', { theirs: Infinity, ours: Infinity }, { forgetAnswered: true });
+    expect(await answeredAt(db, 'c')).toBeUndefined();
+
+    await ours(db, 'reply', 1000, 'sent');
+    await answeredAt(db, 'c');
+    await deleteMessage(db, 'c', 'reply');
+    expect(await dropEmptyConversation(db, 'c')).toBe(true);
+    expect(await getMeta(db, 'answered:c')).toBeUndefined();
   });
 });
 

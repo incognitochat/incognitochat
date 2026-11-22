@@ -256,6 +256,7 @@ export const en = {
   autoPhotos: 'Photos',
   autoVoice: 'Voice and video messages',
   autoGifs: 'GIFs',
+  autoDownloadNote: 'Only what arrives after your first message in a chat downloads automatically. Until then, tap each one to download it.',
   languageTitle: 'Language',
   languageTelegram: 'Same as Telegram',
   storageChats: 'Media by chat',

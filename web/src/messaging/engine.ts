@@ -58,6 +58,7 @@ import { couldCome, DAY, dayOf, endOf, forgetOld, isNewer, MAX_AGE, MAX_APPLIED,
 import { accountSecret, idTag, label, senderTag } from './secret';
 import {
   addMessage,
+  answeredAt,
   attachmentsOf,
   clearMessages,
   deleteMessage,
@@ -643,6 +644,17 @@ export function createMessaging(deps: MessagingDeps) {
       await setMessageStatus(db, conv, fields.id, 'failed', 'sending');
       throw err;
     }
+    await noteAnswered(conv);
+  }
+
+  /**
+   * One of ours was sent, or is about to be deleted: the chat counts as
+   * answered from the first of ours sent (store.ts, answeredAt), kept now,
+   * before that can go. Its failing fails neither the send nor the delete:
+   * it's looked up again when the chat's attachments are.
+   */
+  async function noteAnswered(conv: string): Promise<void> {
+    await answeredAt(db, conv).catch(() => {});
   }
 
   /**
@@ -768,6 +780,7 @@ export function createMessaging(deps: MessagingDeps) {
       await setMessageStatus(db, conv, id, 'failed', 'sending');
       throw err;
     }
+    await noteAnswered(conv);
   }
 
   let uploading = 0;
@@ -1426,7 +1439,8 @@ export function createMessaging(deps: MessagingDeps) {
       // Only the attachments' messages are opened: a flooded chat goes as fast as any.
       const going = (await listRecords(db, conv)).filter((m) => (m.out ? m.at <= upTo.ours : sentAt(m) <= upTo.theirs));
       await discardUploads(await attachmentsOf(db, going));
-      const { left, unread } = await clearMessages(db, conv, upTo);
+      // Where the user first wrote goes with the chat, in the same transaction.
+      const { left, unread } = await clearMessages(db, conv, upTo, { forgetAnswered: true });
       const before = await getIds(db, conv);
       const editsBefore = await getPendingEdits(db, conv);
       let { c: kept, ids, edits } = await tidied(c, now(), before, editsBefore);
@@ -1485,6 +1499,9 @@ export function createMessaging(deps: MessagingDeps) {
     await withLock(`send:${conv}`, async () => {
       const m = await db.get('messages', [conv, id]);
       if (!m) return;
+      // Ours: noted first, so a chat from before where the user first wrote
+      // was kept still counts as answered once it's gone.
+      if (m.out) await noteAnswered(conv);
       await deleteMessage(db, conv, id);
       const c = await getConversation(db, conv);
       if (!c) return;
@@ -2397,7 +2414,14 @@ export function createMessaging(deps: MessagingDeps) {
     const theirs = conv.theirClear;
     if (theirs && (clear || (had.here && message.at <= theirs.upTo))) {
       const { upTo, here, ours } = theirs;
-      const { left, unread, removed } = await clearMessages(db, conv.id, { theirs: upTo, oursHadBy: upTo, oursWrittenBy: Math.min(here, ours ?? Infinity) });
+      // Their delete itself (not a later receipt that takes more) forgets
+      // where the user first wrote, as ours does: the chat starts over.
+      const { left, unread, removed } = await clearMessages(
+        db,
+        conv.id,
+        { theirs: upTo, oursHadBy: upTo, oursWrittenBy: Math.min(here, ours ?? Infinity) },
+        { forgetAnswered: clear },
+      );
       conv.unread = unread;
       // Out of the list until either side writes again.
       if (left === 0) conv.hidden = true;

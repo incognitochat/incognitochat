@@ -13,7 +13,11 @@ export type KeepMedia = 'forever' | 'month' | 'week';
 
 export interface MediaSettings {
   keep: KeepMedia;
-  /** Which received attachments are fetched as soon as their conversation is open. */
+  /**
+   * Which received attachments are fetched as soon as their conversation is
+   * open: only those that came after the user first wrote there (store.ts,
+   * answeredAt).
+   */
   auto: { photos: boolean; voice: boolean; gifs: boolean };
 }
 
@@ -36,7 +40,9 @@ const AUTO_LIMITS = { photo: 5 * MiB, voice: 10 * MiB, round: 10 * MiB, gif: 10 
  * Whether a received attachment is fetched as soon as its conversation is
  * open: photos, voice and video messages, and GIFs (each as the settings
  * say), up to AUTO_LIMITS. Videos, music and files, and anything shown as
- * a file (an SVG called a photo, say), wait for a tap.
+ * a file (an SVG called a photo, say), wait for a tap. Only once the user
+ * has written in that chat, and for what came after (state/app.ts,
+ * autoFetch): before, everything waits for a tap.
  */
 export function fetchesByItself(media: { t: string; s: number; m?: string | undefined }, auto: MediaSettings['auto']): boolean {
   const kind = shownAs(media);

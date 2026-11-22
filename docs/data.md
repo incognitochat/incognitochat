@@ -65,6 +65,7 @@ or mailbox), each conversation also keeps, without any content:
 | Only if the user deleted more than 5,000 of their messages in a month: the end of the day up to which their messages are dropped | 31 days |
 | The time, by the other side's clock, and keyed hash of the newest envelope it took in | While the conversation is kept |
 | The time of the last thing this device sent in it, to the second, so the next is dated after it | Until the chat is deleted (here or for both sides), and with the conversation |
+| Where the user first wrote in it: the time it shows at, to the second, of their first message that was sent, and its place among messages of that second, so only attachments that come after it in the chat download by themselves | Until the chat is deleted, here or for both sides, by either side, and with the conversation; deleting the user's own messages doesn't remove it |
 | The envelope ID (random) and time, to the second, of each of the last 10 things this device sent in it (messages, receipts, reactions, edits, deletes, key updates), so what the other side writes naming one as the newest of the user's it had shows after it | Until the chat is deleted (here or for both sides), and with the conversation; each until 10 newer ones were sent |
 | The time and ID of their newest message it took in | Until a delete for both sides names it, or they delete it for both sides; otherwise while the conversation is kept |
 | For a received message, when it was sent by the other side's clock, if it shows at another time (their clock ahead of ours, or behind what it names, such as the message it answers, or their previous message); for a sent one, the earliest time (their clock) something of theirs showed they had it; sealed like message text, for a sent one that was sent again, when it was first tried, and for a sent attachment, when its upload was made (to send it again with that upload while it lasts) | With the message |
@@ -268,8 +269,11 @@ records go in that same request.
   unless the user taps Turn on notices.
 - **Choose what stays on the device** (Data and storage, on the Link tab): keep
   attachments forever, for a month or for a week; clear a chat's or all of
-  them; and choose which kinds download by themselves. A cleared attachment
-  can be fetched again only while the server still holds it.
+  them; and choose which kinds download by themselves. Even those download
+  by themselves only in a chat the user has written in, and only if they
+  come after the user's first message there in the chat; anything else
+  waits for a tap. A cleared attachment can be fetched again only while the
+  server still holds it.
 - **Choose the app's language** (Data and storage): English, Persian, or the
   same as Telegram, the default. The choice stays on the device and isn't
   sent; notices keep the language Telegram gives the server.

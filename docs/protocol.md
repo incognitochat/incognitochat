@@ -1210,6 +1210,28 @@ Attachments travel outside the envelope, encrypted, through an S3 bucket.
   the app sends: a photo of at most 1280 px as JPEG stays under its raw
   pixels (4.7 MiB); 15 minutes of voice at 48 kbit/s is 5.1 MiB, and a
   minute of video message at about 650 kbit/s 4.6 MiB.
+- **Only once the user has written.** In a conversation, only attachments
+  that come after the user's first message there that was sent (the server
+  took it) are fetched by themselves. One still sending, or not sent,
+  doesn't count; a not-sent one that the other side then names (a reply,
+  receipt or reaction naming it shows they had it, and it shows as sent:
+  Not sent, and sent again, above) counts from where it is in the chat.
+  Until then every attachment waits for a tap, showing its kind and size,
+  and so does anything that came before that first message. Each waits on
+  its own: a tap fetches that one only. In a conversation the user started,
+  everything of the other side's comes after their first message. "After"
+  is the order the chat shows: by the time the chat shows each message at
+  (Times, in Inner message: never later than it arrived here, not the
+  sender's `at` alone), then, within a second, the order messages were
+  taken in. So what was on the device when the user wrote waits. Something
+  sent earlier but dated ahead, that arrives only after the user wrote,
+  counts as after: once the user has written, the other side can send new
+  attachments that download by themselves anyway, so that gains them
+  nothing. The app keeps the place of that first message (the time it
+  shows at and its place in that second) on the device, never sends it,
+  and keeps it if the user's messages are deleted. Deleting the whole
+  conversation, here or for both sides, by either side, forgets it. Nothing
+  about this is on the wire or on the server.
 - **Shown in the chat.** Only JPEG, PNG, WebP and GIF images are shown as
   photos or GIFs: one of any other type (an SVG, which can carry script, or
   none given) is shown as a file, whatever kind the sender says. To show or

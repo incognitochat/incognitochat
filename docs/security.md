@@ -513,6 +513,20 @@ it. This is how close it gets.
   switch for all: uploads and downloads carry no login, so it can't single
   anyone out, and it reads or stores nothing about anyone. Messages keep
   working.
+- **Attachments fill the device only once the user has written.** Anyone
+  with a link can send attachments. The app downloads by itself only those
+  that come after the user's first message in that chat, where the chat
+  shows them (photos up to 5 MiB, voice and video messages and GIFs up to
+  10 MiB, each kind as Data and storage says); before that, every one waits
+  for a tap, showing its kind and size, and a tap downloads that one only.
+  So a stranger can't fill someone's device just by sending, and replying
+  "stop" doesn't download what came before it in the chat. Something they
+  sent earlier but dated ahead, that reaches the device only after the
+  reply, counts as after it: once the user has written, the other side's
+  attachments download as they come anyway, within those sizes and the
+  server's limits on sends, and stay as long as Keep media says, so that
+  gains them nothing. Deleting the chat, here or for both sides, by either
+  side, makes everything wait again until the user writes again.
 - **The edge bill has no ceiling.** The tables' caps bound what a flood
   costs the database, but CloudFront bills each request the firewall lets
   through and the firewall each it looks at, blocked ones included, and a

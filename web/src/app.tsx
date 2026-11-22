@@ -1094,6 +1094,7 @@ function Storage({ app, language, screen, setting }: { app: AppState; language: 
             {tr(AUTO_TEXT[kind])}
           </label>
         ))}
+        <p class="muted">{tr('autoDownloadNote')}</p>
       </fieldset>
       <fieldset class="settings">
         <legend>{tr('languageTitle')}</legend>
@@ -2584,10 +2585,15 @@ function along(e: MouseEvent): number {
 /** Stops a press from reaching the message's swipe and long-press gestures. */
 const keepPress = (e: PointerEvent) => e.stopPropagation();
 
-/** A voice message: play/pause, the waveform (tap to jump), its length, and the speed. Fetched on opening, as in Telegram. */
+/**
+ * A voice message: play/pause, the waveform (tap to jump), its length (and
+ * size, while it waits for a tap), and the speed. Fetched on opening, as in
+ * Telegram, where it came after the user first wrote in the chat.
+ */
 function VoiceView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const url = useMediaUrl(app, m);
-  const { l, v } = m.media!;
+  const { l, v, s } = m.media!;
+  const note = fileNote(language, m);
   const player = useAudio(url.value, l);
   let bars: number[];
   try {
@@ -2608,7 +2614,7 @@ function VoiceView({ app, message: m, language, progress }: { app: AppState; mes
         </div>
         <span class="media-meta">
           <bdi dir="ltr">{formatLength(language, Math.round(shown))}</bdi>
-          {fileNote(language, m) && <span>{fileNote(language, m)}</span>}
+          {note ? <span>{note}</span> : fetchable(app, m) && <span>{formatSize(language, s)}</span>}
           {player.failed && <span>{t(language, 'audioUnplayable')}</span>}
           {url.value && !player.failed && (
             <button type="button" class="rate" aria-label={t(language, 'playbackSpeed')} onPointerDown={keepPress} onClick={player.nextRate}>
@@ -2669,11 +2675,14 @@ function AudioView({ app, message: m, language, progress }: { app: AppState; mes
 /**
  * A video message: a circle that plays muted and on a loop while it's on
  * screen; a tap plays it from the start with sound (a ring shows how far),
- * another tap pauses. Fetched on opening, as in Telegram.
+ * another tap pauses. Its length (and size, while it waits for a tap).
+ * Fetched on opening, as in Telegram, where it came after the user first
+ * wrote in the chat.
  */
 function RoundView({ app, message: m, language, progress }: { app: AppState; message: MessageView; language: Language; progress: number | undefined }) {
   const url = useMediaUrl(app, m);
-  const { p, l } = m.media!;
+  const { p, l, s } = m.media!;
+  const size = fetchable(app, m) ? formatSize(language, s) : null;
   const tiny = tinyPreview(p);
   const video = useRef<HTMLVideoElement>(null);
   // Playing with sound (after a tap), and paused by a tap while so.
@@ -2758,9 +2767,11 @@ function RoundView({ app, message: m, language, progress }: { app: AppState; mes
         </svg>
       )}
       {ready && <button type="button" class="round-tap" aria-label={t(language, loud.value && !held.value ? 'pause' : 'play')} onClick={tap} />}
-      {total > 0 && (
+      {(total > 0 || size) && (
         <span class="round-badge">
-          <bdi dir="ltr">{formatLength(language, Math.round(loud.value ? time.value : total))}</bdi>
+          {total > 0 && <bdi dir="ltr">{formatLength(language, Math.round(loud.value ? time.value : total))}</bdi>}
+          {total > 0 && size && ' · '}
+          {size}
           {!loud.value && (
             <svg class="icon-stroke" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 9h4l5-4v14l-5-4H4zM17 9l4 6M21 9l-4 6" />
