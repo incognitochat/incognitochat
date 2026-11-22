@@ -145,7 +145,7 @@ export const id = {
   holdForVoice: 'Tahan untuk merekam pesan suara. Ketuk untuk beralih ke video.',
   holdForRound: 'Tahan untuk merekam pesan video. Ketuk untuk beralih ke suara.',
   holdToRecord: 'Tahan untuk merekam pesan suara.',
-  slideToCancel: 'Geser untuk membatalkan',
+  slideToCancel: 'Geser: batal',
   flipCamera: 'Ganti kamera',
   cameraDenied: 'Akses kamera atau mikrofon nonaktif. Izinkan keduanya untuk Telegram agar bisa merekam.',
   cameraMissing: 'Kamera tidak ditemukan.',
