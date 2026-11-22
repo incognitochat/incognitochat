@@ -165,6 +165,10 @@ describe('every language', () => {
     expect(matchTag('qaa-pt', registry)).toBeUndefined();
     expect(matchTag('', registry)).toBeUndefined();
     expect(matchTag('-', registry)).toBeUndefined();
+    // Only A–Z are lowercased, as on the server: full Unicode lowercasing
+    // would turn the Kelvin sign (U+212A) into k.
+    expect(matchTag('\u212Ak', { kk: { tags: ['kk'] } })).toBeUndefined();
+    expect(matchTag('KK', { kk: { tags: ['kk'] } })).toBe('kk');
   });
 
   it('names itself in its own language, each differently', () => {
