@@ -2551,7 +2551,23 @@ describe('typed confirmation', () => {
     expect(confirmationMatches('Sil', 'sil')).toBe(true);
     expect(confirmationMatches('HESABIMI SIL', 'hesabımı sil')).toBe(true);
     expect(confirmationMatches('hesabimi sil', 'hesabımı sil')).toBe(true);
-    expect(confirmationMatches('hesap sı', 'hesap sil')).toBe(false);
+    expect(confirmationMatches('hesap sal', 'hesap sil')).toBe(false);
+  });
+
+  it("doesn't depend on how the device's language lowercases", () => {
+    const lower = String.prototype.toLocaleLowerCase;
+    for (const language of ['tr', 'az', 'lt']) {
+      const spy = vi.spyOn(String.prototype, 'toLocaleLowerCase').mockImplementation(function (this: string) {
+        return lower.call(this, language);
+      });
+      try {
+        expect(confirmationMatches('HESAP SIL', 'hesap sil'), language).toBe(true);
+        expect(confirmationMatches('HESAP SİL', 'hesap sil'), language).toBe(true);
+        expect(confirmationMatches('BORRAR DÍA', 'borrar día'), language).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    }
   });
 
   it('takes the phrase however a keyboard types it', () => {
