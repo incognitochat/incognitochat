@@ -1,0 +1,96 @@
+invitationsRemaining:
+  0: 0 kişi daha davet edebilirsiniz.
+  1: 1 kişi daha davet edebilirsiniz.
+  2: 2 kişi daha davet edebilirsiniz.
+  3: 3 kişi daha davet edebilirsiniz.
+  5: 5 kişi daha davet edebilirsiniz.
+  11: 11 kişi daha davet edebilirsiniz.
+  21: 21 kişi daha davet edebilirsiniz.
+  100: 100 kişi daha davet edebilirsiniz.
+  101: 101 kişi daha davet edebilirsiniz.
+  102: 102 kişi daha davet edebilirsiniz.
+  1000000: 1.000.000 kişi daha davet edebilirsiniz.
+levelLine:
+  0: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 0
+  1: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 1
+  2: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 2
+  3: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 3
+  5: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 5
+  11: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 11
+  21: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 21
+  100: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 100
+  101: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 101
+  102: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 102
+  1000000: Seviye xxxxxxxxxxxxxxxxxxxxxxxx: 1.000.000
+unreadCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+unreadMessagesCount:
+  0: 0 okunmamış
+  1: 1 okunmamış
+  2: 2 okunmamış
+  3: 3 okunmamış
+  5: 5 okunmamış
+  11: 11 okunmamış
+  21: 21 okunmamış
+  100: 100 okunmamış
+  101: 101 okunmamış
+  102: 102 okunmamış
+  1000000: 1.000.000 okunmamış
+newMessages:
+  0: 0 yeni mesaj
+  1: 1 yeni mesaj
+  2: 2 yeni mesaj
+  3: 3 yeni mesaj
+  5: 5 yeni mesaj
+  11: 11 yeni mesaj
+  21: 21 yeni mesaj
+  100: 100 yeni mesaj
+  101: 101 yeni mesaj
+  102: 102 yeni mesaj
+  1000000: 1.000.000 yeni mesaj
+blockedCount:
+  0: Engellenenler (0)
+  1: Engellenenler (1)
+  2: Engellenenler (2)
+  3: Engellenenler (3)
+  5: Engellenenler (5)
+  11: Engellenenler (11)
+  21: Engellenenler (21)
+  100: Engellenenler (100)
+  101: Engellenenler (101)
+  102: Engellenenler (102)
+  1000000: Engellenenler (1.000.000)
+usageCount:
+  0: 0
+  1: 1
+  2: 2
+  3: 3
+  5: 5
+  11: 11
+  21: 21
+  100: 100
+  101: 101
+  102: 102
+  1000000: 1.000.000
+messagesLeftToday:
+  0: Bugün kalan mesaj hakkı: 0. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  1: Bugün kalan mesaj hakkı: 1. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  2: Bugün kalan mesaj hakkı: 2. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  3: Bugün kalan mesaj hakkı: 3. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  5: Bugün kalan mesaj hakkı: 5. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  11: Bugün kalan mesaj hakkı: 11. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  21: Bugün kalan mesaj hakkı: 21. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  100: Bugün kalan mesaj hakkı: 100. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  101: Bugün kalan mesaj hakkı: 101. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  102: Bugün kalan mesaj hakkı: 102. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+  1000000: Bugün kalan mesaj hakkı: 1.000.000. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
