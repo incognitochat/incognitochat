@@ -149,7 +149,7 @@ export const pl = {
   holdForVoice: 'Przytrzymaj, aby nagrać wiadomość głosową. Dotknij, aby przełączyć na wideo.',
   holdForRound: 'Przytrzymaj, aby nagrać wiadomość wideo. Dotknij, aby przełączyć na wiadomość głosową.',
   holdToRecord: 'Przytrzymaj, aby nagrać wiadomość głosową.',
-  slideToCancel: 'Przesuń, aby anulować',
+  slideToCancel: 'Przesuń: anuluj',
   flipCamera: 'Przełącz kamerę',
   cameraDenied: 'Dostęp do kamery lub mikrofonu jest wyłączony. Zezwól Telegramowi na dostęp, aby nagrywać.',
   cameraMissing: 'Nie znaleziono kamery.',
