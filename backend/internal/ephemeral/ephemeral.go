@@ -32,6 +32,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -301,6 +302,7 @@ type Limiter struct {
 	tallies map[string]tally     // key and window start -> uses not yet written (Tally)
 	local   map[string]int       // key and window start -> uses counted here only (LocalAt)
 	rows    map[string]budgetRow // key and day start -> the row the table last returned (SpendAt)
+	pending map[string]int       // key, day start and budget -> uses let through here, not yet written (SpendAt, Budget.Batch)
 }
 
 type counted struct {
@@ -324,6 +326,9 @@ const (
 	checkFresh = 60 // seconds
 	// tallyBatch is how many uses a Tally gathers before writing them.
 	tallyBatch = 50
+	// usedFresh is how long UsedAt trusts a count the table told: it reads
+	// again after that.
+	usedFresh = 30 // seconds
 )
 
 // fewerRetries tries a call to the table at most twice.
@@ -520,9 +525,14 @@ const Quarter = 15 * time.Minute
 // Limiter window. Kind names the row's attributes for its minute and
 // quarter, Day the one for its day, which budgets may share (so share
 // PerDay): one letter each. Every limit is at least 1.
+//
+// Batch, if more than 1, has each instance count up to that many uses in
+// memory before it writes them, together, in one update (SpendAt), for a
+// budget used too often for a write each time.
 type Budget struct {
 	Kind, Day                     string
 	PerMinute, PerQuarter, PerDay int
+	Batch                         int
 }
 
 // The attributes a Budget counts in: the start of the minute of its last
@@ -533,17 +543,37 @@ func (b Budget) inMinute() string { return b.Kind + "n" }
 func (b Budget) quarter() string  { return b.Kind + "q" }
 func (b Budget) day() string      { return b.Day + "d" }
 
-// full is the longest of b's windows that holds at (its minute, its
-// quarter) and that row, as the table last returned it, shows used up: the
-// day, a quarter or a minute; 0 if none.
-func (b Budget) full(row map[string]int64, minute, quarter int64) time.Duration {
-	last, used := row[b.minute()]
+// windows are the starts of the minute and the quarter that hold at, as b
+// counts them in row: the minute of b's last use instead, if another
+// instance's clock, a moment ahead, counted it in a later minute already.
+func (b Budget) windows(row map[string]int64, at time.Time) (minute, quarter int64) {
+	minute = at.Truncate(time.Minute).Unix()
+	if last, used := row[b.minute()]; used && last > minute {
+		minute = last
+	}
+	return minute, time.Unix(minute, 0).Truncate(Quarter).Unix()
+}
+
+// over is the longest of b's windows that start at minute and quarter, and
+// the day, whose uses, as row says, would be past its limit with extra
+// more: the day, a quarter or a minute; 0 if none. With extra 1, the
+// windows row shows used up.
+func (b Budget) over(row map[string]int64, minute, quarter, extra int64) time.Duration {
+	var inMinute, inQuarter int64
+	if last, used := row[b.minute()]; used {
+		if last == minute {
+			inMinute = row[b.inMinute()]
+		}
+		if last >= quarter {
+			inQuarter = row[b.quarter()]
+		}
+	}
 	switch {
-	case row[b.day()] >= int64(b.PerDay):
+	case row[b.day()]+extra > int64(b.PerDay):
 		return 24 * time.Hour
-	case used && last >= quarter && row[b.quarter()] >= int64(b.PerQuarter):
+	case inQuarter+extra > int64(b.PerQuarter):
 		return Quarter
-	case used && last == minute && row[b.inMinute()] >= int64(b.PerMinute):
+	case inMinute+extra > int64(b.PerMinute):
 		return time.Minute
 	}
 	return 0
@@ -585,70 +615,150 @@ var errRowMoving = errors.New("ephemeral: the row kept changing")
 // cost, until its window ends. As with AllowNAt, a call that fails counts
 // nothing (a lost answer aside), and only what the table returned refuses
 // anything.
+//
+// A budget with a Batch is counted in batches instead (spendBatched).
 func (l *Limiter) SpendAt(ctx context.Context, key string, b Budget, at time.Time) (time.Duration, error) {
 	day := at.Truncate(24 * time.Hour)
 	k := knownKey(key, day)
+	if b.Batch > 1 {
+		return l.spendBatched(ctx, key, k, b, day, at)
+	}
 	for range spendTries {
 		row := l.row(k)
-		minute := at.Truncate(time.Minute).Unix()
-		last, used := row[b.minute()]
-		// Another instance's clock a moment ahead counted in the next
-		// minute already: this counts there too.
-		if used && last > minute {
-			minute = last
-		}
-		quarter := time.Unix(minute, 0).Truncate(Quarter).Unix()
-		if full := b.full(row, minute, quarter); full > 0 {
+		minute, quarter := b.windows(row, at)
+		if full := b.over(row, minute, quarter, 1); full > 0 {
 			return full, nil
 		}
-		in := b.update(key, day, minute, quarter, used && last == minute, used && last >= quarter)
-		in.TableName = &l.Table
-		callCtx, cancel := l.deadline(ctx)
-		out, err := l.DB.UpdateItem(callCtx, in, fewerRetries)
-		cancel()
-		var failed *types.ConditionalCheckFailedException
-		if errors.As(err, &failed) {
-			// Picked wrong, or a window is used up: the row as it is says
-			// which.
-			l.learnRow(k, day, failed.Item)
-			continue
-		}
-		if err != nil {
+		// Picked wrong, or a window is used up: the row as it is (learnt)
+		// says which.
+		if _, ok, err := l.write(ctx, b.update(key, day, row, minute, quarter, 1, true), k, day); err != nil || ok {
 			return 0, err
 		}
-		l.learnRow(k, day, out.Attributes)
-		return 0, nil
 	}
 	return 0, errRowMoving
 }
 
-// update is the conditional update that counts one use of b in key's row
-// for day, in the minute and quarter that start at minute and quarter:
-// sameMinute, the row's last use of b was in that minute; sameQuarter, in
-// that quarter; neither, earlier or never. Each counts only while every
-// window has room, and only if the row is as it says.
-func (b Budget) update(key string, day time.Time, minute, quarter int64, sameMinute, sameQuarter bool) *dynamodb.UpdateItemInput {
+// spendBatched is SpendAt for a budget with a Batch. Each instance lets
+// uses through on its own count, and writes them in one update once it has
+// Batch of them, or once they might, with what the row last said, use up a
+// window (so one instance alone never lets one through past a limit). That
+// update adds them whatever the limits, since they were let through
+// already, and is picked as SpendAt's is; the row it returns refuses the
+// use that made it if a window is then past its limit, and that use stays
+// counted. So a window can let through, past its limit, only what other
+// instances hold unwritten (fewer than Batch each), and the table is
+// written once a batch, not once a use. Uses written to no table (the
+// instance stopped, or the day ended first) are fewer than a Batch.
+// A call that fails counts nothing: the uses it would have written wait
+// for the next.
+func (l *Limiter) spendBatched(ctx context.Context, key, k string, b Budget, day, at time.Time) (time.Duration, error) {
+	row := l.row(k)
+	minute, quarter := b.windows(row, at)
+	if full := b.over(row, minute, quarter, 1); full > 0 {
+		return full, nil
+	}
+	pk := k + "#" + b.Kind
+	l.mu.Lock()
+	n := l.pending[pk] + 1
+	due := n >= b.Batch || b.over(row, minute, quarter, int64(n)) > 0
+	if l.pending == nil || (len(l.pending) >= maxKnown && l.pending[pk] == 0) {
+		l.pending = map[string]int{}
+	}
+	if due {
+		delete(l.pending, pk)
+	} else {
+		l.pending[pk] = n
+	}
+	l.mu.Unlock()
+	if !due {
+		return 0, nil
+	}
+	err := errRowMoving
+	for range spendTries {
+		var after map[string]int64
+		var ok bool
+		after, ok, err = l.write(ctx, b.update(key, day, row, minute, quarter, int64(n), false), k, day)
+		if err != nil {
+			break
+		}
+		if ok {
+			return b.over(after, minute, quarter, 0), nil
+		}
+		err = errRowMoving
+		row = l.row(k)
+		minute, quarter = b.windows(row, at)
+	}
+	// Not written: the uses let through before wait for the next write.
+	if n > 1 {
+		l.mu.Lock()
+		if l.pending != nil {
+			l.pending[pk] += n - 1
+		}
+		l.mu.Unlock()
+	}
+	return 0, err
+}
+
+// write makes one of b's updates (update) of key's row for day, and learns
+// the row the table returns: as it is now, if it was written (ok), or as it
+// was, if the update's condition failed (not ok, no error), so the next
+// one is picked right.
+func (l *Limiter) write(ctx context.Context, in *dynamodb.UpdateItemInput, k string, day time.Time) (map[string]int64, bool, error) {
+	in.TableName = &l.Table
+	ctx, cancel := l.deadline(ctx)
+	defer cancel()
+	out, err := l.DB.UpdateItem(ctx, in, fewerRetries)
+	var failed *types.ConditionalCheckFailedException
+	if errors.As(err, &failed) {
+		l.learnRow(k, day, failed.Item)
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return l.learnRow(k, day, out.Attributes), true, nil
+}
+
+// update is the conditional update that counts n uses of b in key's row for
+// day, in the minute and quarter that start at minute and quarter, picked
+// by row, as this instance last learnt it: b's last use in that minute, in
+// that quarter, or earlier (or never). It applies only if the row is still
+// as it says; with limited, also only while every window has room for the
+// n (exactly: n is 1 then).
+func (b Budget) update(key string, day time.Time, row map[string]int64, minute, quarter, n int64, limited bool) *dynamodb.UpdateItemInput {
+	last, used := row[b.minute()]
 	names := map[string]string{"#m": b.minute(), "#n": b.inMinute(), "#q": b.quarter(), "#d": b.day()}
 	values := map[string]types.AttributeValue{
-		":one": num(1),
-		":e":   num(day.Add(24 * time.Hour).Unix()),
-		":pd":  num(int64(b.PerDay)),
+		":n": num(n),
+		":e": num(day.Add(24 * time.Hour).Unix()),
+		":m": num(minute),
 	}
-	const dayRoom = "(attribute_not_exists(#d) OR #d < :pd)"
-	var update, condition string
+	var update string
+	var conditions []string
 	switch {
-	case sameMinute:
-		update = "SET e = :e ADD #n :one, #q :one, #d :one"
-		condition = "#m = :m AND #n < :pm AND #q < :pq AND " + dayRoom
-		values[":m"], values[":pm"], values[":pq"] = num(minute), num(int64(b.PerMinute)), num(int64(b.PerQuarter))
-	case sameQuarter:
-		update = "SET #m = :m, #n = :one, e = :e ADD #q :one, #d :one"
-		condition = "#m >= :qs AND #m < :m AND #q < :pq AND " + dayRoom
-		values[":m"], values[":qs"], values[":pq"] = num(minute), num(quarter), num(int64(b.PerQuarter))
+	case used && last == minute:
+		update = "SET e = :e ADD #n :n, #q :n, #d :n"
+		conditions = []string{"#m = :m"}
+		if limited {
+			conditions = append(conditions, "#n < :pm", "#q < :pq")
+			values[":pm"], values[":pq"] = num(int64(b.PerMinute)), num(int64(b.PerQuarter))
+		}
+	case used && last >= quarter:
+		update = "SET #m = :m, #n = :n, e = :e ADD #q :n, #d :n"
+		conditions = []string{"#m >= :qs", "#m < :m"}
+		values[":qs"] = num(quarter)
+		if limited {
+			conditions = append(conditions, "#q < :pq")
+			values[":pq"] = num(int64(b.PerQuarter))
+		}
 	default:
-		update = "SET #m = :m, #n = :one, #q = :one, e = :e ADD #d :one"
-		condition = "(attribute_not_exists(#m) OR #m < :qs) AND " + dayRoom
-		values[":m"], values[":qs"] = num(minute), num(quarter)
+		update = "SET #m = :m, #n = :n, #q = :n, e = :e ADD #d :n"
+		conditions = []string{"(attribute_not_exists(#m) OR #m < :qs)"}
+		values[":qs"] = num(quarter)
+	}
+	if limited {
+		conditions = append(conditions, "(attribute_not_exists(#d) OR #d < :pd)")
+		values[":pd"] = num(int64(b.PerDay))
 	}
 	return &dynamodb.UpdateItemInput{
 		Key: map[string]types.AttributeValue{
@@ -656,7 +766,7 @@ func (b Budget) update(key string, day time.Time, minute, quarter int64, sameMin
 			"sk": s(strconv.FormatInt(day.Unix(), 10)),
 		},
 		UpdateExpression:                    aws.String(update),
-		ConditionExpression:                 aws.String(condition),
+		ConditionExpression:                 aws.String(strings.Join(conditions, " AND ")),
 		ExpressionAttributeNames:            names,
 		ExpressionAttributeValues:           values,
 		ReturnValues:                        types.ReturnValueAllNew,
@@ -673,8 +783,8 @@ func (l *Limiter) row(k string) map[string]int64 {
 }
 
 // learnRow records a key's row for a day as the table just returned it
-// (nil: there is none).
-func (l *Limiter) learnRow(k string, day time.Time, item map[string]types.AttributeValue) {
+// (nil: there is none), and returns its numbers.
+func (l *Limiter) learnRow(k string, day time.Time, item map[string]types.AttributeValue) map[string]int64 {
 	attrs := map[string]int64{}
 	for name, v := range item {
 		if n, ok := v.(*types.AttributeValueMemberN); ok {
@@ -697,6 +807,7 @@ func (l *Limiter) learnRow(k string, day time.Time, item map[string]types.Attrib
 		l.rows = map[string]budgetRow{}
 	}
 	l.rows[k] = budgetRow{attrs: attrs, until: day.Add(24 * time.Hour).Unix()}
+	return maps.Clone(attrs)
 }
 
 // add adds n to key's count for the window that starts at start, if at
@@ -780,9 +891,18 @@ func (l *Limiter) Used(ctx context.Context, key string, window time.Duration) (i
 	return l.UsedAt(ctx, key, window, l.Now())
 }
 
-// UsedAt is Used in the window that holds at.
+// UsedAt is Used in the window that holds at: the count the table told this
+// instance in the last usedFresh seconds (counting, as AllowNAt does, or
+// reading), or else the count read now, eventually consistent (half a read
+// unit; one strongly consistent would cost a whole one), which it then
+// remembers. So it may miss what other instances counted in about the last
+// half a minute, and asking again and again costs the table a read at most
+// every half a minute per instance.
 func (l *Limiter) UsedAt(ctx context.Context, key string, window time.Duration, at time.Time) (int, error) {
 	start := at.Truncate(window)
+	if c, ok := l.memo(key, start); ok && l.Now().Unix()-c.learned <= usedFresh {
+		return c.uses, nil
+	}
 	ctx, cancel := l.deadline(ctx)
 	defer cancel()
 	out, err := l.DB.GetItem(ctx, &dynamodb.GetItemInput{
@@ -792,16 +912,18 @@ func (l *Limiter) UsedAt(ctx context.Context, key string, window time.Duration, 
 			"sk": s(strconv.FormatInt(start.Unix(), 10)),
 		},
 		ProjectionExpression: aws.String("c"),
-		ConsistentRead:       aws.Bool(true),
 	}, fewerRetries)
 	if err != nil {
 		return 0, err
 	}
-	c, ok := out.Item["c"].(*types.AttributeValueMemberN)
-	if !ok {
-		return 0, nil
+	uses := 0
+	if c, ok := out.Item["c"].(*types.AttributeValueMemberN); ok {
+		if uses, err = strconv.Atoi(c.Value); err != nil {
+			return 0, err
+		}
 	}
-	return strconv.Atoi(c.Value)
+	l.learn(key, start, window, uses)
+	return uses, nil
 }
 
 // expiry rounds an expiry time up to the minute, as stored.

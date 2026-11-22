@@ -1083,13 +1083,13 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 | `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
 | `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 29 metrics is billed as a custom
+Metric filters are free. Each of the 36 metrics is billed as a custom
 metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
 month for the five counted whenever the app is used, next to nothing for
-the others until something goes wrong, and at most $8.70 if all of them got
+the others until something goes wrong, and at most $10.80 if all of them got
 data every hour. The six alarms cost $0.70 a month (the token alarm reads
 two metrics), and the lines, under 1 KB a minute per busy instance, cents.
-So about $2.20 a month per environment, at most about $9.
+So about $2.20 a month per environment, at most about $11.
 
 **When a count alarm fires:**
 
@@ -1131,8 +1131,9 @@ So about $2.20 a month per environment, at most about $9.
 3. `limit-hits`: `Limited.<route>` says which limit. A rise on one route
    without more traffic is someone pushing at that limit, which is holding;
    a rise with more traffic everywhere is real use outgrowing the limits.
-   `device_limit` (on `post_session` or a signed route) is a device past its
-   own limits on logins and signed requests
+   `device_limit` (on `post_session`, a signed route or any logged-in route)
+   is a device past its own limits on logins, signed requests or requests
+   with a session
    ([protocol.md](protocol.md#registration-and-sessions)). The app waits
    after one, so a device that hits a limit makes a few a minute, and one
    that keeps pushing hundreds; the counts can't say which device, by
@@ -1557,16 +1558,41 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   instances, and about 800 over 100. An account in the middle of a deletion
   or cleanup can make about ten times as many while it lasts, still within
   its day, and accounts spending a minute's limits at once can make a
-  short spike. Logins of random devices read half a
-  directory unit each and write nothing; filling its 400 reads a second
-  takes about 480 addresses. Still open, each for a change of its own:
-  every request with a session reads the directory before any limit (one
-  unit; `GET /usage` two, and four on the ephemeral table), refused ones
-  included, so one account and about 30 addresses can still use up the
-  directory's reads; and spent send and media tokens replayed past what a
-  function instance remembers cost a write unit each, and `POST /media`
-  has only the `rate-per-ip` rule, so about 30 addresses with one or two
-  accounts can still fill the ephemeral table's writes.
+  short spike.
+
+  Every request with a session, signed or not, first reads the device and
+  its account from the directory (one unit), which logins, sends and
+  every logged-in request need. So the `api` function limits each
+  device's too, once its token checks out and before that read: 180 a
+  minute, 1,200 a quarter of an hour and 30,000 a UTC day. One past a
+  limit reads nothing, and writes nothing once the instance knows. The
+  counts are kept in memory and written ten at a time, so an instance
+  that hasn't heard yet lets up to 9 more through a window another has
+  used up, and learns it from one write (two if its picture of the row is
+  old). So each account kept at its limits reads about 1,200 directory
+  units a quarter of an hour on a few instances, and up to about 2,100
+  spread over all 100: filling the directory's 400 reads a second takes
+  about 290 accounts, or about 170 (for a whole day, about 1,100 either
+  way), where one account and about 30 addresses did before. One account
+  can read 180 units in a minute, or about 1,000 spread over 100
+  instances, so a few dozen spending their minute at once can make a
+  spike of a minute or two. `GET /usage` reads no more of the directory
+  than any logged-in request, and at most two units of the ephemeral
+  table (eventually consistent, and nothing again for half a minute on an
+  instance); it read two and four. `GET /invitations` reads more for a
+  member with invitation codes (about a unit a code). Counting adds about
+  150 write units a quarter of an hour per account kept at its limits on
+  a few instances, up to about 600 over 100: with the logins' and signed
+  requests', filling the ephemeral table's 200 writes a second takes about
+  460 accounts, or about 120 over 100. If the counts can't be written, each
+  instance lets a device make 60 a minute on its own count.
+
+  Logins of random devices read half a directory unit each and write
+  nothing; filling its 400 reads a second takes about 480 addresses. Still
+  open, for a change of its own: spent send and media tokens replayed past
+  what a function instance remembers cost a write unit each, and
+  `POST /media` has only the `rate-per-ip` rule, so about 30 addresses
+  with one or two accounts can still fill the ephemeral table's writes.
 - **`lookups-total`**: everyone's lookups by ID, over one minute so that a
   block ends soon after a flood does. With a random ID, a lookup writes
   nothing and reads half a unit (a link's bundle from the directory; a

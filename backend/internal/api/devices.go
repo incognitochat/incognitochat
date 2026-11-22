@@ -55,10 +55,45 @@ const (
 	StepsPerQuarter  = 900
 )
 
+// Every request with a session token (every logged-in route, signed ones
+// too) reads the device and its account from the directory, strongly, a
+// read unit, before anything else; the directory takes 400 a second in
+// production, and logins, sends and every logged-in request need it. So
+// each device's are limited too, once its token checks out and before
+// that read (sessionLimit). The app makes, per copy open: an inbox fetch
+// every 20 seconds without a push socket (every 2 minutes with one), and
+// a fetch and a confirmation for each push while messages come in (the
+// server's inbox limit stops fetches that read at 30 a minute); 2 at each
+// home screen, 4 to 9 at a launch; a deletion or cleanup step about every
+// second and a half while one runs (StepsPerMinute holds two copies to
+// 90); and little else (tokens, mailboxes, the Usage screen, by taps).
+// Tapping through links makes about 60 to 90 a minute, 2 copies deleting
+// about 120, and a flood of messages about 90 a copy; a copy left showing
+// all day without a socket about 4,300 a day. Being refused holds up the
+// inbox until the window ends, for the day's limit until UTC midnight, so
+// the day allows several copies open all day and a heavy day's use.
+//
+// The table isn't written for each one: each instance counts a device's
+// requests in memory and writes them SessionBatch at a time (ephemeral
+// Budget.Batch), or at once when they might reach a limit. So a window
+// lets through, past its limit, at most what other instances hold
+// unwritten, fewer than SessionBatch each.
+const (
+	SessionRequestsPerMinute  = 180
+	SessionRequestsPerQuarter = 1200
+	SessionRequestsPerDay     = 30000
+	SessionBatch              = 10
+	// SessionRequestsLocalPerMinute is how many requests a minute each
+	// instance lets a device make, on its own count, while the table
+	// can't be written (sessionLimit).
+	SessionRequestsLocalPerMinute = 60
+)
+
 var (
-	loginBudget  = ephemeral.Budget{Kind: "l", Day: "l", PerMinute: LoginsPerMinute, PerQuarter: LoginsPerQuarter, PerDay: LoginsPerDay}
-	signedBudget = ephemeral.Budget{Kind: "s", Day: "s", PerMinute: SignedPerMinute, PerQuarter: SignedPerQuarter, PerDay: SignedPerDay}
-	stepBudget   = ephemeral.Budget{Kind: "c", Day: "s", PerMinute: StepsPerMinute, PerQuarter: StepsPerQuarter, PerDay: SignedPerDay}
+	loginBudget   = ephemeral.Budget{Kind: "l", Day: "l", PerMinute: LoginsPerMinute, PerQuarter: LoginsPerQuarter, PerDay: LoginsPerDay}
+	signedBudget  = ephemeral.Budget{Kind: "s", Day: "s", PerMinute: SignedPerMinute, PerQuarter: SignedPerQuarter, PerDay: SignedPerDay}
+	stepBudget    = ephemeral.Budget{Kind: "c", Day: "s", PerMinute: StepsPerMinute, PerQuarter: StepsPerQuarter, PerDay: SignedPerDay}
+	sessionBudget = ephemeral.Budget{Kind: "t", Day: "t", PerMinute: SessionRequestsPerMinute, PerQuarter: SessionRequestsPerQuarter, PerDay: SessionRequestsPerDay, Batch: SessionBatch}
 )
 
 // budgetFor is the budget a signed request on route counts in: a step of
@@ -101,4 +136,35 @@ func (s *Server) deviceLimit(ctx context.Context, route string, b ephemeral.Budg
 		return refusal{limitReached("device_limit", now, full)}
 	}
 	return nil
+}
+
+// sessionLimit counts a request with a session token in its device's
+// sessionBudget (in the same row as deviceLimit's), once the token checks
+// out and before anything is read for it: a token that doesn't check out,
+// or is over, is refused 401 before this, whatever the device's count, so
+// only whoever holds the device's token can use up its requests, or learn
+// of them. A request past the budget is refused (429 device_limit, with
+// when the window ends) reading nothing; from memory, once this instance
+// knows, writing nothing either. Counts go to the table in batches
+// (SessionBatch). If they can't be written (the table throttled, say), the
+// request goes on if this instance alone has let the device make fewer
+// than SessionRequestsLocalPerMinute this minute, and the uses wait for the
+// next write: refusing them all would turn trouble with the ephemeral
+// table into an outage of every logged-in route (the inbox's own limits
+// let it go on likewise, listInbox), and letting them all through would
+// drop the limit.
+func (s *Server) sessionLimit(ctx context.Context, route, accountID, deviceID string, now time.Time) (httpapi.Response, bool) {
+	name := s.rateName("dev", now, 24*time.Hour, accountID, deviceID)
+	full, err := s.Limits.SpendAt(ctx, name, sessionBudget, now)
+	switch {
+	case err != nil:
+		s.rateFailed(route, err)
+		minute := s.rateName("dev", now, time.Minute, accountID, deviceID)
+		if !s.Limits.LocalAt(minute, 1, SessionRequestsLocalPerMinute, time.Minute, now) {
+			return limitReached("device_limit", now, time.Minute), true
+		}
+	case full > 0:
+		return limitReached("device_limit", now, full), true
+	}
+	return httpapi.Response{}, false
 }

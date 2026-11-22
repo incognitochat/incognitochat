@@ -2250,6 +2250,52 @@ describe("the server's limit on this device's logins and signed requests", () =>
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   }, 10_000);
+
+  it("says so on home when the device's requests are refused, for as long as the server says", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    // Home reads the account: refused, so shown as it was, with the notice.
+    server.outcomes.account = [deviceLimit()];
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit' });
+    server.outcomes.account = [deviceLimit(600)];
+    await owner.app.home();
+    expect(home(owner.app.screen.value)).toMatchObject({ offline: true, notice: 'device-limit-later' });
+    // What brought the user home says it first.
+    server.outcomes.createLink = [new ApiError(429, 'rate_limited')];
+    await owner.app.home();
+    server.outcomes.account = [deviceLimit()];
+    await owner.app.createLink();
+    expect(home(owner.app.screen.value)).toMatchObject({ notice: 'rate-limited' });
+  });
+
+  it('holds its inbox fetches back as long as the server says', async () => {
+    const refused: Outcome[] = [];
+    const server = fakeServer({ inbox: refused });
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(server.api, { issuer });
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    try {
+      // Refused for the next two minutes: polling every 20 seconds would
+      // fetch 6 times; it waits them out, then fetches.
+      for (let i = 0; i < 50; i++) refused.push(deviceLimit(120));
+      const { app } = await setup({ api: server.api, bridge: fakeBridge().bridge, launch: launchWith(''), db, issuer, background: true });
+      await app.start();
+      const inbox = () => server.calls.filter((c) => c === 'GET /inbox').length;
+      const first = inbox();
+      expect(first).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(110_000);
+      expect(inbox()).toBe(first);
+      refused.length = 0;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(inbox()).toBeGreaterThan(first);
+      await app.home();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('after setting up over an account elsewhere', () => {

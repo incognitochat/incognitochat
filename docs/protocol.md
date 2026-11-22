@@ -75,8 +75,9 @@ at half the cost. So a device replaced or removed in about the last second
 may still get a token, and one set up in about the last second may be
 refused: the app logs in once more a second later when that happens right
 after a setup, its own or another copy's. Each logged-in request reads the
-device and its account again, in one strongly consistent read, so a
-replaced or deleted account is refused at its first request. Opening a push
+device and its account again, in one strongly consistent read (once the
+device's limit on such requests allows it, below), so a replaced or
+deleted account is refused at its first request. Opening a push
 socket is the exception: it checks the token alone
 ([security.md](security.md#other-limits)).
 
@@ -127,14 +128,32 @@ the minute's). It counts and refuses only once the signature
 checks out, so nobody without the device's key can use up its limits, or
 learn of them: a forged login of a device that reached its limits is still
 `401 login_refused`. A replaced account (`410`) and one being deleted
-(`409`, on the routes it doesn't take) are refused before anything is
-counted or written. A request refused by a limit counts nothing; a
+(`409`, on the routes it doesn't take) are refused before their login or
+signed request is counted or its nonce written. A request refused by a
+limit counts nothing; a
 replay counts (it passed the signature); nothing counted is ever taken
 back. If the count can't be taken, the answer is `503 unavailable`, and
-the request goes no further. The app waits out a login refused so until
+the request goes no further.
+
+Every request with a session token, signed or not, also reads the device
+from a table every user shares, so each device's are limited too: 180 a
+minute, 1,200 a quarter of an hour and 30,000 a UTC day. They are counted
+once the token checks out and before anything is read: a token that is
+missing, wrong or over is `401 session_expired` first, whatever the
+count, so only the token's holder can use them up or learn of them. Past
+one, the same `429 device_limit` with `Retry-After`, and nothing is read.
+Each function instance counts them in memory and writes them ten at a
+time, so a window may let a few more through than its limit; the request
+that finds its window past the limit is refused, and counts. If they
+can't be written, each instance lets a device make 60 a minute on its own
+count, then refuses it until the minute ends.
+
+The app waits out a login refused so until
 `Retry-After`, but at least 5 seconds and at most 2 minutes at a time (a
 try before the end is refused at no cost); waits out a deletion's steps
-by `Retry-After` too, up to 30 seconds (below); and otherwise says "Too
+by `Retry-After` too, up to 30 seconds (below); holds its background
+syncs back as long as `Retry-After` says, up to 5 minutes at a time
+(below, Delivery); and otherwise says "Too
 many tries. Try again in a minute.", or "Try again later." when the wait
 is longer than a minute. A copy of the device's storage shares its
 limits ([security.md](security.md#other-limits), Keys are stored with the
@@ -160,7 +179,7 @@ Delivery).
 | `401 session_expired` | The session token is missing or over; the app logs in again. |
 | `401 clock_skew` | The device's clock is off (above). |
 | `401 login_refused` | The device or its account doesn't exist (deleted, by its user or for going unused 12 months, or replaced long ago), or the login's signature or nonce is wrong, or the device was set up in about the last second (the app tries once more, above). |
-| `429 device_limit` | The device's logins or signed requests reached a limit (above, Limits per device), until `Retry-After`. Said only once the device's signature checks out. |
+| `429 device_limit` | The device's logins, signed requests or requests with a session reached a limit (above, Limits per device), until `Retry-After`. Said only once the device's signature checks out (logins, signed requests) or its session token does (any request with one). |
 | `410 account_replaced` | The account was replaced by a setup elsewhere. Said only once the device's signature checks out. |
 | `409 account_deleting` | The account is being deleted (below): it takes no request but `GET /account` (which says `deleting: true`) and `DELETE /account`. |
 
@@ -1529,7 +1548,10 @@ in) returns the day's counts for the Usage screen: `{resetsAt, send, media,
 mailboxes, linkChanges, owned}`, each `{used, limit}` (`owned`: the
 account's mailboxes against the most it may have). The app adds what it
 holds unused (tokens fetched ahead, spare mailboxes) to show what's left.
-Both only read the counters the limits keep anyway.
+Both only read the counters the limits keep anyway. `GET /usage` reads them
+cheaply (what the server learnt in the last half a minute, or else an
+eventually consistent read), so it may miss what was counted in about the
+last half a minute.
 
 The two kinds have different issuer keys. A blind signer can't see what it
 signs, so only a key of its own gives a kind its own daily budget; a token

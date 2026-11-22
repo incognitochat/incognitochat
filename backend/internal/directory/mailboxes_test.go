@@ -64,6 +64,10 @@ func TestMailboxes(t *testing.T) {
 	if n, err := s.MailboxCount(ctx, owner.ID, now); err != nil || n != len(pool)+1 {
 		t.Fatalf("MailboxCount = %d, %v", n, err)
 	}
+	// Every logged-in request reads it with the device (GET /usage shows it).
+	if d, err := s.Device(ctx, owner.ID, owner.DeviceID, now); err != nil || d.Mailboxes != len(pool)+1 {
+		t.Fatalf("Device = %+v, %v", d, err)
+	}
 
 	devices, err := s.Devices(ctx, owner.ID, now)
 	if err != nil || len(devices) != 1 || devices[0] != owner.DeviceID {

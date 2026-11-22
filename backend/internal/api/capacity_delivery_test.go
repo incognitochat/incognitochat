@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,23 @@ type deliveryTables struct {
 	meter               *dynamotest.Meter
 	directory, messages string
 	ephemeral           string
+	devSeen             int // devWrites
+}
+
+// devWrites is how many writes went to the devices' own rows (R#dev#…,
+// devices.go: the counts of their logins, signed requests and requests
+// with a session, the last in batches) since the last call, each a write
+// unit: what else the ephemeral table wrote is the routes' own.
+func (tb *deliveryTables) devWrites() float64 {
+	n := 0
+	for _, key := range tb.meter.Written(tb.ephemeral) {
+		if strings.HasPrefix(key, "R#dev#") {
+			n++
+		}
+	}
+	d := n - tb.devSeen
+	tb.devSeen = n
+	return float64(d)
 }
 
 func newDeliveryTables(t *testing.T) (*harness, *deliveryTables) {
@@ -173,17 +191,21 @@ func TestDeliveryCapacity(t *testing.T) {
 
 	// Replaying a confirmation costs a write unit per gone item, counted
 	// against the person's day of misses (in batches); past it, nothing.
+	// The device's requests are counted too, in batches of SessionBatch.
+	tb.devWrites()
 	for range 100 {
 		if status, _ := h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false); status != http.StatusOK {
 			t.Fatalf("replay: %d", status)
 		}
 	}
 	m, e = tb.cost(t, "POST /ack, that page replayed 100 times")
-	if m.Write > AckMissesPerDay+float64(len(page)) || e.Write > AckMissesPerDay/AckBatch+2 {
+	dev := tb.devWrites()
+	t.Logf("  of which the device's requests %.0f", dev)
+	if m.Write > AckMissesPerDay+float64(len(page)) || e.Write-dev > AckMissesPerDay/AckBatch+2 || dev > 100/SessionBatch+1 {
 		t.Fatalf("replays: %v %v", m, e)
 	}
 	h.as(t, owner, http.MethodPost, "/ack", map[string]any{"ids": page}, false)
-	if m, e := tb.cost(t, "POST /ack, past the day's misses"); m.Write != 0 || e.Write != 0 {
+	if m, e := tb.cost(t, "POST /ack, past the day's misses"); m.Write != 0 || e.Write-tb.devWrites() != 0 {
 		t.Fatalf("past the day's misses, an ack costs %v %v", m, e)
 	}
 

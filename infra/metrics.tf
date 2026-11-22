@@ -35,14 +35,18 @@ locals {
   # The routes that answer 429 (rate_limited, daily_limit, link_busy,
   # download_limit or device_limit), as the line names them: each gets
   # Limited.<route>, to tell which limit is being hit. A route missing here
-  # still counts in Limited, and shows in the line. Logins and signed
-  # requests answer device_limit; not the steps of deleting an account or
-  # what is left of one (delete_account, post_account_cleanup), whose
-  # metric, kept 15 months, would date a deletion on a quiet deployment.
+  # still counts in Limited, and shows in the line. Logins and every
+  # logged-in route answer device_limit; not the steps of deleting an
+  # account or what is left of one (delete_account, post_account_cleanup),
+  # whose metric, kept 15 months, would date a deletion on a quiet
+  # deployment.
   limited_routes = [
     "post_register",
     "post_session",
     "post_accounts_lookup",
+    "get_account",
+    "get_usage",
+    "get_invitations",
     "post_invitations",
     "post_invitations_redeem",
     "post_links",
@@ -50,15 +54,19 @@ locals {
     "delete_links_id",
     "post_mailboxes",
     "post_mailboxes_check",
+    "post_mailboxes_id_discard",
     "post_notices",
     "post_notices_language",
     "post_send",
     "post_tokens",
     "post_tokens_media",
     "get_inbox",
+    "post_ack",
     "get_media_id",
+    "get_admin_levels",
     "put_admin_levels",
     "post_admin_grant",
+    "get_admin_switches",
     "put_admin_switches",
   ]
 }

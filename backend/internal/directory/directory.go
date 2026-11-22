@@ -182,6 +182,7 @@ type Device struct {
 	Granted      int    // invitations granted on top of the level's allowance
 	Allocated    int    // invitation uses put into codes
 	Links        int    // active links
+	Mailboxes    int    // pool and conversation mailboxes owned (MailboxCount)
 	Notices      bool   // Telegram notices are set up and not turned off
 	// NoticesRefused: notices are off because Telegram refused one (the
 	// user blocked the bot, say), not set up again since.
@@ -1023,6 +1024,7 @@ func accountState(acct map[string]types.AttributeValue) Device {
 		Granted:        int(num(acct, "ig")),
 		Allocated:      int(num(acct, "ia")),
 		Links:          int(num(acct, "lc")),
+		Mailboxes:      int(num(acct, "mc")),
 		Notices:        chat && !off,
 		NoticesRefused: num(acct, "no") == noticesRefused,
 		NoticesLeft:    off && (chat || language || last),

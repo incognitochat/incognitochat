@@ -150,8 +150,8 @@ function stepWait(err: unknown, pause: number): number | null {
 }
 
 /**
- * The server refused this device's login or signed request for now
- * (deviceLimit): until the minute ends (device-limit, "Try again in a
+ * The server refused this device's login, signed request or other
+ * logged-in request for now (deviceLimit): until the minute ends (device-limit, "Try again in a
  * minute"), or for longer, its quarter of an hour or its day being used up
  * (device-limit-later, "Try again later").
  */
@@ -259,13 +259,15 @@ function limitError(kind: LimitError['kind'], err: ApiError): LimitError {
 }
 
 /**
- * Whether the server refused this device's login or signed request for now
- * (429 device_limit): too many from this device in a minute, a quarter of
- * an hour or the day, whatever the request was. A request that had to log
- * in first passes the login's refusal on as its own, so this is never the
- * route's own limit (a day's tokens or mailboxes, say). Which DeviceLimit
- * goes by how long the server asked to wait (Retry-After): a minute or
- * less, or longer (or unsaid).
+ * Whether the server refused this device's login, signed request or any
+ * logged-in request for now (429 device_limit): too many from this device
+ * in a minute, a quarter of an hour or the day, whatever the request was.
+ * A request that had to log in first passes the login's refusal on as its
+ * own, so this is never the route's own limit (a day's tokens or
+ * mailboxes, say). Which DeviceLimit goes by how long the server asked to
+ * wait (Retry-After): a minute or less, or longer (or unsaid). Background
+ * requests (the inbox) wait it out as any 429 (net/backoff), as long as
+ * Retry-After says, up to their longest wait.
  */
 function deviceLimit(err: unknown): DeviceLimit | null {
   if (!(err instanceof ApiError && err.code === 'device_limit')) return null;
@@ -2146,6 +2148,7 @@ export function createApp(deps: Deps) {
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
+    let notice = options.notice ?? null;
     let account: AccountInfo | null = null;
     let invitations: InvitationsInfo | null = null;
     if (!offline) {
@@ -2157,6 +2160,9 @@ export function createApp(deps: Deps) {
       } catch (err) {
         if (handleGone(err)) return;
         offline = true;
+        // These requests refused for now (any of the device's are, past its
+        // limit): said, unless what brought the user here says something.
+        notice ??= deviceLimit(err);
       }
     }
     if (account?.deleting) return deletingOnServer(account.expired);
@@ -2174,7 +2180,7 @@ export function createApp(deps: Deps) {
       invitations,
       links,
       busy: false,
-      notice: withNewKey(options.notice ?? null, await newKeyToTell(db)),
+      notice: withNewKey(notice, await newKeyToTell(db)),
       // Offered while the bot may not write yet, and after Telegram refused
       // a notice: then only the user's tap sets them up again.
       askNotices: noticeLaunch && !!account && !account.notices && (!writeAllowed || account.noticesRefused),

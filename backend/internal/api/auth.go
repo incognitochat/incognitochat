@@ -78,9 +78,11 @@ func (s *Server) withDevice(route string, h callerHandler) httpapi.HandlerFunc {
 
 // withSignature is withDevice plus a fresh device signature over the request,
 // for sensitive actions: a stolen session token alone can't make them. In
-// order: the timestamp (nothing read yet), the token and the device (read),
-// the signature, the account's state (replaced, being deleted), the
-// device's limits (counted), the nonce (written), the handler.
+// order: the timestamp (nothing read yet), the token (checked, and the
+// request counted against the device's requests, authenticate), the device
+// (read), the signature, the account's state (replaced, being deleted),
+// the device's signed requests (counted), the nonce (written), the
+// handler.
 func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFunc {
 	return func(ctx context.Context, req httpapi.Request) httpapi.Response {
 		// One reading of the clock for both checks of the timestamp, so one
@@ -136,16 +138,24 @@ func (s *Server) withSignature(route string, h callerHandler) httpapi.HandlerFun
 	}
 }
 
+// authenticate checks the session token, counts the request against its
+// device's limit (sessionLimit), and only then reads the device and its
+// account, strongly: a token that doesn't check out is refused 401, and a
+// device past its limit 429, before anything is read.
 func (s *Server) authenticate(ctx context.Context, route string, req httpapi.Request) (caller, httpapi.Response, bool) {
 	token := httpapi.Header(req, SessionHeader)
 	if token == "" {
 		return caller{}, httpapi.Error(http.StatusUnauthorized, "session_expired"), false
 	}
-	claims, err := s.Sessions.Verify(token, s.Now())
+	now := s.Now()
+	claims, err := s.Sessions.Verify(token, now)
 	if err != nil {
 		return caller{}, httpapi.Error(http.StatusUnauthorized, "session_expired"), false
 	}
-	device, err := s.Directory.Device(ctx, claims.AccountID, claims.DeviceID, s.Now())
+	if resp, limited := s.sessionLimit(ctx, route, claims.AccountID, claims.DeviceID, now); limited {
+		return caller{}, resp, false
+	}
+	device, err := s.Directory.Device(ctx, claims.AccountID, claims.DeviceID, now)
 	if errors.Is(err, directory.ErrNotFound) {
 		return caller{}, httpapi.Error(http.StatusUnauthorized, "login_refused"), false
 	}
