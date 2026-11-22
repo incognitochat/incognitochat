@@ -261,7 +261,7 @@ export const es = {
   sourceCode: 'Código fuente',
   sourceCodeUnknown: 'No se encontró el código fuente de esta copia de la app.',
   messagesLeftToday: 'Mensajes restantes hoy: {count}. Más a partir de esta hora: {time}.',
-  storageMedia: 'Archivos multimedia en este dispositivo: {size}',
+  storageMedia: 'Multimedia en este dispositivo: {size}',
   storageApp: 'La app ocupa {size} en total en este dispositivo, incluidos tus chats y claves.',
   keepMedia: 'Conservar multimedia',
   keepForever: 'Siempre',
