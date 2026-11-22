@@ -1083,10 +1083,10 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 | `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
 | `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 36 metrics is billed as a custom
+Metric filters are free. Each of the 35 metrics is billed as a custom
 metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
 month for the five counted whenever the app is used, next to nothing for
-the others until something goes wrong, and at most $10.80 if all of them got
+the others until something goes wrong, and at most $10.50 if all of them got
 data every hour. The six alarms cost $0.70 a month (the token alarm reads
 two metrics), and the lines, under 1 KB a minute per busy instance, cents.
 So about $2.20 a month per environment, at most about $11.
@@ -1137,8 +1137,9 @@ So about $2.20 a month per environment, at most about $11.
    ([protocol.md](protocol.md#registration-and-sessions)). The app waits
    after one, so a device that hits a limit makes a few a minute, and one
    that keeps pushing hundreds; the counts can't say which device, by
-   design. The deletion steps' routes aren't in `Limited.<route>` (a point
-   kept 15 months would date a deletion), only in `Limited`. Seen with
+   design. The deletion steps' routes and blocking's
+   (`post_mailboxes_id_discard`) aren't in `Limited.<route>` (a point kept
+   15 months would date a deletion or a block), only in `Limited`. Seen with
    ordinary use, the limits are constants in
    `backend/internal/api/devices.go`, changed by a release.
 4. `invalid-tokens`: forged, replayed or out-of-date tokens on `POST /send`

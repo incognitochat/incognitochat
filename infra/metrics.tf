@@ -38,8 +38,8 @@ locals {
   # still counts in Limited, and shows in the line. Logins and every
   # logged-in route answer device_limit; not the steps of deleting an
   # account or what is left of one (delete_account, post_account_cleanup),
-  # whose metric, kept 15 months, would date a deletion on a quiet
-  # deployment.
+  # nor a block (post_mailboxes_id_discard), whose metric, kept 15 months,
+  # would date a deletion or a block on a quiet deployment.
   limited_routes = [
     "post_register",
     "post_session",
@@ -54,7 +54,6 @@ locals {
     "delete_links_id",
     "post_mailboxes",
     "post_mailboxes_check",
-    "post_mailboxes_id_discard",
     "post_notices",
     "post_notices_language",
     "post_send",
