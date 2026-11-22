@@ -298,10 +298,11 @@ it. This is how close it gets.
     what each person uses per day (so that no one can flood a mailbox or a
     link, or use up the capacity everyone shares);
   - for each device, one record a UTC day of how often it logged in and
-    made signed requests (link changes, invitations, steps of a deletion)
-    in the current minute, quarter of an hour and day, and the minute of
-    its last of each, overwritten as it goes: so that no device can use up
-    the capacity everyone shares;
+    made signed requests (link changes and key rotations, invitations,
+    admin changes, and the steps of a deletion or cleanup) in the current
+    minute, quarter of an hour and day, and the minute of its last of each,
+    overwritten as it goes: so that no device can use up the capacity
+    everyone shares;
   - a record of each open app's socket, for pushes, and the minute it
     opened;
   - when each account last got a notice, for the 3 minutes until the next
@@ -331,7 +332,7 @@ it. This is how close it gets.
   writes to whom), and which accounts had the app open in which minute;
   and from the devices' records, how often each account logged in and
   made signed requests each day, and the minute of its last of each (a
-  deletion's steps included). That is part of what watching live shows
+  deletion's or cleanup's steps included). That is part of what watching live shows
   them anyway (What users still have to trust, 2.).
 - **Who invited whom.** Using an invitation code is a request from the
   person's session that names the code, and the code names whose it is, so

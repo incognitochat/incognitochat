@@ -1537,25 +1537,36 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   signature checks out (`backend/internal/api/devices.go`): logins 20 a
   minute, 60 a quarter of an hour and 1,000 a UTC day; signed requests 30
   a minute and 60 a quarter of an hour, and a deletion's or cleanup's steps
-  90 and 900 while there is one; 2,000 a day for all signed requests. An
-  allowed one costs two write units (its count and its nonce); one past a
-  limit costs nothing once the function instance knows, which takes it one
-  refused write; a forged one, or a replaced account's, costs nothing.
-  Filling production's 200 writes a second then takes about 750 Telegram
-  accounts kept at their limits (some hundreds if their requests are
-  spread over many function instances), where one account and about 30
-  addresses did before; for a whole day, about 2,900. An account in the
-  middle of a deletion or cleanup can make about ten times as many while
-  it lasts, still within its day, and accounts spending a minute's limits
-  at once can make a short spike. Logins of random devices read half a
+  90 and 900 while there is one; 2,000 a day for all signed requests. They
+  go by the device, so by the account: setting up again (at most 3 times a
+  day per Telegram user) starts a new device with days of its own, about
+  4 days' worth for one person in a day. An allowed one costs two write
+  units (its count and its nonce), or three at a minute's turn on a
+  function instance that hasn't seen that minute yet (its first try
+  guesses wrong); one past a limit costs nothing once the instance knows,
+  which takes it one refused write per window that is used up; a forged
+  one, or a replaced account's, costs nothing. So each account kept at its
+  limits costs 240 to 360 write units a quarter of an hour, plus about 5
+  per function instance it reaches. Filling production's 200 writes a
+  second then takes about 750 Telegram accounts whose requests land on a
+  few instances, and about 210 if they're spread over all 100 that
+  `RESERVE_CONCURRENCY` gives the `api` function (more instances, fewer
+  accounts), where one account and about 30 addresses did before. For a
+  whole day (6,000 to 9,000 write units an account, plus about 120 per
+  instance while it spends its day), about 2,900 accounts on a few
+  instances, and about 800 over 100. An account in the middle of a deletion
+  or cleanup can make about ten times as many while it lasts, still within
+  its day, and accounts spending a minute's limits at once can make a
+  short spike. Logins of random devices read half a
   directory unit each and write nothing; filling its 400 reads a second
   takes about 480 addresses. Still open, each for a change of its own:
   every request with a session reads the directory before any limit (one
   unit; `GET /usage` two, and four on the ephemeral table), refused ones
   included, so one account and about 30 addresses can still use up the
   directory's reads; and spent send and media tokens replayed past what a
-  function instance remembers cost a write unit each, on `POST /media`
-  under `rate-per-ip` alone.
+  function instance remembers cost a write unit each, and `POST /media`
+  has only the `rate-per-ip` rule, so about 30 addresses with one or two
+  accounts can still fill the ephemeral table's writes.
 - **`lookups-total`**: everyone's lookups by ID, over one minute so that a
   block ends soon after a flood does. With a random ID, a lookup writes
   nothing and reads half a unit (a link's bundle from the directory; a

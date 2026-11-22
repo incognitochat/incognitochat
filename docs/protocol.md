@@ -115,21 +115,28 @@ minute, 60 a quarter of an hour and 1,000 a UTC day. Signed requests: 30 a
 minute and 60 a quarter of an hour; while the account is being deleted, or
 has what is left of an account it replaced to delete, the steps of that
 (`DELETE /account`, `POST /account/cleanup`) count apart, 90 a minute and
-900 a quarter of an hour; 2,000 a UTC day for all signed requests. Windows
-are aligned (a quarter starts on the hour, at :15, :30 and :45) and go by
-the server's clock, not the request's timestamp. Past one, the server
-answers `429 {"error": "device_limit"}` with `Retry-After`, the seconds
-until that window ends. It counts and refuses only once the signature
+900 a quarter of an hour; 2,000 a UTC day for all signed requests. They
+go by the device, so by the account: setting up again (at most 3 times a
+day) starts a new device with days of its own, so one Telegram user has
+at most about 4 days' worth in a day. Windows are aligned (a quarter
+starts on the hour, at :15, :30 and :45) and go by the server's clock, not
+the request's timestamp. Past one, the server answers
+`429 {"error": "device_limit"}` with `Retry-After`, the seconds until the
+longest window that is used up ends (the day's, then the quarter's, then
+the minute's). It counts and refuses only once the signature
 checks out, so nobody without the device's key can use up its limits, or
 learn of them: a forged login of a device that reached its limits is still
 `401 login_refused`. A replaced account (`410`) and one being deleted
 (`409`, on the routes it doesn't take) are refused before anything is
-written, counted or not. A request refused by a limit counts nothing; a
+counted or written. A request refused by a limit counts nothing; a
 replay counts (it passed the signature); nothing counted is ever taken
 back. If the count can't be taken, the answer is `503 unavailable`, and
-the request goes no further. The app backs off logins (above), waits out a
-deletion's steps by `Retry-After` (below), and otherwise says "Too many
-tries. Try again in a minute." A copy of the device's storage shares its
+the request goes no further. The app waits out a login refused so until
+`Retry-After`, but at least 5 seconds and at most 2 minutes at a time (a
+try before the end is refused at no cost); waits out a deletion's steps
+by `Retry-After` too, up to 30 seconds (below); and otherwise says "Too
+many tries. Try again in a minute.", or "Try again later." when the wait
+is longer than a minute. A copy of the device's storage shares its
 limits ([security.md](security.md#other-limits), Keys are stored with the
 data).
 

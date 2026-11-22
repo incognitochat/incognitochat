@@ -16,7 +16,10 @@ import (
 // in production). So each device's are limited, in a minute, a quarter of
 // an hour and a UTC day, after its signature checks out and before its
 // nonce is written (deviceLimit). The limits sit well above what the app
-// sends; past one, 429 device_limit with when its window ends.
+// sends; past one, 429 device_limit with when its window ends. They go by
+// the device, so by the account: setting up again (RegistrationsPerDay)
+// starts a new device with days of its own, so one Telegram user has at
+// most that many days' worth more in a day.
 //
 // Logins: the app logs in at each launch (opening a link or a notice
 // starts it again), and every 15 minutes while it shows; a login that
