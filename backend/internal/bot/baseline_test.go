@@ -14,11 +14,14 @@ import (
 // languages: each Telegram language code's reply and button, and the
 // setup's calls. A difference here is a change people would see.
 func TestBaselineReplies(t *testing.T) {
+	// The Persian texts changed on purpose: the product is "Incognito Chat"
+	// in Persian too, and the button says "open the app", so it doesn't mix
+	// scripts.
 	const (
 		enWelcome = "Incognito Chat lets people message you anonymously, end-to-end encrypted. Open the app to set up or to read your messages."
 		enOpen    = "Open Incognito Chat"
-		faWelcome = "با چت ناشناس دیگران می‌توانند ناشناس و با رمزنگاری سرتاسری به شما پیام بدهند. برای راه‌اندازی یا خواندن پیام‌ها، برنامه را باز کنید."
-		faOpen    = "باز کردن چت ناشناس"
+		faWelcome = "با Incognito Chat دیگران می‌توانند ناشناس و با رمزنگاری سرتاسری به شما پیام بدهند. برای راه‌اندازی یا خواندن پیام‌ها، برنامه را باز کنید."
+		faOpen    = "باز کردن برنامه"
 	)
 	b := &Bot{Secret: secret, AppURL: "https://example.github.io/"}
 	for _, tc := range []struct{ from, text, button string }{
