@@ -947,9 +947,10 @@ logged as a warning, since production keeps only warnings and errors; it
 isn't one.
 
 ```json
-{"time":"2026-11-18T10:02:00Z","level":"WARN","msg":"request counts","fn":"api","count":44,
+{"time":"2026-11-18T10:02:00Z","level":"WARN","msg":"request counts","fn":"api","count":46,
+ "messages":20,"media_bytes":2113536,
  "errors":{"rate_limited":2,"signature_rejected":1},
- "routes":{"get_inbox_200":12,"post_register_200":1,"post_send_200":28,"post_send_429":2,"put_links_id_keys_401":1}}
+ "routes":{"get_inbox_200":12,"post_media_201":2,"post_register_200":1,"post_send_200":28,"post_send_429":2,"put_links_id_keys_401":1}}
 ```
 
 - `count` is every answer in that minute, `routes` the answers by route
@@ -957,6 +958,16 @@ isn't one.
   `put_links_id_keys_401`), and `errors` the error answers by code, all
   routes together. Requests to no route, and requests Lambda refuses
   (`lambda-throttles`), aren't counted.
+- `messages` and `media_bytes`, there only when there were any, are for
+  public statistics. `messages` counts the sends answered 200 that weren't
+  quiet: the app marks seen receipts, reactions, edits, deletes and key
+  updates quiet, so it counts the messages people write (a modified app
+  could mark one quiet). Sends to an ended mailbox count too, since they're
+  answered the same on purpose. `media_bytes` adds up the sizes of the
+  uploads paid for (`POST /media` answered 201), padded as the app pads
+  every upload: a power of two up to 1 MiB, then whole MiB. It's the size
+  of the links given, not of finished uploads, and one total for every kind
+  of file: the server can't tell a photo from a voice message.
 - Counts only: route patterns, never paths (which carry IDs), statuses and
   error codes. Nothing names a person, device, account, link, mailbox,
   address or request.
@@ -971,8 +982,9 @@ stack) make these metrics of the lines, in namespace `<prefix>/api`. Each
 data point is dated by when its line was written, not by its `time`. The
 alarms on them (above) are in the bootstrap stack, which CI can't change,
 but CI deploys the line, the filters and the log level, so it could still
-silence them. A test (`backend/internal/tally`) checks that every name the
-filters read is one the `api` function can log.
+silence them. Tests (`backend/internal/tally`) check that every name the
+filters read is one the `api` function can log, and that each public count
+it logs has a filter.
 
 After the first deploy with these filters, once the app has been used
 (a metric appears only when it first counts something), check that the
@@ -989,14 +1001,16 @@ AWS_PROFILE=<profile> aws cloudwatch list-metrics --region <aws-region> --namesp
 | `Limited` | Every `429` (`rate_limited`, `daily_limit`, `link_busy`, `download_limit`). |
 | `Limited.<route>` | One route's `429`s, e.g. `Limited.post_send`, for each route with a limit (`local.limited_routes`). |
 | `InvalidToken`, `InitDataRejected`, `SignatureRejected` | Answers with that error code. |
+| `Messages` | Messages sent: `messages` above. Public statistics, no alarm. |
+| `MediaBytes` | Padded bytes of the uploads paid for (unit `Bytes`): `media_bytes` above. Public statistics, no alarm. |
 
-Metric filters are free. Each of the 19 metrics is billed as a custom
-metric, $0.30 a month, but only for the hours it gets data: about $1 a month
-for the three counted whenever the app is used, next to nothing for the
-others until something goes wrong, and at most $5.70 if all of them got data
-every hour. The six alarms cost $0.70 a month (the token alarm reads two
-metrics), and the lines, under 1 KB a minute per busy instance, cents. So
-about $2 a month per environment, at most about $6.50.
+Metric filters are free. Each of the 21 metrics is billed as a custom
+metric, $0.30 a month, but only for the hours it gets data: about $1.50 a
+month for the five counted whenever the app is used, next to nothing for
+the others until something goes wrong, and at most $6.30 if all of them got
+data every hour. The six alarms cost $0.70 a month (the token alarm reads
+two metrics), and the lines, under 1 KB a minute per busy instance, cents.
+So about $2.20 a month per environment, at most about $7.
 
 **When a count alarm fires:**
 
@@ -1012,7 +1026,9 @@ about $2 a month per environment, at most about $6.50.
            sum(`errors.rate_limited`) as rate_limited,
            sum(`errors.daily_limit`) as daily_limit,
            sum(`errors.link_busy`) as link_busy,
-           sum(`errors.download_limit`) as download_limit
+           sum(`errors.download_limit`) as download_limit,
+           sum(messages) as messages,
+           sum(media_bytes) as media_bytes
      by bin(1h)
    ```
 

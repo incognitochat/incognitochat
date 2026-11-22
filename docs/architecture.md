@@ -463,7 +463,8 @@ The panel under the message box has emoji and stickers, as in Telegram.
 - Logs: warnings and errors only, kept 7 days. IDs, IP addresses, user agents
   and bodies are never logged, and there are no API access logs. Each `api`
   instance logs one line a minute of request counts by route, status and
-  error code, counts only, for the alarms
+  error code, counts only, for the alarms, and how many messages were sent
+  and how many bytes of media uploaded, for public statistics
   ([deployment.md](deployment.md#request-counts)).
 - Code signing: the functions run only code signed by the environment's AWS
   Signer profile, which the deploy role signs with (whatever it uploads), and
