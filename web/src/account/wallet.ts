@@ -79,6 +79,19 @@ export async function rememberLeft(db: Database, kind: TokenKind, left: number, 
   await putMeta(db, LEFT_META[kind], { day: Math.floor(now / DAY_SECONDS), left });
 }
 
+/**
+ * Remembers `left` like rememberLeft, but never more than the server said
+ * before today: what it will still sign only falls within a day, and this
+ * answer may be older than one that came before (GET /usage can miss what
+ * was counted in about the last half a minute). Returns what is kept.
+ */
+export async function lowerLeft(db: Database, kind: TokenKind, left: number, now = nowSeconds()): Promise<number> {
+  const known = await signableToday(db, now, kind);
+  const kept = known === null ? left : Math.min(known, left);
+  await rememberLeft(db, kind, kept, now);
+  return kept;
+}
+
 /** How many more tokens of a kind the server said it will sign today; null if it hasn't said today. */
 async function signableToday(db: Database, now: number, kind: TokenKind): Promise<number | null> {
   const value = await getMeta<{ day?: unknown; left?: unknown }>(db, LEFT_META[kind]);

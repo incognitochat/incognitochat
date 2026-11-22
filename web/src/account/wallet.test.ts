@@ -6,7 +6,7 @@ import { ApiError } from '../net/api';
 import type { Session } from '../net/session';
 import { challenge, EPOCH_SECONDS, epochOf, LABEL_MEDIA_TOKEN, TOKEN_INPUT_LENGTH } from '../protocol/token';
 import { getMeta, openDatabase } from '../storage/db';
-import { batchFor, budgetLeft, countTokens, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
+import { batchFor, budgetLeft, countTokens, lowerLeft, refillTokens, rememberLeft, returnToken, returnTokens, takeToken, takeTokens, type TokenIssuer } from './wallet';
 
 let n = 0;
 const NOW = 1_800_000_000;
@@ -212,5 +212,17 @@ describe('token wallet', () => {
     expect(await batchFor(db, 3, NOW)).toBe(3);
     // Another day: unknown again.
     expect(await batchFor(db, 20, NOW + 24 * 60 * 60)).toBe(20);
+  });
+
+  it('lets an answer that may be older (Usage) lower what is left within a day, never raise it', async () => {
+    const db = await openDatabase(`wallet-test-${n++}`);
+    expect(await lowerLeft(db, 'send', 40, NOW)).toBe(40);
+    await rememberLeft(db, 'send', 10, NOW);
+    expect(await lowerLeft(db, 'send', 49, NOW)).toBe(10);
+    expect(await batchFor(db, 20, NOW)).toBe(10);
+    expect(await lowerLeft(db, 'send', 6, NOW)).toBe(6);
+    // Kinds apart, and another day starts over.
+    expect(await lowerLeft(db, 'media', 300, NOW)).toBe(300);
+    expect(await lowerLeft(db, 'send', 900, NOW + 24 * 60 * 60)).toBe(900);
   });
 });

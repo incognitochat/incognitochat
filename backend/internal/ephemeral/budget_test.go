@@ -488,6 +488,20 @@ func TestUsedAt(t *testing.T) {
 	used(l, 5, 0)
 	fresh := &Limiter{DB: meter, Table: table, Now: now}
 	used(fresh, 5, 0.5)
+
+	// A refusal teaches only a guess, maybe lower than the count (10 more
+	// refused: at least 91, where 95 were counted): never served, but read
+	// again.
+	if ok, err := other.AllowNAt(ctx, "k", 90, 100, day, clock); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if ok, err := fresh.AllowNAt(ctx, "k", 10, 100, day, clock); ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if fresh.CountedAt("k", day, clock) != 91 {
+		t.Fatalf("guessed %d", fresh.CountedAt("k", day, clock))
+	}
+	used(fresh, 95, 0.5)
 }
 
 func rowsOf(t *testing.T, client *dynamodb.Client, table, key string) []map[string]types.AttributeValue {

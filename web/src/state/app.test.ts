@@ -9,7 +9,7 @@ import { addMessage, deleteMessage, getConversation, getMedia, listMessages, PAG
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
 import { SYNC_GAP_MS } from '../sync/pace';
-import type { TokenIssuer } from '../account/wallet';
+import { rememberLeft, type TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
@@ -2484,6 +2484,16 @@ describe('usage', () => {
       chats: { used: 10, limit: 2000 },
     });
     await vi.waitFor(() => expect(owner.app.messagesLeft.value).toBe(20));
+  });
+
+  it('never shows or remembers more left than the server said before today', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    // A token batch's answer said 10 left; Usage, maybe older, says 20.
+    await rememberLeft(owner.db, 'send', 10);
+    await owner.app.usage();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'usage', usage: { messages: { left: 10, limit: 1000 } } });
+    await vi.waitFor(() => expect(owner.app.messagesLeft.value).toBe(10));
   });
 });
 

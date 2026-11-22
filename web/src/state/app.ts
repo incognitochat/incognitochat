@@ -34,7 +34,7 @@ import {
 import { checkSwitches, type Switch, type Switches } from '../account/switches';
 import { checkAccountInfo, createLink, listLinks, newKeyToTell, replaceLink, revokeLink, toldNewKey, type AccountInfo, type LinkRecord } from '../account/links';
 import type { Config } from '../config';
-import { budgetLeft, countTokens, rememberLeft, type TokenIssuer, type TokenKind } from '../account/wallet';
+import { budgetLeft, countTokens, lowerLeft, type TokenIssuer, type TokenKind } from '../account/wallet';
 import { checkUsage, usageView, type UsageView } from '../account/usage';
 import { poolSize } from '../messaging/pool';
 import { importIssuerKey } from '../crypto/blindrsa';
@@ -1700,9 +1700,12 @@ export function createApp(deps: Deps) {
       }
       return;
     }
-    // What the server will still sign today, for the low-balance notice too.
-    await rememberLeft(deps.db, 'send', info.send.limit - info.send.used);
-    await rememberLeft(deps.db, 'media', info.media.limit - info.media.used);
+    // What the server will still sign today, for the low-balance notice
+    // too: never more than it said before today (a batch's exact answer),
+    // since this one may miss what was counted in the last half a minute.
+    const sendLeft = await lowerLeft(deps.db, 'send', info.send.limit - info.send.used);
+    const mediaLeft = await lowerLeft(deps.db, 'media', info.media.limit - info.media.used);
+    info = { ...info, send: { ...info.send, used: info.send.limit - sendLeft }, media: { ...info.media, used: info.media.limit - mediaLeft } };
     void refreshBudget();
     const held = {
       sendTokens: await tokensHeld('send'),

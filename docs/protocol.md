@@ -1564,8 +1564,9 @@ account's mailboxes against the most it may have). The app adds what it
 holds unused (tokens fetched ahead, spare mailboxes) to show what's left.
 Both only read the counters the limits keep anyway. `GET /usage` reads them
 cheaply (what the server learnt in the last half a minute, or else an
-eventually consistent read), so it may miss what was counted in about the
-last half a minute.
+eventually consistent read; never a guess a refusal left), so it may miss
+what was counted in about the last half a minute: the app never takes it
+for more left than a token batch's answer said that day.
 
 The two kinds have different issuer keys. A blind signer can't see what it
 signs, so only a key of its own gives a kind its own daily budget; a token

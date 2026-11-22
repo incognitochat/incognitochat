@@ -309,7 +309,7 @@ type Limiter struct {
 type counted struct {
 	uses    int
 	until   int64 // when its window ends, Unix seconds
-	learned int64 // when the table told it, Unix seconds
+	learned int64 // when the table told it, Unix seconds; 0 for a guess (learnGuess)
 }
 
 type tally struct {
@@ -364,8 +364,9 @@ func (l *Limiter) AllowNAt(ctx context.Context, key string, n, limit int, window
 	}
 	out, err := l.add(ctx, key, n, start, window, limit-n)
 	if conditionFailed(err) {
-		// More than limit-n were counted already.
-		l.learn(key, start, window, max(l.counted(key, start), limit-n+1))
+		// More than limit-n were counted already: a guess, enough to
+		// refuse, never served as a count (UsedAt, CheckAt read again).
+		l.learnGuess(key, start, window, max(l.counted(key, start), limit-n+1))
 		return false, nil
 	}
 	if err != nil {
@@ -891,6 +892,17 @@ func (l *Limiter) memo(key string, start time.Time) (counted, bool) {
 
 // learn records the count the table just told.
 func (l *Limiter) learn(key string, start time.Time, window time.Duration, uses int) {
+	l.remember(key, start, window, uses, l.Now().Unix())
+}
+
+// learnGuess records a count at least the table's, but maybe lower: as
+// learnt long ago, so it refuses what it can, and is never taken for a
+// fresh count.
+func (l *Limiter) learnGuess(key string, start time.Time, window time.Duration, uses int) {
+	l.remember(key, start, window, uses, 0)
+}
+
+func (l *Limiter) remember(key string, start time.Time, window time.Duration, uses int, learned int64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	k := knownKey(key, start)
@@ -905,7 +917,7 @@ func (l *Limiter) learn(key string, start time.Time, window time.Duration, uses 
 	if l.known == nil || len(l.known) >= maxKnown {
 		l.known = map[string]counted{}
 	}
-	l.known[k] = counted{uses: uses, until: start.Add(window).Unix(), learned: l.Now().Unix()}
+	l.known[k] = counted{uses: uses, until: start.Add(window).Unix(), learned: learned}
 }
 
 // Used reports how many uses of key the current window has counted.
