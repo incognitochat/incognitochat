@@ -4,7 +4,7 @@
 // language, which the server reads from the signed launch data.
 
 import { computed, signal, type ReadonlySignal } from '@preact/signals';
-import { applyLanguage, isLanguage, LANGUAGES, pickLanguage, type Language } from '../i18n';
+import { applyLanguage, isLanguage, LANGUAGES, pickLanguage, t, type Language } from '../i18n';
 import { deleteMeta, getMeta, putMeta, type Database } from '../storage/db';
 
 const NAME = 'language';
@@ -12,8 +12,17 @@ const NAME = 'language';
 /** One of the app's languages, or 'telegram': the language Telegram reports (else the browser's). */
 export type LanguageChoice = Language | 'telegram';
 
-/** The choices, in the order they're offered. */
-export const LANGUAGE_CHOICES: readonly LanguageChoice[] = ['telegram', ...(Object.keys(LANGUAGES) as Language[])];
+/**
+ * The choices, in the order they're offered: Same as Telegram, then each
+ * language by its own name, as the picker shows it. English collation (the
+ * root order, whatever the device's language) puts Latin script A–Z first,
+ * then Cyrillic, then Arabic script, as the website's language menu does.
+ */
+const byName = new Intl.Collator('en');
+export const LANGUAGE_CHOICES: readonly LanguageChoice[] = [
+  'telegram',
+  ...(Object.keys(LANGUAGES) as Language[]).sort((a, b) => byName.compare(t(a, 'languageName'), t(b, 'languageName'))),
+];
 
 export interface LanguageSetting {
   readonly choice: ReadonlySignal<LanguageChoice>;

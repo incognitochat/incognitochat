@@ -1,5 +1,5 @@
-// Every language the app has, in the order the picker offers them (after
-// "Same as Telegram"). A code is kept on devices (the language chosen) and,
+// Every language the app has (the picker sorts them by name:
+// state/language.ts). A code is kept on devices (the language chosen) and,
 // for notices, by the server, which picks from Telegram's language the same
 // way (backend/internal/i18n): never rename or remove one. The shared
 // vectors in backend/internal/i18n/testdata/languages.json keep both sides

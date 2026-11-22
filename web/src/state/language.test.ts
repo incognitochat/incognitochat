@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { LANGUAGES } from '../i18n';
+import { LANGUAGES, t } from '../i18n';
 import { openDatabase, putMeta } from '../storage/db';
 import { getLanguageChoice, LANGUAGE_CHOICES, loadLanguageSetting } from './language';
 
@@ -60,10 +60,25 @@ describe('the language setting', () => {
     expect(new Set(LANGUAGE_CHOICES).size).toBe(LANGUAGE_CHOICES.length);
   });
 
-  it('offers Same as Telegram first, then each language in the registry order', () => {
-    expect(LANGUAGE_CHOICES).toEqual(['telegram', 'en', 'fa', 'ru', 'ar', 'nl', 'es', 'pt-BR', 'id', 'tr', 'uk', 'fr', 'de', 'pl']);
+  it('offers Same as Telegram first, then each language by its own name, as the website does', () => {
+    // Latin script A–Z, then Cyrillic, then Arabic script.
+    expect(LANGUAGE_CHOICES.map((c) => (c === 'telegram' ? c : t(c, 'languageName')))).toEqual([
+      'telegram',
+      'Bahasa Indonesia',
+      'Deutsch',
+      'English',
+      'Español',
+      'Français',
+      'Nederlands',
+      'Polski',
+      'Português (Brasil)',
+      'Türkçe',
+      'Русский',
+      'Українська',
+      'العربية',
+      'فارسی',
+    ]);
   });
-
   it('reads stored values that only look like a language as Same as Telegram', async () => {
     for (const stored of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'EN', 'fa-IR', ['fa'], 1, null, { en: true }]) {
       const db = await openDatabase(`language-${crypto.randomUUID()}`);
