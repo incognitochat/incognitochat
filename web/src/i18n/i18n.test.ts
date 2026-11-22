@@ -148,6 +148,11 @@ describe('i18n', () => {
     expect([0, 1, 2, 1000].map((count) => t('de', 'newMessages', { count }))).toEqual(['0 neue Nachrichten', '1 neue Nachricht', '2 neue Nachrichten', '1.000 neue Nachrichten']);
   });
 
+  it('counts in Polish with its three forms', () => {
+    expect([1, 2, 5, 12, 22, 1000].map((count) => t('pl', 'newMessages', { count }))).toEqual(['1 nowa wiadomość', '2 nowe wiadomości', '5 nowych wiadomości', '12 nowych wiadomości', '22 nowe wiadomości', '1000 nowych wiadomości']);
+    expect(t('pl', 'invitationsRemaining', { count: 1 })).toBe('Możesz zaprosić jeszcze 1 osobę.');
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');
