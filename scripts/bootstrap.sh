@@ -147,10 +147,11 @@ stats_vars() {
     # fail on a closed pipe and the check pass by mistake.
     if [[ -z $stats_subject ]]; then
       err=$(mktemp)
-      if ! state=$(tf state list 2>"$err"); then
+      if ! state=$(tf state list -no-color 2>"$err"); then
         if [[ ${1:-} != first-run ]]; then
-          echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied" >&2
-          echo "(rerun with STATS_REPO=<owner>/<repo> or STATS_REPO=none to skip this check). Terraform said:" >&2
+          echo "Couldn't list the Terraform state to look for a stats role, so nothing was applied." >&2
+          echo "STATS_REPO=<owner>/<repo> keeps a stats role and STATS_REPO=none removes it; either" >&2
+          echo "skips this check. Terraform said:" >&2
           cat "$err" >&2
           rm -f "$err"
           exit 1
