@@ -13,7 +13,38 @@ import { countTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { openDatabase, putMeta } from '../storage/db';
 import { pickLanguage } from '../i18n';
+import type { SyncEvent } from '../sync/locks';
 import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
+
+// A read of an open chat's page held up once it's done, until the test lets
+// it go (holdPage): as a slow IndexedDB would, with its draw still under way.
+const pages = vi.hoisted(() => ({ hold: null as (() => Promise<void>) | null }));
+vi.mock('../messaging/store', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../messaging/store')>();
+  return {
+    ...original,
+    pageMessages: async (...args: Parameters<typeof original.pageMessages>) => {
+      const page = await original.pageMessages(...args);
+      const hold = pages.hold;
+      pages.hold = null;
+      await hold?.();
+      return page;
+    },
+  };
+});
+
+/** Holds the next read of an open chat's page, once it's done, until released. */
+function holdPage() {
+  let reached!: () => void;
+  const atRead = new Promise<void>((resolve) => (reached = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  pages.hold = () => {
+    reached();
+    return released;
+  };
+  return { atRead, release };
+}
 
 let n = 0;
 const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
@@ -188,9 +219,15 @@ function launchWith(startParam: string, allowsWrite = true, language?: string): 
 }
 
 /** Sets up an account (two launches) and returns the app of the registration launch. */
-async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', tg: Bridge = bridge()): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>> }> {
+async function person(
+  b: Awaited<ReturnType<typeof backend>>,
+  startParam = '',
+  tg: Bridge = bridge(),
+): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>>; broadcasts: SyncEvent[] }> {
   const db = await openDatabase(`conv-test-${n++}`);
-  const deps = { config, api: b.api, db, bridge: tg, broadcast: () => {}, closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+  // What the apps on this device told the others.
+  const broadcasts: SyncEvent[] = [];
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -202,7 +239,7 @@ async function person(b: Awaited<ReturnType<typeof backend>>, startParam = '', t
     await next.start();
     return next;
   };
-  return Object.assign(app, { db, reopen });
+  return Object.assign(app, { db, reopen, broadcasts });
 }
 
 function screenOf<K extends Screen['kind']>(screen: Screen, kind: K): Extract<Screen, { kind: K }> {
@@ -874,6 +911,40 @@ describe('conversations in the app', () => {
     }
     decrypt.mockRestore();
   }, 60_000);
+
+  it("shows why a send failed, though a redraw of the chat was waiting its turn when it did", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    // The next send is held at the server, then fails.
+    const send = holdAndFail(b, /^\/send$/);
+    const sending = sender.sendMessage('mine');
+    await send.atServer;
+    // A draw of the chat under way, slow to read, and a sync's redraw
+    // waiting its turn after it.
+    const drawing = holdPage();
+    const synced = sender.refresh();
+    await drawing.atRead;
+    const waiting = sender.refresh();
+    // The send fails meanwhile: what it shows joins the redraw waiting (it
+    // tells the other copies, then redraws, at once).
+    const told = sender.broadcasts.length;
+    send.fail(new NetworkError('unreachable'));
+    await vi.waitFor(() => expect(sender.broadcasts.length).toBeGreaterThan(told));
+    drawing.release();
+    await Promise.all([sending, synced, waiting]);
+    const chat = screenOf(sender.screen.value, 'conversation');
+    expect([chat.error, chat.messages.map((m) => [m.text, m.status])]).toEqual([
+      'network',
+      [
+        ['hello', 'sent'],
+        ['mine', 'failed'],
+      ],
+    ]);
+  });
 
   it('sends replies that quote a message, and deletes one message on this device', async () => {
     const b = await backend();
