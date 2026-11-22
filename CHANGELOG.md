@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.1](https://github.com/incognitochat/incognitochat/compare/v2.9.0...v2.9.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **web:** say on the welcome screen that you don't know who writes to you ([#230](https://github.com/incognitochat/incognitochat/issues/230)) ([925e3c5](https://github.com/incognitochat/incognitochat/commit/925e3c5ae4f1fb49be30e01d13f6f8c944401f40))
+
 ## [2.9.0](https://github.com/incognitochat/incognitochat/compare/v2.8.0...v2.9.0) (2026-11-22)
 
 
