@@ -140,7 +140,15 @@ from a table every user shares, so each device's are limited too: 180 a
 minute, 1,200 a quarter of an hour and 30,000 a UTC day. They are counted
 once the token checks out and before anything is read: a token that is
 missing, wrong or over is `401 session_expired` first, whatever the
-count, so only the token's holder can use them up or learn of them. Past
+count, so only the token's holder can make them or learn of their count.
+Messages sent to the device make its app make some (a fetch and a
+confirmation), so the app paces those on the whole device, whatever the
+copies open: the syncs it asks for by itself (pushes, the poll) at most
+one every 5 seconds, one every 15 once a flood has lasted half an hour,
+each reading one page. However many messages come in, that is at most
+about 24 a minute, 360 a quarter of an hour and 12,000 a day, under half
+of each limit, and each message waits at most about that gap more than
+it would. Past
 one, the same `429 device_limit` with `Retry-After`, and nothing is read.
 Each function instance counts them in memory and writes them ten at a
 time, so a window may let a few more through than its limit; the request
@@ -1077,7 +1085,11 @@ each mailbox's owner, to deliver, but not who writes to it.
   meanwhile becomes one sync when the wait ends. Being shown still syncs at
   once, and a sync that gets through ends the wait, as do the push socket
   opening and the device coming back online, which sync at once too. No
-  answer while the device says it's offline doesn't count. An envelope the app
+  answer while the device says it's offline doesn't count. The syncs the
+  app asks for by itself are paced on the whole device, whichever copy
+  runs them (Limits per device): at most one every 5 seconds, reading one
+  page, and a poll within 10 seconds of a sync, or a push before one, is
+  answered by it, the copy that ran it telling the others. An envelope the app
   can't take in yet (its chat is busy, or its link can't be asked now)
   stays unconfirmed, and the walk goes past it. Undelivered envelopes
   expire after 30 days.

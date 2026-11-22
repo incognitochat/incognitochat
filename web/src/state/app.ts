@@ -76,7 +76,8 @@ import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { findSourceUrl } from '../platform/source';
 import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
-import type { SyncEvent } from '../sync/locks';
+import { withLock, type SyncEvent } from '../sync/locks';
+import { createPace } from '../sync/pace';
 
 /** Whether the device says it's offline (its saying online proves nothing). */
 const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -449,6 +450,14 @@ const STUCK_SLACK_MS = 1_000;
  * in a row doubles it, up to this.
  */
 const SYNC_BACKOFF_MAX_MS = 5 * 60_000;
+/**
+ * How many pages of the inbox a sync the app asks for by itself reads (a
+ * push, the poll): one, of up to 50 messages, and its confirmation, so a
+ * flood of messages costs the device at most 2 requests a sync
+ * (sync/pace.ts). One that stops with more waiting asks for another, at the
+ * device's pace; what the user does reads as many as a sync does.
+ */
+const BACKGROUND_PAGES = 1;
 
 /** A link of this account, with its shareable URL. */
 export interface LinkView extends LinkRecord {
@@ -511,14 +520,23 @@ export function createApp(deps: Deps) {
   let stopBackground = (): void => {};
   /** Holds back the syncs the app asks for by itself (backgroundSync) while the server is in trouble. */
   const syncBackoff = createBackoff({ baseMs: POLL_MS, maxMs: SYNC_BACKOFF_MAX_MS });
-  /** The one sync waiting for the backoff to end, for all asked for meanwhile. */
+  /** The one sync waiting for the backoff or the device's pace to allow it, for all asked for meanwhile. */
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * What the syncs the app asks for by itself, not run yet, are for: what
+   * came after this (Unix ms, the latest asked); null if none waits.
+   */
+  let wantedSince: number | null = null;
+  /** The device's syncs as this copy knows them (sync/pace.ts), and whether this copy is running its paced one. */
+  const syncPace = createPace();
+  let pacing = false;
   /** Stops messaging and everything started for it: the poll, the socket, a sync waiting out a server's pause. */
   function stopMessaging(): void {
     stopWatchingStuck();
     stopBackground();
     clearTimeout(backoffTimer);
     backoffTimer = undefined;
+    wantedSince = null;
     messaging?.stop();
     messaging = null;
   }
@@ -818,7 +836,7 @@ export function createApp(deps: Deps) {
     // Without a usable issuer key the app still works, but can't send.
     if (!(await createEngine())) return;
     if (online) {
-      await sync();
+      await syncNow();
       // The server no longer takes this device (its account being deleted,
       // say): nothing more starts, no poll, socket or logins.
       if (signedOut) return;
@@ -840,28 +858,29 @@ export function createApp(deps: Deps) {
             // The server is reachable again: no more waiting.
             onOpen: () => {
               endWait();
-              void sync();
+              void syncNow();
             },
           })
         : null;
     // Being shown is the user's doing: it syncs, backoff or not.
     const visibility = () => {
       socket?.setVisible(shown());
-      if (shown()) void sync();
+      if (shown()) void syncNow();
     };
     socket?.setVisible(shown());
     socket?.start();
-    // With a socket open, polling is only a safety net.
+    // With a socket open, polling is only a safety net. A poll is answered
+    // by a sync in the last half of its interval, in any copy.
     let ticks = 0;
     const poll = setInterval(() => {
       ticks++;
-      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync();
+      if (shown() && (!socket?.connected || ticks % SOCKET_POLL_EVERY === 0)) backgroundSync(Date.now() - POLL_MS / 2);
     }, POLL_MS);
     document.addEventListener('visibilitychange', visibility);
     // Back online: whatever the backoff, sync now.
     const backOnline = () => {
       endWait();
-      if (shown()) void sync();
+      if (shown()) void syncNow();
     };
     const win = typeof window === 'undefined' ? null : window;
     win?.addEventListener('online', backOnline);
@@ -886,21 +905,42 @@ export function createApp(deps: Deps) {
     };
   }
 
-  /** The sync under way, and whether another was asked for meanwhile: pushes, polls and showing the app ask often, so one runs and one waits, no more. */
+  /**
+   * The sync under way, and whether another was asked for meanwhile (and
+   * how many pages it may read): one runs and one waits, no more.
+   */
   let syncing: Promise<void> | null = null;
   let syncAgain = false;
+  let againPages = 0;
 
-  /** Fetches new messages; refreshes the screen if any arrived. */
-  function sync(): Promise<void> {
+  /**
+   * A sync the user's doing asks for (opening the app, showing it, coming
+   * back online, the push socket opening): at once, whatever the device's
+   * pace, and it answers the syncs asked for before it, in every copy
+   * (sync/pace.ts).
+   */
+  function syncNow(): Promise<void> {
+    const at = Date.now();
+    syncPace.started(at, false);
+    deps.broadcast({ type: 'sync-started', at, paced: false });
+    return sync(Infinity);
+  }
+
+  /** Fetches new messages, up to `pages` pages (Infinity: as many as a sync reads); refreshes the screen if any arrived. */
+  function sync(pages: number): Promise<void> {
     if (syncing) {
       syncAgain = true;
+      againPages = Math.max(againPages, pages);
       return syncing;
     }
     syncing = (async () => {
       try {
+        let next = pages;
         do {
           syncAgain = false;
-          await syncOnce();
+          againPages = 0;
+          await syncOnce(next);
+          next = againPages;
           // Not again at once after a failure: when the wait is over.
         } while (syncAgain && syncBackoff.remaining() === 0);
         if (syncAgain) {
@@ -915,41 +955,85 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * A sync the app asks for by itself (the poll, a push, the end of a
-   * pause): while the server is in trouble (syncBackoff), it waits, and all
-   * asked for meanwhile become one when the wait ends.
+   * A sync the app asks for by itself (a push, the poll, a chat free again,
+   * the end of a pause), for what came after `since`: paced on the whole
+   * device (sync/pace.ts), so that pushes, however many messages come and
+   * however many copies are open, make at most one every SYNC_GAP_MS (a
+   * flood, one every SYNC_REFILL_MS once it has lasted), and one another
+   * copy ran since answers it; and while the server is in trouble
+   * (syncBackoff), it waits. All asked for meanwhile become one.
    */
-  function backgroundSync(): void {
-    const wait = syncBackoff.remaining();
-    if (wait === 0) {
-      void sync();
-      return;
-    }
-    // For when the wait ends now, which may be sooner than before (it
-    // started over).
+  function backgroundSync(since = Date.now()): void {
+    wantedSince = Math.max(wantedSince ?? since, since);
+    armPace(syncBackoff.remaining());
+  }
+
+  function armPace(wait: number): void {
     clearTimeout(backoffTimer);
     backoffTimer = setTimeout(() => {
       backoffTimer = undefined;
-      backgroundSync();
+      void runPaced();
     }, wait);
   }
 
-  /** Ends the wait. Returns whether a sync was waiting for it, which is then up to the caller. */
-  function endWait(): boolean {
-    syncBackoff.succeeded();
-    if (backoffTimer === undefined) return false;
-    clearTimeout(backoffTimer);
-    backoffTimer = undefined;
-    return true;
+  /**
+   * Runs the sync asked for by itself once the device's pace allows it, or
+   * drops it if a sync started since (in any copy). It decides and syncs
+   * holding a lock across copies, and tells the other copies when its sync
+   * started; so a copy that decides next knows of it, and waits out the
+   * rest of the gap (without the lock).
+   */
+  async function runPaced(): Promise<void> {
+    if (pacing || wantedSince === null) return;
+    pacing = true;
+    let after: { wait: number } | { partway: boolean } = { wait: -1 };
+    try {
+      after = await withLock('sync-pace', async () => {
+        for (;;) {
+          const since = wantedSince;
+          if (since === null) return { wait: -1 };
+          // A sync started after it was asked for, here or in another
+          // copy: it took in what was asked for then (and the other copy
+          // tells this one of it).
+          if (syncPace.last() > since) {
+            if (wantedSince === since) wantedSince = null;
+            continue;
+          }
+          // The server in trouble, or the device's pace: waited out
+          // without the lock.
+          const wait = Math.max(syncBackoff.remaining(), syncPace.wait(Date.now()));
+          if (wait > 0) return { wait };
+          break;
+        }
+        const at = Date.now();
+        syncPace.started(at, true);
+        deps.broadcast({ type: 'sync-started', at, paced: true });
+        // Starting now: it answers everything asked so far.
+        wantedSince = null;
+        await sync(BACKGROUND_PAGES);
+        return { partway: messaging?.partway() ?? false };
+      });
+    } finally {
+      pacing = false;
+    }
+    // More waits than it read: another, at the pace. Or asked meanwhile.
+    if ('partway' in after && after.partway) backgroundSync();
+    else if (wantedSince !== null) armPace('wait' in after && after.wait > 0 ? after.wait : 0);
   }
 
-  async function syncOnce(): Promise<void> {
+  /** Ends the wait for a server in trouble: a sync asked for meanwhile goes at the device's pace. */
+  function endWait(): void {
+    syncBackoff.succeeded();
+    if (wantedSince !== null) armPace(0);
+  }
+
+  async function syncOnce(pages: number): Promise<void> {
     if (!messaging) return;
     let received = 0;
     try {
-      received = await messaging.sync();
-      // Through: what was waiting runs now.
-      if (endWait()) syncAgain = true;
+      received = await messaging.sync({ pages });
+      // Through: what was waiting goes now (at the device's pace).
+      endWait();
     } catch (err) {
       // What it stored before failing is still shown.
       if (err instanceof SyncFailed) received = err.received;
@@ -2666,7 +2750,9 @@ export function createApp(deps: Deps) {
       deps.bridge ? openPopup(deps.bridge, params) : Promise.resolve(null),
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
     showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
-    sync,
+    sync: syncNow,
+    /** Another copy started a sync at `at` (paced: one the app asked for by itself). */
+    syncStarted: (at: number, paced: boolean) => syncPace.started(at, paced),
     refresh,
     /** A tap on a chat. */
     openConversation: (id: string) => openConversation(id),

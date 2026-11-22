@@ -8,6 +8,7 @@ import { deleteMeta, getMeta, openDatabase, putMeta, wipe } from '../storage/db'
 import { addMessage, deleteMessage, getConversation, getMedia, listMessages, PAGE, putConversation, putMedia, sendingLock, STUCK_MS } from '../messaging/store';
 import { DEFAULT_MEDIA_SETTINGS, getMediaSettings } from '../messaging/settings';
 import { withLock, type SyncEvent } from '../sync/locks';
+import { SYNC_GAP_MS } from '../sync/pace';
 import type { TokenIssuer } from '../account/wallet';
 import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
@@ -946,12 +947,13 @@ describe('syncing', () => {
       expect(inbox()).toBe(before + 1);
 
       // The server is fine again: once a sync gets through, the poll is
-      // back to every 20 seconds.
+      // back to every 20 seconds (a poll within 10 seconds of a sync is
+      // answered by it).
       trouble.length = 0;
       show({ is_visible: true });
       await vi.advanceTimersByTimeAsync(0);
       const fine = inbox();
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(80_000);
       expect(inbox() - fine).toBeGreaterThanOrEqual(3);
       await app.home();
     } finally {
@@ -1029,7 +1031,7 @@ describe('syncing', () => {
       expect(inbox()).toBe(before + 1);
 
       // No answer while the device says it's offline doesn't count: the
-      // next push syncs at once.
+      // next push syncs as soon as the device's pace allows.
       trouble.length = 0;
       listeners.get('online')!();
       await vi.advanceTimersByTimeAsync(0);
@@ -1037,14 +1039,16 @@ describe('syncing', () => {
       trouble.push(new NetworkError('request failed'), new NetworkError('request failed'));
       before = inbox();
       socket.hint();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(SYNC_GAP_MS);
+      expect(inbox()).toBe(before + 1);
       socket.hint();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2 * SYNC_GAP_MS);
       expect(inbox()).toBe(before + 2);
       online = true;
 
       // A sync asked for while one is failing doesn't run right after it,
       // but when the wait is over.
+      await vi.advanceTimersByTimeAsync(2 * SYNC_GAP_MS);
       trouble.push(unavailable(), unavailable());
       let release!: () => void;
       server.state.inboxGate = new Promise((resolve) => (release = resolve));
@@ -1064,6 +1068,139 @@ describe('syncing', () => {
       Reflect.deleteProperty(navigator, 'onLine');
     }
   });
+});
+
+describe('a flood of messages', () => {
+  // The server's limits on a device's requests with a session
+  // (backend/internal/api/devices.go): 180 a minute, 1,200 a quarter of an
+  // hour. Pushes, however many, and however many copies are open, must
+  // stay well under half of each, so nobody writing to someone can use
+  // them up.
+  const PER_MINUTE = 180;
+  const PER_QUARTER = 1200;
+
+  it('costs the device under half of its request limits, with two copies open, for a whole quarter of an hour', async () => {
+    const base = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    const { db } = await registered(base.api, { issuer });
+
+    // The inbox as the server keeps it, until confirmed, and its limit on
+    // fetches that read something (30 a minute, InboxUnitsPerMinute).
+    const waiting = new Map<string, number>(); // item ID -> when delivered
+    const waited: number[] = []; // how long each confirmed item waited
+    const reads = new Map<number, number>();
+    const requests: number[] = []; // when each request with a session went
+    const api: Api = {
+      post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
+      async request(method, path, init, check) {
+        if (init.headers?.['X-Session']) requests.push(Date.now());
+        if (method === 'GET' && path.startsWith('/inbox')) {
+          if (waiting.size === 0) return check({ items: [], more: false });
+          const minute = Math.floor(Date.now() / 60_000);
+          if ((reads.get(minute) ?? 0) >= 30) throw new ApiError(429, 'rate_limited');
+          reads.set(minute, (reads.get(minute) ?? 0) + 1);
+          const ids = [...waiting.keys()].slice(0, 50);
+          return check({ items: ids.map((id) => ({ id, mailbox: 'MMMMMMMMMMMMMMMMMMMMMM', envelope: 'AAAA' })), more: waiting.size > ids.length });
+        }
+        if (method === 'POST' && path === '/ack') {
+          for (const id of (JSON.parse(init.body!) as { ids: string[] }).ids) {
+            const at = waiting.get(id);
+            if (at !== undefined) waited.push(Date.now() - at);
+            waiting.delete(id);
+          }
+          return check({});
+        }
+        return base.api.request(method, path, init, check);
+      },
+    };
+
+    // Each copy's push socket opens at once; every delivery hints each.
+    const sockets: FloodSocket[] = [];
+    class FloodSocket {
+      static OPEN = 1;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        sockets.push(this);
+        void Promise.resolve().then(() => {
+          this.readyState = 1;
+          this.onopen?.();
+        });
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal('window', { addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal('WebSocket', FloodSocket);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    // What storage does between fake ticks (it runs on real ones: Node's
+    // setImmediate, which fake timers leave alone).
+    const { setImmediate: immediate } = globalThis as unknown as { setImmediate: (fn: () => void) => void };
+    const settle = async () => {
+      for (let i = 0; i < 30; i++) await new Promise<void>((resolve) => immediate(resolve));
+    };
+    try {
+      vi.setSystemTime(Math.ceil(Date.now() / (15 * 60_000)) * 15 * 60_000);
+      // Two copies of the app on the device, telling each other what they
+      // do, as the broadcast channel does.
+      const copies: ReturnType<typeof createApp>[] = [];
+      const tell = (from: number) => (e: SyncEvent) => {
+        copies.forEach((c, i) => {
+          if (i === from) return;
+          if (e.type === 'sync-started') c.syncStarted(e.at, e.paced);
+          if (e.type === 'data-changed') void c.refresh();
+        });
+      };
+      for (const i of [0, 1]) {
+        const { app } = await setup({ api, bridge: fakeBridge().bridge, launch: launchWith(''), db, issuer, background: true, config: { ...config, wsUrl: 'wss://ws.example/live' }, broadcast: tell(i) });
+        copies.push(app);
+      }
+      await Promise.all(copies.map((c) => c.start()));
+      await vi.advanceTimersByTimeAsync(0);
+      await settle();
+      expect(sockets.length).toBeGreaterThanOrEqual(2);
+      const start = Date.now();
+      requests.length = 0;
+
+      // Four senders, each at the cap of one mailbox (a message every 2
+      // seconds), for 15 minutes: 1,800 messages, 3,600 pushes.
+      let n = 0;
+      for (let second = 0; second < 15 * 60; second++) {
+        if (second % 2 === 0) {
+          for (let sender = 0; sender < 4; sender++) {
+            waiting.set(`m${n++}`, Date.now());
+            for (const ws of sockets) if (ws.readyState === 1) ws.onmessage?.({ data: '{"t":"sync"}' });
+          }
+        }
+        await vi.advanceTimersByTimeAsync(1000);
+        await settle();
+      }
+
+      const minutes = new Map<number, number>();
+      for (const at of requests) {
+        const minute = Math.floor((at - start) / 60_000);
+        minutes.set(minute, (minutes.get(minute) ?? 0) + 1);
+      }
+      const busiest = Math.max(...minutes.values());
+      const slowest = Math.max(...waited);
+      // Every message was taken in, a few seconds after it came.
+      expect(n).toBe(1800);
+      expect(waiting.size).toBeLessThanOrEqual(8 * 4);
+      expect(slowest).toBeLessThanOrEqual(3 * SYNC_GAP_MS);
+      // Well under half of the quarter and of any minute.
+      expect(requests.length).toBeLessThan(PER_QUARTER / 2);
+      expect(busiest).toBeLessThan(PER_MINUTE / 2);
+      for (const c of copies) await c.home();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  }, 300_000);
 });
 
 describe('an open chat', () => {

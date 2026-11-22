@@ -83,16 +83,22 @@ export function withLockIfFree<T>(name: string, fn: () => Promise<T>, locks: Loc
   return locks.request(PREFIX + namespace + name, { mode: 'exclusive', ifAvailable: true }, async (lock) => (lock ? { value: await fn() } : null));
 }
 
-export type SyncEvent = { type: 'account-changed' } | { type: 'keys-changed' } | { type: 'data-changed' };
+/**
+ * sync-started: a copy started a sync at `at` (Unix ms); paced: one the app
+ * asked for by itself (sync/pace.ts).
+ */
+export type SyncEvent = { type: 'account-changed' } | { type: 'keys-changed' } | { type: 'data-changed' } | { type: 'sync-started'; at: number; paced: boolean };
 
 /** A channel to the other copies of the app. Returns null where unsupported. */
 export function openChannel(onEvent: (event: SyncEvent) => void): { send(event: SyncEvent): void; close(): void } | null {
   if (typeof BroadcastChannel === 'undefined') return null;
   const channel = new BroadcastChannel(PREFIX + namespace + 'sync');
   channel.onmessage = (e: MessageEvent<unknown>) => {
-    const data = e.data as { type?: unknown } | null;
+    const data = e.data as { type?: unknown; at?: unknown; paced?: unknown } | null;
     if (data && (data.type === 'account-changed' || data.type === 'keys-changed' || data.type === 'data-changed')) {
       onEvent({ type: data.type });
+    } else if (data && data.type === 'sync-started' && Number.isSafeInteger(data.at) && typeof data.paced === 'boolean') {
+      onEvent({ type: 'sync-started', at: data.at as number, paced: data.paced });
     }
   };
   return {

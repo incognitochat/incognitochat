@@ -82,6 +82,8 @@ async function main(): Promise<void> {
     if (event.type === 'data-changed') void app.refresh();
     // Another copy deleted old keys: forget them here too.
     if (event.type === 'keys-changed') app.keysChanged();
+    // Another copy started a sync: syncs asked for before it are answered.
+    if (event.type === 'sync-started') app.syncStarted(event.at, event.paced);
   });
   const app = createApp({
     config,

@@ -60,18 +60,21 @@ const (
 // read unit, before anything else; the directory takes 400 a second in
 // production, and logins, sends and every logged-in request need it. So
 // each device's are limited too, once its token checks out and before
-// that read (sessionLimit). The app makes, per copy open: an inbox fetch
-// every 20 seconds without a push socket (every 2 minutes with one), and
-// a fetch and a confirmation for each push while messages come in (the
-// server's inbox limit stops fetches that read at 30 a minute); 2 at each
-// home screen, 4 to 9 at a launch; a deletion or cleanup step about every
-// second and a half while one runs (StepsPerMinute holds two copies to
-// 90); and little else (tokens, mailboxes, the Usage screen, by taps).
-// Tapping through links makes about 60 to 90 a minute, 2 copies deleting
-// about 120, and a flood of messages about 90 a copy; a copy left showing
-// all day without a socket about 4,300 a day. Being refused holds up the
-// inbox until the window ends, for the day's limit until UTC midnight, so
-// the day allows several copies open all day and a heavy day's use.
+// that read (sessionLimit). The app makes: an inbox fetch every 20
+// seconds without a push socket (every 2 minutes with one), per copy
+// open; 2 at each home screen, 4 to 9 at a launch; a deletion or cleanup
+// step about every second and a half while one runs (StepsPerMinute holds
+// two copies to 90); and little else (tokens, mailboxes, the Usage
+// screen, by taps). What others make it do is paced on the whole device,
+// whatever the copies open (web/src/sync/pace.ts): the syncs pushes ask
+// for, a page and its confirmation, at most one every 5 seconds, and one
+// every 15 once a flood has lasted half an hour; so however many messages
+// come in, at most about 24 a minute, 360 a quarter and 12,000 a day,
+// well under half of each limit. Tapping through links makes about 60 to
+// 90 a minute, 2 copies deleting about 120; a copy left showing all day
+// without a socket about 4,300 a day. Being refused holds up the inbox
+// until the window ends, for the day's limit until UTC midnight, so the
+// day allows several copies open all day and a heavy day's use.
 //
 // The table isn't written for each one: each instance counts a device's
 // requests in memory and writes them SessionBatch at a time (ephemeral
