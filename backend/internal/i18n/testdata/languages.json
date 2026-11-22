@@ -10,7 +10,8 @@
     "id",
     "tr",
     "uk",
-    "fr"
+    "fr",
+    "de"
   ],
   "pick": {
     "en": "en",
@@ -88,6 +89,13 @@
     "fr-BE": "fr",
     "FR": "fr",
     "fr_CH": "fr",
-    "fra": "en"
+    "fra": "en",
+    "de": "de",
+    "de-DE": "de",
+    "de-AT": "de",
+    "de-CH": "de",
+    "DE": "de",
+    "de_CH": "de",
+    "deu": "en"
   }
 }

@@ -144,6 +144,10 @@ describe('i18n', () => {
     expect([0, 1, 2, 1000, 1_000_000].map((count) => t('fr', 'newMessages', { count }))).toEqual(['0 nouveau message', '1 nouveau message', '2 nouveaux messages', '1\u202f000 nouveaux messages', '1\u202f000\u202f000 de nouveaux messages']);
   });
 
+  it('counts in German with one and other', () => {
+    expect([0, 1, 2, 1000].map((count) => t('de', 'newMessages', { count }))).toEqual(['0 neue Nachrichten', '1 neue Nachricht', '2 neue Nachrichten', '1.000 neue Nachrichten']);
+  });
+
   it('sets right-to-left for Persian and Arabic', () => {
     expect(DIRECTION.ar).toBe('rtl');
     expect(DIRECTION.fa).toBe('rtl');

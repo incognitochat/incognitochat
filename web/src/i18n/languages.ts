@@ -32,6 +32,7 @@ export const LANGUAGES = {
   tr: { dir: 'ltr', locale: 'tr', unitDisplay: 'short', tags: ['tr'], countInvariant: true },
   uk: { dir: 'ltr', locale: 'uk', unitDisplay: 'short', tags: ['uk'] },
   fr: { dir: 'ltr', locale: 'fr', unitDisplay: 'short', tags: ['fr'] },
+  de: { dir: 'ltr', locale: 'de', unitDisplay: 'short', tags: ['de'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;
