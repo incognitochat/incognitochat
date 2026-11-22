@@ -135,6 +135,14 @@ const STEP_WAIT_MAX_MS = 30_000;
  * at most, 300 in 5 minutes, leaves room for them.
  */
 const CHAT_DELETE_GAP_MS = 1000;
+/**
+ * And at most so many of them in so long (CHAT_DELETE_WINDOW_MS), a
+ * sliding window: a chat the user started that wasn't answered also fetches
+ * its link's key first (GET /links/{id}, a route without login too). With
+ * those and the uploads' deletes, at most 450 in any 5 minutes.
+ */
+const CHAT_DELETES_PER_WINDOW = 150;
+const CHAT_DELETE_WINDOW_MS = 5 * 60_000;
 
 /**
  * Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without
@@ -363,8 +371,9 @@ export type Screen =
   | { kind: 'confirm-replace'; busy: boolean }
   /**
    * Deleting the account, after a typed confirmation. finishing: a deletion
-   * the server says is under way (Finish deleting, while signed out), which
-   * takes no sends: its chats can't be deleted for both sides.
+   * the server says is under way (Finish deleting, while signed out): the
+   * account takes no other request, so no send tokens can be fetched, and
+   * its chats can't be deleted for both sides.
    */
   | { kind: 'confirm-delete'; busy: boolean; error: ErrorKind | null; finishing?: true }
   /**
@@ -479,6 +488,8 @@ export interface Deps {
   stepPauseMs?: number;
   /** The pause between the deletes for both sides before deleting the account, instead of CHAT_DELETE_GAP_MS (tests). */
   chatDeleteGapMs?: number;
+  /** How many of those in how long (ms), instead of CHAT_DELETES_PER_WINDOW in CHAT_DELETE_WINDOW_MS (tests). */
+  chatDeleteWindow?: { count: number; ms: number };
 }
 
 /** How often an open app checks its inbox while it has no push socket. */
@@ -553,6 +564,8 @@ export function createApp(deps: Deps) {
   deps.bridge?.on('back_button_pressed', () => {
     const close = onTop.at(-1);
     if (close) close();
+    // Leaves deleting the chats for both sides at once: the account is kept.
+    else if (currentScreen().kind === 'deleting-chats') void keepAccount();
     else void showHome();
   });
   let messaging: Messaging | null = null;
@@ -1963,9 +1976,10 @@ export function createApp(deps: Deps) {
     const account = await readAccount(deps.db);
     if (!isSetUp(account)) return;
     // Its chats for both sides first, if the user ticked that: only before
-    // a deletion starts (the server takes no sends once it has), and only
-    // once (a second tap finds this screen gone).
-    if (forBoth && !current.finishing && signedOut === null && !deletionPaused && messaging && !(await deletionConfirmed())) {
+    // a deletion starts (once it has, the account takes no other request,
+    // so no send tokens can be fetched), and only once (a second tap finds
+    // this screen gone).
+    if (forBoth && !current.finishing && signedOut === null && !deletionPaused && !(await deletionConfirmed())) {
       if (screen.value !== current) return;
       return deleteChatsForBoth(account.accountId);
     }
@@ -1989,57 +2003,78 @@ export function createApp(deps: Deps) {
     return runDeletion(first);
   }
 
-  /** Counts runs of deleteChatsForBoth: a new run, or leaving its screen, ends the one under way. */
+  /**
+   * Counts runs of deleteChatsForBoth: a new run, leaving its screen
+   * (keepAccount), or going on to the deletion ends the one under way.
+   */
   let chatsRun = 0;
-  /** The account the deletes for both sides on screen are for: Delete anyway and Try again act on it alone. */
-  let chatsAccount: string | null = null;
+  /**
+   * The run whose stop the screen shows, and the account it's for: Try
+   * again and Delete anyway act on it alone, and only while it's the latest
+   * (not once Keep was tapped, while home loads).
+   */
+  let chatsStopped: { run: number; accountId: string } | null = null;
 
   /**
    * Before deleting the account, as the user asked: deletes each chat in
    * the list for both sides, one at a time, as the chat's own Delete does
    * (messaging.remove: their app is told, and the uploads of the user's
-   * attachments there go from the server, with the deletion's own; one of
-   * the day's messages each). Only open ones that a delete for both can
+   * attachments there are queued for deletion, with the deletion's own; one
+   * of the day's messages each). Only open ones that a delete for both can
    * reach: not blocked, not ended, not out of the list (deleted here only).
-   * Paced (CHAT_DELETE_GAP_MS), so the firewall doesn't turn the device
-   * away, which would hold up the deletion's uploads too. Then the
-   * deletion itself (confirmDeletion).
+   * Paced (CHAT_DELETE_GAP_MS, CHAT_DELETES_PER_WINDOW), so the firewall
+   * doesn't turn the device away, which would hold up the deletion's
+   * uploads too. Then the deletion itself (confirmDeletion).
    *
    * One that can't be sent stops it, and the user chooses (deleting-chats'
    * stopped): Try again (the chats still in the list), deleting the account
    * anyway (the rest stay with the other side), or keeping it. Nothing of
-   * this is saved: leaving the screen, or closing the app, ends it with the
-   * account kept, so it never deletes the account with chats left that the
-   * user didn't agree to.
+   * this is saved: leaving the screen (Cancel, back), or closing the app,
+   * ends it with the account kept, so it never deletes the account with
+   * chats left that the user didn't agree to.
    */
   async function deleteChatsForBoth(accountId: string): Promise<void> {
     const run = ++chatsRun;
-    chatsAccount = accountId;
+    chatsStopped = null;
     let done = 0;
     let total = 0;
     screen.value = { kind: 'deleting-chats', done, total, stopped: null };
     const ours = () => run === chatsRun && currentScreen().kind === 'deleting-chats';
-    const show = (stopped: { reason: ChatsStop; left: number } | null = null) => {
-      if (ours()) screen.value = { kind: 'deleting-chats', done, total, stopped };
+    const show = () => {
+      if (ours()) screen.value = { kind: 'deleting-chats', done, total, stopped: null };
+    };
+    const stop = (reason: ChatsStop) => {
+      if (!ours()) return;
+      chatsStopped = { run, accountId };
+      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done } };
     };
     const open = (c: ConversationRecord | undefined): c is ConversationRecord => !!c && c.status === 'active' && !c.hidden;
     const ids = (await listConversations(deps.db)).filter(open).map((c) => c.id);
     total = ids.length;
     show();
+    // Messaging, if it couldn't start before: the box is never ignored.
+    if (total > 0) await createEngine();
     const gap = deps.chatDeleteGapMs ?? CHAT_DELETE_GAP_MS;
-    let sent = 0;
+    const window = deps.chatDeleteWindow ?? { count: CHAT_DELETES_PER_WINDOW, ms: CHAT_DELETE_WINDOW_MS };
+    /** When each delete of this run went out (Unix ms). */
+    const sent: number[] = [];
     for (const id of ids) {
       if (!ours()) return;
       // Blocked, deleted, or deleted for both sides meanwhile (another copy): nothing left to do.
       if (open(await getConversation(deps.db, id))) {
-        if (sent > 0) {
-          await new Promise((resolve) => setTimeout(resolve, gap));
-          if (!ours()) return;
-        }
+        let wait = sent.length > 0 ? gap : 0;
+        if (sent.length >= window.count) wait = Math.max(wait, sent[sent.length - window.count]! + window.ms - Date.now());
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
         const account = await readAccount(deps.db);
-        if (!messaging || !isSetUp(account) || account.accountId !== accountId) return ours() ? start() : undefined;
+        if (!ours()) return;
+        // Another copy deleted the account, and set up a new one: start again.
+        if (!isSetUp(account) || account.accountId !== accountId) {
+          chatsRun++;
+          return start();
+        }
+        if (!messaging) return stop('generic');
+        sent.push(Date.now());
         try {
-          sent++;
           await messaging.remove(id, true);
           deps.broadcast({ type: 'data-changed' });
           // The list, if it shows by now (Cancel while this was sent).
@@ -2048,20 +2083,26 @@ export function createApp(deps: Deps) {
           if (!ours()) return;
           if (handleGone(err)) return;
           // Not for both sides any more (blocked meanwhile, say): nothing to do.
-          if (open(await getConversation(deps.db, id))) return show({ reason: chatsStop(err), left: total - done });
+          if (open(await getConversation(deps.db, id))) return stop(chatsStop(err));
         }
       }
       done++;
       show();
     }
+    // On to the deletion in the same turn as the last look: a Cancel or back
+    // from now on finds its screen gone.
     if (!ours()) return;
+    chatsRun++;
+    backButton(false);
+    screen.value = { kind: 'deleting', error: null };
     return confirmDeletion(accountId);
   }
 
   /** What stopped the deletes for both sides before the account, for the user. */
   function chatsStop(err: unknown): ChatsStop {
     if (err instanceof NoTokens) return 'no-tokens';
-    if (err instanceof ApiError && err.code === 'rate_limited') return 'turned-away';
+    // The firewall, a mailbox's cap, or a link's first messages for this hour: later.
+    if (err instanceof ApiError && (err.code === 'rate_limited' || err.code === 'link_busy')) return 'turned-away';
     const limited = deviceLimit(err);
     if (limited) return limited;
     if (err instanceof ApiError && err.code === 'unknown_issuer_key') return 'outdated';
@@ -2069,11 +2110,23 @@ export function createApp(deps: Deps) {
     return 'generic';
   }
 
-  /** The stopped deletes for both sides' screen, if it's the one shown, with the account they're for. */
-  function stoppedChats(): { current: Extract<Screen, { kind: 'deleting-chats' }>; accountId: string } | null {
+  /** The stop the screen shows, if it's the latest run's, with the account it's for. */
+  function stoppedChats(): { reason: ChatsStop; accountId: string } | null {
     const current = currentScreen();
-    if (current.kind !== 'deleting-chats' || !current.stopped || !chatsAccount) return null;
-    return { current, accountId: chatsAccount };
+    if (current.kind !== 'deleting-chats' || !current.stopped || chatsStopped?.run !== chatsRun) return null;
+    return { reason: current.stopped.reason, accountId: chatsStopped.accountId };
+  }
+
+  /**
+   * Leaves deleting the chats for both sides (Cancel, Keep, or back),
+   * keeping the account: at once, so nothing of the run acts after it, nor
+   * a tap on its screen while home loads.
+   */
+  function keepAccount(): Promise<void> | undefined {
+    if (currentScreen().kind !== 'deleting-chats') return;
+    chatsRun++;
+    backButton(false);
+    return showHome({ tab: 'links' });
   }
 
   /** Whether runDeletion is under way. */
@@ -2802,7 +2855,7 @@ export function createApp(deps: Deps) {
     /** Asks to delete the account (a typed confirmation follows). */
     askDeleteAccount: () => {
       backButton(true);
-      // Finishing one the server says is under way, which takes no sends.
+      // Finishing one the server says is under way: no sends (deleteAccount).
       screen.value = { kind: 'confirm-delete', busy: false, error: null, ...(signedOut !== null || deletionPaused ? { finishing: true as const } : {}) };
     },
     /** Deletes the account, as typed; forBoth: its chats for both sides first, as ticked. */
@@ -2810,7 +2863,7 @@ export function createApp(deps: Deps) {
     /** Stopped deleting the chats for both sides: Try again, with those still in the list. */
     retryDeletingChats: async () => {
       const stopped = stoppedChats();
-      if (stopped && canRetryChats(stopped.current.stopped!.reason)) return deleteChatsForBoth(stopped.accountId);
+      if (stopped && canRetryChats(stopped.reason)) return deleteChatsForBoth(stopped.accountId);
     },
     /** Stopped deleting the chats for both sides: deletes the account anyway; the rest stay with the other side. */
     deleteAccountAnyway: async () => {
@@ -2818,16 +2871,12 @@ export function createApp(deps: Deps) {
       if (!stopped) return;
       // Once: a second tap finds the deletion's screen.
       chatsRun++;
+      backButton(false);
       screen.value = { kind: 'deleting', error: null };
       return confirmDeletion(stopped.accountId);
     },
     /** While deleting the chats for both sides (Cancel), or once it stopped: ends it and keeps the account. */
-    keepAccount: () => {
-      if (currentScreen().kind !== 'deleting-chats') return;
-      chatsRun++;
-      backButton(false);
-      return showHome({ tab: 'links' });
-    },
+    keepAccount,
     /** Try again, on the deleting screen: carries on with the deletion. */
     continueDeletion: () => runDeletion(),
     /** On the deleting screen, when the server keeps failing: the chats, read only. */

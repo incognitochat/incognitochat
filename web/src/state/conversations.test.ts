@@ -8,7 +8,7 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { addMessage, getConversation, listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
+import { addMessage, getConversation, listConversations, listMessages, listRecords, PAGE, putConversation } from '../messaging/store';
 import { countTokens, takeTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
 import { getMeta, openDatabase, putMeta } from '../storage/db';
@@ -258,12 +258,12 @@ async function person(
   b: Awaited<ReturnType<typeof backend>>,
   startParam = '',
   tg: Bridge = bridge(),
-  chatDeleteGapMs = 0,
+  chatDelete: { chatDeleteGapMs?: number; chatDeleteWindow?: { count: number; ms: number } } = {},
 ): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>>; broadcasts: SyncEvent[] }> {
   const db = await openDatabase(`conv-test-${n++}`);
   // What the apps on this device told the others.
   const broadcasts: SyncEvent[] = [];
-  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer, chatDeleteGapMs };
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer, chatDeleteGapMs: 0, ...chatDelete };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -1324,8 +1324,8 @@ describe('deleting the account', () => {
    * Someone (a) whose link n people wrote to, each answered: a's chat with
    * each, by what they wrote ("hello 0", ...), and theirs.
    */
-  async function withChats(b: Awaited<ReturnType<typeof backend>>, n: number, gap = 0) {
-    const a = await person(b, '', bridge(), gap);
+  async function withChats(b: Awaited<ReturnType<typeof backend>>, n: number, chatDelete: Parameters<typeof person>[3] = {}, tg: Bridge = bridge()) {
+    const a = await person(b, '', tg, chatDelete);
     await a.createLink();
     const payload = payloadOf(a);
     const others: Person[] = [];
@@ -1560,7 +1560,7 @@ describe('deleting the account', () => {
 
   it('paces the deletes for both sides', async () => {
     const b = await backend();
-    const { a } = await withChats(b, 3, 150);
+    const { a } = await withChats(b, 3, { chatDeleteGapMs: 150 });
     const times: number[] = [];
     const post = b.api.post.bind(b.api);
     b.api.post = async (path, body, check) => {
@@ -1595,5 +1595,117 @@ describe('deleting the account', () => {
     expect(a.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
     expect(b.calls).not.toContain('DELETE /account');
     expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+  });
+
+  it('keeps no more than so many deletes in a window', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 3, { chatDeleteWindow: { count: 2, ms: 400 } });
+    const times: number[] = [];
+    const post = b.api.post.bind(b.api);
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') times.push(Date.now());
+      return post(path, body, check);
+    };
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(times).toHaveLength(3);
+    expect(times[2]! - times[0]!).toBeGreaterThanOrEqual(395);
+  });
+
+  it("doesn't delete the account when back is pressed during the last chat's send", async () => {
+    const b = await backend();
+    const tg = telegram();
+    const { a } = await withChats(b, 1, {}, tg.bridge);
+    const hold = holdSend(b);
+    a.askDeleteAccount();
+    const deleting = a.deleteAccount(true);
+    await hold.atServer;
+    // Home's own requests take a while to answer.
+    const request = b.api.request.bind(b.api);
+    b.api.request = async (method, path, init, check) => {
+      if (method === 'GET' && (path === '/account' || path === '/invitations')) await new Promise((r) => setTimeout(r, 300));
+      return request(method, path, init, check);
+    };
+    tg.fire('back_button_pressed', {});
+    hold.release();
+    await deleting;
+    await new Promise((r) => setTimeout(r, 600));
+    expect(b.state.deletedAccounts).toEqual([]);
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+  });
+
+  it("doesn't delete the account when Cancel is tapped right after the last chat", async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 1);
+    let armed = true;
+    // Whether the tap came while Cancel still showed.
+    let shown: boolean | null = null;
+    const push = a.broadcasts.push.bind(a.broadcasts);
+    a.broadcasts.push = (...e: SyncEvent[]) => {
+      if (armed && e[0]?.type === 'data-changed' && a.screen.value.kind === 'deleting-chats') {
+        armed = false;
+        // A moment later.
+        (globalThis as unknown as { setImmediate: (fn: () => void) => void }).setImmediate(() => {
+          shown = a.screen.value.kind === 'deleting-chats';
+          void a.keepAccount();
+        });
+      }
+      return push(...e);
+    };
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(shown).not.toBeNull();
+    // A Cancel the screen still showed keeps the account; once on to the deletion, there's none.
+    if (shown) {
+      expect(b.state.deletedAccounts).toEqual([]);
+      expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    } else expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+  });
+
+  it('ignores a tap on Delete anyway once Keep was tapped, while home loads', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 2);
+    await oneTokenLeft(b, a);
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'deleting-chats', stopped: { reason: 'no-tokens' } });
+    const keeping = a.keepAccount();
+    await a.deleteAccountAnyway();
+    await keeping;
+    expect(b.state.deletedAccounts).toEqual([]);
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+  });
+
+  for (const code of ['rate_limited', 'link_busy'] as const) {
+    it(`offers Try again when turned away (${code}), which carries on`, async () => {
+      const b = await backend();
+      const { a, others } = await withChats(b, 1);
+      b.state.sendRefused = new ApiError(429, code);
+      a.askDeleteAccount();
+      await a.deleteAccount(true);
+      expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'turned-away', left: 1 } });
+      expect(canRetryChats('turned-away')).toBe(true);
+      b.state.sendRefused = null;
+      await a.retryDeletingChats();
+      expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+      expect(await hasChat(others[0]!)).toBe(false);
+    });
+  }
+
+  it('skips an ended chat (from older versions)', async () => {
+    const b = await backend();
+    const { a, others, chats } = await withChats(b, 2);
+    await putConversation(a.db, { ...(await getConversation(a.db, chats[0]!))!, status: 'ended' });
+    const sent = b.sends.length;
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(b.sends.length - sent).toBe(1);
+    expect(await hasChat(others[0]!)).toBe(true);
+    expect(await hasChat(others[1]!)).toBe(false);
   });
 });

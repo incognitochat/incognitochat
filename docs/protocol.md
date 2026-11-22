@@ -337,22 +337,26 @@ under way then can take up to its 15-second timeout), and goes on with the
 deletion; any upload it couldn't delete, or never saw, expires within 30
 days. Afterwards it deletes everything on the device. The other side of
 each conversation isn't told, unless the user ticks Also delete my chats
-for the other side (only offered for a deletion not yet under way: the
-server takes no send once it is). Then, before recording the deletion,
-the app deletes each open conversation in its list (not blocked, not
-deleted on this device only) for both sides, exactly as a conversation's
-own delete for both sides does (`delete` with `all`, quiet, one send
-token; its own uploads in it then go with the rest above), one at a
-time, at least a second apart: the firewall turns an address away from
-the routes that need no login past 500 requests in 5 minutes, and the
-uploads' deletes after it need those routes. Nothing of this is
-recorded: if the app closes, or the user cancels, the account stays,
-and the next try covers the conversations still in the list. A send
-that fails stops it, and the user chooses: try again (not once the
-day's send tokens are used up, or the build's issuer key was replaced),
-delete the account anyway, or keep it. The account's deletion doesn't
-touch these envelopes, which wait in the other accounts' inboxes and
-which the server can't tie to it; their apps check them with keys they
+for the other side. That is only offered for a deletion not yet under
+way: once it is, the account takes no other request, so the app can't
+fetch send tokens, and it sends nothing more. Then, before recording the
+deletion, the app deletes each open conversation in its list (not
+blocked, not ended, not deleted on this device only) for both sides,
+exactly as a conversation's own delete for both sides does (`delete`
+with `all`, quiet, one send token; the uploads of its own attachments in
+it are queued and go with the rest above, best effort), one at a time,
+at least a second apart and at most 150 in any 5 minutes: the firewall
+turns an address away from the routes that need no login past 500
+requests in 5 minutes, a conversation the user started that wasn't
+answered first fetches its link's key there too, and the uploads'
+deletes after it need those routes. Nothing of this is recorded: if the
+app closes, or the user cancels or goes back, the account stays, and the
+next try covers the conversations still in the list. A send that fails
+stops it, and the user chooses: try again (not once the day's send
+tokens are used up, or the build's issuer key was replaced), delete the
+account anyway, or keep it. The account's deletion doesn't touch these
+envelopes, which wait in the other accounts' inboxes, stored with
+nothing that names their sender; their apps check them with keys they
 already hold.
 
 **Unused accounts.** Where the operator has turned it on (by default the

@@ -355,9 +355,10 @@ it. This is how close it gets.
   ticks that, the deletes go out one after another, about a second apart,
   right before the account's deletion: the operator or AWS, watching live,
   can tie the mailboxes they go to to the account being deleted, and so
-  see whom it was talking to. The short-lived records of which mailboxes
-  got something in which minute show the same burst while they're kept
-  (Short-lived records). Unticked, nothing is sent.
+  see whom it was talking to, and the deletes of the uploads the user sent
+  in those chats, which follow, to it too. The short-lived records of
+  which mailboxes got something in which minute show the same burst while
+  they're kept (Short-lived records). Unticked, nothing is sent.
 - **Attachments can keep metadata.** Photos are redrawn, which drops
   theirs. A video sent "as video" has the usual location, device and time
   tags removed: the MP4/QuickTime metadata boxes, XMP, the boxes Sony,

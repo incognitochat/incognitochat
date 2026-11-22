@@ -291,13 +291,15 @@ records go in that same request.
   the other side**. Then, before anything else, the app deletes each chat
   in their list for both sides, as a chat's own Delete does: the other
   side's app is asked to delete it, and the uploads of what they sent
-  there go from the server. Each costs one of the day's messages; blocked
-  chats and those deleted on this device only stay with the other side.
-  Like any delete for both sides, this relies on the other side's app. If
-  a chat can't be done (the day's messages are used up, the server can't
-  be reached), the app stops and asks: try again, delete the account
-  anyway (those chats stay with the other side), or keep it. Nothing of
-  this is kept: closing the app keeps the account. Then the account ends at once, and
+  there are deleted from the server with the others above (any it can't
+  delete expire within 30 days). Each costs one of the day's messages;
+  blocked chats, ended ones and those deleted on this device only stay
+  with the other side. Like any delete for both sides, this relies on the
+  other side's app. If a chat can't be done (the day's messages are used
+  up, the server can't be reached), the app stops and asks: delete the
+  account anyway (those chats stay with the other side), keep it, or try
+  again (not when the day's messages are used up, or the app is out of
+  date). Nothing of this is kept: closing the app keeps the account. Then the account ends at once, and
   everything the server holds for it is deleted within minutes (the link,
   mailboxes, waiting messages, invitation codes, keys, and the hash of the
   Telegram ID; only its link IDs and link signing keys' fingerprints stay,

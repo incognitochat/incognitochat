@@ -3559,7 +3559,8 @@ function ConfirmReset({ app, language }: { app: AppState; language: Language }) 
  * Deleting the account: what goes, and a typed phrase so it can't happen by
  * accident. Also deleting the chats for both sides first is an extra,
  * unticked choice, as in a chat's own Delete; not when finishing a deletion
- * the server says is under way (it takes no sends then).
+ * the server says is under way (the account takes no other request then,
+ * so no send tokens can be fetched).
  */
 function ConfirmDelete({ app, language, busy, error, finishing }: { app: AppState; language: Language; busy: boolean; error: ErrorKind | null; finishing: boolean }) {
   const typed = useSignal('');

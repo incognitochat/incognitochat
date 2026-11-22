@@ -1990,6 +1990,18 @@ describe('deleting the account', () => {
     expect(server.calls.filter((c) => c.startsWith('POST /send') || c.startsWith('POST /tokens'))).toEqual([]);
   });
 
+  it("asks, never deleting the account, when ticked but the app can't send (no messaging)", async () => {
+    const server = fakeServer();
+    // No token issuer: messaging can't start.
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount(true);
+    expect(owner.app.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'generic', left: 1 } });
+    expect(server.calls).not.toContain('DELETE /account');
+    expect(await getMeta(owner.db, 'deleting')).toBeUndefined();
+  });
+
   it('tries the uploads the server could not delete again, waiting longer each time, before deleting the account', async () => {
     const failing = new ApiError(500, 'internal');
     const server = fakeServer({ mediaDelete: [failing, new NetworkError('offline')] });
