@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { findSourceUrl, sourceUrl } from './source';
 
 const commit = '41ee5804e4fcf04c74d650cc44541da131336d60';
@@ -38,6 +38,16 @@ describe('sourceUrl', () => {
 describe('findSourceUrl', () => {
   const answer = (status: number, body: string): typeof fetch =>
     async () => new Response(body, { status, headers: { 'content-type': 'application/json' } });
+
+  it('gives up on the manifest after 10 seconds', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      await findSourceUrl('https://example.github.io/', async () => new Response('{}'));
+      expect(timeout).toHaveBeenCalledWith(10_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
 
   it('reads the manifest next to the app, uncached and without credentials', async () => {
     const asked: { url: string; init: RequestInit | undefined }[] = [];

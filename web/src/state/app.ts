@@ -2461,7 +2461,8 @@ export function createApp(deps: Deps) {
      * The running build's source code (AGPL-3.0, section 13), in the
      * device's browser: the repository and commit its signed manifest names
      * (platform/source). 'unknown' when the build has none to name, or it
-     * couldn't be read; 'waiting' for a tap while another one still waits.
+     * couldn't be read; 'waiting' for a tap while another one still waits,
+     * or one that waited while the app was hidden (it opens nothing).
      */
     openSource: async (): Promise<'opened' | 'unknown' | 'waiting'> => {
       if (!deps.bridge) return 'unknown';
@@ -2474,9 +2475,9 @@ export function createApp(deps: Deps) {
       } finally {
         sourceOpening = false;
       }
-      if (!url) return 'unknown';
       // Hidden while it waited: the tap no longer counts.
       if (tapped !== hides) return 'waiting';
+      if (!url) return 'unknown';
       deps.bridge.post('web_app_open_link', { url });
       return 'opened';
     },

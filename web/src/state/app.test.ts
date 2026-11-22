@@ -2596,10 +2596,11 @@ describe('the source link', () => {
         const { bridge, posted } = fakeBridge();
         const { app } = await setup({ api: null, bridge });
         app.prepareSource();
-        expect(await app.openSource()).toBe('opened');
-        expect(await app.openSource()).toBe('opened');
-        // Looked up once, when the home screen showed.
+        // Looked up when the home screen shows, before any tap, and once.
         expect(asked).toEqual(['https://app.example/app/manifest.json']);
+        expect(await app.openSource()).toBe('opened');
+        expect(await app.openSource()).toBe('opened');
+        expect(asked).toHaveLength(1);
         expect(posted.filter((p) => p.type === 'web_app_open_link')).toEqual([
           { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
           { type: 'web_app_open_link', data: { url: `https://github.com/example/app/tree/${commit}` } },
@@ -2640,6 +2641,12 @@ describe('the source link', () => {
         visibility({ is_visible: false });
         answer(manifest());
         expect(await tap).toBe('waiting');
+        // Nor does it say "couldn't find" on return, when the lookup failed.
+        const other = await setup({ api: null, bridge });
+        const failed = other.app.openSource();
+        visibility({ is_visible: false });
+        answer(new Response('', { status: 404 }));
+        expect(await failed).toBe('waiting');
         expect(posted.some((p) => p.type === 'web_app_open_link')).toBe(false);
       },
     );
