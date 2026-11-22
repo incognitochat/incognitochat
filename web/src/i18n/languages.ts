@@ -26,6 +26,7 @@ export const LANGUAGES = {
   ar: { dir: 'rtl', locale: 'ar-u-nu-latn', unitDisplay: 'long', tags: ['ar'] },
   nl: { dir: 'ltr', locale: 'nl', unitDisplay: 'short', tags: ['nl'] },
   es: { dir: 'ltr', locale: 'es', unitDisplay: 'short', tags: ['es'] },
+  'pt-BR': { dir: 'ltr', locale: 'pt-BR', unitDisplay: 'short', tags: ['pt', 'pt-br', 'pt-pt'] },
 } as const satisfies Record<string, LanguageInfo>;
 
 export type Language = keyof typeof LANGUAGES;

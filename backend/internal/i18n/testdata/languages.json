@@ -5,7 +5,8 @@
     "ru",
     "ar",
     "nl",
-    "es"
+    "es",
+    "pt-BR"
   ],
   "pick": {
     "en": "en",
@@ -51,6 +52,15 @@
     "es-MX": "es",
     "ES": "es",
     "es_AR": "es",
-    "spa": "en"
+    "spa": "en",
+    "pt": "pt-BR",
+    "pt-br": "pt-BR",
+    "pt-pt": "pt-BR",
+    "pt-BR": "pt-BR",
+    "pt_BR": "pt-BR",
+    "PT": "pt-BR",
+    "pt-PT": "pt-BR",
+    "pt-AO": "pt-BR",
+    "por": "en"
   }
 }

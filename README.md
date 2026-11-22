@@ -23,7 +23,7 @@ whom.
   arriving.
 - **Notices** from the bot when a message arrives: a generic "New message",
   never who or what.
-- **English, Persian, Russian, Arabic, Dutch and Spanish**, right-to-left included, in Telegram's own theme.
+- **English, Persian, Russian, Arabic, Dutch, Spanish and Brazilian Portuguese**, right-to-left included, in Telegram's own theme.
 
 ## How it works, briefly
 

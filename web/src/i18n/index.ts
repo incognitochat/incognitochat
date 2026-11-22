@@ -9,6 +9,7 @@ import { ru } from './ru';
 import { ar } from './ar';
 import { nl } from './nl';
 import { es } from './es';
+import { ptBR } from './pt-BR';
 import { FALLBACK, LANGUAGES, matchTag, type Language } from './languages';
 
 export { FALLBACK, LANGUAGES, isLanguage, matchTag, type Language } from './languages';
@@ -25,7 +26,7 @@ export type Plural = Partial<Record<Intl.LDMLPluralRule, string>> & { other: str
 export type Text = string | Plural;
 
 /** Every language's strings: a language without its file doesn't compile. */
-export const STRINGS: Readonly<Record<Language, Readonly<Record<Key, Text>>>> = { en, fa, ru, ar, nl, es };
+export const STRINGS: Readonly<Record<Language, Readonly<Record<Key, Text>>>> = { en, fa, ru, ar, nl, es, 'pt-BR': ptBR };
 
 export const DIRECTION = Object.fromEntries(Object.entries(LANGUAGES).map(([code, info]) => [code, info.dir])) as Record<Language, 'ltr' | 'rtl'>;
 
