@@ -1089,15 +1089,49 @@ describe('the syncs the app asks for by itself', () => {
   // What storage does between fake ticks (it runs on real ones: Node's
   // setImmediate, which fake timers leave alone).
   const { setImmediate: immediate } = globalThis as unknown as { setImmediate: (fn: () => void) => void };
+  // WebCrypto (signing a login) runs on Node's own threads, in real time:
+  // however long a machine as busy as CI's takes. The fake clock waits for it
+  // (watchCrypto), as if it took no time, as next to these seconds it nearly
+  // does. Otherwise the login a sync waits for, once a quarter of an hour,
+  // took as many fake seconds as the machine was slow, and the messages that
+  // sync took in waited as much longer (34 seconds, once, in CI).
+  const crypting = new Set<Promise<unknown>>();
+  /** WebCrypto, watched so that settle waits for it; undone by done. */
+  const watched: { mockRestore(): void }[] = [];
+  function watchCrypto(): void {
+    const subtle = crypto.subtle as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    for (const name of ['encrypt', 'decrypt', 'sign', 'verify', 'digest', 'generateKey', 'deriveKey', 'deriveBits', 'importKey', 'exportKey', 'wrapKey', 'unwrapKey']) {
+      const original = subtle[name]!.bind(crypto.subtle);
+      const spy = vi.spyOn(subtle, name).mockImplementation((...args: unknown[]) => {
+        const work: Promise<unknown> = original(...args).finally(() => crypting.delete(work));
+        crypting.add(work);
+        return work;
+      });
+      watched.push(spy);
+    }
+  }
   const settle = async () => {
-    for (let i = 0; i < 30; i++) await new Promise<void>((resolve) => immediate(resolve));
+    for (let i = 0; i < 30; i++) {
+      await new Promise<void>((resolve) => immediate(resolve));
+      while (crypting.size > 0) {
+        await Promise.allSettled(crypting);
+        await new Promise<void>((resolve) => immediate(resolve));
+      }
+    }
   };
-  /** Moves the fake clock on by ms, at most a second at a time, letting storage work. */
+  /**
+   * Moves the fake clock on by ms, a timer at a time, letting storage and
+   * WebCrypto work after each: no timer fires while WebCrypto is at work.
+   */
   const pass = async (ms: number) => {
-    for (let left = ms; left > 0; left -= 1000) {
-      await vi.advanceTimersByTimeAsync(Math.min(1000, left));
+    const end = Date.now() + ms;
+    // The last timer on the way, so that it stops at end.
+    const stop = setTimeout(() => {}, ms);
+    while (Date.now() < end) {
+      await vi.advanceTimersToNextTimerAsync();
       await settle();
     }
+    clearTimeout(stop);
   };
 
   /**
@@ -1146,6 +1180,12 @@ describe('the syncs the app asks for by itself', () => {
           }
           return check({});
         }
+        // Logins, by the device's clock: the server's agrees with it. (The
+        // fake server goes by the real clock, which this fake one, set to
+        // the next quarter of an hour and run on 15 minutes in a moment,
+        // leaves behind: whether a login is answered clock_skew first would
+        // depend on the time of day.)
+        if (path === '/session') return check({ account: base.state.accountId, token: 'v1.p.m', expires: Math.floor(Date.now() / 1000) + 900 });
         return base.api.request(method, path, init, check);
       },
     };
@@ -1173,6 +1213,7 @@ describe('the syncs the app asks for by itself', () => {
     vi.stubGlobal('WebSocket', FakeSocket);
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     vi.setSystemTime(Math.ceil(Date.now() / (15 * 60_000)) * 15 * 60_000);
+    watchCrypto();
     // The copies tell each other what they do, as the broadcast channel
     // does, tellMs late.
     const copies: ReturnType<typeof createApp>[] = [];
@@ -1194,10 +1235,7 @@ describe('the syncs the app asks for by itself', () => {
     // Starting syncs, which may wait for the fake clock (fetchMs).
     let started = false;
     const starting = Promise.all(copies.map((c) => c.start())).then(() => (started = true));
-    while (!started) {
-      await vi.advanceTimersByTimeAsync(100);
-      await settle();
-    }
+    while (!started) await pass(100);
     await starting;
     let n = 0;
     return {
@@ -1219,6 +1257,8 @@ describe('the syncs the app asks for by itself', () => {
   }
 
   const done = () => {
+    for (const spy of watched.splice(0)) spy.mockRestore();
+    crypting.clear();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   };
