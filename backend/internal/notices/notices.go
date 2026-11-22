@@ -28,11 +28,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/incognitochat/incognitochat/backend/internal/directory"
+	"github.com/incognitochat/incognitochat/backend/internal/i18n"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 	"github.com/incognitochat/incognitochat/backend/internal/keyed"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
@@ -350,19 +350,17 @@ func (n *Notifier) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Language returns the notice language for a Telegram language code.
+// Language returns the notice language for a Telegram language code: one
+// of the app's languages (i18n.Pick).
 func Language(code string) string {
-	if l := strings.ToLower(code); l == "fa" || strings.HasPrefix(l, "fa-") || strings.HasPrefix(l, "fa_") {
-		return "fa"
-	}
-	return "en"
+	return i18n.Pick(code)
 }
 
 type texts struct{ notice, open string }
 
+// textFor returns a notice's texts in a stored notice language; English
+// for one it doesn't know.
 func textFor(language string) texts {
-	if language == "fa" {
-		return texts{notice: "پیام جدید", open: "باز کردن"}
-	}
-	return texts{notice: "New message", open: "Open"}
+	s := i18n.For(language)
+	return texts{notice: s.Notice, open: s.NoticeOpen}
 }

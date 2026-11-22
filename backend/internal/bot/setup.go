@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/incognitochat/incognitochat/backend/internal/i18n"
 	"github.com/incognitochat/incognitochat/backend/internal/telegram/botapi"
 )
 
@@ -32,11 +33,11 @@ func (s Setup) Run(ctx context.Context, webhookURL string) error {
 	if !lambdaURL(webhookURL) {
 		return ErrWebhookURL
 	}
-	en, fa := stringsFor("en"), stringsFor("fa")
-	calls := []struct {
+	type call struct {
 		method string
 		params map[string]any
-	}{
+	}
+	calls := []call{
 		{"setWebhook", map[string]any{
 			"url":             webhookURL,
 			"secret_token":    s.Secret,
@@ -46,8 +47,15 @@ func (s Setup) Run(ctx context.Context, webhookURL string) error {
 		{"setChatMenuButton", map[string]any{
 			"menu_button": map[string]any{"type": "web_app", "text": "Open", "web_app": map[string]string{"url": s.AppURL}},
 		}},
-		{"setMyCommands", map[string]any{"commands": []map[string]string{{"command": "start", "description": en.command}}}},
-		{"setMyCommands", map[string]any{"commands": []map[string]string{{"command": "start", "description": fa.command}}, "language_code": "fa"}},
+	}
+	// The /start command in each language: English as the default, every
+	// other language under its two-letter code.
+	for _, l := range i18n.Languages() {
+		params := map[string]any{"commands": []map[string]string{{"command": "start", "description": l.Texts.Command}}}
+		if l.BotCode != "" {
+			params["language_code"] = l.BotCode
+		}
+		calls = append(calls, call{"setMyCommands", params})
 	}
 	for _, c := range calls {
 		if err := s.call(ctx, c.method, c.params); err != nil {

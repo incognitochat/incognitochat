@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/incognitochat/incognitochat/backend/internal/httpapi"
+	"github.com/incognitochat/incognitochat/backend/internal/i18n"
 )
 
 // SecretHeader carries the webhook secret on every update from Telegram.
@@ -71,14 +72,14 @@ func (b *Bot) Handle(req httpapi.Request) httpapi.Response {
 		if m.From != nil {
 			lang = m.From.LanguageCode
 		}
-		s := stringsFor(lang)
+		s := i18n.For(i18n.Pick(lang))
 		return ok(map[string]any{
 			"method":  "sendMessage",
 			"chat_id": m.Chat.ID,
-			"text":    s.welcome,
+			"text":    s.Welcome,
 			"reply_markup": map[string]any{
 				"inline_keyboard": [][]map[string]any{{
-					{"text": s.open, "web_app": map[string]string{"url": b.AppURL}},
+					{"text": s.Open, "web_app": map[string]string{"url": b.AppURL}},
 				}},
 			},
 		})
@@ -92,25 +93,4 @@ func ok(method map[string]any) httpapi.Response {
 		return httpapi.Response{StatusCode: http.StatusOK}
 	}
 	return httpapi.JSON(http.StatusOK, method)
-}
-
-type texts struct {
-	welcome string
-	open    string
-	command string
-}
-
-func stringsFor(languageCode string) texts {
-	if l := strings.ToLower(languageCode); l == "fa" || strings.HasPrefix(l, "fa-") {
-		return texts{
-			welcome: "با چت ناشناس دیگران می‌توانند ناشناس و با رمزنگاری سرتاسری به شما پیام بدهند. برای راه‌اندازی یا خواندن پیام‌ها، برنامه را باز کنید.",
-			open:    "باز کردن چت ناشناس",
-			command: "باز کردن چت ناشناس",
-		}
-	}
-	return texts{
-		welcome: "Incognito Chat lets people message you anonymously, end-to-end encrypted. Open the app to set up or to read your messages.",
-		open:    "Open Incognito Chat",
-		command: "Open Incognito Chat",
-	}
 }
