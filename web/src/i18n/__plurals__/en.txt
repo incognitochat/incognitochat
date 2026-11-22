@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Messages left today: 101. More from xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Messages left today: 102. More from xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Messages left today: 1,000,000. More from xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Chats not deleted for the other side: 0. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  1: Chats not deleted for the other side: 1. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  2: Chats not deleted for the other side: 2. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  3: Chats not deleted for the other side: 3. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  5: Chats not deleted for the other side: 5. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  11: Chats not deleted for the other side: 11. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  21: Chats not deleted for the other side: 21. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  100: Chats not deleted for the other side: 100. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  101: Chats not deleted for the other side: 101. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  102: Chats not deleted for the other side: 102. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.
+  1000000: Chats not deleted for the other side: 1,000,000. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.

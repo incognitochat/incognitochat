@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Berichten voor vandaag: nog 101. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Berichten voor vandaag: nog 102. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Berichten voor vandaag: nog 1.000.000. Meer vanaf xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Chats die niet voor de ander zijn verwijderd: 0. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  1: Chats die niet voor de ander zijn verwijderd: 1. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  2: Chats die niet voor de ander zijn verwijderd: 2. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  3: Chats die niet voor de ander zijn verwijderd: 3. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  5: Chats die niet voor de ander zijn verwijderd: 5. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  11: Chats die niet voor de ander zijn verwijderd: 11. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  21: Chats die niet voor de ander zijn verwijderd: 21. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  100: Chats die niet voor de ander zijn verwijderd: 100. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  101: Chats die niet voor de ander zijn verwijderd: 101. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  102: Chats die niet voor de ander zijn verwijderd: 102. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.
+  1000000: Chats die niet voor de ander zijn verwijderd: 1.000.000. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.

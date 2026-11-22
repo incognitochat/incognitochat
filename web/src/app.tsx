@@ -31,9 +31,11 @@ import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
+  canRetryChats,
   confirmationMatches,
   messageKey,
   type App as AppState,
+  type ChatsStop,
   type ErrorKind,
   type LinkStatus,
   type LinkView,
@@ -149,7 +151,9 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
     case 'confirm-replace':
       return <ConfirmReplace app={app} language={language} busy={screen.busy} />;
     case 'confirm-delete':
-      return <ConfirmDelete app={app} language={language} busy={screen.busy} error={screen.error} />;
+      return <ConfirmDelete app={app} language={language} busy={screen.busy} error={screen.error} finishing={screen.finishing ?? false} />;
+    case 'deleting-chats':
+      return <DeletingChats app={app} language={language} screen={screen} />;
     case 'deleting':
       // Confirmed already: nothing to cancel, only to carry on.
       return (
@@ -3551,14 +3555,27 @@ function ConfirmReset({ app, language }: { app: AppState; language: Language }) 
   );
 }
 
-/** Deleting the account: what goes, and a typed phrase so it can't happen by accident. */
-function ConfirmDelete({ app, language, busy, error }: { app: AppState; language: Language; busy: boolean; error: ErrorKind | null }) {
+/**
+ * Deleting the account: what goes, and a typed phrase so it can't happen by
+ * accident. Also deleting the chats for both sides first is an extra,
+ * unticked choice, as in a chat's own Delete; not when finishing a deletion
+ * the server says is under way (it takes no sends then).
+ */
+function ConfirmDelete({ app, language, busy, error, finishing }: { app: AppState; language: Language; busy: boolean; error: ErrorKind | null; finishing: boolean }) {
   const typed = useSignal('');
+  const forBoth = useSignal(false);
   const phrase = t(language, 'deletePhrase');
   const ok = confirmationMatches(typed.value, phrase);
   return (
     <Page title={t(language, 'deleteTitle')} body={t(language, 'deleteBody')} busy={busy}>
       <p class="warning">{t(language, 'deleteWarning')}</p>
+      {!finishing && (
+        <label class="check">
+          <input type="checkbox" checked={forBoth.value} disabled={busy} onChange={(e) => (forBoth.value = e.currentTarget.checked)} />
+          <span>{t(language, 'deleteChatsForBoth')}</span>
+        </label>
+      )}
+      {!finishing && forBoth.value && <p class="muted">{t(language, 'deleteChatsForBothNote')}</p>}
       {busy && (
         <p class="muted" role="status">
           {t(language, 'deletingAccount')}
@@ -3582,11 +3599,58 @@ function ConfirmDelete({ app, language, busy, error }: { app: AppState; language
           onInput={(e) => (typed.value = e.currentTarget.value)}
         />
       </label>
-      <Button kind="danger" disabled={!ok || busy} onClick={app.deleteAccount}>
+      <Button kind="danger" disabled={!ok || busy} onClick={() => app.deleteAccount(!finishing && forBoth.value)}>
         {t(language, 'deleteAccountConfirm')}
       </Button>
       <Button kind="secondary" disabled={busy} onClick={app.cancelDeleteAccount}>
         {t(language, 'cancel')}
+      </Button>
+    </Page>
+  );
+}
+
+const CHATS_STOP_TEXT: Record<Exclude<ChatsStop, 'no-tokens'>, Key> = {
+  network: 'errorNetwork',
+  // The firewall's block lasts until this address's count over 5 minutes falls.
+  'turned-away': 'errorDeviceLimitLater',
+  'device-limit': 'errorDeviceLimit',
+  'device-limit-later': 'errorDeviceLimitLater',
+  outdated: 'errorOutdated',
+  generic: 'errorGeneric',
+};
+
+/**
+ * Deleting the chats for both sides before the account: how far it got,
+ * with Cancel (the account stays); or why it stopped, and the choice: Try
+ * again (when that may help), delete the account anyway, or keep it.
+ */
+function DeletingChats({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'deleting-chats' }> }) {
+  const { done, total, stopped } = screen;
+  const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
+  if (!stopped) {
+    return (
+      <Page title={tr('deleteTitle')} busy>
+        <p class="muted" role="status">
+          {tr('deletingChats', { done, total })}
+        </p>
+        <Button kind="secondary" onClick={app.keepAccount}>
+          {tr('cancel')}
+        </Button>
+      </Page>
+    );
+  }
+  return (
+    <Page title={tr('deleteTitle')}>
+      <p class="notice" role="alert">
+        {stopped.reason === 'no-tokens' ? tr('deletingChatsNoMessages', { time: clockTime(language, nextUtc(DAY_MS)) }) : tr(CHATS_STOP_TEXT[stopped.reason])}
+      </p>
+      <p>{tr('deletingChatsLeft', { count: stopped.left })}</p>
+      {canRetryChats(stopped.reason) && <Button onClick={app.retryDeletingChats}>{tr('tryAgain')}</Button>}
+      <Button kind="danger" onClick={app.deleteAccountAnyway}>
+        {tr('deleteAccountAnyway')}
+      </Button>
+      <Button kind="secondary" onClick={app.keepAccount}>
+        {tr('keepAccount')}
       </Button>
     </Page>
   );

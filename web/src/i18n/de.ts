@@ -317,6 +317,13 @@ export const de = {
   deletionPausedNotice: 'Das Löschen deines Kontos konnte noch nicht abgeschlossen werden. Bis dahin kannst du deine Chats nur lesen.',
   deletePhrase: 'mein Konto löschen',
   deleteAccountConfirm: 'Mein Konto löschen',
+  deleteChatsForBoth: 'Auch meine Chats auf der anderen Seite löschen',
+  deleteChatsForBothNote: 'Die App der anderen Seite wird gebeten, jeden Chat in deiner Liste zu löschen, und die Anhänge, die du dort gesendet hast, werden vom Server gelöscht. Das hängt von dieser App ab und kann keine Kopien oder Screenshots löschen, die dort gemacht wurden. Chats, die du blockiert hast, und Chats, die du nur für dich gelöscht hast, bleiben auf der anderen Seite.',
+  deletingChats: 'Deine Chats werden auf der anderen Seite gelöscht: {done} von {total}…',
+  deletingChatsLeft: 'Auf der anderen Seite nicht gelöschte Chats: {count}. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.',
+  deletingChatsNoMessages: 'Deine Nachrichten für heute sind aufgebraucht: Jeder gelöschte Chat zählt als eine. Weitere ab {time}.',
+  deleteAccountAnyway: 'Mein Konto trotzdem löschen',
+  keepAccount: 'Mein Konto vorerst behalten',
   accountDeleted:
     'Dein Konto wurde vom Server gelöscht, und die App hat deine Chats und Schlüssel auf diesem Gerät gelöscht. Auf manchen Geräten können sie in den Speicherdateien der App bleiben, und eine früher erstellte Sicherung des Geräts kann sie noch enthalten.',
 

@@ -8,13 +8,13 @@ import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
 import type { Bridge } from '../platform/telegram';
 import { canResend } from '../messaging/engine';
-import { addMessage, listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
-import { countTokens } from '../account/wallet';
+import { addMessage, getConversation, listConversations, listMessages, listRecords, PAGE } from '../messaging/store';
+import { countTokens, takeTokens } from '../account/wallet';
 import { parsePayload } from '../protocol/link';
-import { openDatabase, putMeta } from '../storage/db';
+import { getMeta, openDatabase, putMeta } from '../storage/db';
 import { pickLanguage } from '../i18n';
 import type { SyncEvent } from '../sync/locks';
-import { createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
+import { canRetryChats, createApp, MAX_SHOWN, type LimitError, type Screen } from './app';
 
 // A read of an open chat's page held up once it's done, until the test lets
 // it go (holdPage): as a slow IndexedDB would, with its draw still under way.
@@ -98,6 +98,8 @@ async function backend() {
   // What the app sent to /notices and /send, to check what it tells the server.
   const noticeSetups: string[] = [];
   const sends: Record<string, unknown>[] = [];
+  // Every request, as "METHOD /path", in order.
+  const calls: string[] = [];
   const noticesOn = new Set<string>();
   // The language notices are sent in, as the server picks it from the launch data; and what the app sent to change it.
   const noticeLanguages = new Map<string, string>();
@@ -112,6 +114,7 @@ async function backend() {
   const api: Api = {
     post: (path, body, check) => api.request('POST', path, { body: JSON.stringify(body) }, check),
     async request(method, path, init, check) {
+      calls.push(`${method} ${path}`);
       const body = init.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
       const auth = init.headers?.['X-Session'];
       const account = auth ? auth.split('.')[1]! : '';
@@ -224,7 +227,7 @@ async function backend() {
     noticesOn.delete(account);
     noticesRefused.add(account);
   };
-  return { api, issuer, state, noticeSetups, sends, mediaCalls, refuseNotices, noticeState, noticeLanguages, languageChanges };
+  return { api, issuer, state, noticeSetups, sends, calls, mediaCalls, refuseNotices, noticeState, noticeLanguages, languageChanges };
 }
 
 const bridge = (): Bridge => ({ transport: 'webview-proxy', post: () => {}, on: () => () => {} });
@@ -255,11 +258,12 @@ async function person(
   b: Awaited<ReturnType<typeof backend>>,
   startParam = '',
   tg: Bridge = bridge(),
+  chatDeleteGapMs = 0,
 ): Promise<ReturnType<typeof createApp> & { db: Awaited<ReturnType<typeof openDatabase>>; reopen: (startParam: string) => Promise<ReturnType<typeof createApp>>; broadcasts: SyncEvent[] }> {
   const db = await openDatabase(`conv-test-${n++}`);
   // What the apps on this device told the others.
   const broadcasts: SyncEvent[] = [];
-  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer };
+  const deps = { config, api: b.api, db, bridge: tg, broadcast: (e: SyncEvent) => void broadcasts.push(e), closeDelayMs: 0, background: false, issuer: b.issuer, mediaIssuer: b.issuer, chatDeleteGapMs };
   const first = createApp({ ...deps, launch: launchWith(startParam) });
   await first.start();
   await first.setUp();
@@ -1311,5 +1315,285 @@ describe('deleting the account', () => {
     expect(screenOf(owner.screen.value, 'conversation').messages.map((m) => m.text)).toEqual(['hello', 'hi back']);
     await owner.home();
     expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.id)).toEqual([id]);
+  });
+
+  type Person = Awaited<ReturnType<typeof person>>;
+  const payloadOf = (p: Person) => new URL(screenOf(p.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+
+  /**
+   * Someone (a) whose link n people wrote to, each answered: a's chat with
+   * each, by what they wrote ("hello 0", ...), and theirs.
+   */
+  async function withChats(b: Awaited<ReturnType<typeof backend>>, n: number, gap = 0) {
+    const a = await person(b, '', bridge(), gap);
+    await a.createLink();
+    const payload = payloadOf(a);
+    const others: Person[] = [];
+    for (let i = 0; i < n; i++) {
+      const o = await person(b, payload);
+      await o.writeToLink(`hello ${i}`);
+      others.push(o);
+    }
+    await a.showTab('chats');
+    await a.sync();
+    const list = screenOf(a.screen.value, 'home').conversations;
+    const chats = others.map((_, i) => list.find((c) => c.last?.text === `hello ${i}`)!.id);
+    for (const [i, chat] of chats.entries()) {
+      await a.openConversation(chat);
+      await a.sendMessage(`hi ${i}`);
+      await others[i]!.sync();
+    }
+    await a.home();
+    return { a, others, chats };
+  }
+
+  /** Whether p still has a chat in its list (one deleted for both sides leaves it). */
+  async function hasChat(p: Person): Promise<boolean> {
+    await p.sync();
+    await p.home();
+    await p.showTab('chats');
+    return screenOf(p.screen.value, 'home').conversations.length > 0;
+  }
+
+  /** Leaves a's wallet one send token, and the server none to sign today. */
+  async function oneTokenLeft(b: Awaited<ReturnType<typeof backend>>, a: Person) {
+    const held = await countTokens(a.db, b.issuer.keyId);
+    if (held > 1) await takeTokens(a.db, b.issuer.keyId, held - 1);
+    expect(await countTokens(a.db, b.issuer.keyId)).toBe(1);
+    b.state.tokensLeft = 0;
+  }
+
+  /** Holds the next send until released: sends the user starts meanwhile wait behind it. */
+  function holdSend(b: Awaited<ReturnType<typeof backend>>) {
+    const post = b.api.post.bind(b.api);
+    let reached: () => void = () => {};
+    const atServer = new Promise<void>((r) => (reached = r));
+    let release: () => void = () => {};
+    const released = new Promise<void>((r) => (release = r));
+    let held: Record<string, unknown> | null = null;
+    b.api.post = async (path, body, check) => {
+      if (path === '/send' && !held) {
+        held = body as Record<string, unknown>;
+        reached();
+        await released;
+      }
+      return post(path, body, check);
+    };
+    return { atServer, release, mailbox: () => held?.mailbox };
+  }
+
+  it('deletes each chat in the list for both sides first, quietly, when ticked; blocked ones and ones deleted here only stay', async () => {
+    const b = await backend();
+    // One chat the user started through someone's link, and three through theirs.
+    const c = await person(b);
+    await c.createLink();
+    const a = await person(b, payloadOf(c));
+    await a.writeToLink('hello c');
+    await c.showTab('chats');
+    await c.sync();
+    await a.home();
+    await a.createLink();
+    const payload = payloadOf(a);
+    const others: Person[] = [];
+    for (const text of ['one', 'two', 'three']) {
+      const o = await person(b, payload);
+      await o.writeToLink(text);
+      others.push(o);
+    }
+    const [one, two, three] = others as [Person, Person, Person];
+    await a.showTab('chats');
+    await a.sync();
+    const chatOf = (text: string) => screenOf(a.screen.value, 'home').conversations.find((x) => x.last?.text === text)!.id;
+    const [toOne, toTwo, toThree] = [chatOf('one'), chatOf('two'), chatOf('three')];
+    await a.openConversation(toOne);
+    await a.sendMessage('hi one');
+    await attachment(a.db, toOne, 'mine', true);
+    await attachment(a.db, toOne, 'theirs', false);
+    await one.sync();
+    // Deleted here only, and blocked (its messages kept): out of reach of a delete for both sides.
+    await a.home();
+    await a.deleteConversation(toTwo, false);
+    const mailboxOf = async (chat: string) => (await getConversation(a.db, chat))!.sendTo;
+    const threeAt = await mailboxOf(toThree);
+    await a.openConversation(toThree);
+    // Its "seen" first, which opening it sends in the background.
+    for (let i = 0; i < 200 && !b.sends.some((x) => x.mailbox === threeAt); i++) await new Promise((r) => setTimeout(r, 10));
+    await a.block();
+    const toC = screenOf(a.screen.value, 'home').conversations.find((x) => x.last?.text === 'hello c')!.id;
+    const reached = [await mailboxOf(toOne), await mailboxOf(toC)].sort();
+
+    const sent = b.sends.length;
+    a.askDeleteAccount();
+    expect(a.screen.value).toEqual({ kind: 'confirm-delete', busy: false, error: null });
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    // One delete each, for c's chat and one's, without a notice, all before
+    // the deletion; the upload of the user's photo went too.
+    const deletes = b.sends.slice(sent);
+    expect(deletes.map((d) => d.mailbox).sort()).toEqual(reached);
+    expect(deletes.every((d) => d.quiet === true)).toBe(true);
+    expect(b.calls.lastIndexOf('POST /send')).toBeLessThan(b.calls.indexOf('DELETE /account'));
+    expect(b.state.deletedUploads.sort()).toEqual(['upload-mine', 'upload-theirs']);
+    expect(b.calls.lastIndexOf('POST /media/delete')).toBeLessThan(b.calls.indexOf('DELETE /account'));
+    // Gone on their side; kept where it couldn't be told.
+    expect(await hasChat(c)).toBe(false);
+    expect(await hasChat(one)).toBe(false);
+    expect(await hasChat(two)).toBe(true);
+    expect(await hasChat(three)).toBe(true);
+  });
+
+  it("asks when the day's messages run out partway: keeping the account leaves it, and the chats not reached, as they were", async () => {
+    const b = await backend();
+    const { a, others } = await withChats(b, 2);
+    await oneTokenLeft(b, a);
+    const sent = b.sends.length;
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 1, total: 2, stopped: { reason: 'no-tokens', left: 1 } });
+    expect(b.sends.length - sent).toBe(1);
+    // Nothing to try again until the messages reset.
+    expect(canRetryChats('no-tokens')).toBe(false);
+    const asked = b.calls.length;
+    await a.retryDeletingChats();
+    expect(b.calls.length).toBe(asked);
+    expect(b.sends.length - sent).toBe(1);
+    expect(a.screen.value).toMatchObject({ kind: 'deleting-chats', stopped: { reason: 'no-tokens' } });
+    // Nothing of the deletion was recorded or asked for.
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    expect(b.calls).not.toContain('DELETE /account');
+
+    await a.keepAccount();
+    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    await a.showTab('chats');
+    expect(screenOf(a.screen.value, 'home').conversations).toHaveLength(1);
+    expect((await Promise.all(others.map(hasChat))).sort()).toEqual([false, true]);
+  });
+
+  it('deletes the account anyway when asked, leaving the chats it did not reach with the other side', async () => {
+    const b = await backend();
+    const { a, others } = await withChats(b, 2);
+    await oneTokenLeft(b, a);
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'deleting-chats', stopped: { reason: 'no-tokens', left: 1 } });
+    await a.deleteAccountAnyway();
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(b.state.deletedAccounts).toHaveLength(1);
+    expect((await Promise.all(others.map(hasChat))).sort()).toEqual([false, true]);
+  });
+
+  it("stops when the server can't be reached, and Try again carries on with the chats still in the list", async () => {
+    const b = await backend();
+    const { a, others } = await withChats(b, 2);
+    b.state.sendRefused = new NetworkError('offline') as unknown as ApiError;
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 2, stopped: { reason: 'network', left: 2 } });
+    expect(b.calls).not.toContain('DELETE /account');
+    b.state.sendRefused = null;
+    await a.retryDeletingChats();
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(await hasChat(others[0]!)).toBe(false);
+    expect(await hasChat(others[1]!)).toBe(false);
+  });
+
+  it('stops at Cancel, after the chat being sent, keeping the account', async () => {
+    const b = await backend();
+    const { a, others } = await withChats(b, 2);
+    const sent = b.sends.length;
+    const hold = holdSend(b);
+    a.askDeleteAccount();
+    const deleting = a.deleteAccount(true);
+    await hold.atServer;
+    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 2, stopped: null });
+    await a.keepAccount();
+    hold.release();
+    await deleting;
+    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    expect(b.sends.length - sent).toBe(1);
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    expect(b.calls).not.toContain('DELETE /account');
+    await a.showTab('chats');
+    expect(screenOf(a.screen.value, 'home').conversations).toHaveLength(1);
+    expect((await Promise.all(others.map(hasChat))).sort()).toEqual([false, true]);
+  });
+
+  it('leaves an ordinary app, account kept, when the app closes partway', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 2);
+    holdSend(b);
+    a.askDeleteAccount();
+    void a.deleteAccount(true);
+    await new Promise((r) => setTimeout(r, 50));
+    // Opened again (the held send never ends).
+    const again = await a.reopen('');
+    expect(again.screen.value.kind).toBe('home');
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
+    expect(b.calls).not.toContain('DELETE /account');
+  });
+
+  for (const meanwhile of ['blocked', 'deleted here only'] as const) {
+    it(`skips a chat ${meanwhile} meanwhile (in another copy), and goes on`, async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 2);
+      const sent = b.sends.length;
+      const hold = holdSend(b);
+      a.askDeleteAccount();
+      const deleting = a.deleteAccount(true);
+      await hold.atServer;
+      // The one not being sent, changed in another copy of the app.
+      const sending = await Promise.all(chats.map(async (chat) => (await getConversation(a.db, chat))!.sendTo === hold.mailbox()));
+      const other = chats[sending.indexOf(false)]!;
+      const copy = await a.reopen('');
+      if (meanwhile === 'blocked') {
+        await copy.openConversation(other);
+        await copy.block();
+      } else await copy.deleteConversation(other, false);
+      hold.release();
+      await deleting;
+      expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+      expect(b.sends.length - sent).toBe(1);
+      expect(await hasChat(others[sending.indexOf(true)]!)).toBe(false);
+      expect(await hasChat(others[sending.indexOf(false)]!)).toBe(true);
+    });
+  }
+
+  it('paces the deletes for both sides', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 3, 150);
+    const times: number[] = [];
+    const post = b.api.post.bind(b.api);
+    b.api.post = async (path, body, check) => {
+      if (path === '/send') times.push(Date.now());
+      return post(path, body, check);
+    };
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(times).toHaveLength(3);
+    for (let i = 1; i < times.length; i++) expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(145);
+  });
+
+  it('stops, with no Try again, when the app is out of date', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 1);
+    b.state.keyRetired = true;
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'outdated', left: 1 } });
+    expect(canRetryChats('outdated')).toBe(false);
+  });
+
+  it('shows that the account was replaced, deleting nothing, when the server says so partway', async () => {
+    const b = await backend();
+    const { a } = await withChats(b, 1);
+    const held = await countTokens(a.db, b.issuer.keyId);
+    await takeTokens(a.db, b.issuer.keyId, held);
+    b.state.tokensRefused = new ApiError(410, 'account_replaced');
+    a.askDeleteAccount();
+    await a.deleteAccount(true);
+    expect(a.screen.value).toMatchObject({ kind: 'signed-out', reason: 'replaced' });
+    expect(b.calls).not.toContain('DELETE /account');
+    expect(await getMeta(a.db, 'deleting')).toBeUndefined();
   });
 });

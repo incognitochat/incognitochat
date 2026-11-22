@@ -317,6 +317,13 @@ export const nl = {
   deletionPausedNotice: 'Het verwijderen van je account kon nog niet worden afgerond. Tot dat lukt, kun je je chats alleen lezen.',
   deletePhrase: 'verwijder mijn account',
   deleteAccountConfirm: 'Mijn account verwijderen',
+  deleteChatsForBoth: 'Ook mijn chats verwijderen voor de ander',
+  deleteChatsForBothNote: 'De app van de ander krijgt het verzoek elke chat in je lijst te verwijderen, en de bijlagen die je daar stuurde, worden van de server verwijderd. Dit hangt af van de app van de ander, en kopieën of screenshots die de ander maakte, blijven bestaan. Chats die je hebt geblokkeerd, en chats die je alleen voor jezelf hebt verwijderd, blijven bij de ander.',
+  deletingChats: 'Je chats worden verwijderd voor de ander: {done} van {total}…',
+  deletingChatsLeft: 'Chats die niet voor de ander zijn verwijderd: {count}. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.',
+  deletingChatsNoMessages: 'Je berichten voor vandaag zijn op: elke verwijderde chat telt als één. Meer vanaf {time}.',
+  deleteAccountAnyway: 'Mijn account toch verwijderen',
+  keepAccount: 'Mijn account voorlopig houden',
   accountDeleted:
     'Je account is van de server verwijderd, en de app heeft je chats en sleutels op dit apparaat gewist. Op sommige apparaten kunnen ze nog in de opslagbestanden van de app staan, en een eerder gemaakte back-up van het apparaat kan ze nog bevatten.',
 

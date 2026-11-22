@@ -317,6 +317,13 @@ export const tr = {
   deletionPausedNotice: 'Hesabınızın silinmesi henüz tamamlanamadı. Tamamlanana kadar sohbetleriniz yalnızca okunabilir.',
   deletePhrase: 'hesabımı sil',
   deleteAccountConfirm: 'Hesabımı sil',
+  deleteChatsForBoth: 'Sohbetlerimi karşı taraftan da sil',
+  deleteChatsForBothNote: 'Karşı tarafın uygulamasından listenizdeki her sohbeti silmesi istenir ve oraya gönderdiğiniz ekler sunucudan silinir. Bu, karşı tarafın uygulamasına bağlıdır ve onların aldığı kopyaları ya da ekran görüntülerini silemez. Engellediğiniz sohbetler ve yalnızca kendiniz için sildiğiniz sohbetler karşı tarafta kalır.',
+  deletingChats: 'Sohbetleriniz karşı taraftan siliniyor: {done} / {total}…',
+  deletingChatsLeft: 'Karşı taraftan silinmeyen sohbetler: {count}. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.',
+  deletingChatsNoMessages: 'Bugünkü mesaj hakkınız bitti: her sohbetin silinmesi bir mesaj sayılır. Saat {time} itibarıyla yenilenir.',
+  deleteAccountAnyway: 'Hesabımı yine de sil',
+  keepAccount: 'Hesabım şimdilik kalsın',
   accountDeleted:
     'Hesabınız sunucudan silindi ve uygulama bu cihazdaki sohbetlerinizi ve anahtarlarınızı temizledi. Bazı cihazlarda bunlar uygulamanın depolama dosyalarında kalabilir ve cihazın daha önce alınmış bir kopyası bunları hâlâ içerebilir.',
 

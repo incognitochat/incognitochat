@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Mensagens restantes hoje: 101. Mais a partir de xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Mensagens restantes hoje: 102. Mais a partir de xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Mensagens restantes hoje: 1.000.000. Mais a partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Chats não apagados para a outra pessoa: 0. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  1: Chats não apagados para a outra pessoa: 1. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  2: Chats não apagados para a outra pessoa: 2. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  3: Chats não apagados para a outra pessoa: 3. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  5: Chats não apagados para a outra pessoa: 5. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  11: Chats não apagados para a outra pessoa: 11. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  21: Chats não apagados para a outra pessoa: 21. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  100: Chats não apagados para a outra pessoa: 100. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  101: Chats não apagados para a outra pessoa: 101. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  102: Chats não apagados para a outra pessoa: 102. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.
+  1000000: Chats não apagados para a outra pessoa: 1.000.000. Se você apagar sua conta mesmo assim, eles continuam com ela, e os anexos que você enviou ali ficam no servidor por no máximo 30 dias.

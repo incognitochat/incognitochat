@@ -1958,6 +1958,38 @@ describe('deleting the account', () => {
     expect(server.calls.filter((c) => c.startsWith('GET /inbox'))).toEqual([]);
   });
 
+  it('offers no deleting for both sides when finishing a deletion the server says is under way, and sends nothing if asked', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api, { issuer });
+    await chatOnDevice(owner.db);
+    server.state.deleting = true;
+    await owner.app.home();
+    expect(owner.app.screen.value).toMatchObject({ kind: 'signed-out', reason: 'deleting' });
+    server.calls.length = 0;
+    owner.app.askDeleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'confirm-delete', busy: false, error: null, finishing: true });
+    await owner.app.deleteAccount(true);
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(server.calls.filter((c) => c.startsWith('POST /send') || c.startsWith('POST /tokens'))).toEqual([]);
+  });
+
+  it('offers no deleting for both sides once a deletion has started, and sends nothing if asked', async () => {
+    const server = fakeServer({ deleteAccount: [new NetworkError('offline')] });
+    const owner = await registered(server.api, { issuer });
+    await chatOnDevice(owner.db);
+    owner.app.askDeleteAccount();
+    await owner.app.deleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'deleting', error: 'network' });
+    // The chats meanwhile, then Delete account again, ticked.
+    await owner.app.readDuringDeletion();
+    server.calls.length = 0;
+    owner.app.askDeleteAccount();
+    expect(owner.app.screen.value).toEqual({ kind: 'confirm-delete', busy: false, error: null, finishing: true });
+    await owner.app.deleteAccount(true);
+    expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
+    expect(server.calls.filter((c) => c.startsWith('POST /send') || c.startsWith('POST /tokens'))).toEqual([]);
+  });
+
   it('tries the uploads the server could not delete again, waiting longer each time, before deleting the account', async () => {
     const failing = new ApiError(500, 'internal');
     const server = fakeServer({ mediaDelete: [failing, new NetworkError('offline')] });
