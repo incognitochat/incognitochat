@@ -88,6 +88,8 @@ async function backend() {
         return check({});
       }
       if (path === '/notices/language') {
+        // The launch data alone: never the language chosen in the app.
+        if (Object.keys(body).join() !== 'initData') throw new Error(`sent ${Object.keys(body).join()}`);
         languageChanges.push(body.initData as string);
         if (noticeState.languageRefused) throw noticeState.languageRefused;
         if (!noticesOn.has(account)) throw new ApiError(409, 'notices_off');

@@ -698,7 +698,7 @@ func (m *memDirectory) Device(_ context.Context, account, device string, _ time.
 		Member: a.member, Level: a.level, Granted: a.granted, Allocated: a.allocated, Links: a.links,
 		Notices: a.chat != nil && !a.noticesOff, NoticesRefused: a.noticesOff, NoticesLeft: a.noticesOff && (a.chat != nil || a.language != ""),
 		NoticeLanguage: map[bool]string{true: a.language}[a.chat != nil && !a.noticesOff],
-		Deleting: a.deleting, Leftovers: slices.Clone(a.leftovers), LastUse: a.lastUse,
+		Deleting:       a.deleting, Leftovers: slices.Clone(a.leftovers), LastUse: a.lastUse,
 	}, nil
 }
 

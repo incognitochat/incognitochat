@@ -214,8 +214,10 @@ When a user sets up, Telegram gives the app signed launch data about them
 signature, keeps the keyed hash of the ID described above, and forgets the
 rest. When the user allows notices, it also keeps their chat ID, encrypted,
 and their language (one of the app's languages, picked from Telegram's),
-while notices stay on; when Telegram's language changes, the app sends the
-launch data again so the server can change it. When someone opens a link, the
+while notices stay on. When a later launch's Telegram language picks
+another of the app's languages, the app sends that launch's data again (only
+from a launch without a link or invitation in it, at most once per launch),
+so the server can change it. When someone opens a link, the
 app never sends that launch data to the server, so it doesn't learn who
 opened which link.
 
