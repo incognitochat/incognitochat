@@ -130,26 +130,23 @@ it:
   `/start`, reads the replies (for up to 20 seconds, until none has come for
   4), reads them once more, then deletes them all; `--no-start` skips this.
   No reply at all means it couldn't check, not that it failed.
-- **link:** a named Mini App, `t.me/<bot>/app` (or `--app-name`: the name
-  your links used), if the bot has one. None is fine; one that opens another
-  address fails.
 
 Each must open `https://<org>.github.io/` exactly. The menu button and the
 `/start` buttons are the bot's own addresses, so they must be exactly that,
-with nothing after it. The Main Mini App and a named one are typed in
-BotFather (the final `/` may be left out: a browser adds it) and come back
-from Telegram with its launch parameters added in the fragment, so those may
-carry Telegram's `tgWebApp…` keys, each once, and nothing else: no query, no
-start parameter (the script asks for none), no second `#`. The script sends
-a fixed theme with its request, so Telegram adds its own theme parameter and
-a planted one is a second copy. The app acts on
-some parameters (a start parameter, `#save=`, the first copy of a launch
-parameter), so one planted in the address the operator set fails. Every
-address any version of a reply carried counts, so a button edited away and
-back fails too. The fragment Telegram adds holds your account's signed
-launch data, which logs that account in to the app's server for a while. So
-the script never loads the page, and prints only an address's origin and
-path and the names of unexpected parameters.
+with nothing after it. The Main Mini App's address is typed in BotFather
+(the final `/` may be left out: a browser adds it) and comes back from
+Telegram with its launch parameters added in the fragment, so it may carry
+Telegram's `tgWebApp…` keys, each once, and nothing else: no query, no start
+parameter (the script asks for none), no second `#`. The script sends a
+fixed theme with its request, so Telegram adds its own theme parameter and a
+planted one is a second copy. The app acts on some parameters (a start
+parameter, `#save=`, the first copy of a launch parameter), so one planted
+in the address the operator set fails. Every address any version of a reply
+carried counts, so a button edited away and back fails too. The fragment
+Telegram adds holds your account's signed launch data, which logs that
+account in to the app's server for a while. So the script never loads the
+page, and prints only an address's origin and path and the names of
+unexpected parameters.
 
 ```shell
 python3 -m venv ~/.cache/verify-bot
@@ -184,17 +181,17 @@ use an account made for this, not your own, and use the string in one place
 only (Telegram ends a session used from two places at once).
 
 **What it shows:** what Telegram opens for that account, at that moment. A
-change in BotFather (the Main Mini App, a named Mini App) or to the default
-menu button is for everyone, so any account's check sees it. A per-chat menu
-button, or a button the bot sends only to some people, is invisible to
-everyone else's checks: only your own run shows what you are served.
+change in BotFather (the Main Mini App) or to the default menu button is for
+everyone, so any account's check sees it. A per-chat menu button, or a button
+the bot sends only to some people, is invisible to everyone else's checks:
+only your own run shows what you are served.
 
 **What it doesn't check:**
 
 - the button in the bot's notices (it uses the same address as the welcome
   button, but a notice comes only when there's news);
-- named Mini Apps other than the one asked for: Telegram doesn't list a
-  bot's Mini Apps;
+- named Mini Apps (`t.me/<bot>/<name>`): the app's links don't use them,
+  and Telegram doesn't list a bot's Mini Apps, so a new one wouldn't be seen;
 - links in the bot's replies that aren't app buttons, and inline mode;
 - replies to `/start` that come after it deleted the messages;
 - the parameters a link someone shares carries: anyone can put a start
