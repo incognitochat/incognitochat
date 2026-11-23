@@ -22,8 +22,8 @@ describe('invitation codes', () => {
   });
 
   it('round-trip through invitation links', () => {
-    const url = invitationUrl('some_bot', 'app', 'abcd-efgh');
-    expect(url).toBe('https://t.me/some_bot/app?startapp=invabcdefgh');
+    const url = invitationUrl('some_bot', 'abcd-efgh');
+    expect(url).toBe('https://t.me/some_bot?startapp=invabcdefgh');
     expect(parseInvitationPayload(new URL(url).searchParams.get('startapp')!)).toBe('abcd-efgh');
     expect(parseInvitationPayload('reg' + 'a'.repeat(43))).toBeNull();
     expect(parseInvitationPayload('INVABCDEFGH')).toBeNull();

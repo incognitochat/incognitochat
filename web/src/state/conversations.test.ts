@@ -51,7 +51,6 @@ const rand = () => toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
 const config = {
   apiUrl: 'https://api.example',
   botUsername: 'test_bot',
-  appName: 'dev',
   issuer: { name: 'test', spki: new Uint8Array(0), keyId: new Uint8Array(32) },
 };
 

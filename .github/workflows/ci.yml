@@ -162,7 +162,6 @@ jobs:
         env:
           VITE_API_URL: https://api.example.invalid/
           VITE_BOT_USERNAME: example_bot
-          VITE_APP_NAME: example
           VITE_WS_URL: wss://ws.example.invalid/live
           VITE_MEDIA_ORIGIN: https://media.example.invalid
         run: |

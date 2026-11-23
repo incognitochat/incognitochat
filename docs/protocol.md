@@ -409,7 +409,7 @@ it (accounts set up before keep theirs until they end).
 ## Links
 
 ```
-https://t.me/<bot>/<app>?startapp=<payload>
+https://t.me/<bot>?startapp=<payload>
 payload = "1" ‖ link ID (11) ‖ fingerprint(link signing key) (43)       55 characters
 ```
 

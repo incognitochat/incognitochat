@@ -6,8 +6,8 @@ own bot, and its own hosting organization and repository for the app.
 
 Nothing environment-specific is committed: account IDs, bucket names, bot
 names, URLs and tokens live in GitHub environment secrets and variables and in
-the hosting repository's variables. Below, `<env>`, `<bot>`, `<app>` and
-`<org>` are placeholders.
+the hosting repository's variables. Below, `<env>`, `<bot>` and `<org>` are
+placeholders.
 
 ## How a deploy runs
 
@@ -390,9 +390,11 @@ later: [rotating an issuer key](#rotating-an-issuer-key).
 
 In BotFather, for the environment's bot:
 
-- a direct-link Mini App `<app>` pointing at `https://<org>.github.io/`,
-  with "request write access" on;
-- the main Mini App and the menu button pointing at the same address;
+- the main Mini App and the menu button pointing at `https://<org>.github.io/`.
+  Every link the app makes (`t.me/<bot>?startapp=…`) opens the main Mini App,
+  so it must stay on: without it, Telegram opens the bot or the menu button's
+  address and drops the link. The app asks for permission to message the
+  user itself, after setup;
 - a privacy policy, which Telegram's bot developer terms require. Whoever
   runs the environment publishes it, outside this repository;
   [data.md](data.md) is the technical part it can point to.
@@ -408,7 +410,7 @@ again). Changes made to them in BotFather are undone by the next deploy.
 The app is served from `<org>/<org>.github.io` in a GitHub organization of its
 own. How to create and configure it, and the variables it needs (`API_URL`,
 `WS_URL`, `MEDIA_ORIGIN` from Terraform's outputs, `BOT_USERNAME`,
-`APP_NAME`, `ISSUER_KEY`), is in [hosting/README.md](../hosting/README.md).
+`ISSUER_KEY`), is in [hosting/README.md](../hosting/README.md).
 
 ### What the deploy role may do
 

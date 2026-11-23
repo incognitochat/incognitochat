@@ -397,12 +397,19 @@ elif [ "$rebuild" = 1 ]; then
     echo "REBUILD FAILED can't check out ${commit}"
   elif ! (
     if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
+    # Older builds also took the named Mini App's short name. Set it only
+    # when the manifest has it: every VITE_ setting, even an unused or empty
+    # one, is part of the bundle.
+    if jq -e '.build | has("VITE_APP_NAME")' "$manifest" >/dev/null; then
+      VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") && export VITE_APP_NAME
+    else
+      unset VITE_APP_NAME
+    fi
     # set -e is off inside a condition, so each step is chained.
     cd "$work/code/web" \
       && npm ci --ignore-scripts --silent \
       && VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
         VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
-        VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") \
         VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
         VITE_WS_URL=$(jq -r '.build.VITE_WS_URL // empty' "$manifest") \
         VITE_MEDIA_ORIGIN=$(jq -r '.build.VITE_MEDIA_ORIGIN // empty' "$manifest") \

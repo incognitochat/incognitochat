@@ -19,7 +19,7 @@ describe('link payloads', () => {
     const payload = encodePayload({ id, fingerprint: FP });
     expect(payload).toHaveLength(PAYLOAD_LENGTH);
     expect(parsePayload(payload)).toEqual({ id, fingerprint: FP });
-    expect(linkUrl('some_bot', 'app', { id, fingerprint: FP })).toBe(`https://t.me/some_bot/app?startapp=${payload}`);
+    expect(linkUrl('some_bot', { id, fingerprint: FP })).toBe(`https://t.me/some_bot?startapp=${payload}`);
   });
 
   it('reject anything else', () => {
