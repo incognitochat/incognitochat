@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import types as pytypes
@@ -173,9 +174,25 @@ class Checks(unittest.TestCase):
                 self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
 
     def test_an_address_typed_without_the_final_slash(self):
-        # In BotFather: https://host is https://host/ to a browser.
+        # In BotFather: https://host is https://host/ to a browser. Only the
+        # slash may be missing: everything else is judged the same.
         url = "https://example.github.io#tgWebAppData=SECRET&tgWebAppVersion=9.1"
         self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
+        for planted in PLANTED + ELSEWHERE:
+            # The path's "/" only, where it's the whole path.
+            without = re.sub(r"^([^/?#]*//[^/?#]*)/(?=[?#]|$)", r"\1", planted)
+            if without == planted:
+                continue
+            for where in ("main", "link"):
+                with self.subTest(where=where, url=without):
+                    self.assertEqual(check(Stub(**{where: without})).statuses[where], "failed")
+
+    def test_a_planted_theme_is_a_second_copy(self):
+        # The script sends a theme, so Telegram adds one: a planted one is a second.
+        url = "https://example.github.io/#tgWebAppThemeParams=%7B%22bg_color%22%3A%22%23000%22%7D&tgWebAppData=SECRET&tgWebAppThemeParams=%7B%7D"
+        r = check(Stub(main=url))
+        self.assertEqual(r.statuses["main"], "failed")
+        self.assertIn("#tgWebAppThemeParams (twice)", "\n".join(r.lines))
 
     def test_the_bots_own_buttons_must_be_exact(self):
         # The menu button and /start's buttons: as the bot set them, nothing added.
@@ -542,6 +559,8 @@ class RealClient(unittest.TestCase):
 
         class Conn:
             async def __call__(self, request):
+                # As Telegram gets it: a wrong type wouldn't serialize.
+                bytes(request)
                 calls.append(request)
                 answer = answers[type(request).__name__]
                 if isinstance(answer, Exception):
