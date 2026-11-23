@@ -174,19 +174,31 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 // An ID that isn't the caller's to discard writes nothing: the mailbox is
 // read first, half a directory unit. Copies of a block of one's own
 // mailbox sent at once are refused for a write unit each, but one
-// (directory.Store.DiscardMailbox). A read or write that fails is answered
-// 500 or 503, never not_found, which the app takes for a block done.
+// (directory.Store.DiscardMailbox). A read or write that fails before the
+// mailbox is deleted is answered 500 or 503, never not_found, which the
+// app takes for a block done. Once it is deleted the block holds, and is
+// answered 200 even if its record and count couldn't then be put right
+// (directory.NotForgotten, logged): the app then records the block, and
+// gives the chat a new mailbox if it's unblocked, where an error would
+// leave it showing the chat active, with its replies naming the mailbox
+// that is gone.
 func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller) httpapi.Response {
+	const route = "POST /mailboxes/{id}/discard"
 	id := httpapi.Param(ctx, "id")
 	if !ids.Valid(id) {
 		return httpapi.Error(http.StatusNotFound, "not_found")
 	}
 	err := s.Directory.DiscardMailbox(ctx, c.AccountID, id)
-	if errors.Is(err, directory.ErrNotFound) {
+	var notForgotten *directory.NotForgotten
+	switch {
+	case errors.Is(err, directory.ErrNotFound):
 		return httpapi.Error(http.StatusNotFound, "not_found")
-	}
-	if err != nil {
-		return s.internal("POST /mailboxes/{id}/discard", err)
+	case errors.As(err, &notForgotten):
+		// Neither the mailbox nor the account: the route and why.
+		s.Log.Warn("mailbox discarded, its record not forgotten",
+			slog.String(logx.KeyRoute, route), logx.ErrorKind(notForgotten.Err))
+	case err != nil:
+		return s.internal(route, err)
 	}
 	return httpapi.JSON(http.StatusOK, map[string]string{})
 }

@@ -19,16 +19,18 @@ import (
 )
 
 // twisted is a DB whose reads of chosen items return what a test says (an
-// item forged, or an error), and whose transactions can fail first; the
-// rest goes to DB.
+// item forged, or an error), and whose deletes and updates of chosen items
+// fail first; the rest goes to DB. It counts those writes, and keeps the
+// options of each, by "<operation> <pk> <sk>".
 type twisted struct {
 	DB
 	reads map[string]map[string]types.AttributeValue // "<pk> <sk>" -> the item read instead
 	fail  error                                      // what every GetItem returns, if set
 
-	mu      sync.Mutex
-	txFails []error // what the next transactions return, in turn, before any goes through
-	txCalls int
+	mu    sync.Mutex
+	fails map[string][]error // what the next writes return, in turn, before any goes through
+	calls map[string]int
+	opts  map[string][]func(*dynamodb.Options)
 }
 
 func (d *twisted) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -41,18 +43,35 @@ func (d *twisted) GetItem(ctx context.Context, in *dynamodb.GetItemInput, opts .
 	return d.DB.GetItem(ctx, in, opts...)
 }
 
-func (d *twisted) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWriteItemsInput, opts ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+// write counts a write, and returns the error it should fail with, if any.
+func (d *twisted) write(op string, k map[string]types.AttributeValue, opts []func(*dynamodb.Options)) error {
+	name := op + " " + keyString(k)
 	d.mu.Lock()
-	d.txCalls++
-	var fail error
-	if len(d.txFails) > 0 {
-		fail, d.txFails = d.txFails[0], d.txFails[1:]
+	defer d.mu.Unlock()
+	if d.calls == nil {
+		d.calls, d.opts = map[string]int{}, map[string][]func(*dynamodb.Options){}
 	}
-	d.mu.Unlock()
-	if fail != nil {
-		return nil, fail
+	d.calls[name]++
+	d.opts[name] = opts
+	if fails := d.fails[name]; len(fails) > 0 {
+		d.fails[name] = fails[1:]
+		return fails[0]
 	}
-	return d.DB.TransactWriteItems(ctx, in, opts...)
+	return nil
+}
+
+func (d *twisted) DeleteItem(ctx context.Context, in *dynamodb.DeleteItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	if err := d.write("DeleteItem", in.Key, opts); err != nil {
+		return nil, err
+	}
+	return d.DB.DeleteItem(ctx, in, opts...)
+}
+
+func (d *twisted) UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	if err := d.write("UpdateItem", in.Key, opts); err != nil {
+		return nil, err
+	}
+	return d.DB.UpdateItem(ctx, in, opts...)
 }
 
 func keyString(k map[string]types.AttributeValue) string {
@@ -104,18 +123,14 @@ func mailboxRecords(t *testing.T, s *Store, n NewAccount) ([]string, int) {
 	return records, d.Mailboxes
 }
 
-func writes(calls []string) (deletes, transactions int) {
+// operations counts calls by their operation.
+func operations(calls []string) map[string]int {
+	ops := map[string]int{}
 	for _, c := range calls {
-		switch {
-		case strings.HasPrefix(c, "DeleteItem "):
-			deletes++
-		case strings.HasPrefix(c, "TransactWriteItems "):
-			transactions++
-		case strings.HasPrefix(c, "PutItem "), strings.HasPrefix(c, "UpdateItem "), strings.HasPrefix(c, "BatchWriteItem "):
-			deletes += 100 // no such write is expected: fail loudly
-		}
+		op, _, _ := strings.Cut(c, " ")
+		ops[op]++
 	}
-	return deletes, transactions
+	return ops
 }
 
 // The write that decides a discard checks for itself that the account owns
@@ -139,8 +154,9 @@ func TestDiscardChecksInItsWrite(t *testing.T) {
 		if err := fs.DiscardMailbox(ctx, d.owner.ID, id); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("%s read as the account's own: %v", what, err)
 		}
-		if deletes, transactions := writes(meter.Calls()); deletes != 1 || transactions != 0 {
-			t.Fatalf("%s: %d deletes, %d transactions; calls %v", what, deletes, transactions, meter.Calls())
+		// The read was forged, so the meter sees only the delete, refused.
+		if ops := operations(meter.Calls()); ops["DeleteItem"] != 1 || len(ops) != 1 {
+			t.Fatalf("%s: calls %v", what, meter.Calls())
 		}
 	}
 	if m, err := s.Mailbox(ctx, d.theirs); err != nil || m.Owner != d.other.ID {
@@ -170,8 +186,8 @@ func TestDiscardReadFailureIsNotNotFound(t *testing.T) {
 	if err == nil || errors.Is(err, ErrNotFound) || !awsconf.Unavailable(err) {
 		t.Fatalf("a throttled read: %v", err)
 	}
-	if deletes, transactions := writes(meter.Calls()); deletes != 0 || transactions != 0 {
-		t.Fatalf("wrote after a failed read: %v", meter.Calls())
+	if calls := meter.Calls(); len(calls) != 0 {
+		t.Fatalf("wrote after a failed read: %v", calls)
 	}
 	if _, err := s.Mailbox(ctx, d.mine[0]); err != nil {
 		t.Fatalf("mailbox after a failed read: %v", err)
@@ -179,67 +195,111 @@ func TestDiscardReadFailureIsNotNotFound(t *testing.T) {
 }
 
 // Removing a discarded mailbox's record and counting it off happen once,
-// however often they're tried, and are tried again when a concurrent
-// transaction or throttling stops them.
+// however often they're tried. A write the table refused outright is tried
+// again, a few times; the count's, which mustn't be applied twice, is sent
+// once by the SDK and not tried again after any other failure. What a
+// failure leaves is the record, or the count one too high; the block holds.
 func TestForgetMailbox(t *testing.T) {
 	s, meter, _ := metered(t)
 	ctx := context.Background()
 	d := newDiscardSetup(t, s)
-	_, count := mailboxRecords(t, s, d.owner)
-	saved := forgetRetries
-	forgetRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { forgetRetries = saved })
+	saved := forgetWaits
+	forgetWaits = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { forgetWaits = saved })
+	count := func() int {
+		t.Helper()
+		_, c := mailboxRecords(t, s, d.owner)
+		return c
+	}
+	recorded := func(id string) bool {
+		t.Helper()
+		r, _ := mailboxRecords(t, s, d.owner)
+		return slices.Contains(r, id)
+	}
+	mailbox := func() string {
+		t.Helper()
+		id := ids.New()
+		if err := s.CreateMailboxes(ctx, d.owner.ID, []string{id}, 10); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	record := func(id string) string { return "DeleteItem " + accountPK(d.owner.ID) + " " + mailboxPrefix + id }
+	counter := "UpdateItem " + accountPK(d.owner.ID) + " " + skAccount
+	throttled := &types.ProvisionedThroughputExceededException{Message: aws.String("throttled")}
+	conflict := &types.TransactionConflictException{Message: aws.String("a transaction under way")}
 
 	// Twice: the second finds the record gone and changes nothing.
+	before := count()
 	for range 2 {
 		if err := s.forgetMailbox(ctx, d.owner.ID, d.mine[0]); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if r, c := mailboxRecords(t, s, d.owner); slices.Contains(r, d.mine[0]) || c != count-1 {
-		t.Fatalf("after forgetting twice: records %v, count %d (was %d)", r, c, count)
+	if recorded(d.mine[0]) || count() != before-1 {
+		t.Fatalf("after forgetting twice: recorded %v, count %d (was %d)", recorded(d.mine[0]), count(), before)
 	}
 	// An intro mailbox's record isn't one to forget, and isn't counted.
 	if err := s.forgetMailbox(ctx, d.owner.ID, d.intro); err != nil {
 		t.Fatal(err)
 	}
-	if r, c := mailboxRecords(t, s, d.owner); !slices.Contains(r, d.intro) || c != count-1 {
-		t.Fatalf("an intro mailbox's record forgotten: records %v, count %d", r, c)
+	if !recorded(d.intro) || count() != before-1 {
+		t.Fatalf("an intro mailbox's record forgotten: count %d", count())
 	}
 
-	// A concurrent transaction won, then the table was throttled: tried again.
-	conflict := &types.TransactionCanceledException{CancellationReasons: []types.CancellationReason{
-		{Code: aws.String("TransactionConflict")}, {Code: aws.String("None")}}}
-	throttled := &types.ProvisionedThroughputExceededException{Message: aws.String("throttled")}
-	tw := &twisted{DB: meter, txFails: []error{conflict, throttled}}
+	// Refused outright, then tried again: the record's delete throttled
+	// once; the count's met a transaction under way, then was throttled.
+	// The count's is sent once by the SDK.
+	before = count()
+	tw := &twisted{DB: meter, fails: map[string][]error{record(d.mine[1]): {throttled}, counter: {conflict, throttled}}}
 	fs := &Store{DB: tw, Table: s.Table}
-	if err := fs.DiscardMailbox(ctx, d.owner.ID, d.mine[1]); err != nil || tw.txCalls != 3 {
-		t.Fatalf("discard through a conflict and throttling: %v after %d transactions", err, tw.txCalls)
+	if err := fs.DiscardMailbox(ctx, d.owner.ID, d.mine[1]); err != nil || tw.calls[record(d.mine[1])] != 2 || tw.calls[counter] != 3 {
+		t.Fatalf("discard through throttling and a conflict: %v; calls %v", err, tw.calls)
 	}
-	if r, c := mailboxRecords(t, s, d.owner); slices.Contains(r, d.mine[1]) || c != count-2 {
-		t.Fatalf("after a retried discard: records %v, count %d", r, c)
+	if recorded(d.mine[1]) || count() != before-1 {
+		t.Fatalf("after a discard tried again: recorded %v, count %d (was %d)", recorded(d.mine[1]), count(), before)
+	}
+	var o dynamodb.Options
+	for _, f := range tw.opts[counter] {
+		f(&o)
+	}
+	if o.RetryMaxAttempts != 1 {
+		t.Fatalf("the count's write may be sent %d times", o.RetryMaxAttempts)
 	}
 
-	// Throttled past the retries: the mailbox is gone (the block holds),
-	// its record and the count stay, and the error is the table's, not
-	// ErrNotFound. Discarding it again finds nothing to discard.
-	extra := ids.New()
-	if err := s.CreateMailboxes(ctx, d.owner.ID, []string{extra}, 10); err != nil {
-		t.Fatal(err)
-	}
-	tw = &twisted{DB: meter, txFails: slices.Repeat([]error{throttled}, len(forgetRetries)+1)}
+	// The record's delete refused past the tries again: the mailbox is gone
+	// (the block holds), the record stays and the count with it; the error
+	// is a NotForgotten, the table's, not ErrNotFound. Discarding it again
+	// finds nothing to discard.
+	extra := mailbox()
+	before = count()
+	tw = &twisted{DB: meter, fails: map[string][]error{record(extra): slices.Repeat([]error{throttled}, len(forgetWaits)+1)}}
 	fs = &Store{DB: tw, Table: s.Table}
 	err := fs.DiscardMailbox(ctx, d.owner.ID, extra)
-	if !awsconf.Unavailable(err) || tw.txCalls != len(forgetRetries)+1 {
-		t.Fatalf("discard throttled throughout: %v after %d transactions", err, tw.txCalls)
+	var notForgotten *NotForgotten
+	if !errors.As(err, &notForgotten) || !awsconf.Unavailable(err) || errors.Is(err, ErrNotFound) || tw.calls[record(extra)] != len(forgetWaits)+1 {
+		t.Fatalf("the record's delete throttled throughout: %v; calls %v", err, tw.calls)
 	}
 	if _, err := s.Mailbox(ctx, extra); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("the mailbox after its record couldn't be forgotten: %v", err)
 	}
-	if r, c := mailboxRecords(t, s, d.owner); !slices.Contains(r, extra) || c != count-1 {
-		t.Fatalf("what a failed forget leaves: records %v, count %d", r, c)
+	if !recorded(extra) || count() != before {
+		t.Fatalf("what a failed record delete leaves: recorded %v, count %d (was %d)", recorded(extra), count(), before)
 	}
 	if err := s.DiscardMailbox(ctx, d.owner.ID, extra); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("discarding it again: %v", err)
+	}
+
+	// The count's write failing otherwise (it may have been applied): not
+	// tried again. The record is gone, the count one too high.
+	extra = mailbox()
+	before = count()
+	tw = &twisted{DB: meter, fails: map[string][]error{counter: {errors.New("connection reset")}}}
+	fs = &Store{DB: tw, Table: s.Table}
+	if err := fs.DiscardMailbox(ctx, d.owner.ID, extra); !errors.As(err, &notForgotten) || tw.calls[counter] != 1 {
+		t.Fatalf("the count's write failing: %v; calls %v", err, tw.calls)
+	}
+	if recorded(extra) || count() != before {
+		t.Fatalf("what a failed count leaves: recorded %v, count %d (was %d)", recorded(extra), count(), before)
 	}
 }

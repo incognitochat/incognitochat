@@ -1599,17 +1599,29 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   mailbox, one discarded already) ends there and writes nothing. For a
   mailbox of the caller's own, one conditional delete of it decides (a
   write unit), and only the request that wins it removes its record and
-  counts it off (a transaction of two items, 4 units): 5 write units for
-  a block. Copies of a block sent at once all find the mailbox, and each
+  counts it off, in two more single-item writes: 3 write units for a
+  block. Copies of a block sent at once all find the mailbox, and each
   that loses is refused at the delete for a write unit: 20 at once write
-  24 units in all. So a request writes at most a unit, or 5 for the one
-  that discards a mailbox, and those were made first: at most 100 a day
-  per Telegram user, and 4,000 held at once. An account holding 4,000
+  22 units in all. Blocks of 20 different mailboxes at once write 60:
+  single-item writes to the account item take turns, where transactions
+  naming it at once would cancel each other, each cancelled one billed. A
+  write is tried again only when the table refused it outright (a
+  throttle, which isn't billed, or a transaction on the item under way),
+  at most 3 times. So a request writes at most a unit, or 3 for the one
+  that discards a mailbox (at most 9 if each of its writes kept meeting a
+  transaction on the account item, such as a pool top-up or a link
+  change, and such refusals were billed: AWS doesn't say), and those were
+  made first: at most 100 a day per Telegram user, and 4,000 held at
+  once. An account holding 4,000
   (40 days of making them) and spending them on blocks at its limits
-  writes about 6,000 units a quarter of an hour: about 30 such accounts
-  fill the directory's 200 writes a second (about 17 over 100 instances)
+  writes about 3,600 units a quarter of an hour: about 50 such accounts
+  fill the directory's 200 writes a second (about 29 over 100 instances)
   until their mailboxes run out, in about 50 minutes (about half an
-  hour). A block used to go straight to one transaction of three items,
+  hour). While the counts can't be written, such an account spread over
+  100 instances, at 30 blocks a minute on each, writes about 150 units a
+  second for about 80 seconds, and all accounts together at most about
+  400 (80 requests a minute per instance), so two such accounts pass the
+  cap. A block used to go straight to one transaction of three items,
   which DynamoDB bills even when its condition cancels it: 6 write units
   for any ID, so about 25 accounts kept at their limits, with no
   mailboxes at all, filled those writes for as long as they liked (about
@@ -1626,7 +1638,7 @@ normalised (`/%73ession`, `//session` and `/../session` count as
   460 accounts, or about 120 over 100. If the counts can't be written
   (whoever throttles the ephemeral table's writes), each instance lets a
   device make 30 a minute uncounted, and all devices 80 a minute (then
-  `503 unavailable`), each at most 1.5 units: so at most about 200
+  `503 unavailable`), each reading at most 1.5 units: so at most about 200
   directory reads a second over 100 instances, whatever the number of
   accounts, plus, once per instance, fewer than ten per device made
   before any of its counts first failed to be written. After such a

@@ -76,7 +76,7 @@ func Unavailable(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	if retry.IsErrorThrottles(retry.DefaultThrottles).IsErrorThrottle(err) == aws.TrueTernary {
+	if Throttled(err) {
 		return true
 	}
 	// A transaction DynamoDB cancelled only because items were throttled
@@ -91,6 +91,14 @@ func Unavailable(err error) bool {
 		return status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests
 	}
 	return false
+}
+
+// Throttled reports whether err is a throttle: AWS refused the call
+// outright, doing nothing (a table at its cap, any other rate limit). Unlike
+// a time-out or a 5xx, such a call wasn't applied, so even a write that
+// mustn't be applied twice can be tried again.
+func Throttled(err error) bool {
+	return err != nil && retry.IsErrorThrottles(retry.DefaultThrottles).IsErrorThrottle(err) == aws.TrueTernary
 }
 
 // throttledOnly reports whether a cancelled transaction's reasons are all
