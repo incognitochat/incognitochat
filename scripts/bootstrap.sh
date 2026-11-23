@@ -412,7 +412,9 @@ if [[ $policy_type == tag ]]; then
 else
   how_to_deploy="push to ${deploy_branch}"
 fi
-if ! gh secret list --env "$environment" --repo "$repo" --json name --jq '.[].name' | grep -qx BOT_TOKEN; then
+# Not a pipe into grep -q: it exits at the first match, gh can then die of
+# SIGPIPE, and under pipefail the token would look missing though it's set.
+if ! grep -qx BOT_TOKEN < <(gh secret list --env "$environment" --repo "$repo" --json name --jq '.[].name'); then
   cat <<EOF
 
 Done. One step left: store the Telegram bot token (from @BotFather) as an
