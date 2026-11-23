@@ -327,6 +327,38 @@ function sentIdsKey(conv: string): string {
   return `sent-ids:${conv}`;
 }
 
+function sentClockKey(conv: string): string {
+  return `sent-clock:${conv}`;
+}
+
+/**
+ * When this device last sent something in a conversation (takeSentAt): that
+ * envelope's time (`at`), and the furthest the clock had got in the run of
+ * sends it belongs to (`clock`): the highest the clock read since what this
+ * device sent there was last dated by the clock itself. A quick run is dated
+ * a second apart, ahead of the clock; `clock` tells that lead from a clock
+ * that went back since (engine.ts, stampIn). Unknown for a time a version
+ * before this one kept: `at` stands for both then.
+ */
+export interface LastSent {
+  at: number;
+  clock?: number;
+}
+
+/**
+ * When this device last sent something in a conversation (LastSent), read
+ * within a transaction on `meta`. The time is kept on its own, as versions
+ * before this one keep and read it; the clock with a copy of the time, and
+ * counted only while that is still the time kept (a version before this
+ * one, in another copy of the app, keeps only the time).
+ */
+async function readLastSent(meta: { get(key: string): Promise<unknown> }, conv: string): Promise<LastSent | undefined> {
+  const at = (await meta.get(sentKey(conv))) as number | undefined;
+  if (at === undefined) return undefined;
+  const run = (await meta.get(sentClockKey(conv))) as LastSent | undefined;
+  return run?.at === at && run.clock !== undefined ? { at, clock: run.clock } : { at };
+}
+
 /**
  * Of how many of the last things this device sent in a conversation (of
  * any kind) it keeps the envelope's ID and time (takeSentAt): enough for a
@@ -344,30 +376,37 @@ interface SentEnvelope {
 
 /**
  * Takes the time for something this device sends in a conversation (`at`):
- * choose gets the time of the last one sent there, from this device (also
- * before a reload, and from any copy of the app), and returns the next.
- * Kept apart from the conversation, under a lock of its own: two sends at
- * once never get the same time, and a send going out (which holds the
- * conversation's lock) doesn't hold up the next one being shown. With the
- * envelope's ID, that and its time are kept too, for the last SENT_KEPT.
+ * choose gets when the last one was sent there (LastSent), from this device
+ * (also before a reload, and from any copy of the app), and returns the
+ * next, with the clock it was dated by. Kept apart from the conversation,
+ * under a lock of its own: two sends at once never get the same time, and a
+ * send going out (which holds the conversation's lock) doesn't hold up the
+ * next one being shown. With the envelope's ID, that and its time are kept
+ * too, for the last SENT_KEPT.
  */
-export function takeSentAt(db: Database, conv: string, choose: (last: number | undefined) => number, id?: string): Promise<number> {
+export function takeSentAt(db: Database, conv: string, choose: (last: LastSent | undefined) => LastSent & { clock: number }, id?: string): Promise<number> {
   return withLock(sentKey(conv), async () => {
-    const next = choose(await getMeta<number>(db, sentKey(conv)));
     const tx = db.transaction('meta', 'readwrite');
-    await tx.store.put(next, sentKey(conv));
+    // Read and written in one transaction: choose stays synchronous, as
+    // waiting for anything else would let the transaction end.
+    const next = choose(await readLastSent(tx.store, conv));
+    await tx.store.put(next.at, sentKey(conv));
+    await tx.store.put({ at: next.at, clock: next.clock }, sentClockKey(conv));
     if (id !== undefined) {
       const kept = ((await tx.store.get(sentIdsKey(conv))) as SentEnvelope[] | undefined) ?? [];
-      await tx.store.put([...kept.filter((e) => e.id !== id), { id, at: next }].slice(-SENT_KEPT), sentIdsKey(conv));
+      await tx.store.put([...kept.filter((e) => e.id !== id), { id, at: next.at }].slice(-SENT_KEPT), sentIdsKey(conv));
     }
     await tx.done;
-    return next;
+    return next.at;
   });
 }
 
-/** The time of the last thing this device sent in a conversation (takeSentAt), if any. */
-export function lastSentAt(db: Database, conv: string): Promise<number | undefined> {
-  return getMeta<number>(db, sentKey(conv));
+/** When this device last sent something in a conversation (takeSentAt), if it did. */
+export async function lastSent(db: Database, conv: string): Promise<LastSent | undefined> {
+  const tx = db.transaction('meta');
+  const last = await readLastSent(tx.store, conv);
+  await tx.done;
+  return last;
 }
 
 /** The time of something this device sent in a conversation, by its envelope's ID, if it's one of the last SENT_KEPT there (takeSentAt). */
@@ -376,23 +415,53 @@ export async function sentEnvelopeAt(db: Database, conv: string, id: string): Pr
 }
 
 /**
- * Deletes when this device last sent something in a conversation, and the
- * IDs and times of the last few things (takeSentAt), within a transaction
+ * Deletes when this device last sent something in a conversation (LastSent),
+ * and the IDs and times of the last few things (takeSentAt), within a transaction
  * that writes `meta`: with its chat, or with its record. Whatever deletes a
  * conversation's record deletes these in the same transaction, with what it
  * remembers by keyed hashes.
  */
 function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: string): Promise<unknown> {
-  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentIdsKey(conv))]);
+  return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentClockKey(conv)), meta.delete(sentIdsKey(conv))]);
 }
 
-/** Forgets when this device last sent something in a conversation, and what (deleteSentAt): its chat was deleted. */
-export function forgetSentAt(db: Database, conv: string): Promise<void> {
+/**
+ * Forgets when this device last sent something in a conversation, and what
+ * (deleteSentAt): its chat was deleted. With keepTime (a delete for both
+ * sides), only what: the time stays, the delete's own, with how far the
+ * clock had got. The delete clears what's dated up to it on both sides, so
+ * what's sent there next must be dated after it, also after a reload and
+ * from another copy of the app, though a quick run may have dated it well
+ * ahead of the clock (engine.ts, stampIn).
+ */
+export function forgetSentAt(db: Database, conv: string, keepTime = false): Promise<void> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');
-    await deleteSentAt(tx.store, conv);
+    if (keepTime) await tx.store.delete(sentIdsKey(conv));
+    else await deleteSentAt(tx.store, conv);
     await tx.done;
   });
+}
+
+/**
+ * Deletes the clocks kept with a time last sent (LastSent) whose time is
+ * gone: a version before this one, in another copy of the app (or before
+ * an update was undone), deleted the chat or forgot when it last sent there
+ * without knowing of the clock. This version writes and deletes the two
+ * together. Only keys are read, in one transaction. Returns how many went.
+ */
+export async function dropStrayClocks(db: Database): Promise<number> {
+  const tx = db.transaction('meta', 'readwrite');
+  const prefix = sentClockKey('');
+  const keys = (await tx.store.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}\uffff`))) as string[];
+  let removed = 0;
+  for (const key of keys) {
+    if ((await tx.store.getKey(sentKey(key.slice(prefix.length)))) !== undefined) continue;
+    await tx.store.delete(key);
+    removed++;
+  }
+  await tx.done;
+  return removed;
 }
 
 /** A message's place in its conversation (byTime): its `at`, and its `order` among those with the same `at`. */
@@ -473,8 +542,8 @@ async function lookUpAnswered(db: Database, conv: string, write: boolean): Promi
  * this device, not their `at` alone), and in the same second, taken in
  * later (`order`). Ours is dated when it's written, on the server's clock
  * and after anything we sent before (engine.ts, stampIn); theirs, no later
- * than it arrived, and if it arrived after one of ours dated a few seconds
- * ahead, no earlier than that (engine.ts, shownAt). So what was here before
+ * than it arrived, and if it arrived after a quick run of ours dated ahead,
+ * no earlier than that (engine.ts, shownAt). So what was here before
  * the user's message comes before it (in its second, it was taken in
  * first). What arrives after it comes after it, unless they dated it
  * earlier and it names nothing of ours from since: then it waits for a tap.

@@ -6203,6 +6203,216 @@ describe('message times', () => {
     expect(await texts('owner')).toEqual(['hello', 'one', 'two', 'three']);
   });
 
+  describe('a quick run more than a minute ahead', () => {
+    // Seventy sends in a second are dated up to seventy seconds ahead of the
+    // clock: past the minute after which the app used to take its clock to
+    // have gone back, and dated what it sent next by the clock again, so it
+    // showed among the run, on both sides.
+    const run = async (who: Person, conversation: string, name: string, count = 70) => {
+      const texts: string[] = [];
+      for (let i = 0; i < count; i++) {
+        texts.push(`${name} ${i}`);
+        await who.messaging.send(conversation, `${name} ${i}`);
+      }
+      return texts;
+    };
+
+    it('dates what follows it after it, and both sides show that last', async () => {
+      let clock = S + 100;
+      const { owner, sender, conv, texts } = await chat({ owner: () => clock, sender: () => clock });
+      const sent = ['hello', ...(await run(sender, conv, 'run')), 'one more'];
+      await sender.messaging.send(conv, 'one more');
+      // A second apart from 'hello' on, never back.
+      expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual(sent.map((_, i) => S + i * 1000));
+      expect(await texts('sender')).toEqual(sent);
+      // The owner takes them in five seconds later: those dated after that
+      // second show in it, in the order they came.
+      clock = S + 5100;
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(sent);
+    }, 30_000);
+
+    it('shows it in order to a receiver taking it in a second after each part was sent, and what follows last', async () => {
+      let clock = S + 100;
+      const { owner, sender, conv, texts } = await chat({ owner: () => clock, sender: () => clock });
+      const sent = ['hello'];
+      // Ten a second for eight seconds; the owner takes each second's in during the next.
+      for (let second = 0; second < 8; second++) {
+        sent.push(...(await run(sender, conv, `run ${second}`, 10)));
+        clock += 1000;
+        await owner.messaging.sync();
+      }
+      sent.push('one more');
+      await sender.messaging.send(conv, 'one more');
+      clock += 1000;
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(sent);
+      expect(await texts('sender')).toEqual(sent);
+    }, 30_000);
+
+    it('keeps both sides in order when both write quick runs, and shows what each writes after them last', async () => {
+      const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+      // In turns of ten, each side taking the other's in first: the same order on both sides.
+      const sent = ['hello'];
+      for (let turn = 0; turn < 7; turn++) {
+        sent.push(...(await run(sender, conv, `sender ${turn}`, 10)));
+        await owner.messaging.sync();
+        sent.push(...(await run(owner, mine, `owner ${turn}`, 10)));
+        await sender.messaging.sync();
+      }
+      expect(await texts('owner')).toEqual(sent);
+      expect(await texts('sender')).toEqual(sent);
+      // Then both at once, neither taking the other's in meanwhile: each
+      // side's in the order written, on both sides.
+      const theirs = await run(sender, conv, 'sender at once', 20);
+      const ours = await run(owner, mine, 'owner at once', 20);
+      await owner.messaging.sync();
+      await sender.messaging.sync();
+      for (const who of ['owner', 'sender'] as const) {
+        const shown = (await texts(who)).slice(sent.length);
+        expect(shown.filter((t) => t.startsWith('sender'))).toEqual(theirs);
+        expect(shown.filter((t) => t.startsWith('owner'))).toEqual(ours);
+      }
+      // What each writes after taking the other's in shows last.
+      await sender.messaging.send(conv, 'sender last');
+      await owner.messaging.sync();
+      await owner.messaging.send(mine, 'owner last');
+      await sender.messaging.sync();
+      expect((await texts('owner')).slice(-2)).toEqual(['sender last', 'owner last']);
+      expect((await texts('sender')).slice(-2)).toEqual(['sender last', 'owner last']);
+    }, 30_000);
+
+    it('shows it in order to a receiver that takes it in later, in whatever order the inbox gives it', async () => {
+      let clock = S + 100;
+      const { backend, owner, sender, conv, texts } = await chat({ owner: () => clock, sender: () => clock });
+      const sent = ['hello', ...(await run(sender, conv, 'run')), 'one more'];
+      await sender.messaging.send(conv, 'one more');
+      // The owner's app opens ten minutes later.
+      clock = S + 600_100;
+      backend.inboxes.get('owner')!.reverse();
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(sent);
+    }, 30_000);
+
+    it('deletes it for both sides, and dates what it writes next after the delete, so both sides keep that', async () => {
+      const { owner, sender, conv, texts } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+      await run(sender, conv, 'run');
+      await owner.messaging.sync();
+      // Dated after the whole run (S + 71 s), it takes all of it, on both sides.
+      await sender.messaging.remove(conv, true);
+      // In the same second: a second after the delete, though that's more than a minute ahead.
+      await sender.messaging.send(conv, 'fresh start');
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['fresh start']);
+      expect(await texts('sender')).toEqual(['fresh start']);
+      expect((await listMessages(sender.db, conv))[0]!.at).toBe(S + 72_000);
+    }, 30_000);
+
+    it.each(['after a reload', 'from another copy of the app, open all along'] as const)(
+      'dates what it writes after deleting the chat for both sides after it, after the delete, %s',
+      async (how) => {
+        let clock = S + 100;
+        const { backend, owner, sender, conv, texts } = await chat({ owner: () => clock, sender: () => clock });
+        const copy = copyOf(backend, sender, { now: () => clock, messageNow: () => clock });
+        await run(sender, conv, 'run');
+        await owner.messaging.sync();
+        await sender.messaging.remove(conv, true);
+        await owner.messaging.sync();
+        // Five seconds on: the delete (S + 71 s) is still more than a minute ahead.
+        clock = S + 5100;
+        const app = how === 'after a reload' ? sender.open({ messageNow: () => clock }) : copy;
+        await app.send(conv, 'fresh start');
+        await owner.messaging.sync();
+        expect(await texts('owner')).toEqual(['fresh start']);
+        expect(await texts('sender')).toEqual(['fresh start']);
+      },
+      30_000,
+    );
+
+    it("is taken whole by the other side's delete for both sides, and what it writes next stays on both sides, after a reload too", async () => {
+      let clock = S + 100;
+      const { owner, sender, conv, mine, texts } = await chat({ owner: () => clock, sender: () => clock });
+      await run(sender, conv, 'run');
+      await owner.messaging.sync();
+      await owner.messaging.remove(mine, true);
+      await sender.messaging.sync();
+      expect(await texts('owner')).toEqual([]);
+      expect(await texts('sender')).toEqual([]);
+      clock = S + 5100;
+      await sender.messaging.send(conv, 'still there?');
+      await sender.open({ messageNow: () => clock }).send(conv, 'after a reload');
+      await owner.messaging.sync();
+      expect(await texts('owner')).toEqual(['still there?', 'after a reload']);
+      expect(await texts('sender')).toEqual(['still there?', 'after a reload']);
+    }, 30_000);
+
+    it('keeps the later of two edits sent after it', async () => {
+      const { owner, sender, conv, mine } = await chat({ owner: () => S + 100, sender: () => S + 100 });
+      await run(sender, conv, 'run', 59);
+      const hello = (await listMessages(sender.db, conv)).find((m) => m.text === 'hello')!;
+      await sender.messaging.edit(conv, hello.id, 'v1');
+      await sender.messaging.edit(conv, hello.id, 'v2');
+      await owner.messaging.sync();
+      expect((await getMessage(owner.db, mine, hello.id))!.text).toBe('v2');
+      expect((await getMessage(sender.db, conv, hello.id))!.text).toBe('v2');
+    }, 30_000);
+
+    it('still dates by the clock again once it went back a minute or more, or the run is ten minutes ahead', async () => {
+      let clock = S + 100;
+      const { owner, sender, conv, mine } = await chat({ owner: () => clock, sender: () => clock });
+      const find = async (text: string) => (await listMessages(sender.db, conv)).find((m) => m.text === text)!;
+      const at = async (text: string) => (await find(text)).at;
+      await run(sender, conv, 'run');
+      expect(await at('run 69')).toBe(S + 70_000);
+      // The clock goes back 59 seconds: the run carries on.
+      clock = S - 59_000 + 100;
+      await sender.messaging.send(conv, 'a little back');
+      expect(await at('a little back')).toBe(S + 71_000);
+      // A minute back from the furthest it got (S): from the clock again.
+      clock = S - 60_000 + 100;
+      await sender.messaging.send(conv, 'a minute back');
+      expect(await at('a minute back')).toBe(S - 60_000);
+
+      // A run almost ten minutes ahead (599 more sends than seconds) carries
+      // on once more, then the clock again.
+      const T = S - 60_000;
+      await putMeta(sender.db, `sent-at:${conv}`, T + 599_000);
+      await putMeta(sender.db, `sent-clock:${conv}`, { at: T + 599_000, clock: T });
+      await sender.messaging.send(conv, 'ten minutes ahead');
+      await sender.messaging.send(conv, 'past it');
+      expect([await at('ten minutes ahead'), await at('past it')]).toEqual([T + 600_000, T]);
+
+      // A time kept by a version before this one, in another copy of the
+      // app: it keeps no clock with it, and one kept with another time
+      // doesn't count. As that version took it, the clock went back if it's
+      // a minute ahead or more.
+      for (const [ahead, dated] of [
+        [59_000, T + 60_000],
+        [60_000, T],
+      ]) {
+        await putMeta(sender.db, `sent-at:${conv}`, T + ahead!);
+        await putMeta(sender.db, `sent-clock:${conv}`, { at: T + 1000, clock: T });
+        await sender.messaging.send(conv, `${ahead} ahead`);
+        expect(await at(`${ahead} ahead`)).toBe(dated);
+      }
+      await deleteMeta(sender.db, `sent-clock:${conv}`);
+      await putMeta(sender.db, `sent-at:${conv}`, T + 60_000);
+      await sender.messaging.send(conv, 'no clock');
+      expect(await at('no clock')).toBe(T);
+
+      // An edit the menu offers at the end of the window, from a run almost
+      // ten minutes ahead: well within the hour's grace their app gives it.
+      const hello = await find('hello');
+      clock = S + DAY - 500;
+      await putMeta(sender.db, `sent-at:${conv}`, S + DAY - 1000 + 599_000);
+      await putMeta(sender.db, `sent-clock:${conv}`, { at: S + DAY - 1000 + 599_000, clock: S + DAY - 1000 });
+      expect(editable(hello.at, clock)).toBe(true);
+      await sender.messaging.edit(conv, hello.id, 'hello!');
+      await owner.messaging.sync();
+      expect(await getMessage(owner.db, mine, hello.id)).toMatchObject({ text: 'hello!', edited: S + DAY - 1000 + 600_000 });
+    }, 30_000);
+  });
+
   it.each(['reaction', 'edit', 'seen receipt'] as const)('shows a reply after ours though the newest of ours it names is our %s, not a message', async (kind) => {
     // Clocks alike, all in one second. The owner writes; the sender writes
     // two more, then sends the other envelope: dated a second apart, so
@@ -6393,25 +6603,41 @@ describe('message times', () => {
     });
   });
 
-  it('forgets when it last sent something in a chat once the chat is deleted, here or for both sides', async () => {
+  it('forgets when it last sent something in a chat deleted here, and keeps only that time through a delete for both sides', async () => {
     const { owner, sender, conv, mine, texts } = await chat({ owner: () => S + 500, sender: () => S + 100 });
     const sentAt = (who: Person, c: string) => getMeta<number>(who.db, `sent-at:${c}`);
     await owner.messaging.send(mine, 'hi');
     expect([await sentAt(sender, conv), await sentAt(owner, mine)]).toEqual([S, S]);
     await owner.messaging.remove(mine);
-    expect(await sentAt(owner, mine)).toBeUndefined();
+    // Deleted here: none of it is kept (the time, how far the clock had got, the IDs and times of the last few things sent).
+    for (const key of [`sent-at:${mine}`, `sent-ids:${mine}`, `sent-clock:${mine}`]) expect(await getMeta(owner.db, key)).toBeUndefined();
 
     await sender.messaging.send(conv, 'still there?');
     expect(await sentAt(sender, conv)).toBe(S + 1000);
     await sender.messaging.remove(conv, true);
-    expect(await sentAt(sender, conv)).toBeUndefined();
-    // Nor are the IDs and times of the last few things sent there kept.
-    expect([await getMeta(sender.db, `sent-ids:${conv}`), await getMeta(owner.db, `sent-ids:${mine}`)]).toEqual([undefined, undefined]);
-    // What it sends there next, in the same second, is still dated after the delete (S + 2000), and stays.
-    await sender.messaging.send(conv, 'fresh start');
+    // Deleted for both sides: the delete's time stays (S + 2000), with the
+    // clock, so what's sent there next is dated after it; the IDs don't.
+    expect(await sentAt(sender, conv)).toBe(S + 2000);
+    expect(await getMeta(sender.db, `sent-clock:${conv}`)).toEqual({ at: S + 2000, clock: S });
+    expect(await getMeta(sender.db, `sent-ids:${conv}`)).toBeUndefined();
+    // What it sends there next, in the same second, after a reload, is still dated after the delete, and stays.
+    await sender.open({ messageNow: () => S + 100 }).send(conv, 'fresh start');
     expect((await listMessages(sender.db, conv)).map((m) => m.at)).toEqual([S + 3000]);
     await owner.messaging.sync();
     expect(await texts('owner')).toEqual(['fresh start']);
+  });
+
+  it('deletes a clock kept with a time last sent once an older version deleted that time', async () => {
+    const { owner, sender, conv, mine } = await chat({ owner: () => S + 500, sender: () => S + 100 });
+    await owner.messaging.send(mine, 'hi');
+    // An older copy of the app forgets when the sender last sent there (its
+    // chat deleted) without knowing of the clock; the owner's stays whole.
+    await deleteMeta(sender.db, `sent-at:${conv}`);
+    await deleteMeta(sender.db, `sent-ids:${conv}`);
+    await sender.messaging.maintain();
+    await owner.messaging.maintain();
+    expect(await getMeta(sender.db, `sent-clock:${conv}`)).toBeUndefined();
+    expect(await getMeta(owner.db, `sent-clock:${mine}`)).toEqual({ at: S, clock: S });
   });
 
   it('a delete of the whole chat for both sides takes all of ours they had, also ones dated a few seconds ahead', async () => {

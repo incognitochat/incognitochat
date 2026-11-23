@@ -924,11 +924,11 @@ describe('conversations in the app', () => {
       ['hello', 'read'],
       ['mine', 'failed'],
     ]);
-    // A flood comes in while it's open. The clock stands still from here:
-    // how a flood is dated depends on how fast it comes and on both apps'
-    // clocks (a run dated a minute ahead goes back to the clock, and what
-    // follows it can then show before it: engine.ts, stampIn and shownAt).
-    // Standing still, the order shown is the order taken in, however fast.
+    // A flood comes in while it's open. The clock stands still from here, so
+    // nothing depends on how fast it comes: the flood is dated ahead of the
+    // clock, a second apart, and what follows it after it (engine.ts,
+    // stampIn); the owner shows what's dated after the second it's taken in
+    // in that second, in the order taken in (shownAt).
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
     onTestFinished(() => clock.mockRestore());
     for (let i = 0; i < MAX_SHOWN + 10; i++) await sender.sendMessage(`flood ${i}`);

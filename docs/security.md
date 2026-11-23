@@ -178,6 +178,14 @@ it. This is how close it gets.
     clock, what it sends next carries on from that time, a second apart, so
     as not to go back: for as long as its clock was ahead, a minute at
     most;
+  - a quick run of sends in a conversation is dated ahead of the clock, a
+    second apart, and what follows carries on after it, up to ten minutes
+    ahead. So for a while `at` says how many things the device sent there
+    since the run began, those the server refused or that never arrived
+    included, as one more second each; the other side sees most of them
+    come anyway. It says nothing more about the device's clock than the
+    bullets above (the run starts from the clock messages are dated by),
+    and it's in that conversation only, so it links nothing;
   - anyone still on a version before this one sends the device's clock, to
     the millisecond.
 - **File names and the kind of device, to other users.** Phones often name

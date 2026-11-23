@@ -64,6 +64,7 @@ import {
   deleteMessage,
   dropEmptyConversation,
   dropPendingEdits,
+  dropStrayClocks,
   dropStrayFiles,
   dropStrayMessages,
   earlyFor,
@@ -78,7 +79,7 @@ import {
   getSweep,
   hasMessage,
   keepEarly,
-  lastSentAt,
+  lastSent,
   listConversations,
   listRecords,
   getIds,
@@ -118,6 +119,7 @@ import {
   unread,
   withPreview,
   type ConversationIds,
+  type LastSent,
   type LocalMedia,
   type MessageBody,
   type MessageView,
@@ -212,6 +214,17 @@ export const LINK_KEY_RETRY_MS = 10 * 60_000;
 const MAILBOX_GRACE = MAX_AGE;
 /** The most former mailboxes a conversation keeps (it rarely has more than one). */
 const MAX_FORMER_MAILBOXES = 8;
+/**
+ * How far ahead of the clock a quick run of sends in a conversation may
+ * date them (stampIn): ten minutes, which takes 600 more sends there than
+ * seconds, past what a person sends. Well within the hour's grace the other
+ * side gives an edit (EDIT_GRACE_MS), so an edit the menu offers stays in
+ * it with room to spare (for the second ticking over between the menu's
+ * check and the edit's time, and for clocks); and far from the day ahead
+ * past which they drop an envelope. Past it, what's sent next is dated by
+ * the clock again.
+ */
+const MAX_RUN_LEAD_MS = 10 * 60_000;
 
 export class NoTokens extends Error {
   constructor() {
@@ -494,12 +507,15 @@ export function createMessaging(deps: MessagingDeps) {
   const messageNow = deps.messageNow ?? now;
   const stamp = stamper(messageNow);
   /**
-   * Our deletes of a whole conversation for both sides in this run of the
-   * app, with their time: what we send there after one must be dated after
-   * it, as it clears what's dated up to it on both sides, though deleting
-   * the chat forgets when we last sent something there (forgetSentAt).
+   * Whether what we send in a conversation, with the clock at `at`, carries
+   * on a second after the last thing we sent there: if that's at or ahead of
+   * the clock, the clock hasn't gone back a minute or more since the
+   * furthest it got in that run of sends, and the run is less than ten
+   * minutes ahead (MAX_RUN_LEAD_MS). Else it's dated by the clock.
    */
-  const clearedAt = new Map<string, number>();
+  function carriesOn(last: LastSent | undefined, at: number): last is LastSent {
+    return last !== undefined && at <= last.at && (last.clock ?? last.at) - at < MAX_SKEW_MS && last.at - at < MAX_RUN_LEAD_MS;
+  }
   /**
    * The time for what we send in a conversation (`at`): messageNow in whole
    * seconds, and a second after the last thing we sent there at least
@@ -508,19 +524,24 @@ export function createMessaging(deps: MessagingDeps) {
    * set order, so this way the other side never gets two of ours there with
    * the same time: it shows ours in the order written, and takes a later
    * edit, reaction, key or delete of the whole conversation as later. A
-   * quick run of sends is dated a few seconds ahead. Unless the last is more
-   * than a minute ahead: then the clock went back, and so does this. With
-   * the envelope's ID (made first), that and its time are kept for a while,
-   * so what they write naming it as `last` shows after it (shownAt).
+   * quick run of sends is dated ahead of the clock, a second apart, for as
+   * long as it lasts: what follows it is dated after it, never among it.
+   * Unless the clock went back a minute or more since the furthest it got in
+   * that run (the device's, or the server's as the app knows it): then so
+   * does this, as it would carry that clock on. Or the run is ten minutes
+   * ahead (carriesOn). The time stays through a delete of the whole
+   * conversation for both sides (store.ts, forgetSentAt), so what follows is
+   * dated after the delete. With the envelope's ID (made first), that and
+   * its time are kept for a while, so what they write naming it as `last`
+   * shows after it (shownAt).
    */
   function stampIn(conv: string, id?: string): Promise<number> {
     return takeSentAt(
       db,
       conv,
-      (stored) => {
+      (last) => {
         const at = stamp();
-        const last = Math.max(stored ?? -Infinity, clearedAt.get(conv) ?? -Infinity);
-        return at <= last && last - at < MAX_SKEW_MS ? last + 1000 : at;
+        return carriesOn(last, at) ? { at: last.at + 1000, clock: Math.max(last.clock ?? last.at, at) } : { at, clock: at };
       },
       id,
     );
@@ -540,15 +561,15 @@ export function createMessaging(deps: MessagingDeps) {
    * And no later than it arrived, which wins over the above: a fast clock
    * can't push it above newer ones, nor can it name something of ours dated
    * further ahead (a device clock that went back since, say). Reckoned on
-   * this conversation's times, which a quick run of ours may have dated a
-   * few seconds ahead (stampIn), so it shows after those; but once ours are
-   * a minute ahead or more, stampIn takes the clock to have gone back and
-   * starts again from it, and so does this (only how a flood shows changes).
+   * this conversation's times, which a quick run of ours may have dated
+   * ahead (stampIn): when it arrived counts as the last thing we sent there,
+   * if that's later and what we send next carries on from it (carriesOn).
+   * So it can show after those, and what we write next shows after it.
    */
   async function shownAt(conv: ConversationRecord, message: Message, t: number): Promise<number> {
     const now = Math.floor(t / 1000) * 1000;
-    const last = Math.max((await lastSentAt(db, conv.id)) ?? -Infinity, clearedAt.get(conv.id) ?? -Infinity);
-    const arrived = now < last && last - now < MAX_SKEW_MS ? last : now;
+    const last = await lastSent(db, conv.id);
+    const arrived = carriesOn(last, now) ? last.at : now;
     let after = -Infinity;
     for (const id of new Set([message.last, message.replyTo])) {
       if (id === undefined) continue;
@@ -1511,11 +1532,11 @@ export function createMessaging(deps: MessagingDeps) {
       kept = await withPreview(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) });
       await saveConversation(db, kept, ids, before, { now: edits, before: editsBefore });
     });
-    // Nor is when we last sent something there kept, but what we send next
-    // there must be dated after a delete for both: for this run, that's
-    // kept in memory.
-    if (forBoth) clearedAt.set(conv, upTo.ours);
-    await forgetSentAt(db, conv);
+    // Nor is when we last sent something there kept, or what. Only after a
+    // delete for both, its time stays: what we send there next must be
+    // dated after it, and a quick run before it may have dated it well ahead
+    // of the clock (stampIn).
+    await forgetSentAt(db, conv, forBoth);
   }
 
   /** Deletes one message from this device only; the other side keeps theirs. */
@@ -2302,9 +2323,11 @@ export function createMessaging(deps: MessagingDeps) {
         // set back since).
         const named = message.last ? await db.get('messages', [conv.id, message.last]) : undefined;
         // When we took it in, by our times: what we wrote by then may be
-        // dated a few seconds ahead (stampIn), so no earlier than the last
-        // thing we sent there.
-        const here = Math.max(t, (await lastSentAt(db, conv.id)) ?? -Infinity);
+        // dated ahead (stampIn), so no earlier than the last thing we sent
+        // there. After a run went past MAX_RUN_LEAD_MS and back to the clock,
+        // that may stay ahead of what we write for up to ten minutes: it
+        // only bounds what a late receipt of theirs can take of ours.
+        const here = Math.max(t, (await lastSent(db, conv.id))?.at ?? -Infinity);
         conv.theirClear = { upTo: message.at, here, ...(named?.out ? { ours: named.at } : {}) };
         clear = true;
       }
@@ -2630,7 +2653,9 @@ export function createMessaging(deps: MessagingDeps) {
    * Conversations are looked through whole (one step each), files
    * SWEEP_SCAN at a time, going on where the last upkeep stopped. A
    * conversation's messages go only under its lock, which taking a message
-   * in holds. One copy of the app at a time. Needs no network.
+   * in holds. And clocks kept with a time last sent whose time a version
+   * before this one deleted (dropStrayClocks), at once: nothing writes one
+   * without the other. One copy of the app at a time. Needs no network.
    */
   function sweep(): Promise<void> {
     return withLock('sweep', async () => {
@@ -2664,6 +2689,7 @@ export function createMessaging(deps: MessagingDeps) {
       await dropStrayFiles(db, ready.map((f) => f.key));
       for (const f of ready) files.delete(JSON.stringify(f.key));
       await putSweep(db, { convs, files: [...files.values()].slice(0, SWEEP_KEPT), ...(last ? { after: last } : {}) });
+      await dropStrayClocks(db);
     });
   }
 
@@ -2674,7 +2700,8 @@ export function createMessaging(deps: MessagingDeps) {
    * (telling other copies, onKeysDeleted); forgets what conversations
    * remember of envelopes too old to come again, and empty conversations
    * through our link nothing more can come for that we never opened;
-   * deletes messages and files left with nothing to show them (sweep);
+   * deletes messages and files left with nothing to show them, and clocks
+   * an older version left without their time (sweep);
    * settles a link change whose answer was lost; fills in what older
    * versions didn't keep (links' intro mailboxes and keys); gives the link
    * a new key when due; and, last, deletes uploads still to delete.

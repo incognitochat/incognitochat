@@ -283,8 +283,8 @@ export interface MessageRecord {
   /** The conversation's ID on this device. */
   conv: string;
   /**
-   * Unix ms shown. Ours: when we wrote it, maybe a few seconds ahead
-   * (engine.ts, stampIn). Theirs: their time, but no earlier than what it
+   * Unix ms shown. Ours: when we wrote it, maybe ahead after a quick run
+   * of ours (engine.ts, stampIn). Theirs: their time, but no earlier than what it
    * names (`replyTo`, `last`) or their previous message, and no later than
    * when it arrived, on this conversation's times (engine.ts, shownAt).
    * Whole seconds from versions that date messages by the server's clock
