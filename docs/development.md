@@ -115,6 +115,12 @@ weekly scan reports a fix in a newer version:
 - **govulncheck:** its version in `ci.yml`, `scan.yml` and the commands above.
 - **DynamoDB Local:** the image's tag and digest in `ci.yml`, and its tag in
   the commands above and `backend/internal/dynamotest`.
+- **The bot check's Python packages:** `scripts/verify-bot.requirements.txt`
+  (Telethon and its dependencies) and `scripts/verify-bot.build.txt`
+  (setuptools, to build pyaes), each version with its sha256 hashes from
+  PyPI. Pick versions at least 7 days old. Telethon's source is on
+  [Codeberg](https://codeberg.org/Lonami/Telethon). CI installs them and runs
+  the script's tests; `scripts/check-pins.sh` fails if a package lacks a hash.
 - **The hosting workflow's actions:** `hosting/deploy.yml` is outside
   `.github/workflows`, so Dependabot doesn't see it. CI warns when an action
   it shares with `.github/workflows` is pinned to another commit;

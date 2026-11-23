@@ -129,7 +129,13 @@ it. This is how close it gets.
    - the old device keeps its chats, readable. No answer from the server
      ("replaced", "not signed in") deletes anything on a device: only the user
      can, by typing a confirmation;
-   - the person's link changes, which their contacts see.
+   - the person's link changes, which their contacts see;
+   - anyone can check which address Telegram opens for them, through the
+     bot's Main Mini App (which every link opens), its menu button and its
+     reply to `/start`, with `scripts/verify-bot.py`
+     ([verifying.md](verifying.md#checking-what-the-bot-opens)). A swap for
+     everyone shows in any account's check; a swap aimed at chosen people
+     shows only in theirs.
 2. **Watching live traffic.** The operator, or AWS, can watch requests as they
    happen and link people by timing and IP address: a message arriving, then
    a notice, then a reply or a "seen". A copy of the stored data doesn't show
