@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.11.0](https://github.com/incognitochat/incognitochat/compare/v2.10.0...v2.11.0) (2026-11-23)
+
+
+### Features
+
+* **web:** offer to delete the chats for both sides with the account ([#250](https://github.com/incognitochat/incognitochat/issues/250)) ([02139ba](https://github.com/incognitochat/incognitochat/commit/02139ba725224cdff74f96e612c226c6aaea3a83))
+
+
+### Bug Fixes
+
+* **api:** make a block cost writes only for the caller's own mailbox, once ([#246](https://github.com/incognitochat/incognitochat/issues/246)) ([dec74f0](https://github.com/incognitochat/incognitochat/commit/dec74f0ba5f4ea3161eef73fa5d9ce59086c1ff1))
+* **web:** keep a size with its unit, and say "Reply to your message" ([#245](https://github.com/incognitochat/incognitochat/issues/245)) ([8f7c07c](https://github.com/incognitochat/incognitochat/commit/8f7c07c73ca134f8117af77fbdf988d2c19817df))
+* **web:** show a message sent after a fast run at the end ([#248](https://github.com/incognitochat/incognitochat/issues/248)) ([ded057c](https://github.com/incognitochat/incognitochat/commit/ded057c8e025125a57db196475abdc3bd4c03d77))
+* **web:** sort the language picker by each language's own name ([#249](https://github.com/incognitochat/incognitochat/issues/249)) ([357e0f4](https://github.com/incognitochat/incognitochat/commit/357e0f4bf7c1e9a4b99c56c34b0e7031506c9a59))
+
 ## [2.10.0](https://github.com/incognitochat/incognitochat/compare/v2.9.1...v2.10.0) (2026-11-22)
 
 
