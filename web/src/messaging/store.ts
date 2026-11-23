@@ -387,6 +387,8 @@ interface SentEnvelope {
 export function takeSentAt(db: Database, conv: string, choose: (last: LastSent | undefined) => LastSent & { clock: number }, id?: string): Promise<number> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');
+    // Read and written in one transaction: choose stays synchronous, as
+    // waiting for anything else would let the transaction end.
     const next = choose(await readLastSent(tx.store, conv));
     await tx.store.put(next.at, sentKey(conv));
     await tx.store.put({ at: next.at, clock: next.clock }, sentClockKey(conv));
@@ -423,13 +425,43 @@ function deleteSentAt(meta: { delete(key: string): Promise<unknown> }, conv: str
   return Promise.all([meta.delete(sentKey(conv)), meta.delete(sentClockKey(conv)), meta.delete(sentIdsKey(conv))]);
 }
 
-/** Forgets when this device last sent something in a conversation, and what (deleteSentAt): its chat was deleted. */
-export function forgetSentAt(db: Database, conv: string): Promise<void> {
+/**
+ * Forgets when this device last sent something in a conversation, and what
+ * (deleteSentAt): its chat was deleted. With keepTime (a delete for both
+ * sides), only what: the time stays, the delete's own, with how far the
+ * clock had got. The delete clears what's dated up to it on both sides, so
+ * what's sent there next must be dated after it, also after a reload and
+ * from another copy of the app, though a quick run may have dated it well
+ * ahead of the clock (engine.ts, stampIn).
+ */
+export function forgetSentAt(db: Database, conv: string, keepTime = false): Promise<void> {
   return withLock(sentKey(conv), async () => {
     const tx = db.transaction('meta', 'readwrite');
-    await deleteSentAt(tx.store, conv);
+    if (keepTime) await tx.store.delete(sentIdsKey(conv));
+    else await deleteSentAt(tx.store, conv);
     await tx.done;
   });
+}
+
+/**
+ * Deletes the clocks kept with a time last sent (LastSent) whose time is
+ * gone: a version before this one, in another copy of the app (or before
+ * an update was undone), deleted the chat or forgot when it last sent there
+ * without knowing of the clock. This version writes and deletes the two
+ * together. Only keys are read, in one transaction. Returns how many went.
+ */
+export async function dropStrayClocks(db: Database): Promise<number> {
+  const tx = db.transaction('meta', 'readwrite');
+  const prefix = sentClockKey('');
+  const keys = (await tx.store.getAllKeys(IDBKeyRange.bound(prefix, `${prefix}\uffff`))) as string[];
+  let removed = 0;
+  for (const key of keys) {
+    if ((await tx.store.getKey(sentKey(key.slice(prefix.length)))) !== undefined) continue;
+    await tx.store.delete(key);
+    removed++;
+  }
+  await tx.done;
+  return removed;
 }
 
 /** A message's place in its conversation (byTime): its `at`, and its `order` among those with the same `at`. */

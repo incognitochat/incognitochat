@@ -614,27 +614,34 @@ comparing notes could link them ([security.md](security.md), What still
 leaks). Within a conversation, the sender dates each envelope at least a
 second after the last one it sent there, so the other side never gets two
 of its envelopes there with the same `at`. A quick run of them is dated
-ahead of the clock, a second apart, for as long as it lasts, and what the
-app sends there next carries on after it: it's never dated among the run,
-however long the run was. The app keeps that last time with the
+ahead of the clock, a second apart, for as long as it lasts (up to ten
+minutes ahead, below), and what the app sends there next carries on after
+it, never among the run. The app keeps that last time with the
 conversation, and the furthest the clock had got in that run, so this
-holds across reloads and between copies of the app. There are two
-exceptions. If the clock went back a minute or more from the furthest it
-had got in the run (the device's, or the server's as the app knows it),
-`at` goes back with it. So, for up to a minute after the app starts dating
-messages by the server's clock rather than its own (above), what it sends
-in a conversation where it already sent something by its own clock carries
-on from that time. And if a run is an hour ahead of the clock (3,600 more
-sends there than seconds, past what a person sends), what follows is dated
-by the clock again. That hour is within the grace an edit gets (Editing,
+holds across reloads and between copies of the app. A `delete` with `all`
+of its own keeps them too: it clears what's dated up to it on both sides,
+so what the app sends there next must be dated after it, though a run may
+have dated it well ahead of the clock. There are two exceptions. If the
+clock went back a minute or more from the furthest it had got in the run
+(the device's, or the server's as the app knows it), `at` goes back with
+it. So, for up to a minute after the app starts dating messages by the
+server's clock rather than its own (above), what it sends in a
+conversation where it already sent something by its own clock carries on
+from that time. And if a run is ten minutes ahead of the clock (600 more
+sends there than seconds, past what a person sends), what follows is
+dated by the clock again, so for as long as the run stays ahead, among it,
+as versions before this one did after a minute (only a flood gets there).
+Ten minutes is well within the hour of grace an edit gets (Editing,
 below), so an edit the app offers is never dated past what the other side
 takes. Versions before this one went back to the clock once a run was a
-minute ahead: what they sent next showed among the run, on both sides, and
-a `delete` with `all` sent then left the rest of the run on both sides. The
-inbox gives envelopes in no set order, so it's this, not when they arrive,
-that keeps one side's messages, edits and reactions in order. Versions
-before this one sent the device's own clock, to the millisecond;
-recipients take both.
+minute ahead. What they sent next showed among the run, on both sides;
+edits and reactions sent then lost to earlier ones; a `delete` with `all`
+sent then left the rest of the run on both sides; and after the other
+side's `delete` with `all`, they kept the run, and the other side dropped
+what they sent next for up to a minute. The inbox gives envelopes in no
+set order, so it's this, not when they arrive, that keeps one side's
+messages, edits and reactions in order. Versions before this one sent the
+device's own clock, to the millisecond; recipients take both.
 
 The recipient shows a message at its `at`, with two bounds. It's shown no
 earlier than what it shows the sender had, as the recipient shows those:
