@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.12.0](https://github.com/incognitochat/incognitochat/compare/v2.11.0...v2.12.0) (2026-11-23)
+
+
+### Features
+
+* open links through the bot's main Mini App ([#253](https://github.com/incognitochat/incognitochat/issues/253)) ([11ab9b3](https://github.com/incognitochat/incognitochat/commit/11ab9b3f9feeb032d2b914a141853d0681175589))
+
+
+### Bug Fixes
+
+* **web:** drop the obvious from the note under "Also delete my chats for the other side" ([#251](https://github.com/incognitochat/incognitochat/issues/251)) ([71dcc89](https://github.com/incognitochat/incognitochat/commit/71dcc8906f353bd12debdd9554f4ecb6d96af8f0))
+
 ## [2.11.0](https://github.com/incognitochat/incognitochat/compare/v2.10.0...v2.11.0) (2026-11-23)
 
 
