@@ -89,7 +89,6 @@ class Stub:
         self.main = kw.get("main", GOOD)
         self.menu = kw.get("menu", RAW)
         self.welcome = kw.get("welcome", [RAW])
-        self.link = kw.get("link", None)
         self.started = 0
 
     @staticmethod
@@ -111,26 +110,17 @@ class Stub:
         self.started += 1
         return self.answer(self.welcome)
 
-    async def link_url(self, bot, app_name):
-        return self.answer(self.link)
-
 
 def check(stub, start=True):
-    return asyncio.run(vb.run_checks(stub, BOT, ORIGIN, "app", start))
+    return asyncio.run(vb.run_checks(stub, BOT, ORIGIN, start))
 
 
 class Checks(unittest.TestCase):
     def test_all_pass(self):
-        r = check(Stub(link=GOOD))
+        r = check(Stub())
         self.assertEqual(r.result, "passed")
         self.assertEqual(r.statuses, {c: "passed" for c in vb.CHECKS})
         self.assertEqual(r.bot_id, 42)
-
-    def test_the_named_app_is_optional(self):
-        r = check(Stub(link=None))
-        self.assertEqual(r.result, "passed")
-        self.assertEqual(r.statuses["link"], "na")
-        self.assertIn("not set link: the bot has no Mini App named 'app'", r.lines)
 
     def test_the_main_app_is_required(self):
         r = check(Stub(has_main_app=False))
@@ -138,7 +128,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(r.statuses["main"], "failed")
 
     def test_each_check_fails_for_every_other_address(self):
-        for where in ("main", "menu", "link"):
+        for where in ("main", "menu"):
             for url in ELSEWHERE:
                 with self.subTest(where=where, url=url):
                     r = check(Stub(**{where: url}))
@@ -152,7 +142,7 @@ class Checks(unittest.TestCase):
 
     def test_planted_parameters_fail(self):
         for url in PLANTED:
-            for where in ("main", "menu", "link"):
+            for where in ("main", "menu"):
                 with self.subTest(where=where, url=url):
                     r = check(Stub(**{where: url}))
                     self.assertEqual(r.statuses[where], "failed")
@@ -171,19 +161,19 @@ class Checks(unittest.TestCase):
     def test_telegrams_own_parameters_pass_where_it_adds_them(self):
         for url in (RAW, GOOD, "https://example.github.io/#tgWebAppData=a%26b%3Dc&tgWebAppFullscreen"):
             with self.subTest(url=url):
-                self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
+                self.assertEqual(check(Stub(main=url)).result, "passed")
 
     def test_an_address_typed_without_the_final_slash(self):
         # In BotFather: https://host is https://host/ to a browser. Only the
         # slash may be missing: everything else is judged the same.
         url = "https://example.github.io#tgWebAppData=SECRET&tgWebAppVersion=9.1"
-        self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
+        self.assertEqual(check(Stub(main=url)).result, "passed")
         for planted in PLANTED + ELSEWHERE:
             # The path's "/" only, where it's the whole path.
             without = re.sub(r"^([^/?#]*//[^/?#]*)/(?=[?#]|$)", r"\1", planted)
             if without == planted:
                 continue
-            for where in ("main", "link"):
+            for where in ("main",):
                 with self.subTest(where=where, url=without):
                     self.assertEqual(check(Stub(**{where: without})).statuses[where], "failed")
 
@@ -241,7 +231,7 @@ class Checks(unittest.TestCase):
         r = check(Stub(is_bot=False))
         self.assertEqual(r.result, "failed")
         self.assertEqual(r.statuses["bot"], "failed")
-        self.assertEqual({r.statuses[c] for c in ("main", "menu", "welcome", "link")}, {"unknown"})
+        self.assertEqual({r.statuses[c] for c in ("main", "menu", "welcome")}, {"unknown"})
 
     def test_an_error_stays_in_its_check(self):
         r = check(Stub(menu=OSError("network")))
@@ -253,12 +243,12 @@ class Checks(unittest.TestCase):
 
     def test_a_failure_outranks_an_error(self):
         # Failure before the error, and after it.
-        for kw in ({"main": "https://evil.example/", "menu": OSError("x")}, {"main": OSError("x"), "link": "https://evil.example/"}):
+        for kw in ({"main": "https://evil.example/", "menu": OSError("x")}, {"main": OSError("x"), "menu": "https://evil.example/"}):
             with self.subTest(kw=list(kw)):
                 self.assertEqual(check(Stub(**kw)).result, "failed")
 
     def test_the_full_address_is_never_printed(self):
-        for kw in ({}, {"main": EVIL}, {"link": GOOD.replace("example.github.io", "evil.example")}, {"welcome": [GOOD.replace(".io/#", ".io/x#")]}):
+        for kw in ({}, {"main": EVIL}, {"main": GOOD.replace("example.github.io", "evil.example")}, {"welcome": [GOOD.replace(".io/#", ".io/x#")]}):
             r = check(Stub(**kw))
             text = "\n".join(r.lines)
             self.assertNotIn("SECRET", text)
@@ -316,7 +306,7 @@ def run_main(argv, env=None):
 
 class Command(unittest.TestCase):
     def test_bad_arguments_are_refused(self):
-        for argv in ([], [BOT], ["bad name", ORIGIN], [BOT, "http://x.example"], [BOT, ORIGIN, "--app-name", "a/b"]):
+        for argv in ([], [BOT], ["bad name", ORIGIN], [BOT, "http://x.example"], [BOT, ORIGIN, "--app-name", "app"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as e, contextlib.redirect_stderr(io.StringIO()):
                 vb.main(argv)
             self.assertEqual(e.exception.code, 2)
@@ -452,7 +442,7 @@ class Login(unittest.TestCase):
             async def disconnect(self):
                 self.calls.append("disconnect")
 
-        async def fake_checks(client, username, origin, app_name, start):
+        async def fake_checks(client, username, origin, start):
             client.warnings.extend(warnings)
             if checks:
                 raise checks
@@ -596,13 +586,6 @@ class RealClient(unittest.TestCase):
             buttons.append(t.KeyboardInlineButton(text="Site", type=t.InlineButtonTypeUrl(url=plain)))
         return t.ReplyInlineMarkup(rows=[t.KeyboardInlineButtonRow(buttons=buttons)])
 
-    def rpc_error(self, code):
-        # As Telethon makes it from Telegram's answer.
-        from telethon import errors
-        from telethon.tl.types import RpcError
-
-        return errors.rpc_message_to_error(RpcError(error_code=400, error_message=code), request=None)
-
     def test_reads_every_address(self):
         from telethon.tl import functions
 
@@ -616,24 +599,16 @@ class RealClient(unittest.TestCase):
             "RequestMainWebViewRequest": t.WebViewResultUrl(url=GOOD),
             "GetFullUserRequest": full,
             "DeleteMessagesRequest": object(),
-            "GetBotAppRequest": object(),
-            "RequestAppWebViewRequest": t.WebViewResultUrl(url=GOOD),
         }, replies=[reply])
-        r = asyncio.run(vb.run_checks(self.client(conn), BOT, ORIGIN, "app", True))
+        r = asyncio.run(vb.run_checks(self.client(conn), BOT, ORIGIN, True))
         self.assertEqual(r.statuses, {c: "passed" for c in vb.CHECKS}, r.lines)
 
         sent = [c for c in calls if not isinstance(c, tuple)]
-        web = next(c for c in sent if isinstance(c, functions.messages.RequestAppWebViewRequest))
-        self.assertIs(web.write_allowed, False)
-        self.assertEqual(web.app.short_name, "app")
-        self.assertIsInstance(web.peer, t.InputPeerUser)
         main = next(c for c in sent if isinstance(c, functions.messages.RequestMainWebViewRequest))
         self.assertIsInstance(main.peer, t.InputPeerUser)
-        # A theme in both, so Telegram adds its own copy and a planted one is a second.
-        for request in (web, main):
-            self.assertEqual(request.theme_params.data, vb.THEME)
+        # A theme, so Telegram adds its own copy and a planted one is a second.
+        self.assertEqual(main.theme_params.data, vb.THEME)
         self.assertIsNone(main.start_param)
-        self.assertIsNone(web.start_param)
         self.assertIn(("send", "/start"), calls)
         deleted = next(c for c in sent if isinstance(c, functions.messages.DeleteMessagesRequest))
         self.assertEqual((sorted(deleted.id), deleted.revoke), ([100, 101], True))
@@ -684,7 +659,7 @@ class RealClient(unittest.TestCase):
                     async def welcome_urls(self, bot):
                         return await client.welcome_urls(bot)
 
-                r = asyncio.run(vb.run_checks(Real(), BOT, ORIGIN, "app", True))
+                r = asyncio.run(vb.run_checks(Real(), BOT, ORIGIN, True))
                 self.assertEqual(r.statuses["welcome"], status, r.lines)
                 deleted = [c for c in calls if isinstance(c, functions.messages.DeleteMessagesRequest)]
                 self.assertEqual([sorted(d.id) for d in deleted], [[100, 101]])
@@ -728,17 +703,6 @@ class RealClient(unittest.TestCase):
             asyncio.run(self.client(conn).welcome_urls(self.bot))
         deleted = [c for c in calls if isinstance(c, functions.messages.DeleteMessagesRequest)]
         self.assertEqual([d.id for d in deleted], [[100]])
-
-    def test_no_app_by_that_name_as_telegram_says_it(self):
-        from telethon import errors
-
-        for code in ("BOT_APP_INVALID", "BOT_APP_SHORTNAME_INVALID"):
-            conn, _ = self.fake({"GetBotAppRequest": self.rpc_error(code)})
-            self.assertIsNone(asyncio.run(self.client(conn).link_url(self.bot, "app")), code)
-        # Any other error isn't read as "no app".
-        conn, _ = self.fake({"GetBotAppRequest": self.rpc_error("PEER_ID_INVALID")})
-        with self.assertRaises(errors.RPCError):
-            asyncio.run(self.client(conn).link_url(self.bot, "app"))
 
     def test_menu_button_that_opens_no_web_app(self):
         t = self.t

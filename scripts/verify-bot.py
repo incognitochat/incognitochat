@@ -11,20 +11,18 @@ as one Telegram account sees it (docs/verifying.md):
   menu     the bot's menu button. Required.
   welcome  the app buttons in the bot's replies to /start (skipped with
            --no-start).
-  link     the named Mini App t.me/<bot>/<app name> (default "app"), if the
-           bot has one: none is fine, another address isn't.
 
 Each must open <app origin>/ exactly. The menu button and the /start
 buttons are the bot's own addresses, so they must be exactly <app origin>/.
-The Main Mini App and the named one come back from Telegram with its launch
-parameters added in the fragment, so those may carry Telegram's tgWebApp...
+The Main Mini App's address comes back from Telegram with its launch
+parameters added in the fragment, so it may carry Telegram's tgWebApp...
 keys, each once, but no query, no start parameter (the script asks for
 none), and nothing else. The page is never loaded, and only an address's
 origin and path, and the names of unexpected parameters, are printed: the
 fragment Telegram adds holds this account's signed launch data, a login to
 the app's server for a while.
 
-  scripts/verify-bot.py <bot username> <app origin> [--app-name app] [--no-start] [--summary FILE]
+  scripts/verify-bot.py <bot username> <app origin> [--no-start] [--summary FILE]
   scripts/verify-bot.py <bot> https://<org>.github.io
   scripts/verify-bot.py --make-session
 
@@ -59,7 +57,7 @@ from typing import Protocol
 from urllib.parse import parse_qsl, urlsplit
 
 EXIT_VERIFIED, EXIT_FAILED, EXIT_ERROR = 0, 1, 2
-CHECKS = ("bot", "main", "menu", "welcome", "link")
+CHECKS = ("bot", "main", "menu", "welcome")
 # What Telegram calls the device in the account's list of sessions.
 DEVICE = "Incognito Chat bot check"
 
@@ -181,9 +179,6 @@ class Client(Protocol):
         """Sends /start; the web app addresses in every reply (None if the
         bot didn't reply). Deletes all those messages afterwards."""
 
-    async def link_url(self, bot: Bot, app_name: str) -> str | None:
-        """The named Mini App's address; None if the bot has none by that name."""
-
 
 # --- The checks -------------------------------------------------------------
 
@@ -204,10 +199,6 @@ class Report:
         self.statuses[check] = "failed"
         self.lines.append(f"FAILED {check}: {detail}")
 
-    def not_set(self, check: str, detail: str) -> None:
-        self.statuses[check] = "na"
-        self.lines.append(f"not set {check}: {detail}")
-
     def error(self, check: str, e: BaseException) -> None:
         # The type only: a Telegram error's text can quote the request.
         self.unchecked(check, type(e).__name__)
@@ -226,7 +217,7 @@ class Report:
         return "error" if self.errors else "passed"
 
 
-async def run_checks(client: Client, username: str, origin: str, app_name: str, start: bool) -> Report:
+async def run_checks(client: Client, username: str, origin: str, start: bool) -> Report:
     scheme, host = expected_origin(origin)
     want = f"{scheme}://{host}/"
     report = Report()
@@ -283,14 +274,7 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
             for i, url in enumerate(urls, 1):
                 judge("welcome", f"app button {i} of {len(urls)} in the replies to /start", url)
 
-    async def link() -> None:
-        url = await client.link_url(bot, app_name)
-        if url is None:
-            report.not_set("link", f"the bot has no Mini App named {app_name!r}")
-        else:
-            judge("link", f"t.me/{username}/{app_name}", url, telegram_adds=True)
-
-    for check, run in (("main", main), ("menu", menu), ("welcome", welcome), ("link", link)):
+    for check, run in (("main", main), ("menu", menu), ("welcome", welcome)):
         try:
             await run()
         except Exception as e:  # network, Telegram limits: this check only
@@ -402,22 +386,6 @@ class TelethonClient:
             return None
         return [url for mid in sorted(replies) for url in replies[mid]]
 
-    async def link_url(self, bot: Bot, app_name: str) -> str | None:
-        from telethon import errors, utils
-        from telethon.tl import functions, types
-
-        app = types.InputBotAppShortName(bot_id=bot.handle, short_name=app_name)
-        try:
-            await self.tg(functions.messages.GetBotAppRequest(app=app, hash=0))
-        except errors.RPCError as e:
-            # Telegram's error code, not its text (which can quote the request).
-            if getattr(e, "message", "") in ("BOT_APP_INVALID", "BOT_APP_SHORTNAME_INVALID"):
-                return None
-            raise
-        peer = utils.get_input_peer(bot.handle)
-        result = await self.tg(functions.messages.RequestAppWebViewRequest(peer=peer, app=app, platform=self.platform, write_allowed=False, theme_params=types.DataJSON(data=THEME)))
-        return result.url
-
 
 def _credentials() -> tuple[int, str]:
     api_id, api_hash = os.environ.get("TG_API_ID", ""), os.environ.get("TG_API_HASH", "")
@@ -466,7 +434,7 @@ async def _main(args: argparse.Namespace) -> int:
             print(tg.session.save())
             return EXIT_VERIFIED
         client = TelethonClient(tg)
-        report = await run_checks(client, args.username, args.origin, args.app_name, start=not args.no_start)
+        report = await run_checks(client, args.username, args.origin, start=not args.no_start)
         for warning in client.warnings:
             print(f"Warning: {warning}", file=sys.stderr)
     finally:
@@ -526,7 +494,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("username", nargs="?", help="the bot's username, without @")
     p.add_argument("origin", nargs="?", help="the app's origin, https://<host>")
-    p.add_argument("--app-name", default="app", help="the named Mini App to check if the bot has it (t.me/<bot>/<name>): the name your links used; default app")
     p.add_argument("--no-start", action="store_true", help="don't send /start (skips the welcome check)")
     p.add_argument("--summary", metavar="FILE", help="also write the result as JSON, for the website's Status page")
     p.add_argument("--make-session", action="store_true", help="log in and print a session string for TG_SESSION")
@@ -536,8 +503,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             p.error("give the bot's username and the app's origin")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", args.username):
             p.error(f"not a Telegram username: {args.username!r}")
-        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", args.app_name):
-            p.error(f"not an app name: {args.app_name!r}")
         try:
             expected_origin(args.origin)
         except ValueError as e:
