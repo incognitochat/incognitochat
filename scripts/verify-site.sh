@@ -52,7 +52,7 @@ done
 # --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308). Not a
 # pipe into grep -q: it exits at the first match, gh can then die of SIGPIPE,
 # and under pipefail the pipe fails though the flag is there.
-gh attestation verify --help 2>/dev/null | grep -- --signer-digest >/dev/null \
+grep -q -- --signer-digest < <(gh attestation verify --help 2>/dev/null) \
   || die "this GitHub CLI can't pin the signing workflow (no --signer-digest); update it"
 # Before 2.93.0, gh attestation sent the login token to the TUF mirror's host
 # (GHSA-8xvp-7hj6-mcj9). Before 2.102.0, --signer-workflow matched a prefix
@@ -413,9 +413,10 @@ elif [ "$rebuild" = 1 ]; then
       VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") && export VITE_APP_NAME
     fi
     # set -e is off inside a condition, so each step is chained. npm's summary
-    # and audit report go to stdout, dropped; its warnings and errors to stderr.
+    # and audit report go to stdout, dropped; its warnings and errors to stderr,
+    # at a set level whatever the caller's npm config says.
     cd "$work/code/web" \
-      && npm ci --ignore-scripts >/dev/null \
+      && npm ci --ignore-scripts --loglevel=warn >/dev/null \
       && VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
         VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
         VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
