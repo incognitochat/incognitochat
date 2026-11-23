@@ -390,11 +390,12 @@ later: [rotating an issuer key](#rotating-an-issuer-key).
 
 In BotFather, for the environment's bot:
 
-- the main Mini App and the menu button pointing at `https://<org>.github.io/`.
-  Every link the app makes (`t.me/<bot>?startapp=…`) opens the main Mini App,
-  so it must stay on: without it, Telegram opens the bot or the menu button's
-  address and drops the link. The app asks for permission to message the
-  user itself, after setup;
+- the main Mini App pointing at `https://<org>.github.io/` (every deploy
+  points the menu button there too). Every link the app makes
+  (`t.me/<bot>?startapp=…`) opens the main Mini App, so it must stay on:
+  without it, Telegram opens the bot's chat or its menu button's address and
+  drops the link. The app asks for permission to message the user itself,
+  after setup;
 - a privacy policy, which Telegram's bot developer terms require. Whoever
   runs the environment publishes it, outside this repository;
   [data.md](data.md) is the technical part it can point to.

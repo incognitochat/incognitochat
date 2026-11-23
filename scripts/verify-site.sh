@@ -397,13 +397,12 @@ elif [ "$rebuild" = 1 ]; then
     echo "REBUILD FAILED can't check out ${commit}"
   elif ! (
     if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
-    # Older builds also took the named Mini App's short name. Set it only
-    # when the manifest has it: every VITE_ setting, even an unused or empty
-    # one, is part of the bundle.
+    # Only the manifest's settings: every VITE_ variable, even an unused or
+    # empty one, is part of the bundle. Older builds also took the named
+    # Mini App's short name, so it's set only when the manifest has it.
+    unset "${!VITE_@}"
     if jq -e '.build | has("VITE_APP_NAME")' "$manifest" >/dev/null; then
       VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") && export VITE_APP_NAME
-    else
-      unset VITE_APP_NAME
     fi
     # set -e is off inside a condition, so each step is chained.
     cd "$work/code/web" \
