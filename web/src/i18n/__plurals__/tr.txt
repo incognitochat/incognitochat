@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Bugün kalan mesaj hakkı: 101. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
   102: Bugün kalan mesaj hakkı: 102. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
   1000000: Bugün kalan mesaj hakkı: 1.000.000. Saat xxxxxxxxxxxxxxxxxxxxxxxx itibarıyla yenilenir.
+deletingChatsLeft:
+  0: Karşı taraftan silinmeyen sohbetler: 0. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  1: Karşı taraftan silinmeyen sohbetler: 1. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  2: Karşı taraftan silinmeyen sohbetler: 2. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  3: Karşı taraftan silinmeyen sohbetler: 3. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  5: Karşı taraftan silinmeyen sohbetler: 5. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  11: Karşı taraftan silinmeyen sohbetler: 11. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  21: Karşı taraftan silinmeyen sohbetler: 21. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  100: Karşı taraftan silinmeyen sohbetler: 100. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  101: Karşı taraftan silinmeyen sohbetler: 101. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  102: Karşı taraftan silinmeyen sohbetler: 102. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.
+  1000000: Karşı taraftan silinmeyen sohbetler: 1.000.000. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.

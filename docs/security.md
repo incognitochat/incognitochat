@@ -351,6 +351,14 @@ it. This is how close it gets.
   finer: not the day, not how often, not the months before.
 - **A brand-new user's first message** follows their registration closely in
   time.
+- **Deleting an account with its chats for both sides.** When the user
+  ticks that, the deletes go out one after another, a second or more apart,
+  right before the account's deletion: the operator or AWS, watching live,
+  can tie the mailboxes they go to to the account being deleted, and so
+  see whom it was talking to, and the deletes of the uploads the user sent
+  in those chats, which follow, to it too. The short-lived records of
+  which mailboxes got something in which minute show the same burst while
+  they're kept (Short-lived records). Unticked, nothing is sent.
 - **Attachments can keep metadata.** Photos are redrawn, which drops
   theirs. A video sent "as video" has the usual location, device and time
   tags removed: the MP4/QuickTime metadata boxes, XMP, the boxes Sony,

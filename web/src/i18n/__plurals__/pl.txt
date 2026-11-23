@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Pozostałe wiadomości na dziś: 101. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Pozostałe wiadomości na dziś: 102. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Pozostałe wiadomości na dziś: 1 000 000. Kolejne od xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Czaty nieusunięte u drugiej strony: 0. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  1: Czaty nieusunięte u drugiej strony: 1. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  2: Czaty nieusunięte u drugiej strony: 2. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  3: Czaty nieusunięte u drugiej strony: 3. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  5: Czaty nieusunięte u drugiej strony: 5. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  11: Czaty nieusunięte u drugiej strony: 11. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  21: Czaty nieusunięte u drugiej strony: 21. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  100: Czaty nieusunięte u drugiej strony: 100. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  101: Czaty nieusunięte u drugiej strony: 101. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  102: Czaty nieusunięte u drugiej strony: 102. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.
+  1000000: Czaty nieusunięte u drugiej strony: 1 000 000. Jeśli mimo to usuniesz konto, zostaną u drugiej strony, a załączniki wysłane przez ciebie w tych czatach pozostaną na serwerze najwyżej 30 dni.

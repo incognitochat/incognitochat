@@ -316,6 +316,15 @@ export const en = {
   deletionPausedNotice: "Your account's deletion couldn't finish yet. Your chats are read-only until it does.",
   deletePhrase: 'delete my account',
   deleteAccountConfirm: 'Delete my account',
+  deleteChatsForBoth: 'Also delete my chats for the other side',
+  deleteChatsForBothNote:
+    "For each chat in your list, the other person's app is asked to delete it, and the attachments you sent there are deleted from the server; any that remain expire within 30 days. This relies on their app, and can't remove copies or screenshots they made. Chats you blocked, and chats you deleted only for yourself, stay with them.",
+  deletingChats: 'Deleting your chats for the other side: {done} of {total}…',
+  deletingChatsLeft:
+    'Chats not deleted for the other side: {count}. If you delete your account anyway, they stay with them, and the attachments you sent there expire within 30 days.',
+  deletingChatsNoMessages: "You've used today's messages: each chat's delete counts as one. More from {time}.",
+  deleteAccountAnyway: 'Delete my account anyway',
+  keepAccount: 'Keep my account for now',
   accountDeleted:
     "Your account was deleted from the server, and the app cleared your chats and keys on this device. On some devices they can stay in the app's storage files, and a copy of the device made earlier may still hold them.",
 

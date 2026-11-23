@@ -329,6 +329,13 @@ export const fr = {
   deletionPausedNotice: "La suppression de votre compte n'a pas encore pu aboutir. Vos échanges sont en lecture seule jusqu'à ce qu'elle aboutisse.",
   deletePhrase: 'supprimer mon compte',
   deleteAccountConfirm: 'Supprimer mon compte',
+  deleteChatsForBoth: "Supprimer aussi mes échanges de l'autre côté",
+  deleteChatsForBothNote: "Pour chaque échange de votre liste, l'application de l'autre personne reçoit la demande de le supprimer, et les pièces jointes que vous y avez envoyées sont supprimées du serveur ; s'il en reste, elles y restent 30 jours au plus. Cela dépend de son application et ne peut pas effacer les copies ou captures d'écran que cette personne a faites. Les échanges que vous avez bloqués, et ceux que vous avez supprimés seulement pour vous, restent de l'autre côté.",
+  deletingChats: "Suppression de vos échanges de l'autre côté : {done} sur {total}…",
+  deletingChatsLeft: "Échanges non supprimés de l'autre côté : {count}. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.",
+  deletingChatsNoMessages: "Vous avez épuisé les messages d'aujourd'hui : la suppression de chaque échange compte pour un. D'autres à partir de {time}.",
+  deleteAccountAnyway: 'Supprimer quand même mon compte',
+  keepAccount: "Garder mon compte pour l'instant",
   accountDeleted:
     "Votre compte a été supprimé du serveur, et l'application a effacé vos échanges et vos clés sur cet appareil. Sur certains appareils, ils peuvent rester dans les fichiers de stockage de l'application, et une copie de l'appareil faite auparavant peut encore les contenir.",
 

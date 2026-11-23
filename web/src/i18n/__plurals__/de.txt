@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Verbleibende Nachrichten heute: 101. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Verbleibende Nachrichten heute: 102. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Verbleibende Nachrichten heute: 1.000.000. Weitere ab xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Auf der anderen Seite nicht gelöschte Chats: 0. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  1: Auf der anderen Seite nicht gelöschte Chats: 1. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  2: Auf der anderen Seite nicht gelöschte Chats: 2. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  3: Auf der anderen Seite nicht gelöschte Chats: 3. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  5: Auf der anderen Seite nicht gelöschte Chats: 5. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  11: Auf der anderen Seite nicht gelöschte Chats: 11. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  21: Auf der anderen Seite nicht gelöschte Chats: 21. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  100: Auf der anderen Seite nicht gelöschte Chats: 100. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  101: Auf der anderen Seite nicht gelöschte Chats: 101. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  102: Auf der anderen Seite nicht gelöschte Chats: 102. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.
+  1000000: Auf der anderen Seite nicht gelöschte Chats: 1.000.000. Wenn du dein Konto trotzdem löschst, bleiben sie dort, und die Anhänge, die du dort gesendet hast, bleiben höchstens 30 Tage auf dem Server.

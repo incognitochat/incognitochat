@@ -94,3 +94,15 @@ messagesLeftToday:
   101: Messages restants aujourd'hui : 101. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
   102: Messages restants aujourd'hui : 102. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
   1000000: Messages restants aujourd'hui : 1 000 000. D'autres à partir de xxxxxxxxxxxxxxxxxxxxxxxx.
+deletingChatsLeft:
+  0: Échanges non supprimés de l'autre côté : 0. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  1: Échanges non supprimés de l'autre côté : 1. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  2: Échanges non supprimés de l'autre côté : 2. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  3: Échanges non supprimés de l'autre côté : 3. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  5: Échanges non supprimés de l'autre côté : 5. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  11: Échanges non supprimés de l'autre côté : 11. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  21: Échanges non supprimés de l'autre côté : 21. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  100: Échanges non supprimés de l'autre côté : 100. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  101: Échanges non supprimés de l'autre côté : 101. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  102: Échanges non supprimés de l'autre côté : 102. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.
+  1000000: Échanges non supprimés de l'autre côté : 1 000 000. Si vous supprimez quand même votre compte, ils restent de l'autre côté, et les pièces jointes que vous y avez envoyées restent sur le serveur 30 jours au plus.

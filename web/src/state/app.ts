@@ -75,7 +75,7 @@ import { pickLanguage } from '../i18n';
 import type { Launch } from '../platform/launch';
 import { openPopup, type Bridge, type PopupButton } from '../platform/telegram';
 import { findSourceUrl } from '../platform/source';
-import { deleteMeta, getMeta, putMeta, wipe, type Database } from '../storage/db';
+import { deleteMeta, getMeta, putMeta, wipe, type ConversationRecord, type Database } from '../storage/db';
 import { withLock, type SyncEvent } from '../sync/locks';
 import { createPace } from '../sync/pace';
 
@@ -125,6 +125,26 @@ const PREPARE_MS = 10_000;
 const UPLOAD_DELETE_RETRIES = [1, 2, 4];
 /** The longest wait a step's Retry-After (503 unavailable, 429) is honoured for. */
 const STEP_WAIT_MAX_MS = 30_000;
+/**
+ * The pause between the deletes for both sides that go before deleting the
+ * account, when the user asks for them (deleteChatsForBoth). The firewall
+ * turns an address away for a few minutes past 500 requests in 5 minutes
+ * to the routes that need no login (infra/edge.tf, anonymous-per-ip):
+ * sends, logins and the uploads' deletes, which the deletion then needs
+ * (one batch every 2 seconds, about 130 in 5 minutes). One send a second
+ * at most, 300 in 5 minutes, leaves room for them.
+ */
+const CHAT_DELETE_GAP_MS = 1000;
+/**
+ * And at most so many of them in so long (CHAT_DELETE_WINDOW_MS), a
+ * sliding window, also across Try again: a chat the user started that
+ * wasn't answered also fetches its link's key first (GET /links/{id}, a
+ * route without login too). With those and the uploads' deletes, at most
+ * 450 in any 5 minutes, under the firewall's default of 500 (an operator
+ * who sets it lower may see a run turned away, and Try again later).
+ */
+const CHAT_DELETES_PER_WINDOW = 150;
+const CHAT_DELETE_WINDOW_MS = 5 * 60_000;
 
 /**
  * Ends a deletion that took STEPS_PER_RUN steps, or RUN_FOR_MS, without
@@ -163,6 +183,27 @@ export type DeviceLimit = 'device-limit' | 'device-limit-later';
  * server's to be believed.
  */
 export type ErrorKind = 'network' | 'expired' | 'rate-limited' | DeviceLimit | 'clock' | 'generic';
+
+/**
+ * Why deleting the user's chats for both sides, before the account,
+ * stopped (deleteChatsForBoth): the day's messages are used up
+ * (no-tokens); the server couldn't be reached; it turned the sends away
+ * for now (the firewall, or a mailbox's cap: 429 rate_limited), or the
+ * device's requests (device_limit); a link a chat goes through takes no
+ * more first messages this hour (link-busy: the other chats went on); this
+ * build's token key was replaced or won't load (outdated: the app must be
+ * opened again); or anything else.
+ */
+export type ChatsStop = 'no-tokens' | 'network' | 'turned-away' | DeviceLimit | 'link-busy' | 'outdated' | 'generic';
+
+/**
+ * Whether Try again may help with what stopped the deletes for both sides:
+ * not until the messages reset, or a busy link's hour is over (each try
+ * spends its tokens), or the app is opened again.
+ */
+export function canRetryChats(reason: ChatsStop): boolean {
+  return reason !== 'no-tokens' && reason !== 'link-busy' && reason !== 'outdated';
+}
 
 /**
  * Why the server no longer takes this device: it refused the login (the
@@ -336,8 +377,21 @@ export type Screen =
   | { kind: 'reopening' }
   | { kind: 'registering' }
   | { kind: 'confirm-replace'; busy: boolean }
-  /** Deleting the account, after a typed confirmation. */
-  | { kind: 'confirm-delete'; busy: boolean; error: ErrorKind | null }
+  /**
+   * Deleting the account, after a typed confirmation. finishing: a deletion
+   * the server says is under way (Finish deleting, while signed out): the
+   * account takes no other request, so no send tokens can be fetched, and
+   * its chats can't be deleted for both sides.
+   */
+  | { kind: 'confirm-delete'; busy: boolean; error: ErrorKind | null; finishing?: true }
+  /**
+   * Deleting the user's chats for both sides before the account, as they
+   * asked on confirm-delete: done of total, or why it stopped (stopped) and
+   * how many of them it didn't delete (left). Nothing of it is saved, so
+   * leaving this screen, or closing the app, keeps the account; those
+   * deleted for both sides stay deleted.
+   */
+  | { kind: 'deleting-chats'; done: number; total: number; stopped: { reason: ChatsStop; left: number; until?: number | null } | null }
   /**
    * The account is being deleted, as the user confirmed: in steps, carried
    * on at every launch until done. error: the last try failed; Try again
@@ -440,6 +494,10 @@ export interface Deps {
   background?: boolean;
   /** The pause between steps of a deletion or cleanup, instead of a second (tests). */
   stepPauseMs?: number;
+  /** The pause between the deletes for both sides before deleting the account, instead of CHAT_DELETE_GAP_MS (tests). */
+  chatDeleteGapMs?: number;
+  /** How many of those in how long (ms), instead of CHAT_DELETES_PER_WINDOW in CHAT_DELETE_WINDOW_MS (tests). */
+  chatDeleteWindow?: { count: number; ms: number };
 }
 
 /** How often an open app checks its inbox while it has no push socket. */
@@ -514,6 +572,8 @@ export function createApp(deps: Deps) {
   deps.bridge?.on('back_button_pressed', () => {
     const close = onTop.at(-1);
     if (close) close();
+    // Leaves deleting the chats for both sides at once: the account is kept.
+    else if (currentScreen().kind === 'deleting-chats') void keepAccount();
     else void showHome();
   });
   let messaging: Messaging | null = null;
@@ -1918,11 +1978,30 @@ export function createApp(deps: Deps) {
    * deleted. See runDeletion. This is also how a deletion the server says is
    * under way, with no record of it here, is finished (Finish deleting).
    */
-  async function deleteAccount(): Promise<void> {
+  async function deleteAccount(forBoth = false): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'confirm-delete' || current.busy || !session) return;
     const account = await readAccount(deps.db);
     if (!isSetUp(account)) return;
+    // Its chats for both sides first, if the user ticked that: only before
+    // a deletion starts (once it has, the account takes no other request,
+    // so no send tokens can be fetched), and only once (a second tap finds
+    // this screen gone).
+    if (forBoth && !current.finishing && signedOut === null && !deletionPaused && !(await deletionConfirmed())) {
+      if (screen.value !== current) return;
+      return deleteChatsForBoth(account.accountId);
+    }
+    return confirmDeletion(account.accountId);
+  }
+
+  /**
+   * Records the deletion the user confirmed, for the account they confirmed
+   * it for, and starts it (runDeletion). Nothing if the device holds another
+   * account by now (another copy deleted it, and set up again).
+   */
+  async function confirmDeletion(accountId: string): Promise<void> {
+    const account = await readAccount(deps.db);
+    if (!isSetUp(account) || account.accountId !== accountId) return start();
     // Not one already under way (confirmed here before, or the server says
     // so): the server may take nothing else for it now.
     const first = signedOut !== 'deleting' && signedOut !== 'expired' && !(await deletionConfirmed());
@@ -1930,6 +2009,157 @@ export function createApp(deps: Deps) {
     signedOut = null;
     readOnly.value = false;
     return runDeletion(first);
+  }
+
+  /**
+   * Counts runs of deleteChatsForBoth: a new run, leaving its screen
+   * (keepAccount), or going on to the deletion ends the one under way.
+   */
+  let chatsRun = 0;
+  /**
+   * The run whose stop the screen shows, and the account it's for: Try
+   * again and Delete anyway act on it alone, and only while it's the latest
+   * (not once Keep was tapped, while home loads).
+   */
+  let chatsStopped: { run: number; accountId: string } | null = null;
+  /**
+   * When each delete for both sides before a deletion went out, or failed
+   * (Unix ms), within the last window: the pace holds across runs (Try
+   * again).
+   */
+  const chatSends: number[] = [];
+
+  /**
+   * Before deleting the account, as the user asked: deletes each chat in
+   * the list for both sides, one at a time, as the chat's own Delete does
+   * (messaging.remove: their app is told, and the uploads of the user's
+   * attachments there are queued for deletion, with the deletion's own; one
+   * of the day's messages each). Only open ones that a delete for both can
+   * reach: not blocked, not ended, not out of the list (deleted here only).
+   * Paced (CHAT_DELETE_GAP_MS, CHAT_DELETES_PER_WINDOW), so the firewall
+   * doesn't turn the device away, which would hold up the deletion's
+   * uploads too. A chat whose link takes no more first messages this hour
+   * (link_busy) is left for later, and the others go on. Then the deletion
+   * itself (confirmDeletion).
+   *
+   * One that can't be sent stops it, and the user chooses (deleting-chats'
+   * stopped): Try again (the chats still in the list), deleting the account
+   * anyway (the rest stay with the other side), or keeping it. Nothing of
+   * this is saved: leaving the screen (Cancel, back), or closing the app,
+   * ends it with the account kept, so it never deletes the account with
+   * chats left that the user didn't agree to.
+   */
+  async function deleteChatsForBoth(accountId: string): Promise<void> {
+    const run = ++chatsRun;
+    chatsStopped = null;
+    let done = 0;
+    let total = 0;
+    /** Chats left for later: their link takes no more first messages this hour (link_busy); and until when (Unix ms, the latest the server said; null if it didn't). */
+    let busy = 0;
+    let busyUntil: number | null = null;
+    screen.value = { kind: 'deleting-chats', done, total, stopped: null };
+    const ours = () => run === chatsRun && currentScreen().kind === 'deleting-chats';
+    const show = () => {
+      if (ours()) screen.value = { kind: 'deleting-chats', done, total, stopped: null };
+    };
+    const stop = (reason: ChatsStop) => {
+      if (!ours()) return;
+      chatsStopped = { run, accountId };
+      const until = reason === 'link-busy' ? { until: busyUntil } : {};
+      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done + busy, ...until } };
+    };
+    const open = (c: ConversationRecord | undefined): c is ConversationRecord => !!c && c.status === 'active' && !c.hidden;
+    const ids = (await listConversations(deps.db)).filter(open).map((c) => c.id);
+    total = ids.length;
+    show();
+    // Messaging, if it couldn't start before: the box is never ignored.
+    if (total > 0) await createEngine();
+    const gap = deps.chatDeleteGapMs ?? CHAT_DELETE_GAP_MS;
+    const window = deps.chatDeleteWindow ?? { count: CHAT_DELETES_PER_WINDOW, ms: CHAT_DELETE_WINDOW_MS };
+    for (const id of ids) {
+      if (!ours()) return;
+      // Blocked, deleted, or deleted for both sides meanwhile (another copy):
+      // nothing left to do. Looked at again after the wait, which can be long.
+      if (open(await getConversation(deps.db, id))) {
+        while (chatSends.length > 0 && chatSends[0]! <= Date.now() - window.ms) chatSends.shift();
+        let wait = chatSends.length > 0 ? chatSends.at(-1)! + gap - Date.now() : 0;
+        if (chatSends.length >= window.count) wait = Math.max(wait, chatSends[chatSends.length - window.count]! + window.ms - Date.now());
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        const account = await readAccount(deps.db);
+        const still = open(await getConversation(deps.db, id));
+        if (!ours()) return;
+        // Another copy deleted the account, and set up a new one: start again.
+        if (!isSetUp(account) || account.accountId !== accountId) {
+          chatsRun++;
+          return start();
+        }
+        // This build can't send (its token key won't load): a fresh copy of the app can.
+        if (still && !messaging) return stop('outdated');
+        if (still && messaging) {
+          try {
+            await messaging.remove(id, true);
+            deps.broadcast({ type: 'data-changed' });
+            // The list, if it shows by now (Cancel while this was sent).
+            void refresh();
+          } catch (err) {
+            if (!ours()) return;
+            if (handleGone(err)) return;
+            // Not for both sides any more (blocked meanwhile, say): nothing to do.
+            if (open(await getConversation(deps.db, id))) {
+              // Its link is full for this hour: the others go on, and it's left for later.
+              if (err instanceof ApiError && err.code === 'link_busy') {
+                busy++;
+                const until = limitError('link-busy', err).until;
+                if (until !== null) busyUntil = Math.max(busyUntil ?? 0, until);
+              } else return stop(chatsStop(err));
+            }
+          } finally {
+            chatSends.push(Date.now());
+          }
+        }
+      }
+      done++;
+      show();
+    }
+    if (!ours()) return;
+    if (busy > 0) return stop('link-busy');
+    // On to the deletion in the same turn as the last look: a Cancel or back
+    // from now on finds its screen gone.
+    chatsRun++;
+    backButton(false);
+    screen.value = { kind: 'deleting', error: null };
+    return confirmDeletion(accountId);
+  }
+
+  /** What stopped the deletes for both sides before the account, for the user. */
+  function chatsStop(err: unknown): ChatsStop {
+    if (err instanceof NoTokens) return 'no-tokens';
+    // The firewall, or a mailbox's cap: later.
+    if (err instanceof ApiError && err.code === 'rate_limited') return 'turned-away';
+    const limited = deviceLimit(err);
+    if (limited) return limited;
+    if (err instanceof ApiError && err.code === 'unknown_issuer_key') return 'outdated';
+    if (err instanceof NetworkError) return 'network';
+    return 'generic';
+  }
+
+  /** The stop the screen shows, if it's the latest run's, with the account it's for. */
+  function stoppedChats(): { reason: ChatsStop; accountId: string } | null {
+    const current = currentScreen();
+    if (current.kind !== 'deleting-chats' || !current.stopped || chatsStopped?.run !== chatsRun) return null;
+    return { reason: current.stopped.reason, accountId: chatsStopped.accountId };
+  }
+
+  /**
+   * Leaves deleting the chats for both sides (Cancel, Keep, or back),
+   * keeping the account: at once, so nothing of the run acts after it, nor
+   * a tap on its screen while home loads.
+   */
+  function keepAccount(): Promise<void> | undefined {
+    if (currentScreen().kind !== 'deleting-chats') return;
+    chatsRun++;
+    backButton(false);
+    return showHome({ tab: 'links' });
   }
 
   /** Whether runDeletion is under way. */
@@ -2658,9 +2888,28 @@ export function createApp(deps: Deps) {
     /** Asks to delete the account (a typed confirmation follows). */
     askDeleteAccount: () => {
       backButton(true);
-      screen.value = { kind: 'confirm-delete', busy: false, error: null };
+      // Finishing one the server says is under way: no sends (deleteAccount).
+      screen.value = { kind: 'confirm-delete', busy: false, error: null, ...(signedOut !== null || deletionPaused ? { finishing: true as const } : {}) };
     },
+    /** Deletes the account, as typed; forBoth: its chats for both sides first, as ticked. */
     deleteAccount,
+    /** Stopped deleting the chats for both sides: Try again, with those still in the list. */
+    retryDeletingChats: async () => {
+      const stopped = stoppedChats();
+      if (stopped && canRetryChats(stopped.reason)) return deleteChatsForBoth(stopped.accountId);
+    },
+    /** Stopped deleting the chats for both sides: deletes the account anyway; the rest stay with the other side. */
+    deleteAccountAnyway: async () => {
+      const stopped = stoppedChats();
+      if (!stopped) return;
+      // Once: a second tap finds the deletion's screen.
+      chatsRun++;
+      backButton(false);
+      screen.value = { kind: 'deleting', error: null };
+      return confirmDeletion(stopped.accountId);
+    },
+    /** While deleting the chats for both sides (Cancel), or once it stopped: ends it and keeps the account. */
+    keepAccount,
     /** Try again, on the deleting screen: carries on with the deletion. */
     continueDeletion: () => runDeletion(),
     /** On the deleting screen, when the server keeps failing: the chats, read only. */
