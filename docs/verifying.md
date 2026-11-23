@@ -134,10 +134,13 @@ it:
 
 Each must open `https://<org>.github.io/` exactly. The menu button and the
 `/start` buttons are the bot's own addresses, so they must be exactly that,
-with nothing after it. The Main Mini App and a named one come back from
-Telegram with its launch parameters added in the fragment, so those may
+with nothing after it. The Main Mini App and a named one are typed in
+BotFather (the final `/` may be left out: a browser adds it) and come back
+from Telegram with its launch parameters added in the fragment, so those may
 carry Telegram's `tgWebApp…` keys, each once, and nothing else: no query, no
-start parameter (the script asks for none), no second `#`. The app acts on
+start parameter (the script asks for none), no second `#`. The script sends
+a fixed theme with its request, so Telegram adds its own theme parameter and
+a planted one is a second copy. The app acts on
 some parameters (a start parameter, `#save=`, the first copy of a launch
 parameter), so one planted in the address the operator set fails. Every
 address any version of a reply carried counts, so a button edited away and

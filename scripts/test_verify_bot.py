@@ -48,7 +48,6 @@ ELSEWHERE = [
     "https://evil.example/",
     "https://example.github.io/x/",
     "https://example.github.io/index.html",
-    "https://example.github.io",  # no path at all
     "http://example.github.io/",
     "https://example.github.io.evil.example/",
     "https://example.github.io@evil.example/",
@@ -173,9 +172,15 @@ class Checks(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
 
+    def test_an_address_typed_without_the_final_slash(self):
+        # In BotFather: https://host is https://host/ to a browser.
+        url = "https://example.github.io#tgWebAppData=SECRET&tgWebAppVersion=9.1"
+        self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
+
     def test_the_bots_own_buttons_must_be_exact(self):
         # The menu button and /start's buttons: as the bot set them, nothing added.
-        for url in (GOOD, "https://example.github.io/#tgWebAppData=x", "https://example.github.io/?", "https://example.github.io/#"):
+        for url in (GOOD, "https://example.github.io/#tgWebAppData=x", "https://example.github.io/?", "https://example.github.io/#",
+                    "https://example.github.io"):
             for where in ("menu", "welcome"):
                 with self.subTest(where=where, url=url):
                     r = check(Stub(**({"menu": url} if where == "menu" else {"welcome": [url]})))
@@ -605,6 +610,11 @@ class RealClient(unittest.TestCase):
         self.assertIsInstance(web.peer, t.InputPeerUser)
         main = next(c for c in sent if isinstance(c, functions.messages.RequestMainWebViewRequest))
         self.assertIsInstance(main.peer, t.InputPeerUser)
+        # A theme in both, so Telegram adds its own copy and a planted one is a second.
+        for request in (web, main):
+            self.assertEqual(request.theme_params.data, vb.THEME)
+        self.assertIsNone(main.start_param)
+        self.assertIsNone(web.start_param)
         self.assertIn(("send", "/start"), calls)
         deleted = next(c for c in sent if isinstance(c, functions.messages.DeleteMessagesRequest))
         self.assertEqual((sorted(deleted.id), deleted.revoke), ([100, 101], True))
@@ -642,7 +652,8 @@ class RealClient(unittest.TestCase):
     def test_a_failed_read_keeps_what_was_read(self):
         from telethon.tl import functions
 
-        for seen, status in ((EVIL, "failed"), (RAW, "unknown")):
+        # A button read before the failure is judged as a button: nothing added.
+        for seen, status in ((EVIL, "failed"), (RAW, "unknown"), (RAW + "#tgWebAppData=x", "failed")):
             with self.subTest(seen=seen):
                 def replies(n, seen=seen):
                     return [pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(seen))] if n == 0 else OSError("network")

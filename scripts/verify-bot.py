@@ -100,13 +100,15 @@ def shown(url: str) -> str:
     return text if len(text) <= 200 else text[:197] + "..."
 
 
-def same_place(url: str, scheme: str, host: str) -> bool:
-    """Whether url opens <scheme>://<host>/ exactly: no user, no port, path "/"."""
+def same_place(url: str, scheme: str, host: str, empty_path: bool = False) -> bool:
+    """Whether url opens <scheme>://<host>/ exactly: no user, no port, path
+    "/" (or none, with empty_path: browsers read https://host as
+    https://host/; for an address typed in BotFather)."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return False
-    return parts.scheme == scheme and parts.netloc == host and parts.path == "/"
+    return parts.scheme == scheme and parts.netloc == host and (parts.path == "/" or (empty_path and parts.path == ""))
 
 
 def _name(key: str) -> str:
@@ -231,7 +233,7 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
 
     def judge(check: str, what: str, url: str, telegram_adds: bool = False) -> None:
         added = added_parameters(url, telegram_adds)
-        if not same_place(url, scheme, host):
+        if not same_place(url, scheme, host, empty_path=telegram_adds):
             report.fail(check, f"{what} opens {shown(url)}, not {want}")
         elif added:
             report.fail(check, f"{what} opens {shown(url)} with parameters Telegram doesn't add: {', '.join(added[:5])}")
@@ -313,6 +315,12 @@ def _web_app_urls(markup: object) -> list[str]:
     return urls
 
 
+# Sent with every request for an app's address, so that Telegram adds its own
+# tgWebAppThemeParams, and one planted in the address is a second copy (the
+# app reads the first).
+THEME = '{"bg_color":"#ffffff","text_color":"#000000"}'
+
+
 class TelethonClient:
     """The real client: a Telegram user account through Telethon."""
 
@@ -337,10 +345,10 @@ class TelethonClient:
 
     async def main_url(self, bot: Bot) -> str:
         from telethon import utils
-        from telethon.tl import functions
+        from telethon.tl import functions, types
 
         peer = utils.get_input_peer(bot.handle)
-        result = await self.tg(functions.messages.RequestMainWebViewRequest(peer=peer, bot=bot.handle, platform=self.platform))
+        result = await self.tg(functions.messages.RequestMainWebViewRequest(peer=peer, bot=bot.handle, platform=self.platform, theme_params=types.DataJSON(data=THEME)))
         return result.url
 
     async def menu_button(self, bot: Bot) -> str | None:
@@ -407,7 +415,7 @@ class TelethonClient:
                 return None
             raise
         peer = utils.get_input_peer(bot.handle)
-        result = await self.tg(functions.messages.RequestAppWebViewRequest(peer=peer, app=app, platform=self.platform, write_allowed=False))
+        result = await self.tg(functions.messages.RequestAppWebViewRequest(peer=peer, app=app, platform=self.platform, write_allowed=False, theme_params=types.DataJSON(data=THEME)))
         return result.url
 
 
