@@ -37,13 +37,18 @@ elif [ "$status" = 0 ]; then
 fi
 
 # Actions: the action and commit of each `uses:` pinned to a full SHA.
-pins() { sed -nE 's/^[ -]*uses: *([^@ ]+)@([0-9a-f]{40})( .*)?$/\1 \2/p' "$@"; }
+pin='[ -]*uses: *([^@ ]+)@([0-9a-f]{40})( .*)?$'
+pins() { sed -nE "s/^${pin}/\1 \2/p" "$@"; }
+# The same for one file, once per action and commit, with the line of its
+# first use: one pattern, so a pin can't be listed but not found.
+pins_with_lines() {
+  grep -n '' "$1" | sed -nE "s/^([0-9]+):${pin}/\2 \3 \1/p" | awk '!seen[$1 " " $2]++' | sort
+}
 hosting=hosting/deploy.yml
 for line in $(grep -nE '^[ -]*uses:' "$hosting" | grep -vE '@[0-9a-f]{40}( |$)' | cut -d: -f1 || true); do
   echo "::warning file=${hosting},line=${line}::${hosting} uses an action that isn't pinned to a commit SHA"
 done
-while read -r action sha; do
-  line=$(grep -nF "uses: ${action}@${sha}" "$hosting" | head -n 1 | cut -d: -f1)
+while read -r action sha line; do
   shared=$(pins .github/workflows/*.yml | awk -v a="$action" '$1 == a { print $2 }' | sort -u)
   if [ -z "$shared" ]; then
     echo "${action}: only ${hosting} uses it, so it's updated by hand"
@@ -52,7 +57,7 @@ while read -r action sha; do
   else
     echo "::warning file=${hosting},line=${line}::${hosting} pins ${action} at ${sha}, .github/workflows at $(xargs <<<"$shared"). Update it, then copy it into the hosting repositories (hosting/README.md)"
   fi
-done < <(pins "$hosting" | sort -u)
+done < <(pins_with_lines "$hosting")
 
 # The bot check's Python packages: each pinned to one version and at least
 # one sha256 hash, so `pip install --require-hashes` installs exactly what
