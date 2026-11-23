@@ -336,7 +336,8 @@ else
   if [ "$run_info" != ".github/workflows/deploy.yml"$'\t'"${branch}" ]; then
     echo "OTHER DEPLOYER the live site was deployed by run ${live_run} ($(tr '\t' ' ' <<<"$run_info")), not deploy.yml on ${branch}"
     failed=1
-  elif ! printf '%s\n' ${signed_runs[@]+"${signed_runs[@]}"} | grep -qxF -- "$live_run"; then
+  # Not a pipe into grep -q, as for gh's help above.
+  elif ! grep -qxF -- "$live_run" < <(printf '%s\n' ${signed_runs[@]+"${signed_runs[@]}"}); then
     echo "OTHER DEPLOYER the live site was deployed by run ${live_run}, which didn't sign this manifest"
     failed=1
   else
