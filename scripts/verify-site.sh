@@ -390,10 +390,10 @@ elif [ "$rebuild" = 1 ]; then
   # Only with the Node the site was built with: npm ci refuses an older one
   # (engine-strict in web/.npmrc), and another one may build other bytes.
   node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
-  [ -n "$node" ] || refuse "REBUILD FAILED the manifest doesn't say which Node built the site"
-  have=$(node --version 2>/dev/null) || have='an unknown version'
+  [ -n "$node" ] || refuse "REBUILD FAILED the manifest's node is missing or malformed"
+  have=$(node --version) || have=''
   if [ "$node" != "$have" ]; then
-    die "the site was built with Node ${node}, this is ${have}; switch to ${node} (with nvm: nvm install ${node#v}) and run again, or run without --rebuild"
+    die "the site was built with Node ${node}, this is ${have:-an unknown version}; switch to ${node} (with nvm: nvm install ${node#v}) and run again, or run without --rebuild"
   fi
   # Only the expected repository, at the commit checked above.
   echo "Rebuilding ${commit} from ${code_repo}"
