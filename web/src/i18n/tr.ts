@@ -318,7 +318,7 @@ export const tr = {
   deletePhrase: 'hesabımı sil',
   deleteAccountConfirm: 'Hesabımı sil',
   deleteChatsForBoth: 'Sohbetlerimi karşı taraftan da sil',
-  deleteChatsForBothNote: 'Listenizdeki her sohbet için karşı tarafın uygulamasından o sohbeti silmesi istenir ve oraya gönderdiğiniz ekler sunucudan silinir; kalan ekler sunucuda en fazla 30 gün tutulur. Bu, karşı tarafın uygulamasına bağlıdır ve karşı tarafın kaydettiği kopyaları ya da aldığı ekran görüntülerini silemez. Engellediğiniz sohbetler ve yalnızca kendiniz için sildiğiniz sohbetler karşı tarafta kalır.',
+  deleteChatsForBothNote: 'Listenizdeki her sohbet için karşı tarafın uygulamasından o sohbeti silmesi istenir ve oraya gönderdiğiniz ekler sunucudan silinir; kalan ekler sunucuda en fazla 30 gün tutulur. Engellediğiniz sohbetler ve yalnızca kendiniz için sildiğiniz sohbetler karşı tarafta kalır.',
   deletingChats: 'Sohbetleriniz karşı taraftan siliniyor: {done} / {total}…',
   deletingChatsLeft: 'Karşı taraftan silinmeyen sohbetler: {count}. Hesabınızı yine de silerseniz bu sohbetler karşı tarafta kalır ve oraya gönderdiğiniz ekler sunucuda en fazla 30 gün kalır.',
   deletingChatsNoMessages: 'Bugünkü mesaj hakkınız bitti: her sohbetin silinmesi bir mesaj sayılır. Saat {time} itibarıyla yenilenir.',
