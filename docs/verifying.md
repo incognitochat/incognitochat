@@ -112,7 +112,9 @@ without a login). Use gh 2.102.0 or later: before 2.93.0, `gh attestation`
 sent the login token to the host of Sigstore's TUF mirror
 ([GHSA-8xvp-7hj6-mcj9](https://github.com/advisories/GHSA-8xvp-7hj6-mcj9)),
 so the script refuses those versions, and warns below 2.102.0.
-`--rebuild` also needs the Node version in [`web/.nvmrc`](../web/.nvmrc).
+`--rebuild` also needs the Node the manifest says built the site: the version
+in [`web/.nvmrc`](../web/.nvmrc) at the site's commit. With another one the
+script stops before building (exit code 2) and names the version to use.
 
 ## Checking what the bot opens
 

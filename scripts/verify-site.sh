@@ -13,7 +13,8 @@
 #
 # Needs curl, jq, sha256sum, git and the GitHub CLI 2.93.0 or later (2.102.0
 # or later recommended), logged in (gh auth login, any account: it only reads
-# public data). --rebuild also needs Node (the version in web/.nvmrc).
+# public data). --rebuild also needs the Node the manifest says built the site
+# (web/.nvmrc at the site's commit); with another one it stops before building.
 #
 # Exit codes: 0 verified, 1 verification failed, 2 usage or setup error.
 set -euo pipefail
@@ -48,8 +49,10 @@ tools=(curl jq sha256sum git gh)
 for tool in "${tools[@]}"; do
   command -v "$tool" >/dev/null || die "$tool is missing"
 done
-# --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308).
-gh attestation verify --help 2>/dev/null | grep -q -- --signer-digest \
+# --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308). Not a
+# pipe into grep -q: it exits at the first match, gh can then die of SIGPIPE,
+# and under pipefail the pipe fails though the flag is there.
+grep -q -- --signer-digest < <(gh attestation verify --help 2>/dev/null) \
   || die "this GitHub CLI can't pin the signing workflow (no --signer-digest); update it"
 # Before 2.93.0, gh attestation sent the login token to the TUF mirror's host
 # (GHSA-8xvp-7hj6-mcj9). Before 2.102.0, --signer-workflow matched a prefix
@@ -333,7 +336,8 @@ else
   if [ "$run_info" != ".github/workflows/deploy.yml"$'\t'"${branch}" ]; then
     echo "OTHER DEPLOYER the live site was deployed by run ${live_run} ($(tr '\t' ' ' <<<"$run_info")), not deploy.yml on ${branch}"
     failed=1
-  elif ! printf '%s\n' ${signed_runs[@]+"${signed_runs[@]}"} | grep -qxF -- "$live_run"; then
+  # Not a pipe into grep -q, as for gh's help above.
+  elif ! grep -qxF -- "$live_run" < <(printf '%s\n' ${signed_runs[@]+"${signed_runs[@]}"}); then
     echo "OTHER DEPLOYER the live site was deployed by run ${live_run}, which didn't sign this manifest"
     failed=1
   else
@@ -386,16 +390,21 @@ fi
 if [ "$rebuild" = 1 ] && [ "$failed" != 0 ]; then
   echo "Not rebuilding: the checks above failed"
 elif [ "$rebuild" = 1 ]; then
-  # Only the expected repository, at the commit checked above.
-  echo "Rebuilding ${commit} from ${code_repo}"
   node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
-  if [ "$node" != "$(node --version)" ]; then
-    echo "Note: the site was built with Node ${node:-?}, this is $(node --version); files may differ"
+  [ -n "$node" ] || refuse "REBUILD FAILED the manifest's node is missing or malformed"
+  # Only the expected repository, at the commit checked above.
+  code -c advice.detachedHead=false checkout --quiet --detach "$commit" \
+    || refuse "REBUILD FAILED can't check out ${commit}"
+  # Only with the Node the site was built with: npm ci refuses an older one
+  # (engine-strict in web/.npmrc), and another one may build other bytes.
+  # Asked where npm will run, as a version manager may pick Node per folder.
+  have=$(cd "$work/code/web" && node --version) || have=''
+  if [ "$node" != "$have" ]; then
+    die "the site was built with Node ${node}, this is ${have:-an unknown version}; switch to ${node} (with nvm: nvm install ${node#v}) and run again, or run without --rebuild"
   fi
+  echo "Rebuilding ${commit} from ${code_repo}"
   built=0
-  if ! code -c advice.detachedHead=false checkout --quiet --detach "$commit"; then
-    echo "REBUILD FAILED can't check out ${commit}"
-  elif ! (
+  if ! (
     if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
     # Only the manifest's settings: every VITE_ variable, even an unused or
     # empty one, is part of the bundle. Older builds also took the named
@@ -404,9 +413,11 @@ elif [ "$rebuild" = 1 ]; then
     if jq -e '.build | has("VITE_APP_NAME")' "$manifest" >/dev/null; then
       VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") && export VITE_APP_NAME
     fi
-    # set -e is off inside a condition, so each step is chained.
+    # set -e is off inside a condition, so each step is chained. npm's summary
+    # and audit report go to stdout, dropped; its warnings and errors to stderr,
+    # at a set level whatever the caller's npm config says.
     cd "$work/code/web" \
-      && npm ci --ignore-scripts --silent \
+      && npm ci --ignore-scripts --loglevel=warn >/dev/null \
       && VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
         VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
         VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
