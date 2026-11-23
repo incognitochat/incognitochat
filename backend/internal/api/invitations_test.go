@@ -47,7 +47,7 @@ func TestInvitationChain(t *testing.T) {
 	code := out["code"].(string)
 
 	// Alice joins with the pasted invitation link: level 1, may now own links.
-	link := "https://t.me/some_bot/app?startapp=" + invitations.PayloadPrefix + strings.ReplaceAll(code, "-", "")
+	link := "https://t.me/some_bot?startapp=" + invitations.PayloadPrefix + strings.ReplaceAll(code, "-", "")
 	if status, out := h.as(t, alice, http.MethodPost, "/invitations/redeem", map[string]any{"code": link}, false); status != http.StatusOK || out["level"] != float64(1) {
 		t.Fatalf("redeem: %d %v", status, out)
 	}

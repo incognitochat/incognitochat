@@ -163,7 +163,7 @@ describe('setup', () => {
   });
 
   it('builds the reopen path', () => {
-    expect(registrationPath('some_bot', 'app', 'regABC')).toBe('/some_bot/app?startapp=regABC');
+    expect(registrationPath('some_bot', 'regABC')).toBe('/some_bot?startapp=regABC');
   });
 
   it('tells registration launches from link launches', () => {

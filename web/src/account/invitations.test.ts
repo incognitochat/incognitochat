@@ -10,19 +10,20 @@ describe('invitation codes', () => {
       abcdefgh: 'abcd-efgh',
       invabcdefgh: 'abcd-efgh',
       'https://t.me/some_bot/app?startapp=invabcdefgh': 'abcd-efgh',
+      'https://t.me/some_bot?startapp=invabcdefgh': 'abcd-efgh',
       // Typed on a Persian or an Arabic keyboard's number row.
       'abcd-۲۳۴۵': 'abcd-2345',
       'abcd-٦٧٨٩': 'abcd-6789',
     };
     for (const [input, want] of Object.entries(valid)) expect(normalizeCode(input)).toBe(want);
-    for (const input of ['', 'abc-def', 'abcd-efgh-jk', 'abcd-efg0', 'abcd-efgl', 'abcd-efg۰', 'abcd-efg١', 'hello there', 'https://t.me/some_bot/app?startapp=1abc']) {
+    for (const input of ['', 'abc-def', 'abcd-efgh-jk', 'abcd-efg0', 'abcd-efgl', 'abcd-efg۰', 'abcd-efg١', 'hello there', 'https://t.me/some_bot/app?startapp=1abc', 'https://t.me/some_bot?startapp=1abc']) {
       expect(normalizeCode(input)).toBeNull();
     }
   });
 
   it('round-trip through invitation links', () => {
-    const url = invitationUrl('some_bot', 'app', 'abcd-efgh');
-    expect(url).toBe('https://t.me/some_bot/app?startapp=invabcdefgh');
+    const url = invitationUrl('some_bot', 'abcd-efgh');
+    expect(url).toBe('https://t.me/some_bot?startapp=invabcdefgh');
     expect(parseInvitationPayload(new URL(url).searchParams.get('startapp')!)).toBe('abcd-efgh');
     expect(parseInvitationPayload('reg' + 'a'.repeat(43))).toBeNull();
     expect(parseInvitationPayload('INVABCDEFGH')).toBeNull();

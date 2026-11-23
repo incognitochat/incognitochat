@@ -147,9 +147,9 @@ export function prepareSetup(db: Database, options: { restart?: boolean } = {}):
   });
 }
 
-/** The t.me path that reopens the app as a registration launch. */
-export function registrationPath(botUsername: string, appName: string, startParam: string): string {
-  return `/${botUsername}/${appName}?startapp=${startParam}`;
+/** The t.me path that reopens the app (the bot's main Mini App) as a registration launch. */
+export function registrationPath(botUsername: string, startParam: string): string {
+  return `/${botUsername}?startapp=${startParam}`;
 }
 
 /** Whether a start parameter is a registration launch's. */

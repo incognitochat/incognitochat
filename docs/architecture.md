@@ -119,10 +119,10 @@ flowchart LR
 
 ## Links
 
-A link is `https://t.me/<bot>/<app>?startapp=<payload>`, where the payload
-holds a random link ID and the **fingerprint** of the link's signing key. The
-server keeps the link's **bundle**: the signing key, its current encryption
-key (signed by it), and the link's intro mailbox.
+A link is `https://t.me/<bot>?startapp=<payload>` (it opens the bot's main
+Mini App), where the payload holds a random link ID and the **fingerprint** of
+the link's signing key. The server keeps the link's **bundle**: the signing
+key, its current encryption key (signed by it), and the link's intro mailbox.
 
 - Opening a link, the app fetches the bundle without logging in and checks
   the fingerprint and signatures before encrypting anything. A server that

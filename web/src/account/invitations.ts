@@ -1,5 +1,5 @@
 // Invitations (v1's rules): codes like "abcd-efgh", shared as
-// t.me/<bot>/<app>?startapp=inv<code without the dash>. Joining with one makes
+// t.me/<bot>?startapp=inv<code without the dash>. Joining with one makes
 // this account a member, one level below the code's owner.
 
 import { checkObject } from '../net/api';
@@ -105,6 +105,6 @@ export function parseInvitationPayload(startParam: string): string | null {
   return /^inv[a-z2-9]{8}$/.test(startParam) ? normalizeCode(startParam) : null;
 }
 
-export function invitationUrl(botUsername: string, appName: string, code: string): string {
-  return `https://t.me/${botUsername}/${appName}?startapp=${PAYLOAD_PREFIX}${code.replace('-', '')}`;
+export function invitationUrl(botUsername: string, code: string): string {
+  return `https://t.me/${botUsername}?startapp=${PAYLOAD_PREFIX}${code.replace('-', '')}`;
 }

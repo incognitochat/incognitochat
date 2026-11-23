@@ -1,6 +1,6 @@
 // Package links checks link bundles (docs/protocol.md, Links).
 //
-// A link is t.me/<bot>/<app>?startapp=1<link ID><fingerprint>. Its bundle,
+// A link is t.me/<bot>?startapp=1<link ID><fingerprint>. Its bundle,
 // which anyone with the link ID can fetch, holds the link signing key (whose
 // fingerprint is in the link) and the current encryption keys, each signed by
 // the signing key with a validity window. Senders check all of that before

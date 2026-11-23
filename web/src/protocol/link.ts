@@ -1,7 +1,7 @@
 // Links (docs/protocol.md, Links), byte-compatible with the backend
 // (backend/internal/links).
 //
-// A link is t.me/<bot>/<app>?startapp=<payload>, where
+// A link is t.me/<bot>?startapp=<payload> (it opens the bot's main Mini App), where
 //   payload = "1" ‖ link ID (8 bytes, 11 base64url characters)
 //             ‖ fingerprint of the link signing key (43 characters)
 // 55 characters, fixed length, no separator (base64url uses both - and _).
@@ -45,8 +45,8 @@ export function parsePayload(startParam: string): LinkRef | null {
   return { id, fingerprint: fp };
 }
 
-export function linkUrl(botUsername: string, appName: string, ref: LinkRef): string {
-  return `https://t.me/${botUsername}/${appName}?startapp=${encodePayload(ref)}`;
+export function linkUrl(botUsername: string, ref: LinkRef): string {
+  return `https://t.me/${botUsername}?startapp=${encodePayload(ref)}`;
 }
 
 /** The signed parts of an encryption key (backend: links.KeyParts). */

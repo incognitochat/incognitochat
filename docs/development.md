@@ -132,7 +132,7 @@ weekly scan reports a fix in a newer version:
 - **No environment-specific values in the repository:** no account IDs,
   bucket names, bot names, URLs or tokens. They live in GitHub environment
   variables and secrets, Terraform outputs, and the hosting repository's
-  variables. Docs use placeholders such as `<bot>`, `<app>` and `<org>`.
+  variables. Docs use placeholders such as `<bot>` and `<org>`.
 - Commits and pull request titles follow Conventional Commits. Changes to
   `main` go through pull requests, squash-merged; a push to `main` deploys to
   dev. The titles set the next version and the changelog

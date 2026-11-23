@@ -2465,7 +2465,7 @@ export function createApp(deps: Deps) {
 
   /** The account's links, as the home screen shows them. */
   async function linkViews(): Promise<LinkView[]> {
-    return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, deps.config!.appName, l) }));
+    return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, l) }));
   }
 
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
@@ -2604,7 +2604,7 @@ export function createApp(deps: Deps) {
    */
   async function openInvitations(notice: InvitationsNotice | null = null, made: { code: string; uses: number } | null = null): Promise<void> {
     const { config } = deps;
-    const url = (code: string) => invitationUrl(config!.botUsername, config!.appName, code);
+    const url = (code: string) => invitationUrl(config!.botUsername, code);
     const created = made?.code ?? null;
     let info: InvitationsInfo;
     try {
@@ -2811,7 +2811,7 @@ export function createApp(deps: Deps) {
     if (!config || !bridge) return;
     const code = await prepareSetup(db, options);
     screen.value = { kind: 'reopening' };
-    bridge.post('web_app_open_tg_link', { path_full: registrationPath(config.botUsername, config.appName, code) });
+    bridge.post('web_app_open_tg_link', { path_full: registrationPath(config.botUsername, code) });
     // The new launch is a second copy of the app; this one steps aside.
     setTimeout(() => bridge.post('web_app_close'), deps.closeDelayMs ?? CLOSE_DELAY_MS);
   }

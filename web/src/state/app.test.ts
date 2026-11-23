@@ -91,7 +91,6 @@ let n = 0;
 const config = {
   apiUrl: 'https://api.example',
   botUsername: 'test_bot',
-  appName: 'dev',
   issuer: { name: 'test', spki: new Uint8Array(0), keyId: new Uint8Array(32) },
 };
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -444,7 +443,7 @@ describe('setup', () => {
     expect(app.screen.value.kind).toBe('reopening');
     const open = first.posted.find((p) => p.type === 'web_app_open_tg_link');
     const code = (await readAccount(db))!.fingerprint;
-    expect(open?.data).toEqual({ path_full: `/test_bot/dev?startapp=reg${code}` });
+    expect(open?.data).toEqual({ path_full: `/test_bot?startapp=reg${code}` });
     expect(first.posted.at(-1)?.type).toBe('web_app_close');
 
     // The registration launch, a second copy sharing the same storage.
@@ -543,7 +542,7 @@ describe('setup', () => {
     await app.retry();
     expect(app.screen.value.kind).toBe('reopening');
     // Same keys, same code.
-    expect(bridge.posted.find((p) => p.type === 'web_app_open_tg_link')?.data).toEqual({ path_full: `/test_bot/dev?startapp=${code}` });
+    expect(bridge.posted.find((p) => p.type === 'web_app_open_tg_link')?.data).toEqual({ path_full: `/test_bot?startapp=${code}` });
   });
 
   it('logs in when registered, and shows a replaced account loudly, asking again at each launch', async () => {
@@ -1550,7 +1549,7 @@ describe('links', () => {
     expect(screen.notice).toBe('created');
     expect(screen.links).toHaveLength(1);
     const url = screen.links[0]!.url;
-    expect(url).toMatch(/^https:\/\/t\.me\/test_bot\/dev\?startapp=1[A-Za-z0-9_-]{54}$/);
+    expect(url).toMatch(/^https:\/\/t\.me\/test_bot\?startapp=1[A-Za-z0-9_-]{54}$/);
     expect(server.unsigned).toEqual([]);
 
     // Someone else opens it: the bundle must match the fingerprint in the link.
@@ -2855,7 +2854,7 @@ describe('invitations', () => {
     if (screen.kind !== 'invitations') throw new Error(screen.kind);
     expect(screen.notice).toBe('created');
     expect(screen.created).toBe('aaaa-aaaa');
-    expect(screen.info.codes[0]).toMatchObject({ code: 'aaaa-aaaa', uses: 3, left: 3, url: 'https://t.me/test_bot/dev?startapp=invaaaaaaaa' });
+    expect(screen.info.codes[0]).toMatchObject({ code: 'aaaa-aaaa', uses: 3, left: 3, url: 'https://t.me/test_bot?startapp=invaaaaaaaa' });
     expect(server.unsigned).toEqual([]);
 
     // Someone opens the invitation link (the fake has one account, so stop being admin).
@@ -2993,6 +2992,16 @@ describe('invitations', () => {
     await admin.app.grant(memberLink.url, 2);
     expect(admin.app.screen.value).toMatchObject({ notice: 'granted' });
     expect(server.state.granted).toEqual([{ link: memberLink.id, invitations: 2 }]);
+    // Pasted links work in either form: through a named Mini App or the
+    // bot's main one. Only the start parameter counts.
+    const payload = new URL(memberLink.url).searchParams.get('startapp')!;
+    await admin.app.grant(`https://t.me/test_bot/dev?startapp=${payload}`, 1);
+    await admin.app.grant(`https://t.me/test_bot?startapp=${payload}`, 3);
+    expect(server.state.granted).toEqual([
+      { link: memberLink.id, invitations: 2 },
+      { link: memberLink.id, invitations: 1 },
+      { link: memberLink.id, invitations: 3 },
+    ]);
     expect(server.unsigned).toEqual([]);
 
     await admin.app.home();

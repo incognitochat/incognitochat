@@ -15,6 +15,7 @@ func FuzzNormalize(f *testing.F) {
 		"abcdefgh",
 		"invabcdefgh",
 		"https://t.me/bot/app?startapp=invabcdefgh",
+		"https://t.me/bot?startapp=invabcdefgh",
 		"https://t.me/bot/app?startapp=inv&startapp=abcdefgh",
 		"abcd-efg\u212a", // the Kelvin sign lowers to k
 		"abcd-efgi",      // i isn't in the alphabet
@@ -42,7 +43,7 @@ func FuzzNormalize(f *testing.F) {
 		if again, ok := Normalize(code); !ok || again != code {
 			t.Fatalf("%q normalizes to %q", code, again)
 		}
-		if again, ok := Normalize("https://t.me/bot/app?startapp=" + payload(code)); !ok || again != code {
+		if again, ok := Normalize("https://t.me/bot?startapp=" + payload(code)); !ok || again != code {
 			t.Fatalf("the link for %q normalizes to %q", code, again)
 		}
 	})
