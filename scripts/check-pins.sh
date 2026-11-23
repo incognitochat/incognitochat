@@ -9,6 +9,8 @@
 #   shares with .github/workflows should be pinned to the same commit there.
 #   A difference only warns: the copies in the hosting repositories are
 #   updated by hand (docs/development.md, Updating by hand).
+# - The bot check's Python packages (scripts/verify-bot*.txt): each pinned to
+#   one version with a sha256 hash. A missing one fails.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -51,5 +53,21 @@ while read -r action sha; do
     echo "::warning file=${hosting},line=${line}::${hosting} pins ${action} at ${sha}, .github/workflows at $(xargs <<<"$shared"). Update it, then copy it into the hosting repositories (hosting/README.md)"
   fi
 done < <(pins "$hosting" | sort -u)
+
+# The bot check's Python packages: each pinned to one version and at least
+# one sha256 hash, so `pip install --require-hashes` installs exactly what
+# was reviewed (docs/verifying.md).
+for req in scripts/verify-bot.build.txt scripts/verify-bot.requirements.txt; do
+  bad=0
+  # One requirement per line: comments dropped, continued lines joined.
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! [[ $entry =~ ^[A-Za-z0-9._-]+==[0-9][A-Za-z0-9.]*(\ --hash=sha256:[0-9a-f]{64})+$ ]]; then
+      echo "::error file=${req}::${req} has a package not pinned to a version and a sha256 hash: ${entry%% *}"
+      bad=1 status=1
+    fi
+  done < <(sed -e 's/#.*//' "$req" | sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ba}' | tr -s ' \t' ' ' | sed -e 's/^ //; s/ $//')
+  [ "$bad" = 1 ] || echo "${req}: every package pinned to a version and a hash"
+done
 
 exit "$status"

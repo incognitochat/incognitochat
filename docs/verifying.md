@@ -114,6 +114,91 @@ sent the login token to the host of Sigstore's TUF mirror
 so the script refuses those versions, and warns below 2.102.0.
 `--rebuild` also needs the Node version in [`web/.nvmrc`](../web/.nvmrc).
 
+## Checking what the bot opens
+
+`verify-site.sh` checks what the app's address serves. Whoever controls the
+bot in BotFather decides which address Telegram opens, so
+`scripts/verify-bot.py` checks the other half, as one Telegram account sees
+it:
+
+- **main:** the bot's Main Mini App, which `t.me/<bot>?startapp` links open.
+  It must be set.
+- **menu:** the bot's menu button. It must open the app.
+- **welcome:** the app buttons in the bot's replies to `/start`. It sends
+  `/start`, reads the replies (for up to 20 seconds, until none has come for
+  4), reads them once more, then deletes them all; `--no-start` skips this.
+  No reply at all means it couldn't check, not that it failed.
+- **link:** a named Mini App, `t.me/<bot>/app` (or `--app-name`: the name
+  your links used), if the bot has one. None is fine; one that opens another
+  address fails.
+
+Each must open `https://<org>.github.io/` exactly. The menu button and the
+`/start` buttons are the bot's own addresses, so they must be exactly that,
+with nothing after it. The Main Mini App and a named one are typed in
+BotFather (the final `/` may be left out: a browser adds it) and come back
+from Telegram with its launch parameters added in the fragment, so those may
+carry Telegram's `tgWebApp…` keys, each once, and nothing else: no query, no
+start parameter (the script asks for none), no second `#`. The script sends
+a fixed theme with its request, so Telegram adds its own theme parameter and
+a planted one is a second copy. The app acts on
+some parameters (a start parameter, `#save=`, the first copy of a launch
+parameter), so one planted in the address the operator set fails. Every
+address any version of a reply carried counts, so a button edited away and
+back fails too. The fragment Telegram adds holds your account's signed
+launch data, which logs that account in to the app's server for a while. So
+the script never loads the page, and prints only an address's origin and
+path and the names of unexpected parameters.
+
+```shell
+python3 -m venv ~/.cache/verify-bot
+~/.cache/verify-bot/bin/pip install --require-hashes --only-binary :all: -r scripts/verify-bot.build.txt
+~/.cache/verify-bot/bin/pip install --require-hashes --no-build-isolation -r scripts/verify-bot.requirements.txt
+TG_API_ID=<id> TG_API_HASH=<hash> ~/.cache/verify-bot/bin/python scripts/verify-bot.py <bot> https://<org>.github.io
+```
+
+The packages are [Telethon](https://codeberg.org/Lonami/Telethon), a
+client for Telegram's user API, and its dependencies, pinned by hash. The
+first file is setuptools, which pip needs to build one of them, so that
+everything pip downloads is checked. It needs Python 3.11 or later.
+
+It logs in as you, because only a user account can ask Telegram what it
+opens. Get an `api_id` and `api_hash` for yourself at
+[my.telegram.org](https://my.telegram.org) (Telegram's rules require each app
+to use its own). Then, in a terminal, type your phone number, the code
+Telegram sends you, and your password if you set one. The login stays in
+memory and the script logs it out at the end. If a run is cut short (a lost
+connection, a killed process), the login can stay listed among your
+account's devices until you end it there (Settings, Devices).
+
+Exit codes: 0 verified; 1 verification failed, also when another check
+couldn't run; 2 couldn't run or couldn't finish (setup, login, network,
+Telegram limits, no reply to `/start`). If deleting the `/start` messages or
+logging out fails, it says so and keeps the result.
+
+For a check that runs without anyone typing a code, `--make-session` logs in
+once and prints a session string; with it in `TG_SESSION`, the script logs
+in without prompts. The string is a login to that account: keep it secret,
+use an account made for this, not your own, and use the string in one place
+only (Telegram ends a session used from two places at once).
+
+**What it shows:** what Telegram opens for that account, at that moment. A
+change in BotFather (the Main Mini App, a named Mini App) or to the default
+menu button is for everyone, so any account's check sees it. A per-chat menu
+button, or a button the bot sends only to some people, is invisible to
+everyone else's checks: only your own run shows what you are served.
+
+**What it doesn't check:**
+
+- the button in the bot's notices (it uses the same address as the welcome
+  button, but a notice comes only when there's news);
+- named Mini Apps other than the one asked for: Telegram doesn't list a
+  bot's Mini Apps;
+- links in the bot's replies that aren't app buttons, and inline mode;
+- replies to `/start` that come after it deleted the messages;
+- the parameters a link someone shares carries: anyone can put a start
+  parameter in a `t.me` link. It checks only what the bot's own entry
+  points add.
+
 ## What this proves, and what it doesn't
 
 - **Proves:** the files the manifest lists are, right now, exactly what an
@@ -127,7 +212,9 @@ so the script refuses those versions, and warns below 2.102.0.
   says which.
 - **Doesn't prove** what one particular person was served inside Telegram. A
   bot owner could point the app at another address, for everyone or for
-  chosen people. A page on any other address has none of the keys on your
+  chosen people. `scripts/verify-bot.py` checks what Telegram opens for the
+  account that runs it ([above](#checking-what-the-bot-opens)), so you can
+  check what you are served yourself. A page on any other address has none of the keys on your
   device: it would have to make you set up again, which ends your account
   loudly on your old device and changes your link. A page on the app's own
   address would have them, which is why nothing else may be served there.

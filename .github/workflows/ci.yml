@@ -235,6 +235,19 @@ jobs:
       - name: Check the pins agree
         run: scripts/check-pins.sh
 
+      # scripts/verify-bot.py, with its packages installed as docs/verifying.md
+      # says (pinned by hash), so the tests of its Telegram client run too.
+      # Offline: a stand-in client and connection, no Telegram account.
+      - name: Test the bot check
+        env:
+          VERIFY_BOT_REQUIRE_TELETHON: "1"
+        run: |
+          python3 -m venv "$RUNNER_TEMP/verify-bot"
+          pip="$RUNNER_TEMP/verify-bot/bin/pip"
+          "$pip" install --disable-pip-version-check --require-hashes --only-binary :all: -r scripts/verify-bot.build.txt
+          "$pip" install --disable-pip-version-check --require-hashes --no-build-isolation -r scripts/verify-bot.requirements.txt
+          "$RUNNER_TEMP/verify-bot/bin/python" -m unittest discover -s scripts -p 'test_verify_bot.py' -v
+
   deploy-dev:
     name: Deploy to dev
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
