@@ -1395,6 +1395,39 @@ describe('blocks', () => {
     expect((await getConversation(owner.db, mine))!.status).toBe('blocked');
   });
 
+  it('fail, recording nothing, when the server answers anything but not_found, and work when tried again', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const sender = await person(backend, 'sender');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const conv = await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const mine = await across(sender.db, conv, owner.db);
+    await owner.messaging.send(mine, 'hi');
+    const mailbox = (await getConversation(owner.db, mine))!.myMailbox!;
+
+    // The server couldn't read the mailbox: not a block done.
+    const call = owner.session.call.bind(owner.session);
+    let discards = 0;
+    owner.session.call = async function (...args) {
+      if (args[0] === 'POST' && args[1] === `/mailboxes/${mailbox}/discard` && ++discards === 1) {
+        throw new ApiError(503, 'unavailable');
+      }
+      return call(...args);
+    } as typeof call;
+    await expect(owner.messaging.block(mine)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(discards).toBe(1);
+    expect(backend.waits).toEqual([]);
+    expect(backend.mailboxes.has(mailbox)).toBe(true);
+    expect(await getConversation(owner.db, mine)).toMatchObject({ status: 'active', myMailbox: mailbox });
+
+    // Tapping Block again discards it.
+    await owner.messaging.block(mine);
+    expect(discards).toBe(2);
+    expect(backend.mailboxes.has(mailbox)).toBe(false);
+    expect((await getConversation(owner.db, mine))!.status).toBe('blocked');
+  });
+
   it('let a sender block a conversation too', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');
