@@ -2993,6 +2993,16 @@ describe('invitations', () => {
     await admin.app.grant(memberLink.url, 2);
     expect(admin.app.screen.value).toMatchObject({ notice: 'granted' });
     expect(server.state.granted).toEqual([{ link: memberLink.id, invitations: 2 }]);
+    // Pasted links work in either form: through a named Mini App or the
+    // bot's main one. Only the start parameter counts.
+    const payload = new URL(memberLink.url).searchParams.get('startapp')!;
+    await admin.app.grant(`https://t.me/test_bot/dev?startapp=${payload}`, 1);
+    await admin.app.grant(`https://t.me/test_bot?startapp=${payload}`, 3);
+    expect(server.state.granted).toEqual([
+      { link: memberLink.id, invitations: 2 },
+      { link: memberLink.id, invitations: 1 },
+      { link: memberLink.id, invitations: 3 },
+    ]);
     expect(server.unsigned).toEqual([]);
 
     await admin.app.home();
