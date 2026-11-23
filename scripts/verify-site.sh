@@ -49,8 +49,10 @@ tools=(curl jq sha256sum git gh)
 for tool in "${tools[@]}"; do
   command -v "$tool" >/dev/null || die "$tool is missing"
 done
-# --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308).
-gh attestation verify --help 2>/dev/null | grep -q -- --signer-digest \
+# --signer-digest and --source-ref came in gh 2.68.0 (cli/cli#10308). Not a
+# pipe into grep -q: it exits at the first match, gh can then die of SIGPIPE,
+# and under pipefail the pipe fails though the flag is there.
+gh attestation verify --help 2>/dev/null | grep -- --signer-digest >/dev/null \
   || die "this GitHub CLI can't pin the signing workflow (no --signer-digest); update it"
 # Before 2.93.0, gh attestation sent the login token to the TUF mirror's host
 # (GHSA-8xvp-7hj6-mcj9). Before 2.102.0, --signer-workflow matched a prefix
@@ -387,20 +389,21 @@ fi
 if [ "$rebuild" = 1 ] && [ "$failed" != 0 ]; then
   echo "Not rebuilding: the checks above failed"
 elif [ "$rebuild" = 1 ]; then
-  # Only with the Node the site was built with: npm ci refuses an older one
-  # (engine-strict in web/.npmrc), and another one may build other bytes.
   node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
   [ -n "$node" ] || refuse "REBUILD FAILED the manifest's node is missing or malformed"
-  have=$(node --version) || have=''
+  # Only the expected repository, at the commit checked above.
+  code -c advice.detachedHead=false checkout --quiet --detach "$commit" \
+    || refuse "REBUILD FAILED can't check out ${commit}"
+  # Only with the Node the site was built with: npm ci refuses an older one
+  # (engine-strict in web/.npmrc), and another one may build other bytes.
+  # Asked where npm will run, as a version manager may pick Node per folder.
+  have=$(cd "$work/code/web" && node --version) || have=''
   if [ "$node" != "$have" ]; then
     die "the site was built with Node ${node}, this is ${have:-an unknown version}; switch to ${node} (with nvm: nvm install ${node#v}) and run again, or run without --rebuild"
   fi
-  # Only the expected repository, at the commit checked above.
   echo "Rebuilding ${commit} from ${code_repo}"
   built=0
-  if ! code -c advice.detachedHead=false checkout --quiet --detach "$commit"; then
-    echo "REBUILD FAILED can't check out ${commit}"
-  elif ! (
+  if ! (
     if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
     # Only the manifest's settings: every VITE_ variable, even an unused or
     # empty one, is part of the bundle. Older builds also took the named
@@ -409,9 +412,10 @@ elif [ "$rebuild" = 1 ]; then
     if jq -e '.build | has("VITE_APP_NAME")' "$manifest" >/dev/null; then
       VITE_APP_NAME=$(jq -r .build.VITE_APP_NAME "$manifest") && export VITE_APP_NAME
     fi
-    # set -e is off inside a condition, so each step is chained.
+    # set -e is off inside a condition, so each step is chained. npm's summary
+    # and audit report go to stdout, dropped; its warnings and errors to stderr.
     cd "$work/code/web" \
-      && npm ci --ignore-scripts --silent \
+      && npm ci --ignore-scripts >/dev/null \
       && VITE_API_URL=$(jq -r .build.VITE_API_URL "$manifest") \
         VITE_BOT_USERNAME=$(jq -r .build.VITE_BOT_USERNAME "$manifest") \
         VITE_ISSUER_KEY=$(jq -r '.build.VITE_ISSUER_KEY // empty' "$manifest") \
