@@ -36,13 +36,14 @@ elif [ "$status" = 0 ]; then
   echo "Terraform $(head -n 1 <<<"$versions" | cut -d' ' -f1) in: $(cut -d' ' -f2 <<<"$versions" | xargs)"
 fi
 
-# Actions: the action and commit of each `uses:` pinned to a full SHA.
+# Actions: the action and commit of each `uses:` pinned to a full SHA. No /
+# in the pattern: it goes between sed's delimiters.
 pin='[ -]*uses: *([^@ ]+)@([0-9a-f]{40})( .*)?$'
 pins() { sed -nE "s/^${pin}/\1 \2/p" "$@"; }
 # The same for one file, once per action and commit, with the line of its
 # first use: one pattern, so a pin can't be listed but not found.
 pins_with_lines() {
-  grep -n '' "$1" | sed -nE "s/^([0-9]+):${pin}/\2 \3 \1/p" | awk '!seen[$1 " " $2]++' | sort
+  grep -an '' "$1" | sed -nE "s/^([0-9]+):${pin}/\2 \3 \1/p" | awk '!seen[$1 " " $2]++' | sort
 }
 hosting=hosting/deploy.yml
 for line in $(grep -nE '^[ -]*uses:' "$hosting" | grep -vE '@[0-9a-f]{40}( |$)' | cut -d: -f1 || true); do
@@ -63,6 +64,11 @@ done < <(pins_with_lines "$hosting")
 # one sha256 hash, so `pip install --require-hashes` installs exactly what
 # was reviewed (docs/verifying.md).
 for req in scripts/verify-bot.build.txt scripts/verify-bot.requirements.txt; do
+  if [ ! -f "$req" ] || [ ! -r "$req" ]; then
+    echo "::error::${req} is missing or unreadable"
+    status=1
+    continue
+  fi
   bad=0
   # One requirement per line: comments dropped, continued lines joined.
   while IFS= read -r entry; do
