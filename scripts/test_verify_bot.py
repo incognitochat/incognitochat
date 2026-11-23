@@ -39,7 +39,7 @@ except ImportError:
 
 BOT = "example_bot"
 ORIGIN = "https://example.github.io"
-GOOD = "https://example.github.io/?tgWebAppStartParam=SECRET#tgWebAppData=SECRET-LOGIN"
+GOOD = "https://example.github.io/#tgWebAppData=SECRET-LOGIN&tgWebAppVersion=9.1&tgWebAppPlatform=android&tgWebAppThemeParams=%7B%7D"
 EVIL = "https://evil.example/#tgWebAppData=SECRET-LOGIN"
 # Addresses that must not pass: each is somewhere other than ORIGIN + "/".
 ELSEWHERE = [
@@ -60,6 +60,16 @@ ELSEWHERE = [
     "//example.github.io/",
     "javascript:alert(1)//example.github.io/",
     "",
+]
+# At the right address, with parameters Telegram doesn't add: the app reads
+# some of them (a start parameter, #save=).
+PLANTED = [
+    "https://example.github.io/?tgWebAppStartParam=attacker",
+    "https://example.github.io/?x=1#tgWebAppData=SECRET",
+    "https://example.github.io/#save=ticket",
+    "https://example.github.io/#tgWebAppData=SECRET&tgWebAppStartParam=attacker",
+    "https://example.github.io/#tgWebAppData=SECRET&save=ticket",
+    "https://example.github.io/#/route",
 ]
 
 
@@ -134,6 +144,29 @@ class Checks(unittest.TestCase):
             with self.subTest(where="welcome", url=url):
                 self.assertEqual(check(Stub(welcome=[url])).statuses["welcome"], "failed")
 
+    def test_planted_parameters_fail(self):
+        for url in PLANTED:
+            for where in ("main", "menu", "link"):
+                with self.subTest(where=where, url=url):
+                    r = check(Stub(**{where: url}))
+                    self.assertEqual(r.statuses[where], "failed")
+                    self.assertNotIn("attacker", "\n".join(r.lines))
+                    self.assertNotIn("ticket", "\n".join(r.lines))
+            with self.subTest(where="welcome", url=url):
+                self.assertEqual(check(Stub(welcome=[url])).statuses["welcome"], "failed")
+        # Named, values never shown.
+        for url, names in (("https://example.github.io/#tgWebAppData=x&save=ticket", "#save"),
+                           ("https://example.github.io/?tgWebAppStartParam=attacker", "?tgWebAppStartParam"),
+                           ("https://example.github.io/?x=1&y=2#tgWebAppStartParam=a", "?x, ?y, #tgWebAppStartParam")):
+            with self.subTest(url=url):
+                text = "\n".join(check(Stub(main=url)).lines)
+                self.assertIn(f"with parameters Telegram doesn't add: {names}", text)
+
+    def test_telegrams_own_parameters_pass(self):
+        for url in ("https://example.github.io/", GOOD, "https://example.github.io/#tgWebAppData=a%26b%3Dc&tgWebAppFullscreen"):
+            with self.subTest(url=url):
+                self.assertEqual(check(Stub(main=url, menu=url, welcome=[url], link=url)).result, "passed")
+
     def test_one_bad_button_fails_the_welcome_check(self):
         # The bad one first: a later good one mustn't turn it back to passed.
         for urls in (["https://evil.example/", GOOD], [GOOD, "https://evil.example/"]):
@@ -144,8 +177,13 @@ class Checks(unittest.TestCase):
 
     def test_missing_buttons_fail(self):
         self.assertEqual(check(Stub(menu=None)).statuses["menu"], "failed")
-        self.assertEqual(check(Stub(welcome=None)).statuses["welcome"], "failed")
         self.assertEqual(check(Stub(welcome=[])).statuses["welcome"], "failed")
+
+    def test_no_reply_is_not_a_failure_but_unfinished(self):
+        # A bot that's down looks the same: not a swap.
+        r = check(Stub(welcome=None))
+        self.assertEqual(r.statuses["welcome"], "unknown")
+        self.assertEqual(r.result, "error")
 
     def test_no_start_skips_the_welcome(self):
         stub = Stub(welcome=["https://evil.example/"])
@@ -175,7 +213,7 @@ class Checks(unittest.TestCase):
                 self.assertEqual(check(Stub(**kw)).result, "failed")
 
     def test_the_full_address_is_never_printed(self):
-        for kw in ({}, {"main": EVIL}, {"link": GOOD.replace("example.github.io", "evil.example")}, {"welcome": [GOOD.replace("/?", "/x?")]}):
+        for kw in ({}, {"main": EVIL}, {"link": GOOD.replace("example.github.io", "evil.example")}, {"welcome": [GOOD.replace(".io/#", ".io/x#")]}):
             r = check(Stub(**kw))
             text = "\n".join(r.lines)
             self.assertNotIn("SECRET", text)
@@ -292,6 +330,16 @@ class Command(unittest.TestCase):
             data = json.loads(pathlib.Path(summary).read_text())
             self.assertEqual((data["result"], data["bot_id"], set(data["checks"])), ("passed", 42, set(vb.CHECKS)))
 
+    def test_an_unwritable_summary_is_said_not_a_traceback(self):
+        report = vb.Report()
+        for c in vb.CHECKS:
+            report.ok(c, "fine")
+        code, out, err = self.finish(report, [BOT, ORIGIN, "--summary", "/nonexistent-dir/s.json"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.splitlines()[-1], "VERIFIED")
+        self.assertIn("couldn't write the summary", err)
+        self.assertNotIn("Traceback", err)
+
     def test_a_failing_run_exits_1_and_an_unfinished_one_2(self):
         failed = vb.Report()
         failed.fail("main", "opens https://evil.example/")
@@ -315,7 +363,7 @@ class Login(unittest.TestCase):
 
     API = {"TG_API_ID": "12345", "TG_API_HASH": "0123456789abcdef0123456789abcdef"}
 
-    def run_with(self, argv, env, checks=None, terminal=True):
+    def run_with(self, argv, env, checks=None, terminal=True, logout_fails=False, result="passed"):
         made = []
 
         class Session:
@@ -347,6 +395,8 @@ class Login(unittest.TestCase):
 
             async def log_out(self):
                 self.calls.append("log_out")
+                if logout_fails:
+                    raise ConnectionError("lost")
                 self.authorized = False
 
             async def disconnect(self):
@@ -358,6 +408,8 @@ class Login(unittest.TestCase):
             report = vb.Report()
             for c in vb.CHECKS:
                 report.ok(c, "fine")
+            if result == "failed":
+                report.fail("main", "opens https://evil.example/")
             return report
 
         with mock.patch.object(vb, "_telethon", return_value=(FakeTelegram, Session)), mock.patch.object(vb, "run_checks", fake_checks), \
@@ -379,6 +431,13 @@ class Login(unittest.TestCase):
     def test_also_when_the_checks_stop_early(self):
         code, tg, _, _ = self.run_with([BOT, ORIGIN], self.API, checks=vb.CouldNotRun("no such bot"))
         self.assertEqual(code, 2)
+        self.assertEqual(tg.calls, ["start", "log_out", "disconnect"])
+
+    def test_a_failed_logout_warns_but_keeps_the_result(self):
+        code, tg, out, err = self.run_with([BOT, ORIGIN], self.API, logout_fails=True, result="failed")
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines()[-1], "VERIFICATION FAILED")
+        self.assertIn("Settings, Devices", err)
         self.assertEqual(tg.calls, ["start", "log_out", "disconnect"])
 
     def test_an_interactive_login_needs_a_terminal(self):
@@ -430,7 +489,11 @@ class RealClient(unittest.TestCase):
         self.bot = vb.Bot(id=42, is_bot=True, has_main_app=True, handle=types.InputUser(user_id=42, access_hash=7))
 
     def fake(self, answers, replies=None, fail_reading=False):
+        """replies: a list of messages, or a function of the read's number
+        (0, 1, ...) giving the messages then."""
         calls = []
+        reads = []
+        test = self
 
         class Conn:
             async def __call__(self, request):
@@ -446,10 +509,14 @@ class RealClient(unittest.TestCase):
 
             async def get_messages(self, entity, limit, min_id):
                 calls.append(("get", min_id))
+                # Only what came after this account's /start.
+                test.assertEqual(min_id, 100)
                 if fail_reading:
                     raise OSError("network")
+                now = replies(len(reads)) if callable(replies) else (replies or [])
+                reads.append(1)
                 # Newest first, as Telethon returns them.
-                return sorted(replies or [], key=lambda m: -m.id)
+                return sorted(now, key=lambda m: -m.id)
 
         return Conn(), calls
 
@@ -516,6 +583,37 @@ class RealClient(unittest.TestCase):
         plain = pytypes.SimpleNamespace(id=101, out=False, reply_markup=None)
         conn, _ = self.fake({"DeleteMessagesRequest": object()}, replies=[plain])
         self.assertEqual(asyncio.run(self.client(conn).welcome_urls(self.bot)), [])
+
+    def test_an_edited_reply_is_read_as_edited(self):
+        # Good at first, edited to another address before the last read.
+        def replies(n):
+            return [pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(GOOD if n == 0 else EVIL))]
+
+        conn, _ = self.fake({"DeleteMessagesRequest": object()}, replies=replies)
+        self.assertEqual(asyncio.run(self.client(conn).welcome_urls(self.bot)), [EVIL])
+
+    def test_the_last_read_before_deleting(self):
+        # With no wait, only the read right before deleting sees the replies:
+        # whatever came (or was edited) until then is read, then deleted.
+        from telethon.tl import functions
+
+        late = pytypes.SimpleNamespace(id=102, out=False, reply_markup=self.markup(EVIL))
+        conn, calls = self.fake({"DeleteMessagesRequest": object()}, replies=[late])
+        client = vb.TelethonClient(conn, reply_wait=0, quiet=0, poll=0)
+        self.assertEqual(asyncio.run(client.welcome_urls(self.bot)), [EVIL])
+        deleted = [c for c in calls if isinstance(c, functions.messages.DeleteMessagesRequest)]
+        self.assertEqual([sorted(d.id) for d in deleted], [[100, 102]])
+
+    def test_a_failed_delete_keeps_what_was_read(self):
+        reply = pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(EVIL))
+        conn, _ = self.fake({"DeleteMessagesRequest": ConnectionError("lost")}, replies=[reply])
+        client = self.client(conn)
+        self.assertEqual(asyncio.run(client.welcome_urls(self.bot)), [EVIL])
+        self.assertEqual(len(client.warnings), 1)
+        self.assertIn("delete them", client.warnings[0])
+        # And through the checks, the address is still a failure.
+        stub = Stub(welcome=asyncio.run(self.client(self.fake({"DeleteMessagesRequest": ConnectionError("lost")}, replies=[reply])[0]).welcome_urls(self.bot)))
+        self.assertEqual(check(stub).statuses["welcome"], "failed")
 
     def test_no_reply_still_deletes_the_start_message(self):
         from telethon.tl import functions

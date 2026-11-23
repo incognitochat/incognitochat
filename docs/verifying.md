@@ -121,21 +121,25 @@ bot in BotFather decides which address Telegram opens, so
 `scripts/verify-bot.py` checks the other half, as one Telegram account sees
 it:
 
-- **main:** the bot's Main Mini App, which `t.me/<bot>?startapp` links open:
-  every link the app makes (personal links, invitations) and the website's.
+- **main:** the bot's Main Mini App, which `t.me/<bot>?startapp` links open.
   It must be set.
 - **menu:** the bot's menu button. It must open the app.
 - **welcome:** the app buttons in the bot's replies to `/start`. It sends
-  `/start`, reads every reply, then deletes them all; `--no-start` skips
-  this.
-- **link:** a named Mini App, `t.me/<bot>/app` (or `--app-name`), if the bot
-  still has one. None is fine; one that opens another address fails.
+  `/start`, reads the replies (for up to 20 seconds, until none has come for
+  4), reads them once more, then deletes them all; `--no-start` skips this.
+  No reply at all means it couldn't check, not that it failed.
+- **link:** a named Mini App, `t.me/<bot>/app` (or `--app-name`: the name
+  your links used), if the bot has one. None is fine; one that opens another
+  address fails.
 
 Each must open `https://<org>.github.io/` exactly: same scheme, host and
-path. Telegram adds a query and a fragment to the address; the fragment holds
-your account's signed launch data, which logs that account in to the app's
-server for a while. So the script never loads the page and prints only an
-address's origin and path.
+path, no query, and in the fragment only the parameters Telegram adds
+(`tgWebApp…`; not a start parameter, since the script asks for none). A
+parameter planted in the address the operator set fails: the app acts on
+some (a start parameter, `#save=`). The fragment Telegram adds holds your
+account's signed launch data, which logs that account in to the app's server
+for a while. So the script never loads the page, and prints only an
+address's origin and path and the names of unexpected parameters.
 
 ```shell
 python3 -m venv ~/.cache/verify-bot
@@ -160,7 +164,8 @@ account's devices until you end it there (Settings, Devices).
 
 Exit codes: 0 verified; 1 verification failed, also when another check
 couldn't run; 2 couldn't run or couldn't finish (setup, login, network,
-Telegram limits).
+Telegram limits, no reply to `/start`). If deleting the `/start` messages or
+logging out fails, it says so and keeps the result.
 
 For a check that runs without anyone typing a code, `--make-session` logs in
 once and prints a session string; with it in `TG_SESSION`, the script logs
@@ -181,8 +186,10 @@ everyone else's checks: only your own run shows what you are served.
 - named Mini Apps other than the one asked for: Telegram doesn't list a
   bot's Mini Apps;
 - links in the bot's replies that aren't app buttons, and inline mode;
-- an address's query and fragment. Anyone can already put parameters in a
-  `t.me` link they share, so parameters alone aren't a sign of a swap.
+- replies to `/start` that come after it deleted the messages;
+- the parameters a link someone shares carries: anyone can put a start
+  parameter in a `t.me` link. It checks only what the bot's own entry
+  points add.
 
 ## What this proves, and what it doesn't
 

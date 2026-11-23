@@ -9,6 +9,8 @@
 #   shares with .github/workflows should be pinned to the same commit there.
 #   A difference only warns: the copies in the hosting repositories are
 #   updated by hand (docs/development.md, Updating by hand).
+# - The bot check's Python packages (scripts/verify-bot*.txt): each pinned to
+#   one version with a sha256 hash. A missing one fails.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

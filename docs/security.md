@@ -131,8 +131,8 @@ it. This is how close it gets.
      can, by typing a confirmation;
    - the person's link changes, which their contacts see;
    - anyone can check which address Telegram opens for them, through the
-     bot's Main Mini App (which every link opens), its menu button and its
-     reply to `/start`, with `scripts/verify-bot.py`
+     bot's Main Mini App (which `t.me/<bot>?startapp` links open), its menu
+     button and its reply to `/start`, with `scripts/verify-bot.py`
      ([verifying.md](verifying.md#checking-what-the-bot-opens)). A swap for
      everyone shows in any account's check; a swap aimed at chosen people
      shows only in theirs.
