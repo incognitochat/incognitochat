@@ -14,12 +14,15 @@ as one Telegram account sees it (docs/verifying.md):
   link     the named Mini App t.me/<bot>/<app name> (default "app"), if the
            bot has one: none is fine, another address isn't.
 
-Each must open <app origin>/ exactly: same scheme, host and path, no query,
-and in the fragment only the parameters Telegram adds (tgWebApp..., but no
-start parameter: the script asks for none). The page is never loaded, and
-only an address's origin and path, and the names of unexpected parameters,
-are printed: the fragment Telegram adds holds this account's signed launch
-data, a login to the app's server for a while.
+Each must open <app origin>/ exactly. The menu button and the /start
+buttons are the bot's own addresses, so they must be exactly <app origin>/.
+The Main Mini App and the named one come back from Telegram with its launch
+parameters added in the fragment, so those may carry Telegram's tgWebApp...
+keys, each once, but no query, no start parameter (the script asks for
+none), and nothing else. The page is never loaded, and only an address's
+origin and path, and the names of unexpected parameters, are printed: the
+fragment Telegram adds holds this account's signed launch data, a login to
+the app's server for a while.
 
   scripts/verify-bot.py <bot username> <app origin> [--app-name app] [--no-start] [--summary FILE]
   scripts/verify-bot.py <bot> https://<org>.github.io
@@ -106,26 +109,51 @@ def same_place(url: str, scheme: str, host: str) -> bool:
     return parts.scheme == scheme and parts.netloc == host and parts.path == "/"
 
 
-def added_parameters(url: str) -> list[str]:
-    """The parameters in an address that Telegram doesn't add: any query (the
-    script asks for no start parameter, and Telegram adds none then), and in
-    the fragment anything but its own tgWebApp... keys, a start parameter
-    included. The app reads some of these (a start parameter, #save=), so a
-    planted one changes what it does. Names only, for printing."""
+def _name(key: str) -> str:
+    """A parameter's name for printing; anything not shaped like a name
+    (it could be a value) as a placeholder."""
+    return key if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", key) else "(unnamed)"
+
+
+def added_parameters(url: str, telegram_adds: bool) -> list[str]:
+    """What an address carries that Telegram doesn't add, by name. The app
+    acts on some parameters (a start parameter, #save=, a second copy of a
+    launch parameter, which it reads first), so a planted one changes what
+    it does.
+
+    telegram_adds: the address came back from Telegram, which adds its
+    launch parameters in the fragment (tgWebApp... keys, each once). Without
+    it (a button's address, as the bot set it), any query or fragment is
+    planted. Either way, no query: the script asks for no start parameter,
+    and Telegram adds no query without one."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return []
-    names = ["?" + (k or "(empty)") for k, _ in parse_qsl(parts.query, keep_blank_values=True)]
+    names = ["?" + _name(k) for k, _ in parse_qsl(parts.query, keep_blank_values=True)]
     if parts.query and not names:
         names.append("?")
+    if not telegram_adds:
+        names += ["#" + _name(k) for k, _ in parse_qsl(parts.fragment, keep_blank_values=True)]
+        if not names and ("?" in url or "#" in url):
+            names.append("an empty ? or #")
+        return names
+    if "#" in parts.fragment:
+        names.append("a second #")
+    seen: set[str] = set()
     for k, _ in parse_qsl(parts.fragment, keep_blank_values=True):
-        if not re.fullmatch(r"tgWebApp[A-Za-z]+", k) or k == "tgWebAppStartParam":
-            names.append("#" + (k or "(empty)"))
-    if parts.fragment and not parse_qsl(parts.fragment, keep_blank_values=True):
-        names.append("#")
-    cleaned = ["".join(c if c.isprintable() and c.isascii() else "?" for c in n)[:40] for n in names]
-    return cleaned
+        if not re.fullmatch(r"tgWebApp[A-Za-z]+", k) or k == "tgWebAppStartParam" or k in seen:
+            names.append("#" + _name(k) + (" (twice)" if k in seen else ""))
+        seen.add(k)
+    return names
+
+
+class PartialRead(Exception):
+    """Reading the replies to /start failed partway; urls: what was read."""
+
+    def __init__(self, urls: list[str], cause: BaseException) -> None:
+        super().__init__(type(cause).__name__)
+        self.urls = urls
 
 
 # --- What the checks need from Telegram ----------------------------------------
@@ -201,8 +229,8 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
     want = f"{scheme}://{host}/"
     report = Report()
 
-    def judge(check: str, what: str, url: str) -> None:
-        added = added_parameters(url)
+    def judge(check: str, what: str, url: str, telegram_adds: bool = False) -> None:
+        added = added_parameters(url, telegram_adds)
         if not same_place(url, scheme, host):
             report.fail(check, f"{what} opens {shown(url)}, not {want}")
         elif added:
@@ -221,7 +249,7 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
         if not bot.has_main_app:
             report.fail("main", f"the bot has no Main Mini App, which every t.me/{username}?startapp link opens")
         else:
-            judge("main", f"t.me/{username}?startapp (the Main Mini App)", await client.main_url(bot))
+            judge("main", f"t.me/{username}?startapp (the Main Mini App)", await client.main_url(bot), telegram_adds=True)
 
     async def menu() -> None:
         url = await client.menu_button(bot)
@@ -235,7 +263,15 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
             report.statuses["welcome"] = "na"
             report.lines.append("skipped welcome: --no-start")
             return
-        urls = await client.welcome_urls(bot)
+        try:
+            urls = await client.welcome_urls(bot)
+        except PartialRead as e:
+            # What was read is judged (a wrong address stays a failure);
+            # the rest couldn't be checked.
+            for i, url in enumerate(e.urls, 1):
+                judge("welcome", f"app button {i} of {len(e.urls)} read before reading failed", url)
+            report.unchecked("welcome", f"reading the replies to /start failed ({e})")
+            return
         if urls is None:
             # An outage looks the same: not a swap, so not a failure.
             report.unchecked("welcome", "the bot didn't reply to /start")
@@ -250,7 +286,7 @@ async def run_checks(client: Client, username: str, origin: str, app_name: str, 
         if url is None:
             report.not_set("link", f"the bot has no Mini App named {app_name!r}")
         else:
-            judge("link", f"t.me/{username}/{app_name}", url)
+            judge("link", f"t.me/{username}/{app_name}", url, telegram_adds=True)
 
     for check, run in (("main", main), ("menu", menu), ("welcome", welcome), ("link", link)):
         try:
@@ -319,16 +355,18 @@ class TelethonClient:
         from telethon.tl import functions
 
         sent = await self.tg.send_message(bot.handle, "/start")
-        replies: dict[int, object] = {}
+        # Every app address seen in any version of each reply: a button
+        # edited to another address and back still counts.
+        replies: dict[int, list[str]] = {}
 
         async def read() -> bool:
-            """Reads the replies since /start, keeping each one's latest
-            version (an edit replaces it); whether a new one came."""
+            """Reads the replies since /start; whether a new one came."""
             new = False
-            for message in await self.tg.get_messages(bot.handle, limit=50, min_id=sent.id):
+            for message in await self.tg.get_messages(bot.handle, limit=100, min_id=sent.id):
                 if not message.out:
                     new = new or message.id not in replies
-                    replies[message.id] = message
+                    seen = replies.setdefault(message.id, [])
+                    seen += [u for u in _web_app_urls(message.reply_markup) if u not in seen]
             return new
 
         try:
@@ -341,6 +379,10 @@ class TelethonClient:
             # Once more right before deleting: an edit or a late reply until
             # now is read, and a deleted message can't be edited.
             await read()
+        except Exception as e:
+            if replies:
+                raise PartialRead([u for mid in sorted(replies) for u in replies[mid]], e) from None
+            raise
         finally:
             # This account's /start and every reply, also if reading failed;
             # a failed delete doesn't change what was read.
@@ -350,7 +392,7 @@ class TelethonClient:
                 self.warnings.append(f"couldn't delete the /start messages ({type(e).__name__}); delete them in the chat with the bot")
         if not replies:
             return None
-        return [url for mid in sorted(replies) for url in _web_app_urls(replies[mid].reply_markup)]
+        return [url for mid in sorted(replies) for url in replies[mid]]
 
     async def link_url(self, bot: Bot, app_name: str) -> str | None:
         from telethon import errors, utils
@@ -428,11 +470,15 @@ async def _main(args: argparse.Namespace) -> int:
 async def _close(tg: object, log_out: bool) -> None:
     """Logs an interactive login out and disconnects. A failure here only
     warns: it mustn't hide the checks' result (or an earlier error)."""
+    def warn(why: str) -> None:
+        print(f'Warning: couldn\'t log out ({why}): end the session "{DEVICE}" in Telegram, Settings, Devices', file=sys.stderr)
+
     try:
-        if log_out and await tg.is_user_authorized():
-            await tg.log_out()
+        # Telethon's log_out() answers False when Telegram refuses.
+        if log_out and await tg.is_user_authorized() and not await tg.log_out():
+            warn("Telegram refused")
     except Exception as e:
-        print(f'Warning: couldn\'t log out ({type(e).__name__}): end the session "{DEVICE}" in Telegram, Settings, Devices', file=sys.stderr)
+        warn(type(e).__name__)
     try:
         await tg.disconnect()
     except Exception:
@@ -445,9 +491,10 @@ def _finish(report: Report, args: argparse.Namespace) -> int:
         print(line)
     result = report.result
     print({"passed": "VERIFIED", "failed": "VERIFICATION FAILED", "error": "COULDN'T FINISH"}[result])
-    if args.summary and not _write_summary(args.summary, result, report):
-        return EXIT_ERROR
-    return {"passed": EXIT_VERIFIED, "failed": EXIT_FAILED, "error": EXIT_ERROR}[result]
+    code = {"passed": EXIT_VERIFIED, "failed": EXIT_FAILED, "error": EXIT_ERROR}[result]
+    if args.summary and not _write_summary(args.summary, result, report) and code == EXIT_VERIFIED:
+        return EXIT_ERROR  # a failure stays a failure
+    return code
 
 
 def _write_summary(path: str, result: str, report: Report | None) -> bool:

@@ -41,6 +41,8 @@ BOT = "example_bot"
 ORIGIN = "https://example.github.io"
 GOOD = "https://example.github.io/#tgWebAppData=SECRET-LOGIN&tgWebAppVersion=9.1&tgWebAppPlatform=android&tgWebAppThemeParams=%7B%7D"
 EVIL = "https://evil.example/#tgWebAppData=SECRET-LOGIN"
+# A button's address as the bot sets it: Telegram adds nothing to those.
+RAW = "https://example.github.io/"
 # Addresses that must not pass: each is somewhere other than ORIGIN + "/".
 ELSEWHERE = [
     "https://evil.example/",
@@ -62,7 +64,8 @@ ELSEWHERE = [
     "",
 ]
 # At the right address, with parameters Telegram doesn't add: the app reads
-# some of them (a start parameter, #save=).
+# some of them (a start parameter, #save=, the first copy of a launch
+# parameter).
 PLANTED = [
     "https://example.github.io/?tgWebAppStartParam=attacker",
     "https://example.github.io/?x=1#tgWebAppData=SECRET",
@@ -70,6 +73,9 @@ PLANTED = [
     "https://example.github.io/#tgWebAppData=SECRET&tgWebAppStartParam=attacker",
     "https://example.github.io/#tgWebAppData=SECRET&save=ticket",
     "https://example.github.io/#/route",
+    "https://example.github.io/#tgWebAppData=start_param%3Dattacker&tgWebAppData=SECRET",
+    "https://example.github.io/#tgWebAppData=start_param%3Dattacker#tgWebAppData=SECRET",
+    "https://example.github.io/#tgWebAppVersion=1&tgWebAppVersion=9.1&tgWebAppData=SECRET",
 ]
 
 
@@ -81,8 +87,8 @@ class Stub:
         self.is_bot = kw.get("is_bot", True)
         self.has_main_app = kw.get("has_main_app", True)
         self.main = kw.get("main", GOOD)
-        self.menu = kw.get("menu", GOOD)
-        self.welcome = kw.get("welcome", [GOOD])
+        self.menu = kw.get("menu", RAW)
+        self.welcome = kw.get("welcome", [RAW])
         self.link = kw.get("link", None)
         self.started = 0
 
@@ -162,10 +168,27 @@ class Checks(unittest.TestCase):
                 text = "\n".join(check(Stub(main=url)).lines)
                 self.assertIn(f"with parameters Telegram doesn't add: {names}", text)
 
-    def test_telegrams_own_parameters_pass(self):
-        for url in ("https://example.github.io/", GOOD, "https://example.github.io/#tgWebAppData=a%26b%3Dc&tgWebAppFullscreen"):
+    def test_telegrams_own_parameters_pass_where_it_adds_them(self):
+        for url in (RAW, GOOD, "https://example.github.io/#tgWebAppData=a%26b%3Dc&tgWebAppFullscreen"):
             with self.subTest(url=url):
-                self.assertEqual(check(Stub(main=url, menu=url, welcome=[url], link=url)).result, "passed")
+                self.assertEqual(check(Stub(main=url, link=url)).result, "passed")
+
+    def test_the_bots_own_buttons_must_be_exact(self):
+        # The menu button and /start's buttons: as the bot set them, nothing added.
+        for url in (GOOD, "https://example.github.io/#tgWebAppData=x", "https://example.github.io/?", "https://example.github.io/#"):
+            for where in ("menu", "welcome"):
+                with self.subTest(where=where, url=url):
+                    r = check(Stub(**({"menu": url} if where == "menu" else {"welcome": [url]})))
+                    self.assertEqual(r.statuses[where], "failed")
+        text = "\n".join(check(Stub(menu="https://example.github.io/#tgWebAppData=x&save=y")).lines)
+        self.assertIn("with parameters Telegram doesn't add: #tgWebAppData, #save", text)
+
+    def test_parameter_names_only_never_values(self):
+        r = check(Stub(main="https://example.github.io/?x%20y=SECRET#%2Fodd=SECRET&tgWebAppData=SECRET"))
+        text = "\n".join(r.lines)
+        self.assertIn("?(unnamed)", text)
+        self.assertIn("#(unnamed)", text)
+        self.assertNotIn("SECRET", text)
 
     def test_one_bad_button_fails_the_welcome_check(self):
         # The bad one first: a later good one mustn't turn it back to passed.
@@ -339,6 +362,10 @@ class Command(unittest.TestCase):
         self.assertEqual(out.splitlines()[-1], "VERIFIED")
         self.assertIn("couldn't write the summary", err)
         self.assertNotIn("Traceback", err)
+        failed = vb.Report()
+        failed.fail("main", "opens https://evil.example/")
+        code, out, _ = self.finish(failed, [BOT, ORIGIN, "--summary", "/nonexistent-dir/s.json"])
+        self.assertEqual((code, out.splitlines()[-1]), (1, "VERIFICATION FAILED"))
 
     def test_a_failing_run_exits_1_and_an_unfinished_one_2(self):
         failed = vb.Report()
@@ -363,7 +390,7 @@ class Login(unittest.TestCase):
 
     API = {"TG_API_ID": "12345", "TG_API_HASH": "0123456789abcdef0123456789abcdef"}
 
-    def run_with(self, argv, env, checks=None, terminal=True, logout_fails=False, result="passed"):
+    def run_with(self, argv, env, checks=None, terminal=True, logout_fails=False, result="passed", logout_answer=True, warnings=()):
         made = []
 
         class Session:
@@ -398,11 +425,13 @@ class Login(unittest.TestCase):
                 if logout_fails:
                     raise ConnectionError("lost")
                 self.authorized = False
+                return logout_answer
 
             async def disconnect(self):
                 self.calls.append("disconnect")
 
         async def fake_checks(client, username, origin, app_name, start):
+            client.warnings.extend(warnings)
             if checks:
                 raise checks
             report = vb.Report()
@@ -439,6 +468,17 @@ class Login(unittest.TestCase):
         self.assertEqual(out.splitlines()[-1], "VERIFICATION FAILED")
         self.assertIn("Settings, Devices", err)
         self.assertEqual(tg.calls, ["start", "log_out", "disconnect"])
+
+    def test_a_refused_logout_warns(self):
+        code, tg, out, err = self.run_with([BOT, ORIGIN], self.API, logout_answer=False)
+        self.assertEqual(code, 0)
+        self.assertIn("Telegram refused", err)
+        self.assertIn("Settings, Devices", err)
+
+    def test_the_clients_warnings_reach_stderr(self):
+        code, _, out, err = self.run_with([BOT, ORIGIN], self.API, warnings=["couldn't delete the /start messages (X)"])
+        self.assertIn("Warning: couldn't delete the /start messages (X)", err)
+        self.assertNotIn("Warning", out)
 
     def test_an_interactive_login_needs_a_terminal(self):
         code, tg, _, err = self.run_with([BOT, ORIGIN], self.API, terminal=False)
@@ -514,6 +554,8 @@ class RealClient(unittest.TestCase):
                 if fail_reading:
                     raise OSError("network")
                 now = replies(len(reads)) if callable(replies) else (replies or [])
+                if isinstance(now, Exception):
+                    raise now
                 reads.append(1)
                 # Newest first, as Telethon returns them.
                 return sorted(now, key=lambda m: -m.id)
@@ -543,8 +585,8 @@ class RealClient(unittest.TestCase):
         t = self.t
         resolved = t.contacts.ResolvedPeer(peer=t.PeerUser(user_id=42), chats=[], users=[self.bot_user])
         full = t.users.UserFull(full_user=t.UserFull(id=42, settings=t.PeerSettings(), notify_settings=t.PeerNotifySettings(), common_chats_count=0,
-                                                     bot_info=t.BotInfo(menu_button=t.BotMenuButton(text="Open", url=GOOD))), chats=[], users=[self.bot_user])
-        reply = pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(GOOD, plain="https://other.example/"))
+                                                     bot_info=t.BotInfo(menu_button=t.BotMenuButton(text="Open", url=RAW))), chats=[], users=[self.bot_user])
+        reply = pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(RAW, plain="https://other.example/"))
         conn, calls = self.fake({
             "ResolveUsernameRequest": resolved,
             "RequestMainWebViewRequest": t.WebViewResultUrl(url=GOOD),
@@ -584,13 +626,38 @@ class RealClient(unittest.TestCase):
         conn, _ = self.fake({"DeleteMessagesRequest": object()}, replies=[plain])
         self.assertEqual(asyncio.run(self.client(conn).welcome_urls(self.bot)), [])
 
-    def test_an_edited_reply_is_read_as_edited(self):
-        # Good at first, edited to another address before the last read.
-        def replies(n):
-            return [pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(GOOD if n == 0 else EVIL))]
+    def test_every_version_of_a_reply_counts(self):
+        # Edited to another address, or briefly to another and back: every
+        # address any version carried is judged.
+        for first, then in ((RAW, EVIL), (EVIL, RAW)):
+            with self.subTest(first=first, then=then):
+                def replies(n, first=first, then=then):
+                    return [pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(first if n == 0 else then))]
 
-        conn, _ = self.fake({"DeleteMessagesRequest": object()}, replies=replies)
-        self.assertEqual(asyncio.run(self.client(conn).welcome_urls(self.bot)), [EVIL])
+                conn, _ = self.fake({"DeleteMessagesRequest": object()}, replies=replies)
+                urls = asyncio.run(self.client(conn).welcome_urls(self.bot))
+                self.assertEqual(urls, [first, then])
+                self.assertEqual(check(Stub(welcome=urls)).statuses["welcome"], "failed")
+
+    def test_a_failed_read_keeps_what_was_read(self):
+        from telethon.tl import functions
+
+        for seen, status in ((EVIL, "failed"), (RAW, "unknown")):
+            with self.subTest(seen=seen):
+                def replies(n, seen=seen):
+                    return [pytypes.SimpleNamespace(id=101, out=False, reply_markup=self.markup(seen))] if n == 0 else OSError("network")
+
+                conn, calls = self.fake({"DeleteMessagesRequest": object()}, replies=replies)
+                client = self.client(conn)
+
+                class Real(Stub):
+                    async def welcome_urls(self, bot):
+                        return await client.welcome_urls(bot)
+
+                r = asyncio.run(vb.run_checks(Real(), BOT, ORIGIN, "app", True))
+                self.assertEqual(r.statuses["welcome"], status, r.lines)
+                deleted = [c for c in calls if isinstance(c, functions.messages.DeleteMessagesRequest)]
+                self.assertEqual([sorted(d.id) for d in deleted], [[100, 101]])
 
     def test_the_last_read_before_deleting(self):
         # With no wait, only the read right before deleting sees the replies:

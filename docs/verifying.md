@@ -132,14 +132,19 @@ it:
   your links used), if the bot has one. None is fine; one that opens another
   address fails.
 
-Each must open `https://<org>.github.io/` exactly: same scheme, host and
-path, no query, and in the fragment only the parameters Telegram adds
-(`tgWebApp…`; not a start parameter, since the script asks for none). A
-parameter planted in the address the operator set fails: the app acts on
-some (a start parameter, `#save=`). The fragment Telegram adds holds your
-account's signed launch data, which logs that account in to the app's server
-for a while. So the script never loads the page, and prints only an
-address's origin and path and the names of unexpected parameters.
+Each must open `https://<org>.github.io/` exactly. The menu button and the
+`/start` buttons are the bot's own addresses, so they must be exactly that,
+with nothing after it. The Main Mini App and a named one come back from
+Telegram with its launch parameters added in the fragment, so those may
+carry Telegram's `tgWebApp…` keys, each once, and nothing else: no query, no
+start parameter (the script asks for none), no second `#`. The app acts on
+some parameters (a start parameter, `#save=`, the first copy of a launch
+parameter), so one planted in the address the operator set fails. Every
+address any version of a reply carried counts, so a button edited away and
+back fails too. The fragment Telegram adds holds your account's signed
+launch data, which logs that account in to the app's server for a while. So
+the script never loads the page, and prints only an address's origin and
+path and the names of unexpected parameters.
 
 ```shell
 python3 -m venv ~/.cache/verify-bot
