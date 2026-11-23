@@ -36,14 +36,20 @@ elif [ "$status" = 0 ]; then
   echo "Terraform $(head -n 1 <<<"$versions" | cut -d' ' -f1) in: $(cut -d' ' -f2 <<<"$versions" | xargs)"
 fi
 
-# Actions: the action and commit of each `uses:` pinned to a full SHA.
-pins() { sed -nE 's/^[ -]*uses: *([^@ ]+)@([0-9a-f]{40})( .*)?$/\1 \2/p' "$@"; }
+# Actions: the action and commit of each `uses:` pinned to a full SHA. No /
+# in the pattern: it goes between sed's delimiters.
+pin='[ -]*uses: *([^@ ]+)@([0-9a-f]{40})( .*)?$'
+pins() { sed -nE "s/^${pin}/\1 \2/p" "$@"; }
+# The same for one file, once per action and commit, with the line of its
+# first use: one pattern, so a pin can't be listed but not found.
+pins_with_lines() {
+  grep -an '' "$1" | sed -nE "s/^([0-9]+):${pin}/\2 \3 \1/p" | awk '!seen[$1 " " $2]++' | sort
+}
 hosting=hosting/deploy.yml
-for line in $(grep -nE '^[ -]*uses:' "$hosting" | grep -vE '@[0-9a-f]{40}( |$)' | cut -d: -f1 || true); do
+for line in $(grep -anE '^[ -]*uses:' "$hosting" | grep -avE '@[0-9a-f]{40}( |$)' | cut -d: -f1 || true); do
   echo "::warning file=${hosting},line=${line}::${hosting} uses an action that isn't pinned to a commit SHA"
 done
-while read -r action sha; do
-  line=$(grep -nF "uses: ${action}@${sha}" "$hosting" | head -n 1 | cut -d: -f1)
+while read -r action sha line; do
   shared=$(pins .github/workflows/*.yml | awk -v a="$action" '$1 == a { print $2 }' | sort -u)
   if [ -z "$shared" ]; then
     echo "${action}: only ${hosting} uses it, so it's updated by hand"
@@ -52,21 +58,28 @@ while read -r action sha; do
   else
     echo "::warning file=${hosting},line=${line}::${hosting} pins ${action} at ${sha}, .github/workflows at $(xargs <<<"$shared"). Update it, then copy it into the hosting repositories (hosting/README.md)"
   fi
-done < <(pins "$hosting" | sort -u)
+done < <(pins_with_lines "$hosting")
 
 # The bot check's Python packages: each pinned to one version and at least
 # one sha256 hash, so `pip install --require-hashes` installs exactly what
 # was reviewed (docs/verifying.md).
 for req in scripts/verify-bot.build.txt scripts/verify-bot.requirements.txt; do
+  # One requirement per line: comments dropped, continued lines joined. Read
+  # whole first, so a file that can't be read fails, and the last line is
+  # checked even without a newline at its end.
+  if ! entries=$(sed -e 's/#.*//' "$req" | sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ba}' | tr -s ' \t' ' ' | sed -e 's/^ //; s/ $//'); then
+    echo "::error::${req} is missing or can't be read"
+    status=1
+    continue
+  fi
   bad=0
-  # One requirement per line: comments dropped, continued lines joined.
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     if ! [[ $entry =~ ^[A-Za-z0-9._-]+==[0-9][A-Za-z0-9.]*(\ --hash=sha256:[0-9a-f]{64})+$ ]]; then
       echo "::error file=${req}::${req} has a package not pinned to a version and a sha256 hash: ${entry%% *}"
       bad=1 status=1
     fi
-  done < <(sed -e 's/#.*//' "$req" | sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ba}' | tr -s ' \t' ' ' | sed -e 's/^ //; s/ $//')
+  done <<<"$entries"
   [ "$bad" = 1 ] || echo "${req}: every package pinned to a version and a hash"
 done
 
