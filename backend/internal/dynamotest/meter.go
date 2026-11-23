@@ -23,6 +23,11 @@ type Units struct {
 // call for its consumed capacity. A write refused by its condition is
 // charged too, but DynamoDB doesn't report it: Meter counts it as one write
 // unit, which is what it costs for the small items such writes touch here.
+// So is a transaction cancelled (by a condition, say): AWS bills it as if
+// it had gone through, two write units for each item it names (prepare and
+// commit) that is under 1 KB, and Meter counts that. For one that goes
+// through, DynamoDB Local reports 2 or 3 units whatever its items: count
+// what it wrote (Written) instead.
 //
 // It also records which calls were made, in order (Calls), and the keys of
 // every item a write named (Written), so tests can check what a route does
@@ -245,6 +250,8 @@ func (m *Meter) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWri
 			m.wrote(it.ConditionCheck.TableName, it.ConditionCheck.Key)
 		}
 	}
+	// Each item's table, kept apart: call sorts and compacts its own.
+	named := slices.Clone(tables)
 	m.call("TransactWriteItems", tables...)
 	in.ReturnConsumedCapacity = total
 	out, err := m.Client.TransactWriteItems(ctx, in, opts...)
@@ -252,6 +259,16 @@ func (m *Meter) TransactWriteItems(ctx context.Context, in *dynamodb.TransactWri
 		for i := range out.ConsumedCapacity {
 			m.addWrite(&out.ConsumedCapacity[i])
 		}
+	}
+	var cancelled *types.TransactionCanceledException
+	if errors.As(err, &cancelled) {
+		m.mu.Lock()
+		for _, table := range named {
+			u := m.units[table]
+			u.Write += 2
+			m.units[table] = u
+		}
+		m.mu.Unlock()
 	}
 	return out, err
 }

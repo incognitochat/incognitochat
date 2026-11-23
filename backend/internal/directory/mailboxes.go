@@ -3,6 +3,7 @@ package directory
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
+	"github.com/incognitochat/incognitochat/backend/internal/awsconf"
 	"github.com/incognitochat/incognitochat/backend/internal/ids"
 )
 
@@ -114,29 +116,171 @@ func (s *Store) Mailboxes(ctx context.Context, accountID string) ([]string, erro
 // DiscardMailbox deletes one of an account's pool or conversation mailboxes:
 // sends to it then go nowhere, exactly as to one that never existed. Intro
 // mailboxes go with their link. It returns ErrNotFound unless the account
-// owns the mailbox.
+// owns the mailbox; a read or write that fails is an error, never taken
+// for that. Once the mailbox is deleted, the block holds whatever follows:
+// if its record or count can't then be put right, the error is a
+// *NotForgotten.
+//
+// What it costs is what keeps anyone with a session from spending the
+// directory's writes:
+//   - The mailbox is read first, eventually consistent (half a read unit).
+//     An ID that isn't the account's to discard (unknown, someone else's,
+//     an intro mailbox, one discarded already) ends there, writing nothing.
+//   - Then one conditional delete of the mailbox decides, checking again
+//     that the account owns it and that it isn't an intro mailbox: one
+//     write unit, and only one request wins it. Copies of the request sent
+//     at once all pass the read, and each one that loses is refused here,
+//     a write unit, as is a replay that read the mailbox in about the
+//     second after it was discarded. (One transaction of all three writes
+//     cost each of them 6 write units: DynamoDB bills a cancelled
+//     transaction as one that went through.)
+//   - The one that deleted the mailbox then removes its record from the
+//     account's partition and counts it off (forgetMailbox): two writes of
+//     a unit each, so 3 for a block, however many blocks of the account's
+//     other mailboxes run at once.
+//
+// If this delete goes through but its answer is lost, the SDK's second try
+// is refused (the mailbox is gone), and the block is answered not_found:
+// the app takes that for a block done, which it is, but the record and the
+// count aren't put right, as when forgetMailbox fails, and nothing says so.
+//
+// A mailbox made in about the last second may not be read yet, and is
+// answered as unknown. The app takes a mailbox for anything but a receipt
+// or a delete it sends in a chat (from its pool, made just before only
+// when the pool is empty), and a block comes behind any send under way and
+// takes two taps; it tries a block answered not_found once more, about 2
+// seconds later.
 func (s *Store) DiscardMailbox(ctx context.Context, accountID, id string) error {
-	writes := []types.TransactWriteItem{
-		{Delete: &types.Delete{
-			TableName:                 &s.Table,
-			Key:                       key(mailboxPK(id), skMailbox),
-			ConditionExpression:       aws.String("o = :a AND attribute_not_exists(i)"),
-			ExpressionAttributeValues: attrs{":a": sv(accountID)},
-		}},
-		{Delete: &types.Delete{TableName: &s.Table, Key: key(accountPK(accountID), mailboxPrefix+id)}},
-		{Update: &types.Update{
+	it, err := s.read(ctx, mailboxPK(id), skMailbox, time.Time{}, false)
+	if err != nil {
+		return err
+	}
+	owner, _ := str(it, "o")
+	if _, intro := it["i"]; owner != accountID || intro {
+		return ErrNotFound
+	}
+	_, err = s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:                 &s.Table,
+		Key:                       key(mailboxPK(id), skMailbox),
+		ConditionExpression:       aws.String("o = :a AND attribute_not_exists(i)"),
+		ExpressionAttributeValues: attrs{":a": sv(accountID)},
+	})
+	var refused *types.ConditionalCheckFailedException
+	if errors.As(err, &refused) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.forgetMailbox(ctx, accountID, id); err != nil {
+		return &NotForgotten{Err: err}
+	}
+	return nil
+}
+
+// NotForgotten is DiscardMailbox's error when the mailbox was deleted (the
+// block holds) but its record or count couldn't then be put right
+// (forgetMailbox). Err says why.
+type NotForgotten struct{ Err error }
+
+func (e *NotForgotten) Error() string {
+	return "directory: mailbox discarded, its record not forgotten: " + e.Err.Error()
+}
+
+func (e *NotForgotten) Unwrap() error { return e.Err }
+
+// forgetWaits bound the random waits before forgetMailbox tries a write
+// again, one for each try after the first. Only a write the table refused
+// outright is tried again (a throttle, or a transaction on the item under
+// way): it wasn't applied, and a throttled one isn't billed. The mailbox
+// is gone by then, so its record left behind is worse than a slower
+// answer; the waits are random so that instances refused together don't
+// try again together.
+var forgetWaits = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, 800 * time.Millisecond}
+
+// forgetMailbox removes a discarded mailbox's record from its owner's
+// partition, then counts it off the account's mailboxes (mc). Only for the
+// one request that deleted the mailbox. Two single-item writes, not a
+// transaction: single-item writes to the account item take turns, where
+// transactions naming it cancel each other (and each cancelled one is
+// billed), so blocks of the account's other mailboxes at once each still
+// cost 3 write units.
+//
+// It counts a mailbox off at most once, however often it runs: the record
+// goes only if it is there (and isn't an intro mailbox's), and only the
+// call that removed it counts it off, with a write the SDK sends only once
+// (a second try after an answer lost could apply it twice) and that keeps
+// the count from going below 0. If the record is gone already, it does
+// nothing.
+//
+// What a failure leaves (the block holds either way: the mailbox is gone):
+//   - The record's delete fails: the record stays and the count is one too
+//     high, matching it.
+//   - The count's fails, or its answer is lost: the record is gone and the
+//     count one too high.
+//
+// Either lasts until the account is deleted, which removes the record and
+// passes over the mailbox that is gone (deleteOwned). Nothing mends it
+// sooner: telling such a record from a live mailbox's takes reading the
+// mailbox, up to 4,000 for an account at the limit. So each such failure
+// leaves the account one place fewer of MaxMailboxes (the app, refused
+// mailbox_limit, says so, and blocking any chat frees a place); it takes
+// the directory failing between two writes made a moment apart, past the
+// tries again.
+func (s *Store) forgetMailbox(ctx context.Context, accountID, id string) error {
+	err := s.untilApplied(ctx, func() error {
+		_, err := s.DB.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName:           &s.Table,
+			Key:                 key(accountPK(accountID), mailboxPrefix+id),
+			ConditionExpression: aws.String("attribute_exists(pk) AND attribute_not_exists(i)"),
+		})
+		return err
+	})
+	var refused *types.ConditionalCheckFailedException
+	if errors.As(err, &refused) {
+		return nil // forgotten already
+	}
+	if err != nil {
+		return err
+	}
+	err = s.untilApplied(ctx, func() error {
+		_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 			TableName:                 &s.Table,
 			Key:                       key(accountPK(accountID), skAccount),
 			UpdateExpression:          aws.String("SET mc = mc - :one"),
 			ConditionExpression:       aws.String("mc > :zero"),
 			ExpressionAttributeValues: attrs{":zero": nv(0), ":one": nv(1)},
-		}},
-	}
-	reasons, err := s.transactReasons(ctx, writes)
-	if errors.Is(err, ErrConflict) && len(reasons) > 0 && reasons[0] == "ConditionalCheckFailed" {
-		return ErrNotFound
+		}, triedOnce)
+		return err
+	})
+	if errors.As(err, &refused) {
+		return nil // counted off already: mc is 0
 	}
 	return err
+}
+
+// triedOnce makes the SDK send a call once, not again after an error: for
+// a write that mustn't be applied twice, which a call that timed out or
+// whose answer was lost may have been.
+func triedOnce(o *dynamodb.Options) { o.RetryMaxAttempts = 1 }
+
+// untilApplied runs write, and again after a random wait of up to each of
+// forgetWaits in turn, while the table refused it outright: throttled
+// (awsconf.Throttled), or a transaction on the item under way
+// (TransactionConflictException). It returns the last error.
+func (s *Store) untilApplied(ctx context.Context, write func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := write()
+		var conflict *types.TransactionConflictException
+		if err == nil || !(awsconf.Throttled(err) || errors.As(err, &conflict)) || attempt == len(forgetWaits) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(rand.N(forgetWaits[attempt])):
+		}
+	}
 }
 
 // Devices returns the IDs of an account's devices that haven't expired,

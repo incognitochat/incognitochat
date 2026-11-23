@@ -91,9 +91,9 @@ const (
 	// While the counts can't be written (sessionLimit), each instance
 	// lets a device make SessionRequestsLocalPerMinute a minute, and all
 	// devices together UncountedPerMinute, on its own counts. Each reads
-	// at most 1.5 directory units (GET /invitations with codes; most read
-	// 1), so 100 instances read at most half the directory's 400 a second
-	// for them, however many accounts there are.
+	// at most 1.5 directory units (GET /invitations with codes, a block;
+	// most read 1), so 100 instances read at most half the directory's 400
+	// a second for them, however many accounts there are.
 	SessionRequestsLocalPerMinute = 30
 	UncountedPerMinute            = 80
 )
