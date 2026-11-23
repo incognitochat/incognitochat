@@ -318,7 +318,7 @@ export const nl = {
   deletePhrase: 'verwijder mijn account',
   deleteAccountConfirm: 'Mijn account verwijderen',
   deleteChatsForBoth: 'Ook mijn chats verwijderen voor de ander',
-  deleteChatsForBothNote: 'Bij elke chat in je lijst krijgt de app van de ander het verzoek die chat te verwijderen, en de bijlagen die je daar stuurde, worden van de server verwijderd; wat overblijft, blijft hoogstens 30 dagen op de server. Dit hangt af van de app van de ander, en kopieën of screenshots die de ander maakte, blijven bestaan. Chats die je hebt geblokkeerd, en chats die je alleen voor jezelf hebt verwijderd, blijven bij de ander.',
+  deleteChatsForBothNote: 'Bij elke chat in je lijst krijgt de app van de ander het verzoek die chat te verwijderen, en de bijlagen die je daar stuurde, worden van de server verwijderd; wat overblijft, blijft hoogstens 30 dagen op de server. Chats die je hebt geblokkeerd, en chats die je alleen voor jezelf hebt verwijderd, blijven bij de ander.',
   deletingChats: 'Je chats worden voor de ander verwijderd: {done} van {total}…',
   deletingChatsLeft: 'Chats die niet voor de ander zijn verwijderd: {count}. Als je je account toch verwijdert, blijven die bij de ander, en de bijlagen die je daar stuurde, blijven nog hoogstens 30 dagen op de server.',
   deletingChatsNoMessages: 'Je berichten voor vandaag zijn op: het verwijderen van een chat telt als één bericht. Meer vanaf {time}.',
