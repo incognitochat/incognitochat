@@ -13,7 +13,8 @@
 #
 # Needs curl, jq, sha256sum, git and the GitHub CLI 2.93.0 or later (2.102.0
 # or later recommended), logged in (gh auth login, any account: it only reads
-# public data). --rebuild also needs Node (the version in web/.nvmrc).
+# public data). --rebuild also needs the Node the site was built with (the
+# version in web/.nvmrc); with another one it stops before building.
 #
 # Exit codes: 0 verified, 1 verification failed, 2 usage or setup error.
 set -euo pipefail
@@ -386,14 +387,18 @@ fi
 if [ "$rebuild" = 1 ] && [ "$failed" != 0 ]; then
   echo "Not rebuilding: the checks above failed"
 elif [ "$rebuild" = 1 ]; then
+  # Only with the Node the site was built with: npm ci refuses an older one
+  # (engine-strict in web/.npmrc), and another one may build other bytes.
+  node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
+  if [ -n "$node" ] && [ "$node" != "$(node --version)" ]; then
+    die "the site was built with Node ${node}, this is $(node --version); switch to ${node} (with nvm: nvm install ${node#v}) and run again"
+  fi
   # Only the expected repository, at the commit checked above.
   echo "Rebuilding ${commit} from ${code_repo}"
-  node=$(field node '\Av[0-9]+\.[0-9]+\.[0-9]+\z')
-  if [ "$node" != "$(node --version)" ]; then
-    echo "Note: the site was built with Node ${node:-?}, this is $(node --version); files may differ"
-  fi
   built=0
-  if ! code -c advice.detachedHead=false checkout --quiet --detach "$commit"; then
+  if [ -z "$node" ]; then
+    echo "REBUILD FAILED the manifest doesn't say which Node built the site"
+  elif ! code -c advice.detachedHead=false checkout --quiet --detach "$commit"; then
     echo "REBUILD FAILED can't check out ${commit}"
   elif ! (
     if [ -n "$caller_lc_all_set" ]; then export LC_ALL=$caller_lc_all; else unset LC_ALL; fi
