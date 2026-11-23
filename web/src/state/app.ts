@@ -189,14 +189,20 @@ export type ErrorKind = 'network' | 'expired' | 'rate-limited' | DeviceLimit | '
  * stopped (deleteChatsForBoth): the day's messages are used up
  * (no-tokens); the server couldn't be reached; it turned the sends away
  * for now (the firewall, or a mailbox's cap: 429 rate_limited), or the
- * device's requests (device_limit); this build's token key was replaced
- * (outdated: the app must be opened again); or anything else.
+ * device's requests (device_limit); a link a chat goes through takes no
+ * more first messages this hour (link-busy: the other chats went on); this
+ * build's token key was replaced or won't load (outdated: the app must be
+ * opened again); or anything else.
  */
-export type ChatsStop = 'no-tokens' | 'network' | 'turned-away' | DeviceLimit | 'outdated' | 'generic';
+export type ChatsStop = 'no-tokens' | 'network' | 'turned-away' | DeviceLimit | 'link-busy' | 'outdated' | 'generic';
 
-/** Whether Try again may help with what stopped the deletes for both sides: not until the messages reset, or the app is opened again. */
+/**
+ * Whether Try again may help with what stopped the deletes for both sides:
+ * not until the messages reset, or a busy link's hour is over (each try
+ * spends its tokens), or the app is opened again.
+ */
 export function canRetryChats(reason: ChatsStop): boolean {
-  return reason !== 'no-tokens' && reason !== 'outdated';
+  return reason !== 'no-tokens' && reason !== 'link-busy' && reason !== 'outdated';
 }
 
 /**
@@ -385,7 +391,7 @@ export type Screen =
    * leaving this screen, or closing the app, keeps the account; those
    * deleted for both sides stay deleted.
    */
-  | { kind: 'deleting-chats'; done: number; total: number; stopped: { reason: ChatsStop; left: number } | null }
+  | { kind: 'deleting-chats'; done: number; total: number; stopped: { reason: ChatsStop; left: number; until?: number | null } | null }
   /**
    * The account is being deleted, as the user confirmed: in steps, carried
    * on at every launch until done. error: the last try failed; Try again
@@ -2048,8 +2054,9 @@ export function createApp(deps: Deps) {
     chatsStopped = null;
     let done = 0;
     let total = 0;
-    /** Chats left for later: their link takes no more first messages this hour (link_busy). */
+    /** Chats left for later: their link takes no more first messages this hour (link_busy); and until when (Unix ms, the latest the server said; null if it didn't). */
     let busy = 0;
+    let busyUntil: number | null = null;
     screen.value = { kind: 'deleting-chats', done, total, stopped: null };
     const ours = () => run === chatsRun && currentScreen().kind === 'deleting-chats';
     const show = () => {
@@ -2058,7 +2065,8 @@ export function createApp(deps: Deps) {
     const stop = (reason: ChatsStop) => {
       if (!ours()) return;
       chatsStopped = { run, accountId };
-      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done + busy } };
+      const until = reason === 'link-busy' ? { until: busyUntil } : {};
+      screen.value = { kind: 'deleting-chats', done, total, stopped: { reason, left: total - done + busy, ...until } };
     };
     const open = (c: ConversationRecord | undefined): c is ConversationRecord => !!c && c.status === 'active' && !c.hidden;
     const ids = (await listConversations(deps.db)).filter(open).map((c) => c.id);
@@ -2099,8 +2107,11 @@ export function createApp(deps: Deps) {
             // Not for both sides any more (blocked meanwhile, say): nothing to do.
             if (open(await getConversation(deps.db, id))) {
               // Its link is full for this hour: the others go on, and it's left for later.
-              if (err instanceof ApiError && err.code === 'link_busy') busy++;
-              else return stop(chatsStop(err));
+              if (err instanceof ApiError && err.code === 'link_busy') {
+                busy++;
+                const until = limitError('link-busy', err).until;
+                if (until !== null) busyUntil = Math.max(busyUntil ?? 0, until);
+              } else return stop(chatsStop(err));
             }
           } finally {
             chatSends.push(Date.now());
@@ -2111,7 +2122,7 @@ export function createApp(deps: Deps) {
       show();
     }
     if (!ours()) return;
-    if (busy > 0) return stop('turned-away');
+    if (busy > 0) return stop('link-busy');
     // On to the deletion in the same turn as the last look: a Cancel or back
     // from now on finds its screen gone.
     chatsRun++;

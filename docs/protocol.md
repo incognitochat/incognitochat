@@ -351,11 +351,14 @@ no login past 500 requests in 5 minutes (by default), a conversation the
 user started that wasn't answered first fetches its link's key there
 too, and the uploads' deletes after it need those routes. A conversation
 whose link takes no more first messages this hour (`link_busy`) is left
-for later, and the others go on. Nothing of this is recorded: if the
+for later, and the others go on; then the user is asked, as below, and
+told from when (Retry-After), with no Try again before. Nothing of this
+is recorded: if the
 app closes, or the user cancels or goes back, the account stays, and the
 next try covers the conversations still in the list. A send that fails
 stops it, and the user chooses: try again (not once the day's send
-tokens are used up, or the build's issuer key was replaced), delete the
+tokens are used up, or the build's issuer key was replaced or won't
+load), delete the
 account anyway, or keep it. The account's deletion doesn't touch these
 envelopes, which wait in the other accounts' inboxes, stored with
 nothing that names their sender; their apps check them with keys they

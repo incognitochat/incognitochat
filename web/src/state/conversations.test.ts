@@ -1677,15 +1677,14 @@ describe('deleting the account', () => {
     expect(screenOf(a.screen.value, 'home').tab).toBe('links');
   });
 
-  for (const code of ['rate_limited', 'link_busy'] as const) {
+  for (const code of ['rate_limited'] as const) {
     it(`offers Try again when turned away (${code}), which carries on`, async () => {
       const b = await backend();
       const { a, others } = await withChats(b, 1);
       b.state.sendRefused = new ApiError(429, code);
       a.askDeleteAccount();
       await a.deleteAccount(true);
-      // A busy link's chat is left for later, the others go on: it stops at the end.
-      expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: code === 'link_busy' ? 1 : 0, total: 1, stopped: { reason: 'turned-away', left: 1 } });
+      expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 0, total: 1, stopped: { reason: 'turned-away', left: 1 } });
       expect(canRetryChats('turned-away')).toBe(true);
       b.state.sendRefused = null;
       await a.retryDeletingChats();
@@ -1756,12 +1755,17 @@ describe('deleting the account', () => {
     const busyAt = (await getConversation(a.db, chats[0]!))!.sendTo;
     const post = b.api.post.bind(b.api);
     b.api.post = async (path, body, check) => {
-      if (path === '/send' && (body as { mailbox?: string }).mailbox === busyAt) throw new ApiError(429, 'link_busy');
+      if (path === '/send' && (body as { mailbox?: string }).mailbox === busyAt) throw new ApiError(429, 'link_busy', undefined, undefined, 1200);
       return post(path, body, check);
     };
+    const asked = Date.now();
     a.askDeleteAccount();
     await a.deleteAccount(true);
-    expect(a.screen.value).toEqual({ kind: 'deleting-chats', done: 2, total: 2, stopped: { reason: 'turned-away', left: 1 } });
+    const screen = screenOf(a.screen.value, 'deleting-chats');
+    expect(screen).toMatchObject({ done: 2, total: 2, stopped: { reason: 'link-busy', left: 1 } });
+    // Until when, as the server said (Retry-After): no Try again before, which would spend its tokens again.
+    expect(screen.stopped!.until! - asked).toBeGreaterThanOrEqual(1200_000);
+    expect(canRetryChats('link-busy')).toBe(false);
     expect(b.calls).not.toContain('DELETE /account');
     expect(await hasChat(others[0]!)).toBe(true);
     expect(await hasChat(others[1]!)).toBe(false);

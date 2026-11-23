@@ -3610,7 +3610,7 @@ function ConfirmDelete({ app, language, busy, error, finishing }: { app: AppStat
   );
 }
 
-const CHATS_STOP_TEXT: Record<Exclude<ChatsStop, 'no-tokens'>, Key> = {
+const CHATS_STOP_TEXT: Record<Exclude<ChatsStop, 'no-tokens' | 'link-busy'>, Key> = {
   network: 'errorNetwork',
   // The firewall's block lasts until this address's count over 5 minutes falls.
   'turned-away': 'errorDeviceLimitLater',
@@ -3643,7 +3643,11 @@ function DeletingChats({ app, language, screen }: { app: AppState; language: Lan
   return (
     <Page title={tr('deleteTitle')}>
       <p class="notice" role="alert">
-        {stopped.reason === 'no-tokens' ? tr('deletingChatsNoMessages', { time: clockTime(language, nextUtc(DAY_MS)) }) : tr(CHATS_STOP_TEXT[stopped.reason])}
+        {stopped.reason === 'no-tokens'
+          ? tr('deletingChatsNoMessages', { time: clockTime(language, nextUtc(DAY_MS)) })
+          : stopped.reason === 'link-busy'
+            ? tr('errorLinkBusy', { time: clockTime(language, stopped.until ?? nextUtc(HOUR_MS)) })
+            : tr(CHATS_STOP_TEXT[stopped.reason])}
       </p>
       <p>{tr('deletingChatsLeft', { count: stopped.left })}</p>
       {canRetryChats(stopped.reason) && <Button onClick={app.retryDeletingChats}>{tr('tryAgain')}</Button>}
