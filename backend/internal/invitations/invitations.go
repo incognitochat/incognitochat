@@ -8,7 +8,7 @@
 // grant individual members extra. Admins have no allowance limit.
 //
 // A code looks like "abcd-efgh" and can be used a set number of times. It is
-// shared as t.me/<bot>/<app>?startapp=inv<code without the dash>.
+// shared as t.me/<bot>?startapp=inv<code without the dash>.
 package invitations
 
 import (

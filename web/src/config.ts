@@ -8,10 +8,8 @@ import issuerKeys from '../issuer-keys.json';
 export interface Config {
   /** Base URL of the HTTPS API, without a trailing slash. */
   apiUrl: string;
-  /** The bot's username, for t.me links. */
+  /** The bot's username, for t.me links (they open its main Mini App). */
   botUsername: string;
-  /** The Mini App's short name, for t.me links. */
-  appName: string;
   /**
    * The send-token issuer's public key, published in issuer-keys.json and
    * named by the build: tokens for any other key are refused. With it, the
@@ -48,11 +46,10 @@ const issuerKey = issuer(env.VITE_ISSUER_KEY);
 
 /** The build's settings, or null for a build made without them (tests, previews). */
 export const config: Config | null =
-  env.VITE_API_URL && env.VITE_BOT_USERNAME && env.VITE_APP_NAME && issuerKey
+  env.VITE_API_URL && env.VITE_BOT_USERNAME && issuerKey
     ? {
         apiUrl: env.VITE_API_URL.replace(/\/+$/, ''),
         botUsername: env.VITE_BOT_USERNAME,
-        appName: env.VITE_APP_NAME,
         issuer: issuerKey,
         ...(env.VITE_WS_URL ? { wsUrl: env.VITE_WS_URL } : {}),
         ...(env.VITE_MEDIA_ORIGIN ? { media: true } : {}),

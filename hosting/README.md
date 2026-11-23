@@ -40,7 +40,7 @@ Before building, it checks what it checked out, and stops on anything else:
 3. Repository variables: `CODE_REPOSITORY` (`incognitochat/incognitochat`),
    `REFS` (`commits` for dev, `tags` for production), `RELEASE_BRANCH`
    (`main`), `API_URL` (the `api_url` Terraform output),
-   `BOT_USERNAME`, `APP_NAME`, `ISSUER_KEY` (the name of the environment's
+   `BOT_USERNAME`, `ISSUER_KEY` (the name of the environment's
    token issuer keys in `web/issuer-keys.json`; when they are replaced, it
    changes as [deployment.md](../docs/deployment.md#rotating-an-issuer-key)
    says), and `WS_URL` (the
@@ -101,8 +101,12 @@ gh workflow run deploy.yml --repo <org>/<org>.github.io \
 
 The run builds it, with a warning for each check it let through. Use it only
 on purpose, and never below 2.4.0 (on dev, below v2.4.0's commit), nor below
-any later release that raises the storage version again. Normal deploys
-then go on forward from the rolled-back build.
+any later release that raises the storage version again, nor below the
+release that moved the app's links to the bot's main Mini App
+(`t.me/<bot>?startapp=…`; on dev, below that change's commit): older builds
+link to a named Mini App the bot no longer has, and they don't build here,
+since they need a `VITE_APP_NAME` this workflow no longer sets. Normal
+deploys then go on forward from the rolled-back build.
 
 The check doesn't stop whoever holds the dispatch token, who can send
 `rollback: true` too. It makes going back deliberate, and visible in the

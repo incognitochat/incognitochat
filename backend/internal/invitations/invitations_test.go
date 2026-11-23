@@ -37,13 +37,14 @@ func TestNormalize(t *testing.T) {
 		"abcdefgh":     "abcd-efgh",
 		"invabcdefgh":  "abcd-efgh",
 		"https://t.me/some_bot/app?startapp=invabcdefgh": "abcd-efgh",
+		"https://t.me/some_bot?startapp=invabcdefgh":     "abcd-efgh",
 	}
 	for input, want := range valid {
 		if got, ok := Normalize(input); !ok || got != want {
 			t.Errorf("Normalize(%q) = %q, %v; want %q", input, got, ok, want)
 		}
 	}
-	for _, input := range []string{"", "abc-def", "abcd-efgh-jk", "abcd-efg0", "abcd-efgl", "hello there", "https://t.me/some_bot/app?startapp=1abc"} {
+	for _, input := range []string{"", "abc-def", "abcd-efgh-jk", "abcd-efg0", "abcd-efgl", "hello there", "https://t.me/some_bot/app?startapp=1abc", "https://t.me/some_bot?startapp=1abc"} {
 		if got, ok := Normalize(input); ok {
 			t.Errorf("Normalize(%q) = %q, want invalid", input, got)
 		}

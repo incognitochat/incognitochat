@@ -17,11 +17,10 @@ interface BuildSettings {
 function checkSettings(env: Record<string, string>): BuildSettings {
   const api = env.VITE_API_URL ?? '';
   const bot = env.VITE_BOT_USERNAME ?? '';
-  const app = env.VITE_APP_NAME ?? '';
   const issuer = env.VITE_ISSUER_KEY ?? '';
-  if (!api && !bot && !app && !issuer) return { apiOrigin: null, wsOrigin: null, mediaOrigin: null };
-  if (!api || !bot || !app || !issuer) {
-    throw new Error('Set all of VITE_API_URL, VITE_BOT_USERNAME, VITE_APP_NAME and VITE_ISSUER_KEY, or none');
+  if (!api && !bot && !issuer) return { apiOrigin: null, wsOrigin: null, mediaOrigin: null };
+  if (!api || !bot || !issuer) {
+    throw new Error('Set all of VITE_API_URL, VITE_BOT_USERNAME and VITE_ISSUER_KEY, or none');
   }
   if (issuer === '_comment' || !(issuer in issuerKeys)) {
     throw new Error(`VITE_ISSUER_KEY must name a key published in issuer-keys.json`);
@@ -35,7 +34,6 @@ function checkSettings(env: Record<string, string>): BuildSettings {
     throw new Error('VITE_API_URL must be a plain https:// URL');
   }
   if (!/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(bot)) throw new Error('VITE_BOT_USERNAME is not a bot username');
-  if (!/^[A-Za-z0-9_]{3,30}$/.test(app)) throw new Error('VITE_APP_NAME is not a Mini App short name');
   let wsOrigin: string | null = null;
   if (env.VITE_WS_URL) {
     const ws = new URL(env.VITE_WS_URL);

@@ -31,10 +31,10 @@ describe('connectTelegram', () => {
     const bridge = connectTelegram(true, win as never)!;
     expect(bridge.transport).toBe('webview-proxy');
     bridge.post('web_app_ready');
-    bridge.post('web_app_open_tg_link', { path_full: '/bot/app?startapp=x' });
+    bridge.post('web_app_open_tg_link', { path_full: '/bot?startapp=x' });
     expect(posted).toEqual([
       { type: 'web_app_ready', data: undefined },
-      { type: 'web_app_open_tg_link', data: '{"path_full":"/bot/app?startapp=x"}' },
+      { type: 'web_app_open_tg_link', data: '{"path_full":"/bot?startapp=x"}' },
     ]);
 
     const seen: unknown[] = [];
