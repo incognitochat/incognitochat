@@ -495,7 +495,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("username", nargs="?", help="the bot's username, without @")
     p.add_argument("origin", nargs="?", help="the app's origin, https://<host>")
     p.add_argument("--no-start", action="store_true", help="don't send /start (skips the welcome check)")
-    p.add_argument("--summary", metavar="FILE", help="also write the result as JSON, for the website's Status page")
+    p.add_argument("--summary", metavar="FILE", help="also write the result as JSON, for other tools")
     p.add_argument("--make-session", action="store_true", help="log in and print a session string for TG_SESSION")
     args = p.parse_args(argv)
     if not args.make_session:
