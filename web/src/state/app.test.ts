@@ -3160,6 +3160,83 @@ describe('the Settings tab', () => {
     again.release();
   });
 
+  it("never records the old account's size from Data and storage still measuring when the account changes", async () => {
+    const owner = await registered(fakeServer().api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await owner.app.showTab('chats');
+    // Data and storage measures, slowly; meanwhile another copy changes the account (home comes back on Chats, which measures nothing).
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    await owner.app.accountChanged();
+    storage.release();
+    await opening;
+    // Settings, while measuring anew, has no size to show: not the old account's.
+    const settings = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await settings.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: null });
+    settings.release();
+  });
+
+  it("keeps the newer size when Settings' measurement ends before Data and storage's later one", async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    // Settings measures (1500), held; Data and storage then measures more (2500), held too.
+    const settings = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await settings.atRead;
+    await photo('q', 1000);
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    // Data and storage's (newer) ends first, then Settings' (older): the newer stays.
+    storage.release();
+    await opening;
+    settings.release();
+    await tick();
+    const back = holdRead('mediaUsage');
+    await owner.app.home();
+    await back.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 2500 });
+    back.release();
+  });
+
+  it('ignores a tab switch while home is busy, so an action under way is asked once and lands where it began', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'POST' && path === '/links') await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const creating = owner.app.createLink();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).busy).toBe(true));
+    await owner.app.showTab('chats');
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+    // Creating again meanwhile asks nothing more.
+    await owner.app.createLink();
+    release();
+    await creating;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+    expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+  });
+
   it("forgets the size when another copy changes the account, so the old account's never shows", async () => {
     const owner = await registered(fakeServer().api);
     await addMessage(

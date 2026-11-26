@@ -3137,7 +3137,12 @@ export function createApp(deps: Deps) {
     popup: (params: { title?: string; message: string; buttons: PopupButton[] }) =>
       deps.bridge ? openPopup(deps.bridge, params) : Promise.resolve(null),
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
-    showTab: (t: HomeTab) => showHome({ tab: t }),
+    /** Switches home's tab; not while home is busy (an action under way would draw over it, and a redraw would let it be asked twice). */
+    showTab: (t: HomeTab): Promise<void> => {
+      const current = screen.value;
+      if (current.kind === 'home' && current.busy) return Promise.resolve();
+      return showHome({ tab: t });
+    },
     /** Choosing the app's language (from Settings). */
     language: (): void => {
       backButton(true);
