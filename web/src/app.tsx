@@ -760,20 +760,35 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   useBackCloses(menuShown, () => (chatMenu.value = false));
   const menuButton = useRef<HTMLButtonElement>(null);
   const cancelBlock = useRef<HTMLButtonElement>(null);
-  /** Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from the page's own box (a scrollbar on either side left out). */
+  /**
+   * Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from
+   * the menu's overlay (the page's box less any scroll: a scrollbar on
+   * either side left out). With ⋯ out of view (a turn scrolled it away),
+   * the menu closes instead.
+   */
   const placeChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
+    if (!r || r.bottom < 0 || r.top > window.innerHeight) {
+      chatMenu.value = false;
+      return;
+    }
     const page = document.documentElement;
-    const box = page.getBoundingClientRect();
-    const rtl = page.dir === 'rtl';
-    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left - box.left : box.left + page.clientWidth - r.right) } : { top: 56, end: 8 };
+    const left = page.getBoundingClientRect().left + window.scrollX;
+    const at = { top: Math.round(r.bottom + 4), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
+    const now = chatMenu.peek();
+    if (now && now.top === at.top && now.end === at.end) return;
+    chatMenu.value = at;
   };
   // A turned phone, a resized window, or the keyboard closing as the menu
-  // takes the focus (Android resizes the page): placed again, under ⋯.
-  useEffect(() => {
+  // takes the focus (Android resizes the page): placed again, under ⋯. Added
+  // and removed in the same commit as the menu, and never reopening one closed.
+  useLayoutEffect(() => {
     if (!menuShown) return;
-    addEventListener('resize', placeChatMenu);
-    return () => removeEventListener('resize', placeChatMenu);
+    const placeAgain = () => {
+      if (chatMenu.peek()) placeChatMenu();
+    };
+    addEventListener('resize', placeAgain);
+    return () => removeEventListener('resize', placeAgain);
   }, [menuShown]);
   // Blocked or read-only meanwhile: the menu goes, for good.
   useEffect(() => {
