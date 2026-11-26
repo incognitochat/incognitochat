@@ -187,6 +187,7 @@ export const fa = {
   cancelReply: 'لغو پاسخ',
   deletedMessage: 'پیام پاک‌شده',
   messageActions: 'کارهای پیام',
+  chatActions: 'کارهای گفت‌وگو',
   deleteForMe: 'پاک کردن برای من',
   deleteMessageConfirm: 'این پیام از این دستگاه پاک شود؟ نسخهٔ طرف مقابل می‌ماند.',
   deleteOwnMessageConfirm: 'این پیام پاک شود؟',

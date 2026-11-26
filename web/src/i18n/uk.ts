@@ -192,6 +192,7 @@ export const uk = {
   cancelReply: 'Скасувати відповідь',
   deletedMessage: 'Видалене повідомлення',
   messageActions: 'Дії з повідомленням',
+  chatActions: 'Дії з чатом',
   deleteForMe: 'Видалити для мене',
   deleteMessageConfirm: 'Видалити це повідомлення з цього пристрою? Співрозмовник збереже свою копію.',
   deleteOwnMessageConfirm: 'Видалити це повідомлення?',

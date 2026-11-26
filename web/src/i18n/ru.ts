@@ -192,6 +192,7 @@ export const ru = {
   cancelReply: 'Отменить ответ',
   deletedMessage: 'Удалённое сообщение',
   messageActions: 'Действия с сообщением',
+  chatActions: 'Действия с чатом',
   deleteForMe: 'Удалить у меня',
   deleteMessageConfirm: 'Удалить это сообщение с этого устройства? У собеседника останется его копия.',
   deleteOwnMessageConfirm: 'Удалить это сообщение?',

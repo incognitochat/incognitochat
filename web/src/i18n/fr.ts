@@ -192,6 +192,7 @@ export const fr = {
   cancelReply: 'Annuler la réponse',
   deletedMessage: 'Message supprimé',
   messageActions: 'Actions sur le message',
+  chatActions: "Actions sur l'échange",
   deleteForMe: 'Supprimer pour moi',
   deleteMessageConfirm: "Supprimer ce message de cet appareil ? L'autre personne garde sa copie.",
   deleteOwnMessageConfirm: 'Supprimer ce message ?',

@@ -188,6 +188,7 @@ export const nl = {
   cancelReply: 'Antwoord annuleren',
   deletedMessage: 'Verwijderd bericht',
   messageActions: 'Berichtacties',
+  chatActions: 'Chatacties',
   deleteForMe: 'Verwijderen voor mij',
   deleteMessageConfirm: 'Dit bericht van dit apparaat verwijderen? De ander houdt een eigen kopie.',
   deleteOwnMessageConfirm: 'Dit bericht verwijderen?',

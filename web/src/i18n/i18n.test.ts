@@ -162,9 +162,9 @@ describe('i18n', () => {
 /** Counted keys whose number stands alone ("Level 2: 5"): no noun agrees with it, so they may stay plain in any language. */
 const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'levelLine', 'messagesLeftToday', 'deletingChatsLeft'];
 
-/** Shown in Telegram's own popups (app.tsx: confirmSwitch, confirmDeleteHereOnly, confirmReplace, confirmRevoke, and clearing media): at most 256 characters for a message and 64 for a button. A new popup's keys go here. */
-const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm', 'revokeConfirm'];
-const POPUP_BUTTONS: readonly Key[] = ['clearMedia', 'pause', 'resume', 'deleteHereOnly', 'newLink', 'revokeYes'];
+/** Shown in Telegram's own popups (app.tsx: confirmSwitch, confirmDeleteHereOnly, confirmReplace, confirmRevoke, confirmBlock, and clearing media): at most 256 characters for a message and 64 for a button. A new popup's keys go here. */
+const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm', 'revokeConfirm', 'blockConfirmOwner', 'blockConfirmSender'];
+const POPUP_BUTTONS: readonly Key[] = ['clearMedia', 'pause', 'resume', 'deleteHereOnly', 'newLink', 'revokeYes', 'blockYes'];
 
 /** What the app says about safety and privacy: a translation must keep exactly what each says (checked by back-translation before a language ships). */
 const SECURITY_KEYS: readonly Key[] = [

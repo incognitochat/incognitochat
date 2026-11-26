@@ -1429,7 +1429,8 @@ export function createApp(deps: Deps) {
   /** Blocks the open conversation, silently, then goes back to the list. */
   async function block(): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'conversation' || !messaging) return;
+    // Once: not again while it's under way, nor a chat blocked already (or only read).
+    if (current.kind !== 'conversation' || !messaging || current.busy || current.blocked || current.readOnly) return;
     screen.value = { ...current, busy: true };
     try {
       await messaging.block(current.id);
