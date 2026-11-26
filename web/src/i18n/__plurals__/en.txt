@@ -58,18 +58,6 @@ newMessages:
   101: 101 new messages
   102: 102 new messages
   1000000: 1,000,000 new messages
-blockedCount:
-  0: Blocked (0)
-  1: Blocked (1)
-  2: Blocked (2)
-  3: Blocked (3)
-  5: Blocked (5)
-  11: Blocked (11)
-  21: Blocked (21)
-  100: Blocked (100)
-  101: Blocked (101)
-  102: Blocked (102)
-  1000000: Blocked (1,000,000)
 usageCount:
   0: 0
   1: 1

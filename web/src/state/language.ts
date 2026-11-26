@@ -1,4 +1,4 @@
-// The app's language on this device (Data and storage, Language): one of the
+// The app's language on this device (Settings, Language): one of the
 // app's languages (i18n/languages.ts), or the same as Telegram, the default. The choice is kept in this
 // profile's meta store and never sent: Telegram notices keep Telegram's
 // language, which the server reads from the signed launch data.

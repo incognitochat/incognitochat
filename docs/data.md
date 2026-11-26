@@ -49,7 +49,7 @@ either side writes again. Each conversation also keeps what the chat list
 shows of its newest message (the start of its text, or what its attachment
 or sticker is), sealed under the storage key like the message, until a
 newer one replaces it or the message goes. Attachments can also be cleared
-on their own (Data and storage); their messages stay, with each file's
+on their own (Settings, Data and storage); their messages stay, with each file's
 key, to fetch it again.
 Downloads are marked not to be kept in the web view's cache.
 

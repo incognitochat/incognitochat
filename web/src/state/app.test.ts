@@ -2791,18 +2791,18 @@ describe('data and storage', () => {
     expect(await getMedia(owner.db, 'c1', 'new')).toBeDefined();
   });
 
-  it('clears all media on request, and goes back to the link tab', async () => {
+  it('clears all media on request, and goes back to the Settings tab', async () => {
     const owner = await registered(fakeServer().api);
     await putMeta(owner.db, 'media-settings', { keep: 'forever' });
     await photoOnDevice(owner.db, 'a', 40);
     await photoOnDevice(owner.db, 'b', 0);
-    await owner.app.showTab('links');
+    await owner.app.showTab('settings');
     await owner.app.storage();
     await owner.app.clearMedia();
     expect(owner.app.screen.value).toMatchObject({ kind: 'storage', usage: { media: 0, chats: [] }, cleared: 2000 });
     expect(owner.broadcasts).toContainEqual({ type: 'data-changed' });
     await owner.app.home();
-    expect(home(owner.app.screen.value).tab).toBe('links');
+    expect(home(owner.app.screen.value).tab).toBe('settings');
   });
 });
 
@@ -2821,7 +2821,7 @@ describe('the back button', () => {
     const shown = () => posted.filter((p) => p.type === 'web_app_setup_back_button').at(-1)?.data;
     const back = () => handlers.get('back_button_pressed')!({});
     const owner = await registered(fakeServer().api, { bridge });
-    await owner.app.showTab('links');
+    await owner.app.showTab('settings');
     expect(shown()).toEqual({ is_visible: false });
 
     // A dialog on the home screen shows the button, and back closes it, not the app.
@@ -2842,7 +2842,7 @@ describe('the back button', () => {
     expect(owner.app.screen.value.kind).toBe('storage');
     expect(shown()).toEqual({ is_visible: true });
     back();
-    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('links'));
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
     expect(shown()).toEqual({ is_visible: false });
   });
 
@@ -3006,7 +3006,7 @@ describe('the Settings tab', () => {
     expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
     // Told only when it changes.
     const told = tg.count('web_app_setup_settings_button');
-    await owner.app.showTab('links');
+    await owner.app.showTab('settings');
     await owner.app.storage();
     expect(tg.count('web_app_setup_settings_button')).toBe(told);
 
