@@ -1303,7 +1303,9 @@ describe('blocking from a chat', () => {
     const before = discards();
     const blocking = sender.block();
     await atServer;
-    await sender.block();
+    // Asked again meanwhile: it returns at once (a second block would wait on the first's lock).
+    const again = sender.block().then(() => 'returned');
+    expect(await Promise.race([again, new Promise((r) => setTimeout(() => r('still waiting'), 500))])).toBe('returned');
     release();
     await blocking;
     expect(discards() - before).toBe(once);
@@ -1314,7 +1316,8 @@ describe('blocking from a chat', () => {
     await sender.block();
     expect(discards() - before).toBe(once);
     expect(sender.screen.value.kind).toBe('conversation');
-  });
+    // Each real block waits out the fake server's missing route once (2 s): more than the default 5 s in all.
+  }, 15_000);
 });
 
 describe('deleting the account', () => {
