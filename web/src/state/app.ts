@@ -486,12 +486,16 @@ export type HomeTab = 'chats' | 'links' | 'settings';
 
 /**
  * Where Telegram's own Settings item (in its menu) is offered: the screens of
- * a set-up app, not setup, sign-out, deletion or errors; nor while a link is
- * being checked or written to, or an invitation redeemed, any of which would
- * draw over Settings once done. It opens the Settings tab.
+ * a set-up app, not setup, sign-out, deletion or errors; nor while one is
+ * busy (an action under way, a link being written to, an invitation being
+ * redeemed) or a link is being checked, any of which would draw over
+ * Settings once done. It opens the Settings tab.
  */
 export function offersSettings(s: Screen): boolean {
-  if (s.kind === 'link') return s.status !== 'checking' && !s.busy;
+  // Busy, a screen draws itself (or home's tab) again once done, over
+  // Settings; except Data and storage's first reading, which looks first.
+  if ('busy' in s && s.busy && !(s.kind === 'storage' && s.usage === null)) return false;
+  if (s.kind === 'link') return s.status !== 'checking';
   if (s.kind === 'invitation') return !s.busy;
   return SETTINGS_BUTTON_SCREENS.has(s.kind);
 }
@@ -1836,7 +1840,10 @@ export function createApp(deps: Deps) {
     mediaSettings = await getMediaSettings(deps.db);
     const current = screen.value;
     if (current.kind !== 'storage') screen.value = { kind: 'storage', settings: mediaSettings, usage: null, busy: true, cleared };
+    // Also the size Settings shows: a measurement like Settings' own, the latest started winning.
+    const run = ++mediaRuns;
     const { total, byConversation } = await mediaUsage(deps.db);
+    if (run === mediaRuns) mediaBytes = total;
     const labels = new Map((await listConversations(deps.db)).map((c) => [c.id, c.label]));
     const chats = Object.entries(byConversation)
       .filter(([, bytes]) => bytes > 0)
@@ -1849,9 +1856,6 @@ export function createApp(deps: Deps) {
     } catch {
       // Not every webview tells (Telegram Desktop on Linux has no navigator.storage).
     }
-    // Settings shows it too, once back there (over any measurement still under way).
-    mediaRuns++;
-    mediaBytes = total;
     if (currentScreen().kind !== 'storage') return;
     screen.value = { kind: 'storage', settings: mediaSettings, usage: { media: total, chats, app }, busy: false, cleared };
   }

@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logIn, prepareSetup, readAccount } from '../account/account';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
@@ -91,6 +91,9 @@ vi.mock('../messaging/store', async (importOriginal) => {
     },
   };
 });
+
+// A read held for a test that never reached it mustn't hold up the next test.
+afterEach(() => heldReads.next.clear());
 
 let n = 0;
 const config = {
@@ -3109,6 +3112,68 @@ describe('the Settings tab', () => {
     await starting;
     expect(app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
     expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // The press did nothing: home is still on the tab it was (Chats), not Settings.
+    await app.home();
+    expect(home(app.screen.value).tab).toBe('chats');
+  });
+
+  it("isn't offered while a screen is busy, which would draw over Settings once done", () => {
+    expect(offersSettings({ kind: 'storage', settings: DEFAULT_MEDIA_SETTINGS, usage: { media: 0, chats: [], app: null }, busy: true, cleared: null })).toBe(false);
+    // Data and storage's first reading is the exception: it looks before drawing.
+    expect(offersSettings({ kind: 'storage', settings: DEFAULT_MEDIA_SETTINGS, usage: null, busy: true, cleared: null })).toBe(true);
+    expect(offersSettings({ kind: 'blocked', conversations: [], busy: true, notice: null })).toBe(false);
+    expect(offersSettings({ kind: 'blocked', conversations: [], busy: false, notice: null })).toBe(true);
+  });
+
+  it("Data and storage's measurement never wins over one Settings started later", async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await photo('q', 1000);
+    // Data and storage measures (2500), slowly; meanwhile the user goes back.
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    await photo('r', 500);
+    const settings = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await settings.atRead;
+    // The older one ends first, then the newer (3000): the newer shows.
+    storage.release();
+    await opening;
+    settings.release();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(3000));
+    // And what Data and storage measures (3500) shows on Settings at once, while Settings measures again.
+    await photo('s', 500);
+    await owner.app.storage();
+    const again = holdRead('mediaUsage');
+    await owner.app.home();
+    await again.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 3500 });
+    again.release();
+  });
+
+  it("forgets the size when another copy changes the account, so the old account's never shows", async () => {
+    const owner = await registered(fakeServer().api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    const measuring = holdRead('mediaUsage');
+    await owner.app.accountChanged();
+    await measuring.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: null });
+    measuring.release();
   });
 
   it('is not offered while a link is checked or an invitation joined, which would draw over Settings once done', async () => {
