@@ -487,15 +487,16 @@ export type HomeTab = 'chats' | 'links' | 'settings';
 /**
  * Where Telegram's own Settings item (in its menu) is offered: the screens of
  * a set-up app, not setup, sign-out, deletion or errors; nor while a link is
- * being checked or an invitation redeemed, which would draw over Settings
- * once done. It opens the Settings tab.
+ * being checked or written to, or an invitation redeemed, any of which would
+ * draw over Settings once done. It opens the Settings tab.
  */
-function offersSettings(s: Screen): boolean {
-  if (s.kind === 'link') return s.status !== 'checking';
+export function offersSettings(s: Screen): boolean {
+  if (s.kind === 'link') return s.status !== 'checking' && !s.busy;
   if (s.kind === 'invitation') return !s.busy;
   return SETTINGS_BUTTON_SCREENS.has(s.kind);
 }
 
+/** The other screens it's offered on (links and invitations: offersSettings). */
 const SETTINGS_BUTTON_SCREENS: ReadonlySet<Screen['kind']> = new Set([
   'home',
   'conversation',
@@ -505,8 +506,6 @@ const SETTINGS_BUTTON_SCREENS: ReadonlySet<Screen['kind']> = new Set([
   'invitations',
   'admin',
   'language',
-  'link',
-  'invitation',
 ]);
 
 export interface Deps {
@@ -1850,6 +1849,9 @@ export function createApp(deps: Deps) {
     } catch {
       // Not every webview tells (Telegram Desktop on Linux has no navigator.storage).
     }
+    // Settings shows it too, once back there (over any measurement still under way).
+    mediaRuns++;
+    mediaBytes = total;
     if (currentScreen().kind !== 'storage') return;
     screen.value = { kind: 'storage', settings: mediaSettings, usage: { media: total, chats, app }, busy: false, cleared };
   }
@@ -2925,6 +2927,9 @@ export function createApp(deps: Deps) {
       deletionRun++;
       deletionRunning = false;
       deletionPaused = false;
+      // Measured again for the account there is now.
+      mediaBytes = null;
+      mediaRuns++;
       session?.setUp();
       return start();
     },

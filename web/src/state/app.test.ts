@@ -14,7 +14,7 @@ import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
 import type { Messaging, MessagingDeps } from '../messaging/engine';
-import { confirmationMatches, createApp, type Deps, type Screen } from './app';
+import { confirmationMatches, createApp, offersSettings, type Deps, type Screen } from './app';
 import { encryptFile, newFileKey } from '../crypto/media';
 import { toBase64Url } from '../crypto/encoding';
 
@@ -76,6 +76,11 @@ vi.mock('../messaging/store', async (importOriginal) => {
       const list = await original.listConversations(...args);
       await heldReads.pass('listConversations', args);
       return list;
+    },
+    mediaUsage: async (...args: Parameters<typeof original.mediaUsage>) => {
+      const usage = await original.mediaUsage(...args);
+      await heldReads.pass('mediaUsage', args);
+      return usage;
     },
     answeredAt: async (...args: Parameters<typeof original.answeredAt>) => {
       try {
@@ -403,7 +408,7 @@ function payloadOf(url: string): string {
  * Holds the next read of `name` (that `when` picks) once it's done, until
  * released: as a slow IndexedDB would, with what read it still under way.
  */
-function holdRead(name: 'pageMessages' | 'listConversations', when: (args: unknown[]) => boolean = () => true) {
+function holdRead(name: 'pageMessages' | 'listConversations' | 'mediaUsage', when: (args: unknown[]) => boolean = () => true) {
   let reached!: () => void;
   const atRead = new Promise<void>((resolve) => (reached = resolve));
   let release!: () => void;
@@ -2942,7 +2947,7 @@ describe('the Settings tab', () => {
     await drawn;
   });
 
-  it("Delete account's way out goes back to Settings: Back, and Cancel", async () => {
+  it("Delete account's way out from Settings goes back there: Back, and Cancel", async () => {
     const tg = recordingBridge();
     const owner = await registered(fakeServer().api, { bridge: tg.bridge });
     await owner.app.showTab('settings');
@@ -2950,8 +2955,6 @@ describe('the Settings tab', () => {
     expect(owner.app.screen.value.kind).toBe('confirm-delete');
     tg.fire('back_button_pressed');
     await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
-    // Cancel goes there even when the user came from elsewhere (Delete account lives in Settings).
-    await owner.app.showTab('chats');
     owner.app.askDeleteAccount();
     await owner.app.cancelDeleteAccount();
     expect(home(owner.app.screen.value).tab).toBe('settings');
@@ -3031,6 +3034,81 @@ describe('the Settings tab', () => {
     tg.fire('settings_button_pressed');
     await tick();
     expect(owner.app.screen.value.kind).toBe('confirm-delete');
+  });
+
+  it('draws Settings at once with the last size measured, measures after, the latest measurement winning', async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await owner.app.showTab('chats');
+    await photo('q', 1000);
+
+    // A slow measurement (A): the tab is drawn meanwhile, with the last size.
+    const a = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await a.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 1500 });
+    // A new attachment, then a redraw meanwhile: it keeps the size, and measures again (B).
+    await photo('r', 500);
+    const b = holdRead('mediaUsage');
+    await owner.app.refresh();
+    await b.atRead;
+    expect(home(owner.app.screen.value).media).toBe(1500);
+    b.release();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(3000));
+    // A, older (2500, from before the new one), finishes last: dropped.
+    a.release();
+    await tick();
+    expect(home(owner.app.screen.value).media).toBe(3000);
+
+    // Left for Chats while measuring: Chats gets no size.
+    const c = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await c.atRead;
+    await owner.app.showTab('chats');
+    c.release();
+    await tick();
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', media: null });
+  });
+
+  it('is not offered on a link being checked or written to, or an invitation being joined', () => {
+    expect(offersSettings({ kind: 'link', status: 'checking', canWrite: false, busy: false, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'link', status: 'verified', canWrite: true, busy: true, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'link', status: 'verified', canWrite: true, busy: false, error: null })).toBe(true);
+    expect(offersSettings({ kind: 'invitation', code: 'abcd-efgh', busy: true, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'invitation', code: 'abcd-efgh', busy: false, error: null })).toBe(true);
+  });
+
+  it('hides the Settings item while a link is checked, and offers it again once it is', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    const url = home(owner.app.screen.value).links[0]!.url;
+    const sender = await registered(server.api);
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/')) await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const tg = recordingBridge();
+    const { app } = await setup({ api: server.api, bridge: tg.bridge, launch: launchWith(payloadOf(url)), db: sender.db });
+    const starting = app.start();
+    await vi.waitFor(() => expect(app.screen.value).toMatchObject({ kind: 'link', status: 'checking' }));
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    release();
+    await starting;
+    expect(app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
   });
 
   it('is not offered while a link is checked or an invitation joined, which would draw over Settings once done', async () => {
