@@ -760,19 +760,20 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   useBackCloses(menuShown, () => (chatMenu.value = false));
   const menuButton = useRef<HTMLButtonElement>(null);
   const cancelBlock = useRef<HTMLButtonElement>(null);
-  const openChatMenu = () => {
+  /** Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from the page's own box (a scrollbar on either side left out). */
+  const placeChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
-    const rtl = document.documentElement.dir === 'rtl';
-    // The page's width without a scrollbar, as the menu's overlay has it.
-    const width = document.documentElement.clientWidth;
-    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left : width - r.right) } : { top: 56, end: 8 };
+    const page = document.documentElement;
+    const box = page.getBoundingClientRect();
+    const rtl = page.dir === 'rtl';
+    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left - box.left : box.left + page.clientWidth - r.right) } : { top: 56, end: 8 };
   };
-  // Placed when it opened: a turned phone or a resized window closes it.
+  // A turned phone, a resized window, or the keyboard closing as the menu
+  // takes the focus (Android resizes the page): placed again, under ⋯.
   useEffect(() => {
     if (!menuShown) return;
-    const close = () => (chatMenu.value = false);
-    addEventListener('resize', close);
-    return () => removeEventListener('resize', close);
+    addEventListener('resize', placeChatMenu);
+    return () => removeEventListener('resize', placeChatMenu);
   }, [menuShown]);
   // Blocked or read-only meanwhile: the menu goes, for good.
   useEffect(() => {
@@ -818,6 +819,9 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replying.value = null;
     replyKept.current = null;
     menu.value = null;
+  }, [screen.id]);
+  // Before the new chat paints: the old one's ⋯ menu and Block question don't show on it.
+  useLayoutEffect(() => {
     chatMenu.value = false;
     confirmingBlock.value = false;
     asked.current = false;
@@ -869,7 +873,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
               aria-haspopup="menu"
               aria-expanded={menuShown}
               disabled={screen.busy}
-              onClick={openChatMenu}
+              onClick={placeChatMenu}
             >
               <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="5" cy="12" r="2" />
