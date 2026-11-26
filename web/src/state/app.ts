@@ -2602,7 +2602,7 @@ export function createApp(deps: Deps) {
       // Last measured (null the first time): measured again below, without holding the tab up.
       media: shownTab === 'settings' ? mediaBytes : null,
     };
-    // Dropped if a newer home draw began meanwhile, or an action on home (it
+    // Dropped if a newer showHome began meanwhile, or an action on home (it
     // draws home itself once done, or the screen its end calls for); or, a
     // tab switch, if home has left the screen (a chat opened, say).
     if (ask !== homeAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {

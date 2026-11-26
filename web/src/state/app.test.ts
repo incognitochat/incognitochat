@@ -3545,13 +3545,16 @@ describe('switching tabs while home loads (a slow network)', () => {
       await release.reached;
       await user.app.redeem('abcd-efgh');
       expect(home(user.app.screen.value)).toMatchObject({ notice: 'joined', busy: false });
-      // The older draw reads storage last before deciding: wait for that read, then let it decide.
-      const settled = holdRead('listConversations');
+      // The older draw reads the chats twice, the second just before it decides: hold that one, then let it decide.
+      const first = holdRead('listConversations');
       release();
-      await settled.atRead;
-      settled.release();
-      for (let i = 0; i < 10; i++) await tick();
-      expect(home(user.app.screen.value)).toMatchObject({ notice: 'joined' });
+      await first.atRead;
+      const last = holdRead('listConversations');
+      first.release();
+      await last.atRead;
+      last.release();
+      await tick();
+      expect(home(user.app.screen.value)).toMatchObject({ tab: 'chats', notice: 'joined' });
     } finally {
       release();
     }
@@ -3562,8 +3565,8 @@ describe('switching tabs while home loads (a slow network)', () => {
     server.state.inviteOnly = true;
     const owner = await registered(server.api);
     await owner.app.showTab('links');
-    const release = holdFirst(server, (m, p) => m === 'POST' && p === '/links');
     server.state.admin = true;
+    const release = holdFirst(server, (m, p) => m === 'POST' && p === '/links');
     try {
       const creating = owner.app.createLink();
       await release.reached;
@@ -3572,6 +3575,7 @@ describe('switching tabs while home loads (a slow network)', () => {
       expect(home(owner.app.screen.value)).toMatchObject({ busy: true, notice: null });
       release();
       await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ busy: false, notice: 'created' });
     } finally {
       release();
     }
@@ -3594,12 +3598,15 @@ describe('switching tabs while home loads (a slow network)', () => {
       await owner.app.createLink();
       const ended = owner.app.screen.value.kind;
       expect(ended).not.toBe('home');
-      // The older draw reads storage last before deciding: wait for that read, then let it decide.
-      const settled = holdRead('listConversations');
+      // The older draw reads the chats twice, the second just before it decides: hold that one, then let it decide.
+      const first = holdRead('listConversations');
       release();
-      await settled.atRead;
-      settled.release();
-      for (let i = 0; i < 10; i++) await tick();
+      await first.atRead;
+      const last = holdRead('listConversations');
+      first.release();
+      await last.atRead;
+      last.release();
+      await tick();
       expect(owner.app.screen.value.kind).toBe(ended);
     } finally {
       release();
