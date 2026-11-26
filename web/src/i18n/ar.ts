@@ -115,7 +115,7 @@ export const ar = {
   noticesAllow: 'تفعيل الإشعارات',
   noticesTitle: 'إشعارات البوت',
   noticesOn: 'مفعّلة',
-  noticesOff: 'متوقفة',
+  noticesOff: 'معطّلة',
   tabSettings: 'الإعدادات',
   youWrote: 'أنت: {text}',
   you: 'أنت',

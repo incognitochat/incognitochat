@@ -486,9 +486,16 @@ export type HomeTab = 'chats' | 'links' | 'settings';
 
 /**
  * Where Telegram's own Settings item (in its menu) is offered: the screens of
- * a set-up app, not setup, sign-out, deletion or errors. It opens the
- * Settings tab.
+ * a set-up app, not setup, sign-out, deletion or errors; nor while a link is
+ * being checked or an invitation redeemed, which would draw over Settings
+ * once done. It opens the Settings tab.
  */
+function offersSettings(s: Screen): boolean {
+  if (s.kind === 'link') return s.status !== 'checking';
+  if (s.kind === 'invitation') return !s.busy;
+  return SETTINGS_BUTTON_SCREENS.has(s.kind);
+}
+
 const SETTINGS_BUTTON_SCREENS: ReadonlySet<Screen['kind']> = new Set([
   'home',
   'conversation',
@@ -606,13 +613,13 @@ export function createApp(deps: Deps) {
   // top, then opens the Settings tab.
   let settingsButton: boolean | null = null;
   effect(() => {
-    const visible = SETTINGS_BUTTON_SCREENS.has(screen.value.kind);
+    const visible = offersSettings(screen.value);
     if (visible === settingsButton) return;
     settingsButton = visible;
     deps.bridge?.post('web_app_setup_settings_button', { is_visible: visible });
   });
   deps.bridge?.on('settings_button_pressed', () => {
-    if (!SETTINGS_BUTTON_SCREENS.has(currentScreen().kind)) return;
+    if (!offersSettings(currentScreen())) return;
     // Closing takes each one off as it redraws, later: all of them, as they are now.
     for (const close of [...onTop].reverse()) close();
     void showHome({ tab: 'settings' });
@@ -1171,12 +1178,12 @@ export function createApp(deps: Deps) {
       const draw = ++homeDraws;
       const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
       const blockedCount = (await listConversations(deps.db)).filter((c) => c.status === 'blocked').length;
-      const media = current.tab === 'settings' ? (await mediaUsage(deps.db)).total : null;
       const latest = screen.value;
       // A newer one draws (or drew) what's newer.
       if (draw !== homeDraws || latest.kind !== 'home' || latest.busy) return;
       const notice = withNewKey(latest.notice, newKey);
-      screen.value = { ...latest, conversations: list, links, notice, blockedCount, media: latest.tab === 'settings' ? media : null };
+      screen.value = { ...latest, conversations: list, links, notice, blockedCount };
+      if (latest.tab === 'settings') void measureMedia();
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
@@ -2202,7 +2209,8 @@ export function createApp(deps: Deps) {
     if (currentScreen().kind !== 'deleting-chats') return;
     chatsRun++;
     backButton(false);
-    return showHome({ tab: 'links' });
+    // Back where Delete account is.
+    return showHome({ tab: 'settings' });
   }
 
   /** Whether runDeletion is under way. */
@@ -2511,6 +2519,20 @@ export function createApp(deps: Deps) {
     return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, l) }));
   }
 
+  // The attachments on this device (bytes), for the Settings tab: measured
+  // when it shows and redraws (it reads every message), the latest
+  // measurement winning.
+  let mediaBytes: number | null = null;
+  let mediaRuns = 0;
+  async function measureMedia(): Promise<void> {
+    const run = ++mediaRuns;
+    const total = (await mediaUsage(deps.db)).total;
+    if (run !== mediaRuns) return;
+    mediaBytes = total;
+    const current = screen.value;
+    if (current.kind === 'home' && current.tab === 'settings') screen.value = { ...current, media: total };
+  }
+
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab } = {}): Promise<void> {
     if (options.tab) tab = options.tab;
     const { config, db } = deps;
@@ -2563,8 +2585,10 @@ export function createApp(deps: Deps) {
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
       deletionPaused,
-      media: tab === 'settings' ? (await mediaUsage(db)).total : null,
+      // Last measured (null the first time): measured again below, without holding the tab up.
+      media: tab === 'settings' ? mediaBytes : null,
     };
+    if (tab === 'settings') void measureMedia();
     if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
     // By itself only if Telegram never refused one (never set up, or a new
     // chat key): a block holds until the user taps Turn on notices.
@@ -2966,7 +2990,8 @@ export function createApp(deps: Deps) {
       // to where Finish deleting was asked, while signed out.
       if (await deletionConfirmed()) screen.value = { kind: 'deleting', error: deletionError };
       else if (signedOut) screen.value = { kind: 'signed-out', reason: signedOut, busy: false, offline: false };
-      else return showHome({ tab: 'links' });
+      // Back where Delete account is.
+      else return showHome({ tab: 'settings' });
     },
     close: () => deps.bridge?.post('web_app_close'),
     retry: () => retry(),

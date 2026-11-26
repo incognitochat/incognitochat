@@ -386,12 +386,12 @@ function TabBar({ app, language, screen }: { app: AppState; language: Language; 
             <Icon name={icon} />
             {tab === 'chats' && unread > 0 && (
               <span class="badge tab-badge" aria-hidden="true">
-                {unread > 99 ? '99+' : formatCount(language, unread)}
+                {unread > 99 ? `${formatCount(language, 99)}+` : formatCount(language, unread)}
               </span>
             )}
           </span>
           <span class="tab-label">{t(language, text)}</span>
-          {tab === 'chats' && unread > 0 && <span class="visually-hidden">{t(language, 'unreadMessages')}</span>}
+          {tab === 'chats' && unread > 0 && <span class="visually-hidden">{t(language, 'unreadMessagesCount', { count: unread })}</span>}
         </button>
       ))}
     </nav>
@@ -505,13 +505,12 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
       {screen.conversations.length === 0 ? (
         <div class="empty">
           <p class="muted">{tr('noConversations')}</p>
-          {link && (
-            <div class="row">
-              <Button disabled={screen.busy || screen.offline} onClick={() => app.share(link.url)}>
-                {tr('share')}
-              </Button>
-              <CopyButton language={language} text={link.url} disabled={screen.busy || screen.offline} />
-            </div>
+          {link ? (
+            <LinkCard app={app} language={language} link={link} busy={screen.busy || screen.offline} />
+          ) : (
+            <Button kind="secondary" onClick={() => app.showTab('links')}>
+              {tr('tabLinks')}
+            </Button>
           )}
         </div>
       ) : (
@@ -547,15 +546,17 @@ function LinkTab({ app, language, screen, top }: TabProps) {
       {mayJoin && <JoinForm app={app} language={language} busy={busy} />}
       {link ? (
         <>
-          <LinkCard app={app} language={language} link={link} busy={busy || offline} />
+          <LinkCard app={app} language={language} link={link} busy={busy || offline} intro />
           <div class="group">
             <Cell icon="renew" label={tr('newLink')} kind="action" disabled={busy || offline} onClick={() => void confirmReplace(app, language)} />
             <Cell icon="trash" label={tr('revoke')} kind="danger" disabled={busy || offline} onClick={() => void confirmRevoke(app, language, link.id)} />
           </div>
-          <p class="group-note">{tr('homeIntro')}</p>
         </>
       ) : (
-        !canCreate && <p class="muted">{tr('noLinks')}</p>
+        <>
+          <p class="group group-pad">{tr('homeIntro')}</p>
+          {!canCreate && <p class="muted">{tr('noLinks')}</p>}
+        </>
       )}
       {canCreate && (
         <Button disabled={busy} onClick={app.createLink}>
@@ -3647,8 +3648,8 @@ function CopyButton({ language, text, disabled }: { language: Language; text: st
   );
 }
 
-/** The account's link: to copy or share. */
-function LinkCard({ app, language, link, busy }: { app: AppState; language: Language; link: LinkView; busy: boolean }) {
+/** The account's link: to copy or share; with intro, what it's for, above it. */
+function LinkCard({ app, language, link, busy, intro }: { app: AppState; language: Language; link: LinkView; busy: boolean; intro?: boolean }) {
   const tr = (key: Key) => t(language, key);
   const copied = useSignal(false);
   const input = useRef<HTMLInputElement>(null);
@@ -3664,6 +3665,7 @@ function LinkCard({ app, language, link, busy }: { app: AppState; language: Lang
   };
   return (
     <div class="group link-card">
+      {intro && <p>{tr('homeIntro')}</p>}
       <label class="field">
         <span class="muted">{tr('homeTitle')}</span>
         <input class="link-url" type="text" dir="ltr" readonly value={link.url} ref={input} onFocus={(e) => e.currentTarget.select()} />

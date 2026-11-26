@@ -2115,11 +2115,11 @@ describe('deleting the account', () => {
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
-  it('cancels back to the link tab', async () => {
+  it('cancels back to the Settings tab, where Delete account is', async () => {
     const owner = await registered(fakeServer().api);
     owner.app.askDeleteAccount();
     await owner.app.cancelDeleteAccount();
-    expect(home(owner.app.screen.value).tab).toBe('links');
+    expect(home(owner.app.screen.value).tab).toBe('settings');
   });
 
   it("never touches the account set up after it: one copy finishes, a new account is set up, the other copy stops", async () => {
@@ -2914,9 +2914,10 @@ describe('the Settings tab', () => {
     );
     await putMedia(owner.db, 'c1', 'p', new Uint8Array(1500));
     await owner.app.showTab('settings');
+    // Measured after the tab draws, without holding it up.
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
     expect(home(owner.app.screen.value)).toMatchObject({
       tab: 'settings',
-      media: 1500,
       blockedCount: 0,
       account: { canCreateLinks: true },
       invitations: { inviteOnly: true, member: true },
@@ -2932,7 +2933,28 @@ describe('the Settings tab', () => {
       { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: 'upload-q', k: 'a2V5', d: 'c2VjcmV0' } },
     );
     await owner.app.refresh();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(2500));
+    // Drawn again, it shows the last measurement at once.
+    await owner.app.showTab('chats');
+    const drawn = owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
     expect(home(owner.app.screen.value).media).toBe(2500);
+    await drawn;
+  });
+
+  it("Delete account's way out goes back to Settings: Back, and Cancel", async () => {
+    const tg = recordingBridge();
+    const owner = await registered(fakeServer().api, { bridge: tg.bridge });
+    await owner.app.showTab('settings');
+    owner.app.askDeleteAccount();
+    expect(owner.app.screen.value.kind).toBe('confirm-delete');
+    tg.fire('back_button_pressed');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    // Cancel goes there even when the user came from elsewhere (Delete account lives in Settings).
+    await owner.app.showTab('chats');
+    owner.app.askDeleteAccount();
+    await owner.app.cancelDeleteAccount();
+    expect(home(owner.app.screen.value).tab).toBe('settings');
   });
 
   it('goes back to Settings from every page it opens', async () => {
@@ -2982,16 +3004,59 @@ describe('the Settings tab', () => {
     await owner.app.storage();
     expect(tg.count('web_app_setup_settings_button')).toBe(told);
 
-    // From a page with something open on top: that closes, and Settings opens.
-    let closed = 0;
-    const done = owner.app.onBack(() => {
-      closed++;
-      done();
+    // From a page with two things open on top (a dialog over a menu, say): both close, and Settings opens.
+    const closed: string[] = [];
+    const menu = owner.app.onBack(() => {
+      closed.push('menu');
+      menu();
+    });
+    const dialog = owner.app.onBack(() => {
+      closed.push('dialog');
+      dialog();
     });
     tg.fire('settings_button_pressed');
     await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
-    expect(closed).toBe(1);
+    expect(closed).toEqual(['dialog', 'menu']);
     expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+
+    // Offered in a chat and on the Language page; not while deleting the account is being confirmed.
+    await chatOnDevice(owner.db);
+    await owner.app.openConversation('c1');
+    expect(owner.app.screen.value.kind).toBe('conversation');
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    owner.app.language();
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    owner.app.askDeleteAccount();
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    await tick();
+    expect(owner.app.screen.value.kind).toBe('confirm-delete');
+  });
+
+  it('is not offered while a link is checked or an invitation joined, which would draw over Settings once done', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const tg = recordingBridge();
+    const user = await registered(server.api, { bridge: tg.bridge, launch: launchWith('invabcdefgh') });
+    expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: false });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // Joining: held at the server until we've looked.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (path === '/invitations/redeem') await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const joining = user.app.redeem('abcd-efgh');
+    await vi.waitFor(() => expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: true }));
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    release();
+    await joining;
+    // Where joining always lands; the press didn't take it to Settings.
+    expect(home(user.app.screen.value)).toMatchObject({ tab: 'chats', notice: 'joined' });
   });
 
   it('is not offered while the server refuses this device, and a press then does nothing', async () => {
