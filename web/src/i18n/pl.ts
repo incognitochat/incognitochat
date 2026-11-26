@@ -192,6 +192,7 @@ export const pl = {
   cancelReply: 'Anuluj odpowiedź',
   deletedMessage: 'Usunięta wiadomość',
   messageActions: 'Opcje wiadomości',
+  chatActions: 'Opcje czatu',
   deleteForMe: 'Usuń u mnie',
   deleteMessageConfirm: 'Usunąć tę wiadomość z tego urządzenia? Druga strona zachowa swoją kopię.',
   deleteOwnMessageConfirm: 'Usunąć tę wiadomość?',

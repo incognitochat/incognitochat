@@ -29,6 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
+import { labelParts } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -753,6 +754,9 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const confirmingBlock = useSignal(false);
   useBackCloses(confirmingBlock.value, () => (confirmingBlock.value = false));
+  // The ⋯ menu in the header: Block, Delete.
+  const chatMenu = useSignal(false);
+  useBackCloses(chatMenu.value, () => (chatMenu.value = false));
   const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
   const sending = app.preparing.value.filter((p) => p.conv === screen.id).length;
   useEffect(() => {
@@ -814,14 +818,34 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   return (
     <main class="page conversation">
       <header class="conversation-head">
-        <span class="chat-name">
-          <Origin role={screen.role} language={language} />
-          <bdi dir="ltr" class="label">
-            {screen.label}
-          </bdi>
-        </span>
-        <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
-        {screen.blocked || screen.readOnly ? null : confirmingBlock.value ? (
+        <div class="chat-title">
+          <Avatar label={screen.label} />
+          <span class="chat-title-text">
+            <span class="chat-name">
+              <Origin role={screen.role} language={language} />
+              <LabelCode label={screen.label} />
+            </span>
+            <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
+          </span>
+          {!screen.blocked && !screen.readOnly && !confirmingBlock.value && (
+            <button
+              type="button"
+              class="bar-icon chat-menu-button"
+              aria-label={tr('chatActions')}
+              aria-haspopup="menu"
+              aria-expanded={chatMenu.value}
+              disabled={screen.busy}
+              onClick={() => (chatMenu.value = true)}
+            >
+              <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="5" cy="12" r="2" />
+                <circle cx="12" cy="12" r="2" />
+                <circle cx="19" cy="12" r="2" />
+              </svg>
+            </button>
+          )}
+        </div>
+        {!screen.blocked && !screen.readOnly && confirmingBlock.value && (
           <div class="row">
             <p class="warning">{tr(screen.role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender')}</p>
             <Button kind="danger" disabled={screen.busy} onClick={app.block}>
@@ -831,17 +855,16 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
               {tr('cancel')}
             </Button>
           </div>
-        ) : (
-          <div class="head-actions">
-            <button type="button" class="link-button" disabled={screen.busy} onClick={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}>
-              {tr('delete')}
-            </button>
-            <button type="button" class="link-button" disabled={screen.busy} onClick={() => (confirmingBlock.value = true)}>
-              {tr('block')}
-            </button>
-          </div>
         )}
       </header>
+      {chatMenu.value && (
+        <ChatMenu
+          language={language}
+          onClose={() => (chatMenu.value = false)}
+          onBlock={() => (confirmingBlock.value = true)}
+          onDelete={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}
+        />
+      )}
       <ol class="messages">
         {screen.more && (
           <li class="earlier">
@@ -1096,34 +1119,37 @@ function DeleteConversation({ app, language, target }: { app: AppState; language
 function Blocked({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'blocked' }> }) {
   const tr = (key: Key) => t(language, key);
   return (
-    <Page title={tr('blockedTitle')} busy={screen.busy}>
-      {screen.notice && (
-        <p class="notice" role="status">
-          {tr(NOTICE_TEXT[screen.notice])}
-        </p>
-      )}
-      {screen.conversations.length === 0 ? (
-        <p class="muted">{tr('noBlocked')}</p>
-      ) : (
-        <ul class="chats">
-          {screen.conversations.map((c) => (
-            <li key={c.id} class="blocked-row">
-              <button type="button" class="chat" onClick={() => void app.openConversation(c.id)}>
-                <bdi dir="ltr" class="label">
-                  {c.label}
-                </bdi>
-                <span class="preview" dir="auto">
-                  {c.last ? contentLine(language, c.last) : ''}
-                </span>
-              </button>
-              <Button kind="secondary" disabled={screen.busy} onClick={() => app.unblock(c.id)}>
-                {tr('unblock')}
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Page>
+    <div class="grouped-page">
+      <Page title={tr('blockedTitle')} busy={screen.busy}>
+        {screen.notice && (
+          <p class="notice" role="status">
+            {tr(NOTICE_TEXT[screen.notice])}
+          </p>
+        )}
+        {screen.conversations.length === 0 ? (
+          <p class="muted">{tr('noBlocked')}</p>
+        ) : (
+          <ul class="group">
+            {screen.conversations.map((c) => (
+              <li key={c.id} class="cell static with-avatar">
+                <button type="button" class="cell-open" onClick={() => void app.openConversation(c.id)}>
+                  <Avatar label={c.label} small />
+                  <span class="cell-label cell-lines">
+                    <LabelCode label={c.label} />
+                    <span class="preview" dir="auto">
+                      {c.last ? contentLine(language, c.last) : ''}
+                    </span>
+                  </span>
+                </button>
+                <button type="button" class="text-button" disabled={screen.busy} onClick={() => void app.unblock(c.id)}>
+                  {tr('unblock')}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Page>
+    </div>
   );
 }
 
@@ -1230,58 +1256,70 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
     if (choice === 'clear') void app.clearMedia(conv);
   };
   return (
-    <Page title={tr('storageTitle')} busy={busy}>
-      {cleared !== null && cleared > 0 && (
-        <p class="notice" role="status">
-          {tr('storageCleared', { size: size(cleared) })}
-        </p>
-      )}
-      {usage && <p>{usage.media > 0 ? tr('storageMedia', { size: size(usage.media) }) : tr('noStoredMedia')}</p>}
-      {usage?.app && <p class="muted">{tr('storageApp', { size: size(usage.app.usage) })}</p>}
-      <fieldset class="settings" disabled={busy}>
-        <legend>{tr('keepMedia')}</legend>
-        {(['forever', 'month', 'week'] as const).map((keep) => (
-          <label class="option" key={keep}>
-            <input type="radio" name="keep-media" checked={settings.keep === keep} onChange={() => void app.setKeepMedia(keep)} />
-            {tr(KEEP_TEXT[keep])}
-          </label>
-        ))}
-      </fieldset>
-      <fieldset class="settings" disabled={busy}>
-        <legend>{tr('autoDownload')}</legend>
-        {(['photos', 'voice', 'gifs'] as const).map((kind) => (
-          <label class="option" key={kind}>
-            <input type="checkbox" checked={settings.auto[kind]} onChange={(e) => void app.setAutoDownload(kind, e.currentTarget.checked)} />
-            {tr(AUTO_TEXT[kind])}
-          </label>
-        ))}
-        <p class="muted">{tr('autoDownloadNote')}</p>
-      </fieldset>
-      {usage && usage.chats.length > 0 && (
-        <section class="settings">
-          <h2>{tr('storageChats')}</h2>
-          <ul class="chats">
-            {usage.chats.map((c) => (
-              <li key={c.id} class="storage-row">
-                <span class="storage-chat">
-                  <bdi dir="ltr" class="label">
-                    {c.label}
-                  </bdi>
-                  <span class="muted">{size(c.bytes)}</span>
-                </span>
-                <Button kind="secondary" disabled={busy} onClick={() => void clear(c.id)}>
-                  {tr('clearMedia')}
-                </Button>
-              </li>
+    <div class="grouped-page">
+      <Page title={tr('storageTitle')} busy={busy}>
+        {cleared !== null && cleared > 0 && (
+          <p class="notice" role="status">
+            {tr('storageCleared', { size: size(cleared) })}
+          </p>
+        )}
+        {usage && (
+          <div class="group group-pad">
+            <p>{usage.media > 0 ? tr('storageMedia', { size: size(usage.media) }) : tr('noStoredMedia')}</p>
+            {usage.app && <p class="muted">{tr('storageApp', { size: size(usage.app.usage) })}</p>}
+          </div>
+        )}
+        <fieldset class="group-set" disabled={busy}>
+          <legend class="group-title">{tr('keepMedia')}</legend>
+          <div class="segmented">
+            {(['forever', 'month', 'week'] as const).map((keep) => (
+              <label class="segment" key={keep}>
+                <input type="radio" name="keep-media" checked={settings.keep === keep} onChange={() => void app.setKeepMedia(keep)} />
+                {tr(KEEP_TEXT[keep])}
+              </label>
             ))}
-          </ul>
-          <button type="button" class="link-button" disabled={busy} onClick={() => void clear()}>
-            {tr('clearAllMedia')}
-          </button>
-        </section>
-      )}
-      <p class="muted">{tr('storageNote')}</p>
-    </Page>
+          </div>
+        </fieldset>
+        <fieldset class="group-set" disabled={busy}>
+          <legend class="group-title">{tr('autoDownload')}</legend>
+          <div class="group plain">
+            {(['photos', 'voice', 'gifs'] as const).map((kind) => (
+              <label class="cell" key={kind}>
+                <span class="cell-label">{tr(AUTO_TEXT[kind])}</span>
+                <input type="checkbox" role="switch" class="switch" checked={settings.auto[kind]} onChange={(e) => void app.setAutoDownload(kind, e.currentTarget.checked)} />
+              </label>
+            ))}
+          </div>
+          <p class="group-note">{tr('autoDownloadNote')}</p>
+        </fieldset>
+        {usage && usage.chats.length > 0 && (
+          <section class="group-set">
+            <h2 class="group-title">{tr('storageChats')}</h2>
+            <ul class="group">
+              {usage.chats.map((c) => (
+                <li key={c.id} class="cell static with-avatar">
+                  <Avatar label={c.label} small />
+                  <span class="cell-label cell-lines">
+                    <LabelCode label={c.label} />
+                    <span class="muted">{size(c.bytes)}</span>
+                  </span>
+                  <button type="button" class="text-button" disabled={busy} onClick={() => void clear(c.id)}>
+                    {tr('clearMedia')}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div class="group">
+              <button type="button" class="cell is-danger" disabled={busy} onClick={() => void clear()}>
+                <Icon name="trash" class="cell-icon" />
+                <span class="cell-label">{tr('clearAllMedia')}</span>
+              </button>
+            </div>
+          </section>
+        )}
+        <p class="group-note">{tr('storageNote')}</p>
+      </Page>
+    </div>
   );
 }
 
@@ -1413,6 +1451,20 @@ type Gesture = { x: number; y: number; pointer: number; mode: 'pending' | 'swipe
  * A chat in the list. Tap opens it; swiping it toward the start reveals
  * Delete; a long press (or a right click) asks to delete it straight away.
  */
+/** A chat's picture: its label's emoji in a circle (empty for a label without one). */
+function Avatar({ label, small }: { label: string; small?: boolean }) {
+  return <span class={small ? 'avatar small' : 'avatar'}>{labelParts(label).emoji}</span>;
+}
+
+/** A chat's name beside its picture: the label's code (all of it, for a label without an emoji). */
+function LabelCode({ label }: { label: string }) {
+  return (
+    <bdi dir="ltr" class="label">
+      {labelParts(label).code}
+    </bdi>
+  );
+}
+
 function ChatRow({
   app,
   language,
@@ -1522,28 +1574,29 @@ function ChatRow({
         onKeyDown={(e) => menuKeyDown(e, longPress, { enter: false })}
         onClick={onClick}
       >
-        <span class="chat-top">
-          <span class="chat-name">
-            <Origin role={c.role} language={language} />
-            <bdi dir="ltr" class="label">
-              {c.label}
-            </bdi>
-          </span>
-          <span class="muted chat-time">
-            {c.last?.out && c.last.status && <Ticks status={c.last.status} language={language} />}
-            {relativeTime(language, new Date(c.lastAt))}
-          </span>
-        </span>
-        <span class="chat-bottom">
-          <span class="preview" dir="auto">
-            {c.last ? (c.last.out ? tr('youWrote', { text: contentLine(language, c.last) }) : contentLine(language, c.last)) : ''}
-          </span>
-          {c.unread > 0 && (
-            <span class="badge">
-              <span aria-hidden="true">{t(language, 'unreadCount', { count: c.unread })}</span>
-              <span class="visually-hidden">{tr('unreadMessagesCount', { count: c.unread })}</span>
+        <Avatar label={c.label} />
+        <span class="chat-body">
+          <span class="chat-top">
+            <span class="chat-name">
+              <Origin role={c.role} language={language} />
+              <LabelCode label={c.label} />
             </span>
-          )}
+            <span class="muted chat-time">
+              {c.last?.out && c.last.status && <Ticks status={c.last.status} language={language} />}
+              {relativeTime(language, new Date(c.lastAt))}
+            </span>
+          </span>
+          <span class="chat-bottom">
+            <span class="preview" dir="auto">
+              {c.last ? (c.last.out ? tr('youWrote', { text: contentLine(language, c.last) }) : contentLine(language, c.last)) : ''}
+            </span>
+            {c.unread > 0 && (
+              <span class="badge">
+                <span aria-hidden="true">{t(language, 'unreadCount', { count: c.unread })}</span>
+                <span class="visually-hidden">{tr('unreadMessagesCount', { count: c.unread })}</span>
+              </span>
+            )}
+          </span>
         </span>
       </button>
     </li>
@@ -3309,6 +3362,44 @@ function Reactions({ message: m, language, canReact, onReact }: { message: Messa
 const formatCount = (language: Language, n: number) => new Intl.NumberFormat(locale(language)).format(n);
 
 /** The long-press menu of a message: reactions, then Reply, Copy, Delete for me. */
+/** The chat's own menu, from the ⋯ in its header: Block (asks first, below the header) and Delete (its dialog). */
+function ChatMenu({ language, onClose, onBlock, onDelete }: { language: Language; onClose: () => void; onBlock: () => void; onDelete: () => void }) {
+  const tr = (key: Key) => t(language, key);
+  const focus = useDialogFocus<HTMLDivElement>('menu');
+  const act = (f: () => void) => () => {
+    onClose();
+    f();
+  };
+  return (
+    <div class="overlay popover" onClick={onClose} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+      <div
+        class="dialog menu"
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr('chatActions')}
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={(e) => {
+          focus.onKeyDown(e);
+          moveInMenu(e);
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div class="menu-items" role="menu" aria-label={tr('chatActions')}>
+          <button type="button" role="menuitem" class="menu-item" onClick={act(onBlock)}>
+            <Icon name="blocked" class="menu-icon" />
+            {tr('block')}
+          </button>
+          <button type="button" role="menuitem" class="menu-item danger" onClick={act(onDelete)}>
+            <Icon name="trash" class="menu-icon" />
+            {tr('delete')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MessageMenu({
   message,
   language,

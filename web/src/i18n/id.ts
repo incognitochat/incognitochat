@@ -188,6 +188,7 @@ export const id = {
   cancelReply: 'Batalkan balasan',
   deletedMessage: 'Pesan dihapus',
   messageActions: 'Tindakan pesan',
+  chatActions: 'Tindakan obrolan',
   deleteForMe: 'Hapus untuk saya',
   deleteMessageConfirm: 'Hapus pesan ini dari perangkat ini? Pihak lain tetap menyimpan salinannya.',
   deleteOwnMessageConfirm: 'Hapus pesan ini?',

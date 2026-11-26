@@ -191,6 +191,7 @@ export const ptBR = {
   cancelReply: 'Cancelar resposta',
   deletedMessage: 'Mensagem apagada',
   messageActions: 'Ações da mensagem',
+  chatActions: 'Ações do chat',
   deleteForMe: 'Apagar para mim',
   deleteMessageConfirm: 'Apagar esta mensagem deste dispositivo? A outra pessoa continua com a cópia dela.',
   deleteOwnMessageConfirm: 'Apagar esta mensagem?',

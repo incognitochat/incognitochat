@@ -188,6 +188,7 @@ export const tr = {
   cancelReply: 'Yanıtı iptal et',
   deletedMessage: 'Silinmiş mesaj',
   messageActions: 'Mesaj işlemleri',
+  chatActions: 'Sohbet işlemleri',
   deleteForMe: 'Benim için sil',
   deleteMessageConfirm: 'Bu mesaj bu cihazdan silinsin mi? Karşı taraf kendi kopyasını tutar.',
   deleteOwnMessageConfirm: 'Bu mesaj silinsin mi?',

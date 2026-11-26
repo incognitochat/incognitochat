@@ -187,6 +187,7 @@ export const en = {
   cancelReply: 'Cancel reply',
   deletedMessage: 'Deleted message',
   messageActions: 'Message actions',
+  chatActions: 'Chat actions',
   deleteForMe: 'Delete for me',
   deleteMessageConfirm: "Delete this message from this device? The other side keeps their copy.",
   deleteOwnMessageConfirm: 'Delete this message?',

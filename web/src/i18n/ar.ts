@@ -193,6 +193,7 @@ export const ar = {
   cancelReply: 'إلغاء الرد',
   deletedMessage: 'رسالة محذوفة',
   messageActions: 'إجراءات الرسالة',
+  chatActions: 'إجراءات المحادثة',
   deleteForMe: 'حذف لديّ',
   deleteMessageConfirm: 'هل تريد حذف هذه الرسالة من هذا الجهاز؟ يحتفظ الطرف الآخر بنسخته.',
   deleteOwnMessageConfirm: 'هل تريد حذف هذه الرسالة؟',

@@ -188,6 +188,7 @@ export const de = {
   cancelReply: 'Antwort abbrechen',
   deletedMessage: 'Gelöschte Nachricht',
   messageActions: 'Nachrichtenaktionen',
+  chatActions: 'Chataktionen',
   deleteForMe: 'Bei mir löschen',
   deleteMessageConfirm: 'Diese Nachricht von diesem Gerät löschen? Die andere Seite behält ihre Kopie.',
   deleteOwnMessageConfirm: 'Diese Nachricht löschen?',
