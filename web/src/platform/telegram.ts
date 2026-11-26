@@ -16,6 +16,8 @@ interface IncomingEvents {
   safe_area_changed: { top: number; bottom: number; left: number; right: number };
   content_safe_area_changed: { top: number; bottom: number; left: number; right: number };
   back_button_pressed: Record<string, never>;
+  /** The Settings item in Telegram's menu for the app (shown while web_app_setup_settings_button says so). */
+  settings_button_pressed: Record<string, never>;
   write_access_requested: { status: 'allowed' | 'cancelled' };
   visibility_changed: { is_visible: boolean };
   popup_closed: { button_id?: string };
@@ -35,6 +37,7 @@ export interface OutgoingEvents {
   web_app_request_safe_area: undefined;
   web_app_request_content_safe_area: undefined;
   web_app_setup_back_button: { is_visible: boolean };
+  web_app_setup_settings_button: { is_visible: boolean };
   web_app_request_write_access: undefined;
   web_app_open_popup: PopupParams;
   web_app_open_tg_link: { path_full: string };

@@ -2,7 +2,7 @@
 // reads `screen` and calls actions; it never touches storage, crypto or the
 // network itself.
 
-import { signal } from '@preact/signals';
+import { effect, signal } from '@preact/signals';
 import {
   isRegistrationLaunch,
   isSetUp,
@@ -402,7 +402,7 @@ export type Screen =
   | { kind: 'elsewhere' }
   | {
       kind: 'home';
-      tab: 'chats' | 'links';
+      tab: HomeTab;
       conversations: ConversationView[];
       offline: boolean;
       /** Offline because the server refused home's own requests for now (deviceLimit): said in place of "offline". */
@@ -420,7 +420,11 @@ export type Screen =
       signedOut: SignedOutReason | null;
       /** The user's deletion couldn't finish, and they read their chats meanwhile: read-only; Try again carries on with it. */
       deletionPaused: boolean;
+      /** Bytes of attachments stored on this device, for the Settings tab (null on the other tabs). */
+      media: number | null;
     }
+  /** Choosing the app's language (the choice itself lives in state/language.ts). */
+  | { kind: 'language' }
   | { kind: 'blocked'; conversations: ConversationView[]; busy: boolean; notice: HomeNotice | null }
   /** Data and storage: what stays on this device and what's fetched by itself. */
   | { kind: 'storage'; settings: MediaSettings; usage: StorageUsage | null; busy: boolean; cleared: number | null }
@@ -476,6 +480,27 @@ export type Screen =
   | { kind: 'error'; error: ErrorKind };
 
 type AdminScreen = Extract<Screen, { kind: 'admin' }>;
+
+/** The home screen's tabs, switched by the bar at its bottom. */
+export type HomeTab = 'chats' | 'links' | 'settings';
+
+/**
+ * Where Telegram's own Settings item (in its menu) is offered: the screens of
+ * a set-up app, not setup, sign-out, deletion or errors. It opens the
+ * Settings tab.
+ */
+const SETTINGS_BUTTON_SCREENS: ReadonlySet<Screen['kind']> = new Set([
+  'home',
+  'conversation',
+  'blocked',
+  'storage',
+  'usage',
+  'invitations',
+  'admin',
+  'language',
+  'link',
+  'invitation',
+]);
 
 export interface Deps {
   config: Config | null;
@@ -576,9 +601,25 @@ export function createApp(deps: Deps) {
     else if (currentScreen().kind === 'deleting-chats') void keepAccount();
     else void showHome();
   });
+  // Telegram's Settings item: shown on the screens that have somewhere to
+  // take it (told only when that changes); a press closes whatever is open on
+  // top, then opens the Settings tab.
+  let settingsButton: boolean | null = null;
+  effect(() => {
+    const visible = SETTINGS_BUTTON_SCREENS.has(screen.value.kind);
+    if (visible === settingsButton) return;
+    settingsButton = visible;
+    deps.bridge?.post('web_app_setup_settings_button', { is_visible: visible });
+  });
+  deps.bridge?.on('settings_button_pressed', () => {
+    if (!SETTINGS_BUTTON_SCREENS.has(currentScreen().kind)) return;
+    // Closing takes each one off as it redraws, later: all of them, as they are now.
+    for (const close of [...onTop].reverse()) close();
+    void showHome({ tab: 'settings' });
+  });
   let messaging: Messaging | null = null;
   let mediaSettings: MediaSettings = DEFAULT_MEDIA_SETTINGS;
-  let tab: 'chats' | 'links' = 'chats';
+  let tab: HomeTab = 'chats';
   let backgroundStarted = false;
   // Stops the inbox poll and the push socket (the account was deleted).
   let stopBackground = (): void => {};
@@ -1129,11 +1170,13 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home' && !current.busy) {
       const draw = ++homeDraws;
       const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
+      const blockedCount = (await listConversations(deps.db)).filter((c) => c.status === 'blocked').length;
+      const media = current.tab === 'settings' ? (await mediaUsage(deps.db)).total : null;
       const latest = screen.value;
       // A newer one draws (or drew) what's newer.
       if (draw !== homeDraws || latest.kind !== 'home' || latest.busy) return;
       const notice = withNewKey(latest.notice, newKey);
-      screen.value = { ...latest, conversations: list, links, notice };
+      screen.value = { ...latest, conversations: list, links, notice, blockedCount, media: latest.tab === 'settings' ? media : null };
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
@@ -2468,7 +2511,7 @@ export function createApp(deps: Deps) {
     return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, l) }));
   }
 
-  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
+  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab } = {}): Promise<void> {
     if (options.tab) tab = options.tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
@@ -2520,6 +2563,7 @@ export function createApp(deps: Deps) {
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
       deletionPaused,
+      media: tab === 'settings' ? (await mediaUsage(db)).total : null,
     };
     if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
     // By itself only if Telegram never refused one (never set up, or a new
@@ -3059,7 +3103,12 @@ export function createApp(deps: Deps) {
     popup: (params: { title?: string; message: string; buttons: PopupButton[] }) =>
       deps.bridge ? openPopup(deps.bridge, params) : Promise.resolve(null),
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
-    showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
+    showTab: (t: HomeTab) => showHome({ tab: t }),
+    /** Choosing the app's language (from Settings). */
+    language: (): void => {
+      backButton(true);
+      screen.value = { kind: 'language' };
+    },
     sync: syncNow,
     /**
      * Another copy started a sync at `at` (paced: one the app asked for by

@@ -12,6 +12,10 @@ const TOKENS: Record<string, string> = {
   button_text_color: '--app-on-accent',
   link_color: '--app-link',
   destructive_text_color: '--app-danger',
+  // Newer clients only: the app falls back to the colours above (app.css).
+  section_bg_color: '--app-section',
+  section_separator_color: '--app-separator',
+  bottom_bar_bg_color: '--app-bar',
 };
 
 const COLOR = /^#[0-9a-f]{3,8}$/i;

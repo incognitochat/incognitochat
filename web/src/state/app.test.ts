@@ -2879,6 +2879,137 @@ describe('the back button', () => {
   });
 });
 
+/** A Telegram bridge that keeps what the app posts, and plays events to every handler. */
+function recordingBridge() {
+  const handlers = new Map<string, Set<(data: unknown) => void>>();
+  const posted: { type: string; data: unknown }[] = [];
+  const bridge: Bridge = {
+    transport: 'webview-proxy',
+    post: (type, ...data) => void posted.push({ type, data: data[0] }),
+    on: (type, handler) => {
+      if (!handlers.has(type)) handlers.set(type, new Set());
+      handlers.get(type)!.add(handler as (data: unknown) => void);
+      return () => void handlers.get(type)!.delete(handler as (data: unknown) => void);
+    },
+  };
+  return {
+    bridge,
+    posted,
+    fire: (type: string) => handlers.get(type)?.forEach((h) => h({})),
+    last: (type: string) => posted.filter((p) => p.type === type).at(-1)?.data,
+    count: (type: string) => posted.filter((p) => p.type === type).length,
+  };
+}
+
+describe('the Settings tab', () => {
+  it('shows what its rows need: the media on this device, blocked chats, the account and invitations', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.member = true;
+    const owner = await registered(server.api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await putMedia(owner.db, 'c1', 'p', new Uint8Array(1500));
+    await owner.app.showTab('settings');
+    expect(home(owner.app.screen.value)).toMatchObject({
+      tab: 'settings',
+      media: 1500,
+      blockedCount: 0,
+      account: { canCreateLinks: true },
+      invitations: { inviteOnly: true, member: true },
+    });
+    // The other tabs don't read it.
+    await owner.app.showTab('chats');
+    expect(home(owner.app.screen.value).media).toBeNull();
+    // A redraw (new messages, another copy's change) keeps it up to date on Settings only.
+    await owner.app.showTab('settings');
+    await addMessage(
+      owner.db,
+      { id: 'q', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: 'upload-q', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.refresh();
+    expect(home(owner.app.screen.value).media).toBe(2500);
+  });
+
+  it('goes back to Settings from every page it opens', async () => {
+    const tg = recordingBridge();
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.admin = true;
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    const pages: [Screen['kind'], () => unknown][] = [
+      ['language', owner.app.language],
+      ['blocked', owner.app.blocked],
+      ['storage', owner.app.storage],
+      ['usage', owner.app.usage],
+      ['invitations', owner.app.invitations],
+      ['admin', owner.app.admin],
+    ];
+    for (const [kind, open] of pages) {
+      await owner.app.showTab('settings');
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+      await open();
+      expect(owner.app.screen.value.kind).toBe(kind);
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: true });
+      tg.fire('back_button_pressed');
+      await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+    }
+  });
+
+  it("offers Telegram's Settings item on the app's own screens, and a press there opens the Settings tab", async () => {
+    const server = fakeServer();
+    // Before setting up: not offered.
+    const before = recordingBridge();
+    const fresh = await setup({ api: server.api, bridge: before.bridge, launch: launchWith('') });
+    await fresh.app.start();
+    expect(fresh.app.screen.value.kind).toBe('welcome');
+    expect(before.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    before.fire('settings_button_pressed');
+    await tick();
+    expect(fresh.app.screen.value.kind).toBe('welcome');
+
+    const tg = recordingBridge();
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // Told only when it changes.
+    const told = tg.count('web_app_setup_settings_button');
+    await owner.app.showTab('links');
+    await owner.app.storage();
+    expect(tg.count('web_app_setup_settings_button')).toBe(told);
+
+    // From a page with something open on top: that closes, and Settings opens.
+    let closed = 0;
+    const done = owner.app.onBack(() => {
+      closed++;
+      done();
+    });
+    tg.fire('settings_button_pressed');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    expect(closed).toBe(1);
+    expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+  });
+
+  it('is not offered while the server refuses this device, and a press then does nothing', async () => {
+    const refused = () => new ApiError(401, 'login_refused');
+    // The first login is the one registered() makes.
+    const server = fakeServer({ session: ['ok', refused(), refused()] });
+    const { db } = await registered(server.api);
+    const tg = recordingBridge();
+    const { app } = await setup({ api: server.api, bridge: tg.bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value.kind).toBe('signed-out');
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    await tick();
+    expect(app.screen.value.kind).toBe('signed-out');
+  });
+});
+
 describe('invitations', () => {
   it('lets an admin invite someone, who then joins through the link', async () => {
     const server = fakeServer();
