@@ -752,19 +752,16 @@ function useChatScroll(app: AppState, id: string, messages: { id: string; out: b
 
 function Conversation({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'conversation' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
-  const confirmingBlock = useSignal(false);
-  useBackCloses(confirmingBlock.value, () => (confirmingBlock.value = false));
   // The ⋯ menu in the header: Block, Delete. Only while they can be done.
   const chatMenu = useSignal<{ top: number; end: number } | false>(false);
-  const menuShown = !!chatMenu.value && !screen.blocked && !screen.readOnly && !confirmingBlock.value;
+  const menuShown = !!chatMenu.value && !screen.blocked && !screen.readOnly;
   useBackCloses(menuShown, () => (chatMenu.value = false));
   const menuButton = useRef<HTMLButtonElement>(null);
-  const cancelBlock = useRef<HTMLButtonElement>(null);
   /**
    * Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from
    * the menu's overlay (the page's box less any scroll: a scrollbar on
-   * either side left out). It never leaves the screen: with ⋯ scrolled out
-   * of view (a turn, older messages loading above), it stays at the top.
+   * either side left out). With ⋯ scrolled out of view (a turn, older
+   * messages loading above), it stays where it was, kept on the screen.
    */
   const placeChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
@@ -774,15 +771,18 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     }
     const page = document.documentElement;
     const left = page.getBoundingClientRect().left + window.scrollX;
-    const top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - 128));
-    const at = { top: Math.round(top), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
     const now = chatMenu.peek();
+    const inView = r.bottom > 0 && r.top < window.innerHeight;
+    const wanted = inView || !now ? r.bottom + 4 : now.top;
+    // On screen, with room below for the menu's two items (about 120 px).
+    const top = Math.max(8, Math.min(wanted, window.innerHeight - 128));
+    const at = { top: Math.round(top), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
     if (now && now.top === at.top && now.end === at.end) return;
     chatMenu.value = at;
   };
   // A turned phone, a resized window, the keyboard closing as the menu takes
   // the focus (Android resizes the page), or the page scrolling under it:
-  // placed again, under ⋯ (or at the top, ⋯ gone from view). Added and removed in
+  // placed again, under ⋯ (or where it was, ⋯ gone from view). Added and removed in
   // the same commit as the menu, and never reopening one closed. On a resize
   // it runs after useChatScroll's handler (added when the chat opened), so it
   // measures ⋯ where that left it.
@@ -802,15 +802,6 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   useEffect(() => {
     if (screen.blocked || screen.readOnly) chatMenu.value = false;
   }, [screen.blocked, screen.readOnly]);
-  // Asking whether to block: the focus goes to Cancel. Answered with Cancel
-  // (the focus gone with it), back to ⋯; closed by Back or Settings while the
-  // user was elsewhere (typing, say), the focus stays where it is.
-  const asked = useRef(false);
-  useEffect(() => {
-    if (confirmingBlock.value) cancelBlock.current?.focus({ preventScroll: true });
-    else if (asked.current && (!document.activeElement || document.activeElement === document.body)) menuButton.current?.focus({ preventScroll: true });
-    asked.current = confirmingBlock.value;
-  }, [confirmingBlock.value]);
   const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
   const sending = app.preparing.value.filter((p) => p.conv === screen.id).length;
   useEffect(() => {
@@ -843,11 +834,9 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replyKept.current = null;
     menu.value = null;
   }, [screen.id]);
-  // Before the new chat paints: the old one's ⋯ menu and Block question don't show on it.
+  // Before the new chat paints: the old one's ⋯ menu doesn't show on it.
   useLayoutEffect(() => {
     chatMenu.value = false;
-    confirmingBlock.value = false;
-    asked.current = false;
   }, [screen.id]);
   // A quote's message older than those shown: loaded, then jumped to.
   const jumping = useRef<string | null>(null);
@@ -887,7 +876,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             </span>
             <span class="muted">{tr(screen.role === 'owner' ? 'aboutOwnerConversation' : 'aboutSenderConversation')}</span>
           </span>
-          {!screen.blocked && !screen.readOnly && !confirmingBlock.value && (
+          {!screen.blocked && !screen.readOnly && (
             <button
               type="button"
               class="bar-icon chat-menu-button"
@@ -910,24 +899,13 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             </button>
           )}
         </div>
-        {!screen.blocked && !screen.readOnly && confirmingBlock.value && (
-          <div class="row">
-            <p class="warning">{tr(screen.role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender')}</p>
-            <Button kind="danger" disabled={screen.busy} onClick={app.block}>
-              {tr('blockYes')}
-            </Button>
-            <button type="button" class="button secondary" ref={cancelBlock} disabled={screen.busy} onClick={() => (confirmingBlock.value = false)}>
-              {tr('cancel')}
-            </button>
-          </div>
-        )}
       </header>
       {menuShown && (
         <ChatMenu
           language={language}
           at={chatMenu.value || null}
           onClose={() => (chatMenu.value = false)}
-          onBlock={() => (confirmingBlock.value = true)}
+          onBlock={() => void confirmBlock(app, language, screen.id, screen.role)}
           onDelete={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}
         />
       )}
@@ -1430,6 +1408,19 @@ async function confirmReplace(app: AppState, language: Language): Promise<void> 
     ],
   });
   if (choice === 'replace') await app.replaceLink();
+}
+
+/** Asks, in Telegram's own popup, before blocking this chat's other person; blocks only if that chat is still open. */
+async function confirmBlock(app: AppState, language: Language, id: string, role: 'owner' | 'sender'): Promise<void> {
+  const choice = await app.popup({
+    message: t(language, role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender'),
+    buttons: [
+      { id: 'block', type: 'destructive', text: t(language, 'blockYes') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  const now = app.screen.value;
+  if (choice === 'block' && now.kind === 'conversation' && now.id === id) await app.block();
 }
 
 /** Asks, in Telegram's own popup, before deleting the link. */
@@ -3433,7 +3424,7 @@ function Reactions({ message: m, language, canReact, onReact }: { message: Messa
 
 const formatCount = (language: Language, n: number) => new Intl.NumberFormat(locale(language)).format(n);
 
-/** The chat's own menu, from the ⋯ in its header: Block (asks first, below the header) and Delete (its dialog). */
+/** The chat's own menu, from the ⋯ in its header: Block (asks first, in Telegram's popup) and Delete (its dialog). */
 function ChatMenu({
   language,
   at,
@@ -3442,7 +3433,7 @@ function ChatMenu({
   onDelete,
 }: {
   language: Language;
-  /** Where it opens: below the ⋯ button (px from the top, and from the window's inline end). */
+  /** Where it opens: px from the top and from the window's inline end (below ⋯, kept on screen). */
   at: { top: number; end: number } | null;
   onClose: () => void;
   onBlock: () => void;
