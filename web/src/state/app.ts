@@ -1170,8 +1170,11 @@ export function createApp(deps: Deps) {
   // that read storage before another can't draw over it (an older list,
   // previews or unread counts, until something drew it again).
   let homeDraws = 0;
-  // Actions started on home (busy), each drawing home itself once done.
+  // Actions started on home (busy), each drawing home itself once done; and
+  // the draws of home asked for a tab (a tap, Telegram's Settings item, an
+  // action's end). A home draw is dropped once a newer one of either began.
   let homeActions = 0;
+  let tabAsks = 0;
 
   /**
    * Redraws the current screen from storage (after new messages, or another
@@ -2542,8 +2545,11 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home' && current.tab === 'settings') screen.value = { ...current, media: total };
   }
 
-  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab } = {}): Promise<void> {
+  /** Draws home. overHome: a tab switch, drawn only if home is still on screen (not over a chat opened meanwhile). */
+  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean } = {}): Promise<void> {
     const actions = homeActions;
+    const ask = options.tab ? ++tabAsks : tabAsks;
+    const shownTab = options.tab ?? tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
@@ -2578,7 +2584,7 @@ export function createApp(deps: Deps) {
     const links = await linkViews();
     const drawn = {
       kind: 'home' as const,
-      tab: options.tab ?? tab,
+      tab: shownTab,
       conversations: await conversations(),
       offline,
       limited,
@@ -2594,11 +2600,12 @@ export function createApp(deps: Deps) {
       signedOut,
       deletionPaused,
       // Last measured (null the first time): measured again below, without holding the tab up.
-      media: (options.tab ?? tab) === 'settings' ? mediaBytes : null,
+      media: shownTab === 'settings' ? mediaBytes : null,
     };
-    const latest = screen.value;
-    // An action started on home meanwhile draws home itself once done.
-    if (actions !== homeActions && latest.kind === 'home' && latest.busy) return;
+    // A newer tab asked for, or an action started on home meanwhile (it draws
+    // home itself once done, or the screen its end calls for): that one shows.
+    if (ask !== tabAsks || actions !== homeActions) return;
+    if (options.overHome && screen.value.kind !== 'home') return;
     tab = drawn.tab;
     backButton(false);
     screen.value = drawn;
@@ -2657,7 +2664,7 @@ export function createApp(deps: Deps) {
     const code = normalizeCode(input);
     if (!code) return showHome({ notice: 'invalid-invitation' });
     const current = screen.value;
-    if (current.kind === 'invitation' && current.busy) return;
+    if ((current.kind === 'invitation' || current.kind === 'home') && current.busy) return;
     if (current.kind === 'home') homeActions++;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
     if (current.kind === 'invitation') screen.value = { ...current, busy: true, error: null };
@@ -3151,7 +3158,7 @@ export function createApp(deps: Deps) {
     showTab: (t: HomeTab): Promise<void> => {
       const current = screen.value;
       if (current.kind === 'home' && current.busy) return Promise.resolve();
-      return showHome({ tab: t });
+      return showHome({ tab: t, overHome: true });
     },
     /** Choosing the app's language (from Settings). */
     language: (): void => {

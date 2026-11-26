@@ -3143,7 +3143,7 @@ describe('the Settings tab', () => {
     await storage.atRead;
     await photo('r', 500);
     const settings = holdRead('mediaUsage');
-    await owner.app.showTab('settings');
+    await owner.app.home();
     await settings.atRead;
     // The older one ends first, then the newer (3000): the newer shows.
     storage.release();
@@ -3335,6 +3335,170 @@ describe('the Settings tab', () => {
     tg.fire('settings_button_pressed');
     await tick();
     expect(app.screen.value.kind).toBe('signed-out');
+  });
+});
+
+describe('switching tabs while home loads (a slow network)', () => {
+  /** Holds the first request that matches, until released. */
+  function holdFirst(server: ReturnType<typeof fakeServer>, match: (method: string, path: string) => boolean) {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let holding = true;
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (holding && match(method, path)) {
+        holding = false;
+        await held;
+      }
+      return request(method, path, init, check);
+    }) as Api['request'];
+    return () => release();
+  }
+  const account = (m: string, p: string) => m === 'GET' && p === '/account';
+
+  it('ends on the tab tapped last, whichever loads last', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    const release = holdFirst(server, account);
+    try {
+      const first = owner.app.showTab('settings');
+      await tick();
+      await owner.app.showTab('links');
+      expect(home(owner.app.screen.value).tab).toBe('links');
+      release();
+      await first;
+      expect(home(owner.app.screen.value).tab).toBe('links');
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over what an action ended with, when the action ends first", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await tick();
+      await owner.app.createLink();
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created', busy: false });
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over the screen an action ended on (the account replaced elsewhere)", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    const release = holdFirst(server, account);
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'POST' && path === '/links') throw new ApiError(410, 'account_replaced');
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      const switching = owner.app.showTab('settings');
+      await tick();
+      await owner.app.createLink();
+      const ended = owner.app.screen.value.kind;
+      expect(ended).not.toBe('home');
+      release();
+      await switching;
+      expect(owner.app.screen.value.kind).toBe(ended);
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over a chat opened meanwhile", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await tick();
+      await owner.app.openConversation('c1');
+      release();
+      await switching;
+      expect(owner.app.screen.value.kind).toBe('conversation');
+    } finally {
+      release();
+    }
+  });
+
+  it('deletes a chat from home once, while a tab switch loads', async () => {
+    const server = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    engines.made.length = 0;
+    const owner = await registered(server.api, { issuer });
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const engine = engines.made.at(-1)!;
+    let releaseRemove = () => {};
+    const removeHeld = new Promise<void>((r) => (releaseRemove = r));
+    let removes = 0;
+    vi.spyOn(engine, 'remove').mockImplementation(async () => {
+      removes++;
+      await removeHeld;
+    });
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await tick();
+      const deleting = owner.app.deleteConversation('c1', false);
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: true }));
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: true });
+      await owner.app.deleteConversation('c1', false);
+      releaseRemove();
+      await deleting;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: false, notice: 'deleted' });
+      expect(removes).toBe(1);
+    } finally {
+      release();
+      releaseRemove();
+    }
+  });
+
+  it('joins from home once, while a tab switch loads, and lands where it began', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let releaseRedeem = () => {};
+    const redeemHeld = new Promise<void>((r) => (releaseRedeem = r));
+    const release = holdFirst(server, account);
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (path === '/invitations/redeem') await redeemHeld;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      const switching = owner.app.showTab('settings');
+      await tick();
+      const joining = owner.app.redeem('abcd-efgh');
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true }));
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      await owner.app.redeem('abcd-efgh');
+      releaseRedeem();
+      await joining;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'joined', busy: false });
+      expect(server.calls.filter((c) => c === 'POST /invitations/redeem')).toHaveLength(1);
+    } finally {
+      release();
+      releaseRedeem();
+    }
   });
 });
 
