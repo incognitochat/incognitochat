@@ -2837,6 +2837,46 @@ describe('the back button', () => {
     await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('links'));
     expect(shown()).toEqual({ is_visible: false });
   });
+
+  it('goes back to the tab each screen was opened from', async () => {
+    const handlers = new Map<string, (data: unknown) => void>();
+    const bridge: Bridge = {
+      transport: 'webview-proxy',
+      post: () => {},
+      on: (type, handler) => {
+        handlers.set(type, handler as (data: unknown) => void);
+        return () => {};
+      },
+    };
+    const back = () => handlers.get('back_button_pressed')!({});
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.admin = true;
+    const owner = await registered(server.api, { bridge });
+    const screens: [Screen['kind'], () => Promise<void>][] = [
+      ['blocked', owner.app.blocked],
+      ['storage', owner.app.storage],
+      ['usage', owner.app.usage],
+      ['invitations', owner.app.invitations],
+      ['admin', owner.app.admin],
+    ];
+    for (const tab of ['chats', 'links'] as const) {
+      for (const [kind, open] of screens) {
+        await owner.app.showTab(tab);
+        await open();
+        expect(owner.app.screen.value.kind).toBe(kind);
+        back();
+        await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe(tab));
+      }
+    }
+    // Invitations and Admin have a Back button of their own, which does the same.
+    for (const open of [owner.app.invitations, owner.app.admin]) {
+      await owner.app.showTab('links');
+      await open();
+      await owner.app.home();
+      expect(home(owner.app.screen.value).tab).toBe('links');
+    }
+  });
 });
 
 describe('invitations', () => {
