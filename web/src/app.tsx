@@ -182,11 +182,13 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
     case 'blocked':
       return <Blocked app={app} language={language} screen={screen} />;
     case 'storage':
-      return <Storage app={app} language={language} screen={screen} setting={setting} />;
+      return <Storage app={app} language={language} screen={screen} />;
     case 'usage':
       return <Usage language={language} screen={screen} />;
     case 'home':
-      return <Home app={app} language={language} screen={screen} />;
+      return <Home app={app} language={language} screen={screen} setting={setting} />;
+    case 'language':
+      return <LanguagePage language={language} setting={setting} />;
     case 'invitations':
       return <Invitations app={app} language={language} screen={screen} />;
     case 'admin':
@@ -289,17 +291,154 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
   }
 }
 
-function Home({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'home' }> }) {
+type HomeScreen = Extract<Screen, { kind: 'home' }>;
+
+/** A line icon, 24 units square, in the text's colour. */
+function Icon({ name, class: className }: { name: keyof typeof ICONS; class?: string }) {
+  return (
+    <svg class={className ? `icon-stroke ${className}` : 'icon-stroke'} viewBox="0 0 24 24" aria-hidden="true">
+      {ICONS[name]}
+    </svg>
+  );
+}
+
+const ICONS = {
+  chats: <path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.5L3 20.5l1.6-5A8.4 8.4 0 1 1 21 11.5z" />,
+  link: (
+    <>
+      <path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1" />
+      <path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" />
+    </>
+  ),
+  settings: (
+    <>
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  bell: (
+    <>
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </>
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </>
+  ),
+  storage: (
+    <>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+      <path d="M3 12a9 3 0 0 0 18 0" />
+    </>
+  ),
+  blocked: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="m4.9 4.9 14.2 14.2" />
+    </>
+  ),
+  invite: (
+    <>
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M19 8v6M22 11h-6" />
+    </>
+  ),
+  usage: <path d="M18 20V10M12 20V4M6 20v-6" />,
+  admin: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
+  code: <path d="m16 18 6-6-6-6M8 6l-6 6 6 6" />,
+  trash: (
+    <>
+      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </>
+  ),
+  renew: (
+    <>
+      <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+      <path d="M21 3v5h-5" />
+    </>
+  ),
+  chevron: <path d="m9 18 6-6-6-6" />,
+  external: <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />,
+  check: <path d="M20 6 9 17l-5-5" />,
+};
+
+const TABS: readonly { tab: HomeScreen['tab']; text: Key; icon: keyof typeof ICONS }[] = [
+  { tab: 'chats', text: 'tabChats', icon: 'chats' },
+  { tab: 'links', text: 'tabLinks', icon: 'link' },
+  { tab: 'settings', text: 'tabSettings', icon: 'settings' },
+];
+
+/** The bar at the bottom of home: Chats, My link, Settings. */
+function TabBar({ app, language, screen }: { app: AppState; language: Language; screen: HomeScreen }) {
+  const unread = screen.conversations.reduce((sum, c) => sum + c.unread, 0);
+  return (
+    <nav class="tab-bar">
+      {TABS.map(({ tab, text, icon }) => (
+        <button type="button" class="tab-item" aria-current={screen.tab === tab ? 'page' : undefined} disabled={screen.busy} onClick={() => void app.showTab(tab)}>
+          <span class="tab-icon">
+            <Icon name={icon} />
+            {tab === 'chats' && unread > 0 && (
+              <span class="badge tab-badge" aria-hidden="true">
+                {unread > 99 ? `${formatCount(language, 99)}+` : formatCount(language, unread)}
+              </span>
+            )}
+          </span>
+          <span class="tab-label">{t(language, text)}</span>
+          {tab === 'chats' && unread > 0 && <span class="visually-hidden">{t(language, 'unreadMessagesCount', { count: unread })}</span>}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/** A row of a settings group: an icon, a name, what it's set to, and where it goes. */
+function Cell({
+  icon,
+  label,
+  value,
+  onClick,
+  disabled,
+  kind = 'page',
+  short,
+}: {
+  icon: keyof typeof ICONS;
+  label: string;
+  value?: ComponentChildren;
+  /** The value is short (a size, a count): never cut. */
+  short?: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  /** page: opens a page (a chevron); external: opens outside the app; action: does something here, after asking; danger: the same, destructive. */
+  kind?: 'page' | 'external' | 'action' | 'danger';
+}) {
+  return (
+    <button type="button" class={`cell is-${kind}`} disabled={disabled} onClick={onClick}>
+      <Icon name={icon} class="cell-icon" />
+      <span class="cell-label">{label}</span>
+      {value !== undefined && value !== null && value !== '' && <span class={short ? 'cell-value short' : 'cell-value'}>{value}</span>}
+      {kind === 'page' && <Icon name="chevron" class="cell-go chevron" />}
+      {kind === 'external' && <Icon name="external" class="cell-go" />}
+    </button>
+  );
+}
+
+function Home({ app, language, screen, setting }: { app: AppState; language: Language; screen: HomeScreen; setting: LanguageSetting }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
-  const { account, invitations, links, busy, notice, offline, limited } = screen;
-  // One link per account (older ones, from before, go when it's replaced).
-  const link = links[links.length - 1];
-  const canCreate = !offline && !!account?.canCreateLinks && !link;
-  const mayJoin = !!invitations && invitations.inviteOnly && !invitations.member && !invitations.admin;
-  const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
-  // The chat swiped open to show its Delete button.
-  const revealed = useSignal<string | null>(null);
+  const { notice, offline, limited } = screen;
   useEffect(() => app.prepareSource(), [app]);
+  // A new tab starts at its top.
+  const shownTab = useRef(screen.tab);
+  useEffect(() => {
+    if (shownTab.current !== screen.tab) window.scrollTo({ top: 0 });
+    shownTab.current = screen.tab;
+  }, [screen.tab]);
   // Signed out, the chats are read-only; Try again asks the server again.
   // A deletion that couldn't finish: read-only too; Try again carries on with it.
   const status = screen.deletionPaused ? (
@@ -320,127 +459,192 @@ function Home({ app, language, screen }: { app: AppState; language: Language; sc
     // Refused for now, the server was reached: its notice says so, alone.
     offline && notice !== 'device-limit' && notice !== 'device-limit-later' && <p class="notice">{tr(limited ? ERROR_TEXT[limited] : 'offline')}</p>
   );
-  const tabs = (
-    <div class="tabs" role="tablist">
-      {(['chats', 'links'] as const).map((tabName) => (
-        <button
-          type="button"
-          role="tab"
-          aria-selected={screen.tab === tabName}
-          class={screen.tab === tabName ? 'tab active' : 'tab'}
-          onClick={() => void app.showTab(tabName)}
-        >
-          {tr(tabName === 'chats' ? 'tabChats' : 'tabLinks')}
-          {tabName === 'chats' && screen.conversations.some((c) => c.unread > 0) && (
-            <>
-              <span class="dot" aria-hidden="true" />
-              <span class="visually-hidden">{tr('unreadMessages')}</span>
-            </>
-          )}
-        </button>
-      ))}
-    </div>
-  );
-  if (screen.tab === 'chats') {
-    return (
-      <main class="page">
-        {tabs}
-        {status}
-        {notice && (
-          <p class="notice" role="status">
-            {tr(NOTICE_TEXT[notice])}
-          </p>
-        )}
-        {screen.askNotices && (
-          <div class="card">
-            <p>{tr('noticesAsk')}</p>
-            <button type="button" class="button secondary" onClick={() => app.allowNotices()}>
-              {tr('noticesAllow')}
-            </button>
-          </div>
-        )}
-        {screen.conversations.length === 0 ? (
-          <p class="muted">{tr('noConversations')}</p>
-        ) : (
-          <ul class="chats">
-            {screen.conversations.map((c) => (
-              <ChatRow
-                key={c.id}
-                app={app}
-                language={language}
-                chat={c}
-                revealed={revealed.value === c.id}
-                onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
-              />
-            ))}
-          </ul>
-        )}
-        {screen.blockedCount > 0 && (
-          <button type="button" class="link-button muted-link" onClick={() => void app.blocked()}>
-            {tr('blockedCount', { count: screen.blockedCount })}
-          </button>
-        )}
-      </main>
-    );
-  }
-  return (
-    <Page title={tr('homeTitle')} body={tr('homeIntro')}>
-      {tabs}
+  const top = (
+    <>
       {status}
       {notice && (
         <p class="notice" role="status">
           {tr(NOTICE_TEXT[notice])}
         </p>
       )}
+    </>
+  );
+  return (
+    <div class={screen.tab === 'chats' ? 'home' : 'home grouped'}>
+      {screen.tab === 'chats' ? (
+        <ChatsTab app={app} language={language} screen={screen} top={top} />
+      ) : screen.tab === 'links' ? (
+        <LinkTab app={app} language={language} screen={screen} top={top} />
+      ) : (
+        <SettingsTab app={app} language={language} screen={screen} top={top} setting={setting} />
+      )}
+      <TabBar app={app} language={language} screen={screen} />
+    </div>
+  );
+}
+
+type TabProps = { app: AppState; language: Language; screen: HomeScreen; top: ComponentChildren };
+
+function ChatsTab({ app, language, screen, top }: TabProps) {
+  const tr = (key: Key) => t(language, key);
+  // The chat swiped open to show its Delete button.
+  const revealed = useSignal<string | null>(null);
+  const link = screen.links[screen.links.length - 1];
+  return (
+    <main class="page home-tab">
+      <h1>{tr('tabChats')}</h1>
+      {top}
+      {screen.askNotices && (
+        <div class="card">
+          <p>{tr('noticesAsk')}</p>
+          <button type="button" class="button secondary" onClick={() => app.allowNotices()}>
+            {tr('noticesAllow')}
+          </button>
+        </div>
+      )}
+      {screen.conversations.length === 0 ? (
+        <div class="empty">
+          <p class="muted">{tr('noConversations')}</p>
+          {link ? (
+            <LinkCard app={app} language={language} link={link} busy={screen.busy || screen.offline} />
+          ) : (
+            <Button kind="secondary" onClick={() => app.showTab('links')}>
+              {tr('tabLinks')}
+            </Button>
+          )}
+        </div>
+      ) : (
+        <ul class="chats">
+          {screen.conversations.map((c) => (
+            <ChatRow
+              key={c.id}
+              app={app}
+              language={language}
+              chat={c}
+              revealed={revealed.value === c.id}
+              onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
+            />
+          ))}
+        </ul>
+      )}
+    </main>
+  );
+}
+
+function LinkTab({ app, language, screen, top }: TabProps) {
+  const tr = (key: Key) => t(language, key);
+  const { account, invitations, busy, notice, offline } = screen;
+  // One link per account (older ones, from before, go when it's replaced).
+  const link = screen.links[screen.links.length - 1];
+  const canCreate = !offline && !!account?.canCreateLinks && !link;
+  const mayJoin = !!invitations && invitations.inviteOnly && !invitations.member && !invitations.admin;
+  return (
+    <main class="page home-tab">
+      <h1>{tr('tabLinks')}</h1>
+      {top}
       {account && !account.canCreateLinks && notice !== 'invitation' && <p class="notice">{tr('needInvitation')}</p>}
       {mayJoin && <JoinForm app={app} language={language} busy={busy} />}
       {link ? (
-        <ul class="links">
-          <LinkItem key={link.id} app={app} language={language} link={link} busy={busy || offline} />
-        </ul>
+        <>
+          <LinkCard app={app} language={language} link={link} busy={busy || offline} intro />
+          <div class="group">
+            <Cell icon="renew" label={tr('newLink')} kind="action" disabled={busy || offline} onClick={() => void confirmReplace(app, language)} />
+            <Cell icon="trash" label={tr('revoke')} kind="danger" disabled={busy || offline} onClick={() => void confirmRevoke(app, language, link.id)} />
+          </div>
+        </>
       ) : (
-        <p class="muted">{tr('noLinks')}</p>
+        <>
+          <p class="group group-pad">{tr('homeIntro')}</p>
+          {!canCreate && <p class="muted">{tr('noLinks')}</p>}
+        </>
       )}
       {canCreate && (
         <Button disabled={busy} onClick={app.createLink}>
           {tr('createLink')}
         </Button>
       )}
-      {(mayInvite || invitations?.admin) && (
-        <div class="row">
-          {mayInvite && (
-            <Button kind="secondary" disabled={busy} onClick={app.invitations}>
-              {tr('invitationsTitle')}
-            </Button>
-          )}
-          {invitations?.admin && (
-            <Button kind="secondary" disabled={busy} onClick={app.admin}>
-              {tr('adminTitle')}
-            </Button>
-          )}
-        </div>
-      )}
       {busy && <div class="spinner" aria-hidden="true" />}
-      <button type="button" class="link-button muted-link" disabled={busy} onClick={() => void app.storage()}>
-        {tr('storageTitle')}
-      </button>
-      <button type="button" class="link-button muted-link" disabled={busy || offline} onClick={() => void app.usage()}>
-        {tr('usageTitle')}
-      </button>
-      <button
-        type="button"
-        class="link-button muted-link"
-        disabled={busy}
-        onClick={async () => {
-          if ((await app.openSource()) === 'unknown') void app.popup({ message: tr('sourceCodeUnknown'), buttons: [{ id: 'ok', type: 'ok' }] });
-        }}
-      >
-        {tr('sourceCode')}
-      </button>
-      <button type="button" class="link-button delete-account" disabled={busy || offline} onClick={app.askDeleteAccount}>
-        {tr('deleteAccount')}
-      </button>
-    </Page>
+    </main>
+  );
+}
+
+function SettingsTab({ app, language, screen, top, setting }: TabProps & { setting: LanguageSetting }) {
+  const tr = (key: Key) => t(language, key);
+  const { account, invitations, busy, offline } = screen;
+  const mayInvite = !!invitations && invitations.inviteOnly && (invitations.member || invitations.admin);
+  const choice = setting.choice.value;
+  return (
+    <main class="page home-tab">
+      <h1>{tr('tabSettings')}</h1>
+      {top}
+      {account && (
+        <>
+          <div class="group">
+            {/* Off and the app may ask Telegram (the same rule as the Chats card): the row turns them on. */}
+            {!account.notices && screen.askNotices ? (
+              <Cell icon="bell" label={tr('noticesAllow')} kind="action" onClick={() => app.allowNotices()} />
+            ) : (
+              <div class="cell static">
+                <Icon name="bell" class="cell-icon" />
+                <span class="cell-label">{tr('noticesTitle')}</span>
+                <span class="cell-value short">{tr(account.notices ? 'noticesOn' : 'noticesOff')}</span>
+              </div>
+            )}
+          </div>
+          <p class="group-note">{tr('noticesAsk')}</p>
+        </>
+      )}
+      <div class="group">
+        <Cell
+          icon="globe"
+          label={tr('languageTitle')}
+          value={choice === 'telegram' ? tr('languageTelegram') : <bdi lang={choice}>{t(choice, 'languageName')}</bdi>}
+          onClick={app.language}
+        />
+        <Cell icon="storage" label={tr('storageTitle')} short value={screen.media ? formatSize(language, screen.media) : null} disabled={busy} onClick={() => void app.storage()} />
+        <Cell icon="blocked" label={tr('blockedTitle')} short value={screen.blockedCount > 0 ? formatCount(language, screen.blockedCount) : null} disabled={busy} onClick={() => void app.blocked()} />
+      </div>
+      <div class="group">
+        {mayInvite && <Cell icon="invite" label={tr('invitationsTitle')} disabled={busy} onClick={() => void app.invitations()} />}
+        <Cell icon="usage" label={tr('usageTitle')} disabled={busy || offline} onClick={() => void app.usage()} />
+        {invitations?.admin && <Cell icon="admin" label={tr('adminTitle')} disabled={busy} onClick={() => void app.admin()} />}
+        <Cell
+          icon="code"
+          label={tr('sourceCode')}
+          kind="external"
+          disabled={busy}
+          onClick={async () => {
+            if ((await app.openSource()) === 'unknown') void app.popup({ message: tr('sourceCodeUnknown'), buttons: [{ id: 'ok', type: 'ok' }] });
+          }}
+        />
+      </div>
+      <div class="group">
+        <Cell icon="trash" label={tr('deleteAccount')} kind="danger" disabled={busy || offline} onClick={app.askDeleteAccount} />
+      </div>
+      {busy && <div class="spinner" aria-hidden="true" />}
+    </main>
+  );
+}
+
+/** Choosing the app's language: each named in itself, the choice ticked. */
+function LanguagePage({ language, setting }: { language: Language; setting: LanguageSetting }) {
+  return (
+    <div class="grouped-page">
+      <main class="page">
+        <h1>{t(language, 'languageTitle')}</h1>
+        <fieldset class="group">
+          <legend class="visually-hidden">{t(language, 'languageTitle')}</legend>
+          {LANGUAGE_CHOICES.map((choice) => (
+            <label class="cell choice" key={choice}>
+              <input type="radio" name="language" checked={setting.choice.value === choice} onChange={() => void setting.choose(choice)} />
+              {/* Each language named in itself. */}
+              <span class="cell-label">{choice === 'telegram' ? t(language, 'languageTelegram') : <bdi lang={choice}>{t(choice, 'languageName')}</bdi>}</span>
+              {setting.choice.value === choice && <Icon name="check" class="cell-check" />}
+            </label>
+          ))}
+        </fieldset>
+      </main>
+    </div>
   );
 }
 
@@ -1011,7 +1215,7 @@ function UsageRow({
 }
 
 /** Data and storage: what stays on this device, and what's fetched by itself. */
-function Storage({ app, language, screen, setting }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }>; setting: LanguageSetting }) {
+function Storage({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'storage' }> }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const { settings, usage, busy, cleared } = screen;
   const size = (bytes: number) => formatSize(language, bytes);
@@ -1052,16 +1256,6 @@ function Storage({ app, language, screen, setting }: { app: AppState; language: 
           </label>
         ))}
         <p class="muted">{tr('autoDownloadNote')}</p>
-      </fieldset>
-      <fieldset class="settings">
-        <legend>{tr('languageTitle')}</legend>
-        {LANGUAGE_CHOICES.map((choice) => (
-          <label class="option" key={choice}>
-            <input type="radio" name="language" checked={setting.choice.value === choice} onChange={() => void setting.choose(choice)} />
-            {/* Each language named in itself. */}
-            {choice === 'telegram' ? tr('languageTelegram') : <bdi lang={choice}>{t(choice, 'languageName')}</bdi>}
-          </label>
-        ))}
       </fieldset>
       {usage && usage.chats.length > 0 && (
         <section class="settings">
@@ -1132,6 +1326,18 @@ async function confirmReplace(app: AppState, language: Language): Promise<void> 
     ],
   });
   if (choice === 'replace') await app.replaceLink();
+}
+
+/** Asks, in Telegram's own popup, before deleting the link. */
+async function confirmRevoke(app: AppState, language: Language, id: string): Promise<void> {
+  const choice = await app.popup({
+    message: t(language, 'revokeConfirm'),
+    buttons: [
+      { id: 'revoke', type: 'destructive', text: t(language, 'revokeYes') },
+      { id: 'cancel', type: 'cancel' },
+    ],
+  });
+  if (choice === 'revoke') await app.revokeLink(id);
 }
 
 /**
@@ -3442,51 +3648,37 @@ function CopyButton({ language, text, disabled }: { language: Language; text: st
   );
 }
 
-function LinkItem({ app, language, link, busy }: { app: AppState; language: Language; link: LinkView; busy: boolean }) {
+/** The account's link: to copy or share; with intro, what it's for, above it. */
+function LinkCard({ app, language, link, busy, intro }: { app: AppState; language: Language; link: LinkView; busy: boolean; intro?: boolean }) {
   const tr = (key: Key) => t(language, key);
   const copied = useSignal(false);
-  const confirming = useSignal(false);
   const input = useRef<HTMLInputElement>(null);
-  const copy = async (input: HTMLInputElement | null) => {
+  const copy = async () => {
     try {
       await navigator.clipboard.writeText(link.url);
       copied.value = true;
       setTimeout(() => (copied.value = false), 2000);
     } catch {
       // Some webviews refuse clipboard access: select it for copying by hand.
-      input?.select();
+      input.current?.select();
     }
   };
   return (
-    <li class="link">
-      <input class="link-url" type="text" dir="ltr" readonly value={link.url} ref={input} onFocus={(e) => e.currentTarget.select()} />
-      {confirming.value ? (
-        <div class="row">
-          <p class="warning">{tr('revokeConfirm')}</p>
-          <Button kind="danger" disabled={busy} onClick={() => app.revokeLink(link.id)}>
-            {tr('revokeYes')}
-          </Button>
-          <Button kind="secondary" disabled={busy} onClick={() => (confirming.value = false)}>
-            {tr('cancel')}
-          </Button>
-        </div>
-      ) : (
-        <div class="row">
-          <Button kind="secondary" disabled={busy} onClick={() => copy(input.current)}>
-            {copied.value ? tr('copied') : tr('copy')}
-          </Button>
-          <Button kind="secondary" disabled={busy} onClick={() => app.share(link.url)}>
-            {tr('share')}
-          </Button>
-          <Button kind="secondary" disabled={busy} onClick={() => void confirmReplace(app, language)}>
-            {tr('newLink')}
-          </Button>
-          <Button kind="secondary" disabled={busy} onClick={() => (confirming.value = true)}>
-            {tr('revoke')}
-          </Button>
-        </div>
-      )}
-    </li>
+    <div class="group link-card">
+      {intro && <p>{tr('homeIntro')}</p>}
+      <label class="field">
+        <span class="muted">{tr('homeTitle')}</span>
+        <input class="link-url" type="text" dir="ltr" readonly value={link.url} ref={input} onFocus={(e) => e.currentTarget.select()} />
+      </label>
+      <div class="link-actions">
+        <Button disabled={busy} onClick={() => app.share(link.url)}>
+          {tr('share')}
+        </Button>
+        <Button kind="secondary" disabled={busy} onClick={() => void copy()}>
+          {copied.value ? tr('copied') : tr('copy')}
+        </Button>
+      </div>
+    </div>
   );
 }
 

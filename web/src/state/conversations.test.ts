@@ -1462,7 +1462,7 @@ describe('deleting the account', () => {
     expect(b.calls).not.toContain('DELETE /account');
 
     await a.keepAccount();
-    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    expect(screenOf(a.screen.value, 'home').tab).toBe('settings');
     await a.showTab('chats');
     expect(screenOf(a.screen.value, 'home').conversations).toHaveLength(1);
     expect((await Promise.all(others.map(hasChat))).sort()).toEqual([false, true]);
@@ -1508,7 +1508,7 @@ describe('deleting the account', () => {
     await a.keepAccount();
     hold.release();
     await deleting;
-    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    expect(screenOf(a.screen.value, 'home').tab).toBe('settings');
     expect(b.sends.length - sent).toBe(1);
     expect(await getMeta(a.db, 'deleting')).toBeUndefined();
     expect(b.calls).not.toContain('DELETE /account');
@@ -1632,7 +1632,7 @@ describe('deleting the account', () => {
     await new Promise((r) => setTimeout(r, 600));
     expect(b.state.deletedAccounts).toEqual([]);
     expect(await getMeta(a.db, 'deleting')).toBeUndefined();
-    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    expect(screenOf(a.screen.value, 'home').tab).toBe('settings');
   });
 
   it('goes on to the deletion in the same turn as the last chat, so a Cancel a moment later finds nothing to cancel', async () => {
@@ -1673,7 +1673,7 @@ describe('deleting the account', () => {
     await keeping;
     expect(b.state.deletedAccounts).toEqual([]);
     expect(await getMeta(a.db, 'deleting')).toBeUndefined();
-    expect(screenOf(a.screen.value, 'home').tab).toBe('links');
+    expect(screenOf(a.screen.value, 'home').tab).toBe('settings');
   });
 
   for (const code of ['rate_limited'] as const) {

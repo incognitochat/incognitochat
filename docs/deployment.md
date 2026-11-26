@@ -824,7 +824,7 @@ the deploy role is denied writing table items, so deploys never reset it.
    about $1,500 a day and 2 GiB of downloads every 5 minutes about $50 a
    day, while a pause only holds attachments back for a while.
 3. Pause with the AWS CLI (an admin profile of the environment's AWS
-   account), or from the app: Link tab, Admin, Attachments (admins only;
+   account), or from the app: Settings, Admin, Attachments (admins only;
    it asks to confirm).
 
    ```shell

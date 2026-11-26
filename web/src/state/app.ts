@@ -2,7 +2,7 @@
 // reads `screen` and calls actions; it never touches storage, crypto or the
 // network itself.
 
-import { signal } from '@preact/signals';
+import { effect, signal } from '@preact/signals';
 import {
   isRegistrationLaunch,
   isSetUp,
@@ -402,7 +402,7 @@ export type Screen =
   | { kind: 'elsewhere' }
   | {
       kind: 'home';
-      tab: 'chats' | 'links';
+      tab: HomeTab;
       conversations: ConversationView[];
       offline: boolean;
       /** Offline because the server refused home's own requests for now (deviceLimit): said in place of "offline". */
@@ -420,7 +420,11 @@ export type Screen =
       signedOut: SignedOutReason | null;
       /** The user's deletion couldn't finish, and they read their chats meanwhile: read-only; Try again carries on with it. */
       deletionPaused: boolean;
+      /** Bytes of attachments stored on this device, for the Settings tab (null on the other tabs). */
+      media: number | null;
     }
+  /** Choosing the app's language (the choice itself lives in state/language.ts). */
+  | { kind: 'language' }
   | { kind: 'blocked'; conversations: ConversationView[]; busy: boolean; notice: HomeNotice | null }
   /** Data and storage: what stays on this device and what's fetched by itself. */
   | { kind: 'storage'; settings: MediaSettings; usage: StorageUsage | null; busy: boolean; cleared: number | null }
@@ -476,6 +480,37 @@ export type Screen =
   | { kind: 'error'; error: ErrorKind };
 
 type AdminScreen = Extract<Screen, { kind: 'admin' }>;
+
+/** The home screen's tabs, switched by the bar at its bottom. */
+export type HomeTab = 'chats' | 'links' | 'settings';
+
+/**
+ * Where Telegram's own Settings item (in its menu) is offered: the screens of
+ * a set-up app, not setup, sign-out, deletion or errors; nor while one is
+ * busy (an action under way, a link being written to, an invitation being
+ * redeemed) or a link is being checked, any of which would draw over
+ * Settings once done. It opens the Settings tab.
+ */
+export function offersSettings(s: Screen): boolean {
+  // Busy, a screen draws itself (or home's tab) again once done, over
+  // Settings; except Data and storage's first reading, which looks first.
+  if ('busy' in s && s.busy && !(s.kind === 'storage' && s.usage === null)) return false;
+  if (s.kind === 'link') return s.status !== 'checking';
+  if (s.kind === 'invitation') return !s.busy;
+  return SETTINGS_BUTTON_SCREENS.has(s.kind);
+}
+
+/** The other screens it's offered on (links and invitations: offersSettings). */
+const SETTINGS_BUTTON_SCREENS: ReadonlySet<Screen['kind']> = new Set([
+  'home',
+  'conversation',
+  'blocked',
+  'storage',
+  'usage',
+  'invitations',
+  'admin',
+  'language',
+]);
 
 export interface Deps {
   config: Config | null;
@@ -576,9 +611,25 @@ export function createApp(deps: Deps) {
     else if (currentScreen().kind === 'deleting-chats') void keepAccount();
     else void showHome();
   });
+  // Telegram's Settings item: shown on the screens that have somewhere to
+  // take it (told only when that changes); a press closes whatever is open on
+  // top, then opens the Settings tab.
+  let settingsButton: boolean | null = null;
+  effect(() => {
+    const visible = offersSettings(screen.value);
+    if (visible === settingsButton) return;
+    settingsButton = visible;
+    deps.bridge?.post('web_app_setup_settings_button', { is_visible: visible });
+  });
+  deps.bridge?.on('settings_button_pressed', () => {
+    if (!offersSettings(currentScreen())) return;
+    // Closing takes each one off as it redraws, later: all of them, as they are now.
+    for (const close of [...onTop].reverse()) close();
+    void showHome({ tab: 'settings' });
+  });
   let messaging: Messaging | null = null;
   let mediaSettings: MediaSettings = DEFAULT_MEDIA_SETTINGS;
-  let tab: 'chats' | 'links' = 'chats';
+  let tab: HomeTab = 'chats';
   let backgroundStarted = false;
   // Stops the inbox poll and the push socket (the account was deleted).
   let stopBackground = (): void => {};
@@ -1119,6 +1170,11 @@ export function createApp(deps: Deps) {
   // that read storage before another can't draw over it (an older list,
   // previews or unread counts, until something drew it again).
   let homeDraws = 0;
+  // Actions started on home (busy), each drawing home itself once done; and
+  // the draws of home (showHome). A home draw is dropped once a newer one of
+  // either began: the newer one shows.
+  let homeActions = 0;
+  let homeAsks = 0;
 
   /**
    * Redraws the current screen from storage (after new messages, or another
@@ -1129,11 +1185,13 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home' && !current.busy) {
       const draw = ++homeDraws;
       const [list, links, newKey] = [await conversations(), await linkViews(), await newKeyToTell(deps.db)];
+      const blockedCount = (await listConversations(deps.db)).filter((c) => c.status === 'blocked').length;
       const latest = screen.value;
       // A newer one draws (or drew) what's newer.
       if (draw !== homeDraws || latest.kind !== 'home' || latest.busy) return;
       const notice = withNewKey(latest.notice, newKey);
-      screen.value = { ...latest, conversations: list, links, notice };
+      screen.value = { ...latest, conversations: list, links, notice, blockedCount };
+      if (latest.tab === 'settings') void measureMedia();
       if (newKey && notice === 'new-signing-key') await toldNewKey(deps.db);
     } else if (current.kind === 'conversation' && !current.busy) {
       // Not marked seen here: only once they're in view (markSeen, from the screen).
@@ -1392,6 +1450,7 @@ export function createApp(deps: Deps) {
     if (!messaging) return;
     const current = screen.value;
     if ((current.kind === 'home' || current.kind === 'conversation') && current.busy) return;
+    if (current.kind === 'home') homeActions++;
     if (current.kind === 'home' || current.kind === 'conversation') screen.value = { ...current, busy: true };
     try {
       // Told before blocking, which ends our way of writing to them.
@@ -1787,7 +1846,10 @@ export function createApp(deps: Deps) {
     mediaSettings = await getMediaSettings(deps.db);
     const current = screen.value;
     if (current.kind !== 'storage') screen.value = { kind: 'storage', settings: mediaSettings, usage: null, busy: true, cleared };
+    // Also the size Settings shows: a measurement like Settings' own, the latest started winning.
+    const run = ++mediaRuns;
     const { total, byConversation } = await mediaUsage(deps.db);
+    if (run === mediaRuns) mediaBytes = total;
     const labels = new Map((await listConversations(deps.db)).map((c) => [c.id, c.label]));
     const chats = Object.entries(byConversation)
       .filter(([, bytes]) => bytes > 0)
@@ -2159,7 +2221,8 @@ export function createApp(deps: Deps) {
     if (currentScreen().kind !== 'deleting-chats') return;
     chatsRun++;
     backButton(false);
-    return showHome({ tab: 'links' });
+    // Back where Delete account is.
+    return showHome({ tab: 'settings' });
   }
 
   /** Whether runDeletion is under way. */
@@ -2468,8 +2531,25 @@ export function createApp(deps: Deps) {
     return (await listLinks(deps.db)).map((l) => ({ ...l, url: linkUrl(deps.config!.botUsername, l) }));
   }
 
-  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: 'chats' | 'links' } = {}): Promise<void> {
-    if (options.tab) tab = options.tab;
+  // The attachments on this device (bytes), for the Settings tab: measured
+  // when it shows and redraws (it reads every message), the latest
+  // measurement winning.
+  let mediaBytes: number | null = null;
+  let mediaRuns = 0;
+  async function measureMedia(): Promise<void> {
+    const run = ++mediaRuns;
+    const total = (await mediaUsage(deps.db)).total;
+    if (run !== mediaRuns) return;
+    mediaBytes = total;
+    const current = screen.value;
+    if (current.kind === 'home' && current.tab === 'settings') screen.value = { ...current, media: total };
+  }
+
+  /** Draws home. overHome: a tab switch, drawn only if home is still on screen (not over a chat opened meanwhile). */
+  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean } = {}): Promise<void> {
+    const actions = homeActions;
+    const ask = ++homeAsks;
+    const shownTab = options.tab ?? tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
@@ -2502,10 +2582,9 @@ export function createApp(deps: Deps) {
     // Read from here on: a refresh that read before draws nothing over it.
     homeDraws++;
     const links = await linkViews();
-    backButton(false);
-    screen.value = {
-      kind: 'home',
-      tab,
+    const drawn = {
+      kind: 'home' as const,
+      tab: shownTab,
       conversations: await conversations(),
       offline,
       limited,
@@ -2520,7 +2599,21 @@ export function createApp(deps: Deps) {
       blockedCount: (await listConversations(db)).filter((c) => c.status === 'blocked').length,
       signedOut,
       deletionPaused,
+      // Last measured (null the first time): measured again below, without holding the tab up.
+      media: shownTab === 'settings' ? mediaBytes : null,
     };
+    // Dropped if a newer showHome began meanwhile, or an action on home (it
+    // draws home itself once done, or the screen its end calls for); or, a
+    // tab switch, if home has left the screen (a chat opened, say).
+    if (ask !== homeAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {
+      // Its homeDraws++ may have dropped a refresh's draw: read again.
+      void refresh();
+      return;
+    }
+    tab = drawn.tab;
+    backButton(false);
+    screen.value = drawn;
+    if (tab === 'settings') void measureMedia();
     if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
     // By itself only if Telegram never refused one (never set up, or a new
     // chat key): a block holds until the user taps Turn on notices.
@@ -2572,10 +2665,11 @@ export function createApp(deps: Deps) {
 
   /** Joins with an invitation code (typed, pasted, or from an invitation link). */
   async function redeem(input: string): Promise<void> {
+    const current = screen.value;
+    if ((current.kind === 'invitation' || current.kind === 'home') && current.busy) return;
     const code = normalizeCode(input);
     if (!code) return showHome({ notice: 'invalid-invitation' });
-    const current = screen.value;
-    if (current.kind === 'invitation' && current.busy) return;
+    if (current.kind === 'home') homeActions++;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
     if (current.kind === 'invitation') screen.value = { ...current, busy: true, error: null };
     let notice: HomeNotice = 'joined';
@@ -2739,6 +2833,7 @@ export function createApp(deps: Deps) {
   async function linkAction(action: () => Promise<unknown>, done: HomeNotice): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'home' || current.busy) return;
+    homeActions++;
     screen.value = { ...current, busy: true, notice: null };
     let notice: HomeNotice = done;
     try {
@@ -2857,6 +2952,9 @@ export function createApp(deps: Deps) {
       deletionRun++;
       deletionRunning = false;
       deletionPaused = false;
+      // Measured again for the account there is now.
+      mediaBytes = null;
+      mediaRuns++;
       session?.setUp();
       return start();
     },
@@ -2922,7 +3020,8 @@ export function createApp(deps: Deps) {
       // to where Finish deleting was asked, while signed out.
       if (await deletionConfirmed()) screen.value = { kind: 'deleting', error: deletionError };
       else if (signedOut) screen.value = { kind: 'signed-out', reason: signedOut, busy: false, offline: false };
-      else return showHome({ tab: 'links' });
+      // Back where Delete account is.
+      else return showHome({ tab: 'settings' });
     },
     close: () => deps.bridge?.post('web_app_close'),
     retry: () => retry(),
@@ -3059,7 +3158,17 @@ export function createApp(deps: Deps) {
     popup: (params: { title?: string; message: string; buttons: PopupButton[] }) =>
       deps.bridge ? openPopup(deps.bridge, params) : Promise.resolve(null),
     haptic: () => deps.bridge?.post('web_app_trigger_haptic_feedback', { type: 'impact', impact_style: 'medium' }),
-    showTab: (t: 'chats' | 'links') => showHome({ tab: t }),
+    /** Switches home's tab; not while home is busy (an action under way would draw over it, and a redraw would let it be asked twice). */
+    showTab: (t: HomeTab): Promise<void> => {
+      const current = screen.value;
+      if (current.kind === 'home' && current.busy) return Promise.resolve();
+      return showHome({ tab: t, overHome: true });
+    },
+    /** Choosing the app's language (from Settings). */
+    language: (): void => {
+      backButton(true);
+      screen.value = { kind: 'language' };
+    },
     sync: syncNow,
     /**
      * Another copy started a sync at `at` (paced: one the app asked for by

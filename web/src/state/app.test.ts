@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logIn, prepareSetup, readAccount } from '../account/account';
 import { ApiError, NetworkError, type Api } from '../net/api';
 import { parseLaunch, type Launch } from '../platform/launch';
@@ -14,7 +14,7 @@ import type { IssuerKey } from '../crypto/blindrsa';
 import { en } from '../i18n/en';
 import { fa } from '../i18n/fa';
 import type { Messaging, MessagingDeps } from '../messaging/engine';
-import { confirmationMatches, createApp, type Deps, type Screen } from './app';
+import { confirmationMatches, createApp, offersSettings, type Deps, type Screen } from './app';
 import { encryptFile, newFileKey } from '../crypto/media';
 import { toBase64Url } from '../crypto/encoding';
 
@@ -77,6 +77,11 @@ vi.mock('../messaging/store', async (importOriginal) => {
       await heldReads.pass('listConversations', args);
       return list;
     },
+    mediaUsage: async (...args: Parameters<typeof original.mediaUsage>) => {
+      const usage = await original.mediaUsage(...args);
+      await heldReads.pass('mediaUsage', args);
+      return usage;
+    },
     answeredAt: async (...args: Parameters<typeof original.answeredAt>) => {
       try {
         return await original.answeredAt(...args);
@@ -86,6 +91,9 @@ vi.mock('../messaging/store', async (importOriginal) => {
     },
   };
 });
+
+// A read held for a test that never reached it mustn't hold up the next test.
+afterEach(() => heldReads.next.clear());
 
 let n = 0;
 const config = {
@@ -403,7 +411,7 @@ function payloadOf(url: string): string {
  * Holds the next read of `name` (that `when` picks) once it's done, until
  * released: as a slow IndexedDB would, with what read it still under way.
  */
-function holdRead(name: 'pageMessages' | 'listConversations', when: (args: unknown[]) => boolean = () => true) {
+function holdRead(name: 'pageMessages' | 'listConversations' | 'mediaUsage', when: (args: unknown[]) => boolean = () => true) {
   let reached!: () => void;
   const atRead = new Promise<void>((resolve) => (reached = resolve));
   let release!: () => void;
@@ -2115,11 +2123,11 @@ describe('deleting the account', () => {
     expect(owner.app.screen.value).toMatchObject({ kind: 'welcome', deleted: true });
   });
 
-  it('cancels back to the link tab', async () => {
+  it('cancels back to the Settings tab, where Delete account is', async () => {
     const owner = await registered(fakeServer().api);
     owner.app.askDeleteAccount();
     await owner.app.cancelDeleteAccount();
-    expect(home(owner.app.screen.value).tab).toBe('links');
+    expect(home(owner.app.screen.value).tab).toBe('settings');
   });
 
   it("never touches the account set up after it: one copy finishes, a new account is set up, the other copy stops", async () => {
@@ -2783,18 +2791,18 @@ describe('data and storage', () => {
     expect(await getMedia(owner.db, 'c1', 'new')).toBeDefined();
   });
 
-  it('clears all media on request, and goes back to the link tab', async () => {
+  it('clears all media on request, and goes back to the Settings tab', async () => {
     const owner = await registered(fakeServer().api);
     await putMeta(owner.db, 'media-settings', { keep: 'forever' });
     await photoOnDevice(owner.db, 'a', 40);
     await photoOnDevice(owner.db, 'b', 0);
-    await owner.app.showTab('links');
+    await owner.app.showTab('settings');
     await owner.app.storage();
     await owner.app.clearMedia();
     expect(owner.app.screen.value).toMatchObject({ kind: 'storage', usage: { media: 0, chats: [] }, cleared: 2000 });
     expect(owner.broadcasts).toContainEqual({ type: 'data-changed' });
     await owner.app.home();
-    expect(home(owner.app.screen.value).tab).toBe('links');
+    expect(home(owner.app.screen.value).tab).toBe('settings');
   });
 });
 
@@ -2813,7 +2821,7 @@ describe('the back button', () => {
     const shown = () => posted.filter((p) => p.type === 'web_app_setup_back_button').at(-1)?.data;
     const back = () => handlers.get('back_button_pressed')!({});
     const owner = await registered(fakeServer().api, { bridge });
-    await owner.app.showTab('links');
+    await owner.app.showTab('settings');
     expect(shown()).toEqual({ is_visible: false });
 
     // A dialog on the home screen shows the button, and back closes it, not the app.
@@ -2834,8 +2842,795 @@ describe('the back button', () => {
     expect(owner.app.screen.value.kind).toBe('storage');
     expect(shown()).toEqual({ is_visible: true });
     back();
-    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('links'));
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
     expect(shown()).toEqual({ is_visible: false });
+  });
+
+  it('goes back to the tab each screen was opened from', async () => {
+    const handlers = new Map<string, (data: unknown) => void>();
+    const bridge: Bridge = {
+      transport: 'webview-proxy',
+      post: () => {},
+      on: (type, handler) => {
+        handlers.set(type, handler as (data: unknown) => void);
+        return () => {};
+      },
+    };
+    const back = () => handlers.get('back_button_pressed')!({});
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.admin = true;
+    const owner = await registered(server.api, { bridge });
+    const screens: [Screen['kind'], () => Promise<void>][] = [
+      ['blocked', owner.app.blocked],
+      ['storage', owner.app.storage],
+      ['usage', owner.app.usage],
+      ['invitations', owner.app.invitations],
+      ['admin', owner.app.admin],
+    ];
+    for (const tab of ['chats', 'links'] as const) {
+      for (const [kind, open] of screens) {
+        await owner.app.showTab(tab);
+        await open();
+        expect(owner.app.screen.value.kind).toBe(kind);
+        back();
+        await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe(tab));
+      }
+    }
+    // Invitations and Admin have a Back button of their own, which does the same.
+    for (const open of [owner.app.invitations, owner.app.admin]) {
+      await owner.app.showTab('links');
+      await open();
+      await owner.app.home();
+      expect(home(owner.app.screen.value).tab).toBe('links');
+    }
+  });
+});
+
+/** A Telegram bridge that keeps what the app posts, and plays events to every handler. */
+function recordingBridge() {
+  const handlers = new Map<string, Set<(data: unknown) => void>>();
+  const posted: { type: string; data: unknown }[] = [];
+  const bridge: Bridge = {
+    transport: 'webview-proxy',
+    post: (type, ...data) => void posted.push({ type, data: data[0] }),
+    on: (type, handler) => {
+      if (!handlers.has(type)) handlers.set(type, new Set());
+      handlers.get(type)!.add(handler as (data: unknown) => void);
+      return () => void handlers.get(type)!.delete(handler as (data: unknown) => void);
+    },
+  };
+  return {
+    bridge,
+    posted,
+    fire: (type: string) => handlers.get(type)?.forEach((h) => h({})),
+    last: (type: string) => posted.filter((p) => p.type === type).at(-1)?.data,
+    count: (type: string) => posted.filter((p) => p.type === type).length,
+  };
+}
+
+describe('the Settings tab', () => {
+  it('shows what its rows need: the media on this device, blocked chats, the account and invitations', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.member = true;
+    const owner = await registered(server.api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await putMedia(owner.db, 'c1', 'p', new Uint8Array(1500));
+    await owner.app.showTab('settings');
+    // Measured after the tab draws, without holding it up.
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    expect(home(owner.app.screen.value)).toMatchObject({
+      tab: 'settings',
+      blockedCount: 0,
+      account: { canCreateLinks: true },
+      invitations: { inviteOnly: true, member: true },
+    });
+    // The other tabs don't read it.
+    await owner.app.showTab('chats');
+    expect(home(owner.app.screen.value).media).toBeNull();
+    // A redraw (new messages, another copy's change) keeps it up to date on Settings only.
+    await owner.app.showTab('settings');
+    await addMessage(
+      owner.db,
+      { id: 'q', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1000, m: 'image/jpeg', w: 10, h: 10, id: 'upload-q', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.refresh();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(2500));
+    // Drawn again, it shows the last measurement at once.
+    await owner.app.showTab('chats');
+    const drawn = owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    expect(home(owner.app.screen.value).media).toBe(2500);
+    await drawn;
+  });
+
+  it("Delete account's way out from Settings goes back there: Back, and Cancel", async () => {
+    const tg = recordingBridge();
+    const owner = await registered(fakeServer().api, { bridge: tg.bridge });
+    await owner.app.showTab('settings');
+    owner.app.askDeleteAccount();
+    expect(owner.app.screen.value.kind).toBe('confirm-delete');
+    tg.fire('back_button_pressed');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    owner.app.askDeleteAccount();
+    await owner.app.cancelDeleteAccount();
+    expect(home(owner.app.screen.value).tab).toBe('settings');
+  });
+
+  it('goes back to Settings from every page it opens', async () => {
+    const tg = recordingBridge();
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.admin = true;
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    const pages: [Screen['kind'], () => unknown][] = [
+      ['language', owner.app.language],
+      ['blocked', owner.app.blocked],
+      ['storage', owner.app.storage],
+      ['usage', owner.app.usage],
+      ['invitations', owner.app.invitations],
+      ['admin', owner.app.admin],
+    ];
+    for (const [kind, open] of pages) {
+      await owner.app.showTab('settings');
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+      await open();
+      expect(owner.app.screen.value.kind).toBe(kind);
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: true });
+      tg.fire('back_button_pressed');
+      await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+      expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+    }
+  });
+
+  it("offers Telegram's Settings item on the app's own screens, and a press there opens the Settings tab", async () => {
+    const server = fakeServer();
+    // Before setting up: not offered.
+    const before = recordingBridge();
+    const fresh = await setup({ api: server.api, bridge: before.bridge, launch: launchWith('') });
+    await fresh.app.start();
+    expect(fresh.app.screen.value.kind).toBe('welcome');
+    expect(before.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    before.fire('settings_button_pressed');
+    await tick();
+    expect(fresh.app.screen.value.kind).toBe('welcome');
+
+    const tg = recordingBridge();
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // Told only when it changes.
+    const told = tg.count('web_app_setup_settings_button');
+    await owner.app.showTab('settings');
+    await owner.app.storage();
+    expect(tg.count('web_app_setup_settings_button')).toBe(told);
+
+    // From a page with two things open on top (a dialog over a menu, say): both close, and Settings opens.
+    const closed: string[] = [];
+    const menu = owner.app.onBack(() => {
+      closed.push('menu');
+      menu();
+    });
+    const dialog = owner.app.onBack(() => {
+      closed.push('dialog');
+      dialog();
+    });
+    tg.fire('settings_button_pressed');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    expect(closed).toEqual(['dialog', 'menu']);
+    expect(tg.last('web_app_setup_back_button')).toEqual({ is_visible: false });
+
+    // Offered in a chat and on the Language page; not while deleting the account is being confirmed.
+    await chatOnDevice(owner.db);
+    await owner.app.openConversation('c1');
+    expect(owner.app.screen.value.kind).toBe('conversation');
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    owner.app.language();
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    owner.app.askDeleteAccount();
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    await tick();
+    expect(owner.app.screen.value.kind).toBe('confirm-delete');
+  });
+
+  it('draws Settings at once with the last size measured, measures after, the latest measurement winning', async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await owner.app.showTab('chats');
+    await photo('q', 1000);
+
+    // A slow measurement (A): the tab is drawn meanwhile, with the last size.
+    const a = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await a.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 1500 });
+    // A new attachment, then a redraw meanwhile: it keeps the size, and measures again (B).
+    await photo('r', 500);
+    const b = holdRead('mediaUsage');
+    await owner.app.refresh();
+    await b.atRead;
+    expect(home(owner.app.screen.value).media).toBe(1500);
+    b.release();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(3000));
+    // A, older (2500, from before the new one), finishes last: dropped.
+    a.release();
+    await tick();
+    expect(home(owner.app.screen.value).media).toBe(3000);
+
+    // Left for Chats while measuring: Chats gets no size.
+    const c = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await c.atRead;
+    await owner.app.showTab('chats');
+    c.release();
+    await tick();
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', media: null });
+  });
+
+  it('is not offered on a link being checked or written to, or an invitation being joined', () => {
+    expect(offersSettings({ kind: 'link', status: 'checking', canWrite: false, busy: false, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'link', status: 'verified', canWrite: true, busy: true, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'link', status: 'verified', canWrite: true, busy: false, error: null })).toBe(true);
+    expect(offersSettings({ kind: 'invitation', code: 'abcd-efgh', busy: true, error: null })).toBe(false);
+    expect(offersSettings({ kind: 'invitation', code: 'abcd-efgh', busy: false, error: null })).toBe(true);
+  });
+
+  it('hides the Settings item while a link is checked, and offers it again once it is', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    const url = home(owner.app.screen.value).links[0]!.url;
+    const sender = await registered(server.api);
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'GET' && path.startsWith('/links/')) await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const tg = recordingBridge();
+    const { app } = await setup({ api: server.api, bridge: tg.bridge, launch: launchWith(payloadOf(url)), db: sender.db });
+    const starting = app.start();
+    await vi.waitFor(() => expect(app.screen.value).toMatchObject({ kind: 'link', status: 'checking' }));
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    release();
+    await starting;
+    expect(app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // The press did nothing: home is still on the tab it was (Chats), not Settings.
+    await app.home();
+    expect(home(app.screen.value).tab).toBe('chats');
+  });
+
+  it("isn't offered while a screen is busy, which would draw over Settings once done", () => {
+    expect(offersSettings({ kind: 'storage', settings: DEFAULT_MEDIA_SETTINGS, usage: { media: 0, chats: [], app: null }, busy: true, cleared: null })).toBe(false);
+    // Data and storage's first reading is the exception: it looks before drawing.
+    expect(offersSettings({ kind: 'storage', settings: DEFAULT_MEDIA_SETTINGS, usage: null, busy: true, cleared: null })).toBe(true);
+    expect(offersSettings({ kind: 'blocked', conversations: [], busy: true, notice: null })).toBe(false);
+    expect(offersSettings({ kind: 'blocked', conversations: [], busy: false, notice: null })).toBe(true);
+  });
+
+  it("Data and storage's measurement never wins over one Settings started later", async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await photo('q', 1000);
+    // Data and storage measures (2500), slowly; meanwhile the user goes back.
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    await photo('r', 500);
+    const settings = holdRead('mediaUsage');
+    await owner.app.home();
+    await settings.atRead;
+    // The older one ends first, then the newer (3000): the newer shows.
+    storage.release();
+    await opening;
+    settings.release();
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(3000));
+    // And what Data and storage measures (3500) shows on Settings at once, while Settings measures again.
+    await photo('s', 500);
+    await owner.app.storage();
+    const again = holdRead('mediaUsage');
+    await owner.app.home();
+    await again.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 3500 });
+    again.release();
+  });
+
+  it("never records the old account's size from Data and storage still measuring when the account changes", async () => {
+    const owner = await registered(fakeServer().api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    await owner.app.showTab('chats');
+    // Data and storage measures, slowly; meanwhile another copy changes the account (home comes back on Chats, which measures nothing).
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    await owner.app.accountChanged();
+    storage.release();
+    await opening;
+    // Settings, while measuring anew, has no size to show: not the old account's.
+    const settings = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await settings.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: null });
+    settings.release();
+  });
+
+  it("keeps Data and storage's newer size when Settings' older measurement ends after it", async () => {
+    const owner = await registered(fakeServer().api);
+    const photo = (id: string, s: number) =>
+      addMessage(
+        owner.db,
+        { id, conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+        { text: '', media: { t: 'photo', s, m: 'image/jpeg', w: 10, h: 10, id: `upload-${id}`, k: 'a2V5', d: 'c2VjcmV0' } },
+      );
+    await photo('p', 1500);
+    // Settings measures (1500), held; Data and storage then measures more (2500), held too.
+    const settings = holdRead('mediaUsage');
+    await owner.app.showTab('settings');
+    await settings.atRead;
+    await photo('q', 1000);
+    const storage = holdRead('mediaUsage');
+    const opening = owner.app.storage();
+    await storage.atRead;
+    // Data and storage's (newer) ends first, then Settings' (older): the newer stays.
+    storage.release();
+    await opening;
+    settings.release();
+    await tick();
+    const back = holdRead('mediaUsage');
+    await owner.app.home();
+    await back.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: 2500 });
+    back.release();
+  });
+
+  it('ignores a tab switch while home is busy, so an action under way is asked once and lands where it began', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'POST' && path === '/links') await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      const creating = owner.app.createLink();
+      await vi.waitFor(() => expect(home(owner.app.screen.value).busy).toBe(true));
+      await owner.app.showTab('chats');
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      // Creating again meanwhile asks nothing more.
+      await owner.app.createLink();
+      release();
+      await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+      expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't let a tab switch still loading draw over an action started meanwhile", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let releaseAccount = () => {};
+    const accountHeld = new Promise<void>((r) => (releaseAccount = r));
+    let releaseLink = () => {};
+    const linkHeld = new Promise<void>((r) => (releaseLink = r));
+    let holdAccount = true;
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (holdAccount && method === 'GET' && path === '/account') {
+        holdAccount = false;
+        await accountHeld;
+      }
+      if (method === 'POST' && path === '/links') await linkHeld;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      // A tap on Settings on a slow network: nothing changes yet, so the user taps Create my link.
+      const switching = owner.app.showTab('settings');
+      await tick();
+      const creating = owner.app.createLink();
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true }));
+      releaseAccount();
+      await switching;
+      // Settings didn't draw over the action: still busy on My link, so nothing can be asked twice.
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      await owner.app.createLink();
+      releaseLink();
+      await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+      expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    } finally {
+      releaseAccount();
+      releaseLink();
+    }
+  });
+
+  it("forgets the size when another copy changes the account, so the old account's never shows", async () => {
+    const owner = await registered(fakeServer().api);
+    await addMessage(
+      owner.db,
+      { id: 'p', conv: 'c1', at: Date.now(), out: false, status: 'read', file: 'local' },
+      { text: '', media: { t: 'photo', s: 1500, m: 'image/jpeg', w: 10, h: 10, id: 'upload-p', k: 'a2V5', d: 'c2VjcmV0' } },
+    );
+    await owner.app.showTab('settings');
+    await vi.waitFor(() => expect(home(owner.app.screen.value).media).toBe(1500));
+    const measuring = holdRead('mediaUsage');
+    await owner.app.accountChanged();
+    await measuring.atRead;
+    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'settings', media: null });
+    measuring.release();
+  });
+
+  it('is not offered while a link is checked or an invitation joined, which would draw over Settings once done', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const tg = recordingBridge();
+    const user = await registered(server.api, { bridge: tg.bridge, launch: launchWith('invabcdefgh') });
+    expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: false });
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: true });
+    // Joining: held at the server until we've looked.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (path === '/invitations/redeem') await held;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const joining = user.app.redeem('abcd-efgh');
+    await vi.waitFor(() => expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: true }));
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    release();
+    await joining;
+    // Where joining always lands; the press didn't take it to Settings.
+    expect(home(user.app.screen.value)).toMatchObject({ tab: 'chats', notice: 'joined' });
+  });
+
+  it('is not offered while the server refuses this device, and a press then does nothing', async () => {
+    const refused = () => new ApiError(401, 'login_refused');
+    // The first login is the one registered() makes.
+    const server = fakeServer({ session: ['ok', refused(), refused()] });
+    const { db } = await registered(server.api);
+    const tg = recordingBridge();
+    const { app } = await setup({ api: server.api, bridge: tg.bridge, launch: launchWith(''), db });
+    await app.start();
+    expect(app.screen.value.kind).toBe('signed-out');
+    expect(tg.last('web_app_setup_settings_button')).toEqual({ is_visible: false });
+    tg.fire('settings_button_pressed');
+    await tick();
+    expect(app.screen.value.kind).toBe('signed-out');
+  });
+});
+
+describe('switching tabs while home loads (a slow network)', () => {
+  /** Holds the first request that matches, until released; reached: once it's held. */
+  function holdFirst(server: ReturnType<typeof fakeServer>, match: (method: string, path: string) => boolean) {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let atHold = () => {};
+    const reached = new Promise<void>((r) => (atHold = r));
+    let holding = true;
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (holding && match(method, path)) {
+        holding = false;
+        atHold();
+        await held;
+      }
+      return request(method, path, init, check);
+    }) as Api['request'];
+    return Object.assign(() => release(), { reached });
+  }
+  const account = (m: string, p: string) => m === 'GET' && p === '/account';
+
+  it('ends on the tab tapped last, whichever loads last', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    const release = holdFirst(server, account);
+    try {
+      const first = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.showTab('links');
+      expect(home(owner.app.screen.value).tab).toBe('links');
+      release();
+      await first;
+      expect(home(owner.app.screen.value).tab).toBe('links');
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over what an action ended with, when the action ends first", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.createLink();
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created', busy: false });
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over the screen an action ended on (the account replaced elsewhere)", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    const release = holdFirst(server, account);
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'POST' && path === '/links') throw new ApiError(410, 'account_replaced');
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.createLink();
+      const ended = owner.app.screen.value.kind;
+      expect(ended).not.toBe('home');
+      release();
+      await switching;
+      expect(owner.app.screen.value.kind).toBe(ended);
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't draw over a chat opened meanwhile", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.openConversation('c1');
+      release();
+      await switching;
+      expect(owner.app.screen.value.kind).toBe('conversation');
+    } finally {
+      release();
+    }
+  });
+
+  it('deletes a chat from home once, while a tab switch loads', async () => {
+    const server = fakeServer();
+    const issuer: TokenIssuer = { key: {} as IssuerKey, keyId: new Uint8Array(32) };
+    engines.made.length = 0;
+    const owner = await registered(server.api, { issuer });
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const engine = engines.made.at(-1)!;
+    let releaseRemove = () => {};
+    const removeHeld = new Promise<void>((r) => (releaseRemove = r));
+    let removes = 0;
+    vi.spyOn(engine, 'remove').mockImplementation(async () => {
+      removes++;
+      await removeHeld;
+    });
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      const deleting = owner.app.deleteConversation('c1', false);
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: true }));
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: true });
+      await owner.app.deleteConversation('c1', false);
+      releaseRemove();
+      await deleting;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'chats', busy: false, notice: 'deleted' });
+      expect(removes).toBe(1);
+    } finally {
+      release();
+      releaseRemove();
+    }
+  });
+
+  it('joins from home once, while a tab switch loads, and lands where it began', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let releaseRedeem = () => {};
+    const redeemHeld = new Promise<void>((r) => (releaseRedeem = r));
+    const release = holdFirst(server, account);
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (path === '/invitations/redeem') await redeemHeld;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      const joining = owner.app.redeem('abcd-efgh');
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true }));
+      release();
+      await switching;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      await owner.app.redeem('abcd-efgh');
+      releaseRedeem();
+      await joining;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'joined', busy: false });
+      expect(server.calls.filter((c) => c === 'POST /invitations/redeem')).toHaveLength(1);
+    } finally {
+      release();
+      releaseRedeem();
+    }
+  });
+
+  it('drops a stale draw without leaving the chat list behind: a refresh under way is read again', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const release = holdFirst(server, account);
+    try {
+      const older = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.showTab('links');
+      expect(home(owner.app.screen.value).conversations[0]!.unread).toBe(0);
+      // A message arrives (unread 1), and a refresh reads it, slowly.
+      await putConversation(owner.db, { ...(await getConversation(owner.db, 'c1'))!, unread: 1 });
+      const read = holdRead('listConversations');
+      const refreshing = owner.app.refresh();
+      await read.atRead;
+      release();
+      await older;
+      read.release();
+      await refreshing;
+      expect(home(owner.app.screen.value).tab).toBe('links');
+      await vi.waitFor(() => expect(home(owner.app.screen.value).conversations[0]!.unread).toBe(1));
+    } finally {
+      release();
+    }
+  });
+
+  it('keeps the notice of a join that ended before an older home draw loads', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
+    const tg = recordingBridge();
+    // Opened from an invitation link: joining there isn't an action on home, so only the draws' order decides.
+    const user = await registered(server.api, { bridge: tg.bridge, launch: launchWith('invabcdefgh') });
+    expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: false });
+    const release = holdFirst(server, account);
+    try {
+      tg.fire('settings_button_pressed');
+      await release.reached;
+      await user.app.redeem('abcd-efgh');
+      expect(home(user.app.screen.value)).toMatchObject({ notice: 'joined', busy: false });
+      // The older draw reads the chats twice, the second just before it decides: hold that one, then let it decide.
+      const first = holdRead('listConversations');
+      release();
+      await first.atRead;
+      const last = holdRead('listConversations');
+      first.release();
+      await last.atRead;
+      last.release();
+      await tick();
+      expect(home(user.app.screen.value)).toMatchObject({ tab: 'chats', notice: 'joined' });
+    } finally {
+      release();
+    }
+  });
+
+  it('ignores Join with a mistyped code while home is busy, drawing nothing over the action', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    server.state.admin = true;
+    const release = holdFirst(server, (m, p) => m === 'POST' && p === '/links');
+    try {
+      const creating = owner.app.createLink();
+      await release.reached;
+      expect(home(owner.app.screen.value).busy).toBe(true);
+      await owner.app.redeem('not a code');
+      expect(home(owner.app.screen.value)).toMatchObject({ busy: true, notice: null });
+      release();
+      await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ busy: false, notice: 'created' });
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't let Telegram's Settings item, still loading, draw over the screen an action ended on", async () => {
+    const server = fakeServer();
+    const tg = recordingBridge();
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    await owner.app.showTab('links');
+    const release = holdFirst(server, account);
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (method === 'POST' && path === '/links') throw new ApiError(410, 'account_replaced');
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      tg.fire('settings_button_pressed');
+      await release.reached;
+      await owner.app.createLink();
+      const ended = owner.app.screen.value.kind;
+      expect(ended).not.toBe('home');
+      // The older draw reads the chats twice, the second just before it decides: hold that one, then let it decide.
+      const first = holdRead('listConversations');
+      release();
+      await first.atRead;
+      const last = holdRead('listConversations');
+      first.release();
+      await last.atRead;
+      last.release();
+      await tick();
+      expect(owner.app.screen.value.kind).toBe(ended);
+    } finally {
+      release();
+    }
+  });
+
+  it('a tab tapped, a chat opened, then Back: home stays on the tab Back went to', async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const release = holdFirst(server, account);
+    try {
+      const switching = owner.app.showTab('settings');
+      await release.reached;
+      await owner.app.openConversation('c1');
+      await owner.app.home();
+      expect(home(owner.app.screen.value).tab).toBe('chats');
+      release();
+      await switching;
+      expect(home(owner.app.screen.value).tab).toBe('chats');
+    } finally {
+      release();
+    }
   });
 });
 

@@ -130,7 +130,7 @@ key, its current encryption key (signed by it), and the link's intro mailbox.
   already write to included, so the server can't tell them apart.
 - A link opened from Telegram never acts by itself, since anyone can send
   one. If you already write to that person, the app says so and opens the
-  chat only when you tap Open. An invitation link asks first and joins only
+  chat only when you tap Open chat. An invitation link asks first and joins only
   when you tap Join.
 - An account has one link at a time, and can replace it: the old link stops
   working at once, the new one keeps the same fingerprint, so blocks and labels
@@ -419,7 +419,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
   backend.
 - **Languages:** those listed in `web/src/i18n/languages.ts`, right-to-left
   included: Telegram's language (else the device's, else English), unless
-  the user picks one in Data and storage (kept on the device). Telegram's
+  the user picks one in Settings, Language (kept on the device). Telegram's
   theme is mapped onto the app's own colours.
 
 ## The backend

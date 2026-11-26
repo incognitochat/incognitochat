@@ -58,18 +58,6 @@ newMessages:
   101: 101 nieuwe berichten
   102: 102 nieuwe berichten
   1000000: 1.000.000 nieuwe berichten
-blockedCount:
-  0: Geblokkeerd (0)
-  1: Geblokkeerd (1)
-  2: Geblokkeerd (2)
-  3: Geblokkeerd (3)
-  5: Geblokkeerd (5)
-  11: Geblokkeerd (11)
-  21: Geblokkeerd (21)
-  100: Geblokkeerd (100)
-  101: Geblokkeerd (101)
-  102: Geblokkeerd (102)
-  1000000: Geblokkeerd (1.000.000)
 usageCount:
   0: 0
   1: 1

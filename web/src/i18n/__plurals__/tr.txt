@@ -58,18 +58,6 @@ newMessages:
   101: 101 yeni mesaj
   102: 102 yeni mesaj
   1000000: 1.000.000 yeni mesaj
-blockedCount:
-  0: Engellenenler (0)
-  1: Engellenenler (1)
-  2: Engellenenler (2)
-  3: Engellenenler (3)
-  5: Engellenenler (5)
-  11: Engellenenler (11)
-  21: Engellenenler (21)
-  100: Engellenenler (100)
-  101: Engellenenler (101)
-  102: Engellenenler (102)
-  1000000: Engellenenler (1.000.000)
 usageCount:
   0: 0
   1: 1

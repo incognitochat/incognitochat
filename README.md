@@ -112,7 +112,7 @@ Incognito Chat is free software, under the [GNU Affero General Public
 License, version 3](LICENSE) (`AGPL-3.0-only`). You may use, study, change
 and share it. If you run a changed version as a service, you must offer its
 users the source of that version, the server included. The app's "Source
-code" link opens the repository and commit that its hosting workflow wrote
+code" link (in Settings) opens the repository and commit that its hosting workflow wrote
 into `manifest.json`, so a copy built from your own fork links to your
 fork's code.
 

@@ -15,6 +15,12 @@ describe('applyTheme', () => {
     expect(dataset.theme).toBe('telegram');
   });
 
+  it("maps a newer client's section and bottom bar colours, which older ones don't send", () => {
+    const { root, props } = fakeRoot();
+    applyTheme({ section_bg_color: '#17212b', section_separator_color: '#111921', bottom_bar_bg_color: '#1d2733' }, root);
+    expect(props).toEqual({ '--app-section': '#17212b', '--app-separator': '#111921', '--app-bar': '#1d2733' });
+  });
+
   it('picks black or white text for the destructive colour, whichever reads better', () => {
     const light = fakeRoot();
     applyTheme({ destructive_text_color: '#ff595a' }, light.root);

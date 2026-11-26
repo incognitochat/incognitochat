@@ -58,18 +58,6 @@ newMessages:
   101: 101 nowych wiadomości
   102: 102 nowe wiadomości
   1000000: 1 000 000 nowych wiadomości
-blockedCount:
-  0: Zablokowani (0)
-  1: Zablokowani (1)
-  2: Zablokowani (2)
-  3: Zablokowani (3)
-  5: Zablokowani (5)
-  11: Zablokowani (11)
-  21: Zablokowani (21)
-  100: Zablokowani (100)
-  101: Zablokowani (101)
-  102: Zablokowani (102)
-  1000000: Zablokowani (1 000 000)
 usageCount:
   0: 0
   1: 1

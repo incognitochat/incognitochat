@@ -58,18 +58,6 @@ newMessages:
   101: 101 pesan baru
   102: 102 pesan baru
   1000000: 1.000.000 pesan baru
-blockedCount:
-  0: Diblokir (0)
-  1: Diblokir (1)
-  2: Diblokir (2)
-  3: Diblokir (3)
-  5: Diblokir (5)
-  11: Diblokir (11)
-  21: Diblokir (21)
-  100: Diblokir (100)
-  101: Diblokir (101)
-  102: Diblokir (102)
-  1000000: Diblokir (1.000.000)
 usageCount:
   0: 0
   1: 1

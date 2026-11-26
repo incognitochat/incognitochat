@@ -303,7 +303,7 @@ it. This is how close it gets.
 - **"Seen" right after a link.** Opening a link from Telegram never opens a
   chat or sends "seen" by itself, so a link's owner can't send someone their
   link and watch for a "seen" to learn whether that person writes to them.
-  If the person already does, the app says so and waits for a tap on Open,
+  If the person already does, the app says so and waits for a tap on Open chat,
   and warns that opening the chat right away could give them away. Someone
   who opens it at once anyway can still be recognised by the timing.
 - **Short-lived records.** The server keeps, for minutes to a day:
@@ -564,7 +564,7 @@ it. This is how close it gets.
   with a link can send attachments. The app downloads by itself only those
   that come after the user's first message in that chat, where the chat
   shows them (photos up to 5 MiB, voice and video messages and GIFs up to
-  10 MiB, each kind as Data and storage says); before that, every one waits
+  10 MiB, each kind as Settings, Data and storage says); before that, every one waits
   for a tap, showing its kind and size, and a tap downloads that one only.
   So a stranger can't fill someone's device just by sending, and replying
   "stop" doesn't download what came before it in the chat. Something they
