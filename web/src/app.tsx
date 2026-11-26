@@ -1410,7 +1410,7 @@ async function confirmReplace(app: AppState, language: Language): Promise<void> 
   if (choice === 'replace') await app.replaceLink();
 }
 
-/** Asks, in Telegram's own popup, before blocking this chat's other person; blocks only if that chat is still open. */
+/** Asks, in Telegram's own popup, before blocking this chat's other person; blocks only if that chat is still open, not busy and not blocked already. */
 async function confirmBlock(app: AppState, language: Language, id: string, role: 'owner' | 'sender'): Promise<void> {
   const choice = await app.popup({
     message: t(language, role === 'owner' ? 'blockConfirmOwner' : 'blockConfirmSender'),
@@ -1420,7 +1420,7 @@ async function confirmBlock(app: AppState, language: Language, id: string, role:
     ],
   });
   const now = app.screen.value;
-  if (choice === 'block' && now.kind === 'conversation' && now.id === id) await app.block();
+  if (choice === 'block' && now.kind === 'conversation' && now.id === id && !now.busy && !now.blocked) await app.block();
 }
 
 /** Asks, in Telegram's own popup, before deleting the link. */
