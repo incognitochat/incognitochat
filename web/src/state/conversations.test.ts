@@ -1270,6 +1270,53 @@ describe('conversations in the app', () => {
   });
 });
 
+describe('blocking from a chat', () => {
+  it('blocks once: not again while blocking, nor a chat blocked already', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hi');
+    const conv = screenOf(sender.screen.value, 'conversation').id;
+    const discards = () => b.calls.filter((c) => c.endsWith('/discard')).length;
+    // What one block asks of the server, from someone else's chat blocked alone.
+    const other = await person(b, payload);
+    await other.writeToLink('hello');
+    const start = discards();
+    await other.block();
+    const once = discards() - start;
+    expect(once).toBeGreaterThan(0);
+    // The first block held at the server: a second one meanwhile asks nothing.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let reached = () => {};
+    const atServer = new Promise<void>((r) => (reached = r));
+    const request = b.api.request.bind(b.api);
+    b.api.request = (async (method, path, init, check) => {
+      if (path.endsWith('/discard')) {
+        reached();
+        await held;
+      }
+      return request(method, path, init, check);
+    }) as Api['request'];
+    const before = discards();
+    const blocking = sender.block();
+    await atServer;
+    await sender.block();
+    release();
+    await blocking;
+    expect(discards() - before).toBe(once);
+    expect(screenOf(sender.screen.value, 'home').notice).toBe('blocked');
+    // Opened again, blocked: blocking again asks nothing.
+    await sender.openConversation(conv);
+    expect(screenOf(sender.screen.value, 'conversation').blocked).toBe(true);
+    await sender.block();
+    expect(discards() - before).toBe(once);
+    expect(sender.screen.value.kind).toBe('conversation');
+  });
+});
+
 describe('deleting the account', () => {
   /** An attachment on the device in a chat, sent or received, with its upload's ID. */
   async function attachment(db: Awaited<ReturnType<typeof openDatabase>>, conv: string, id: string, out: boolean) {
