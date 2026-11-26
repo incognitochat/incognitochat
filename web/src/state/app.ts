@@ -1174,7 +1174,7 @@ export function createApp(deps: Deps) {
   // the draws of home (showHome). A home draw is dropped once a newer one of
   // either began: the newer one shows.
   let homeActions = 0;
-  let tabAsks = 0;
+  let homeAsks = 0;
 
   /**
    * Redraws the current screen from storage (after new messages, or another
@@ -2548,7 +2548,7 @@ export function createApp(deps: Deps) {
   /** Draws home. overHome: a tab switch, drawn only if home is still on screen (not over a chat opened meanwhile). */
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean } = {}): Promise<void> {
     const actions = homeActions;
-    const ask = ++tabAsks;
+    const ask = ++homeAsks;
     const shownTab = options.tab ?? tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
@@ -2602,9 +2602,10 @@ export function createApp(deps: Deps) {
       // Last measured (null the first time): measured again below, without holding the tab up.
       media: shownTab === 'settings' ? mediaBytes : null,
     };
-    // A newer tab asked for, or an action started on home meanwhile (it draws
-    // home itself once done, or the screen its end calls for): that one shows.
-    if (ask !== tabAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {
+    // Dropped if a newer home draw began meanwhile, or an action on home (it
+    // draws home itself once done, or the screen its end calls for); or, a
+    // tab switch, if home has left the screen (a chat opened, say).
+    if (ask !== homeAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {
       // Its homeDraws++ may have dropped a refresh's draw: read again.
       void refresh();
       return;

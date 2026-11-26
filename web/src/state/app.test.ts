@@ -3531,21 +3531,47 @@ describe('switching tabs while home loads (a slow network)', () => {
     }
   });
 
-  it('keeps the notice of a join that ended before an older tab switch loads', async () => {
+  it('keeps the notice of a join that ended before an older home draw loads', async () => {
     const server = fakeServer();
     server.state.inviteOnly = true;
     server.state.codes.set('abcd-efgh', { uses: 1, left: 1 });
-    const owner = await registered(server.api);
-    await owner.app.showTab('links');
+    const tg = recordingBridge();
+    // Opened from an invitation link: joining there isn't an action on home, so only the draws' order decides.
+    const user = await registered(server.api, { bridge: tg.bridge, launch: launchWith('invabcdefgh') });
+    expect(user.app.screen.value).toMatchObject({ kind: 'invitation', busy: false });
     const release = holdFirst(server, account);
     try {
-      const switching = owner.app.showTab('settings');
+      tg.fire('settings_button_pressed');
       await release.reached;
-      await owner.app.redeem('abcd-efgh');
-      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'joined', busy: false });
+      await user.app.redeem('abcd-efgh');
+      expect(home(user.app.screen.value)).toMatchObject({ notice: 'joined', busy: false });
+      // The older draw reads storage last before deciding: wait for that read, then let it decide.
+      const settled = holdRead('listConversations');
       release();
-      await switching;
-      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'joined' });
+      await settled.atRead;
+      settled.release();
+      for (let i = 0; i < 10; i++) await tick();
+      expect(home(user.app.screen.value)).toMatchObject({ notice: 'joined' });
+    } finally {
+      release();
+    }
+  });
+
+  it('ignores Join with a mistyped code while home is busy, drawing nothing over the action', async () => {
+    const server = fakeServer();
+    server.state.inviteOnly = true;
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    const release = holdFirst(server, (m, p) => m === 'POST' && p === '/links');
+    server.state.admin = true;
+    try {
+      const creating = owner.app.createLink();
+      await release.reached;
+      expect(home(owner.app.screen.value).busy).toBe(true);
+      await owner.app.redeem('not a code');
+      expect(home(owner.app.screen.value)).toMatchObject({ busy: true, notice: null });
+      release();
+      await creating;
     } finally {
       release();
     }
@@ -3568,7 +3594,11 @@ describe('switching tabs while home loads (a slow network)', () => {
       await owner.app.createLink();
       const ended = owner.app.screen.value.kind;
       expect(ended).not.toBe('home');
+      // The older draw reads storage last before deciding: wait for that read, then let it decide.
+      const settled = holdRead('listConversations');
       release();
+      await settled.atRead;
+      settled.release();
       for (let i = 0; i < 10; i++) await tick();
       expect(owner.app.screen.value.kind).toBe(ended);
     } finally {
