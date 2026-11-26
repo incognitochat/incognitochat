@@ -763,25 +763,26 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   /**
    * Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from
    * the menu's overlay (the page's box less any scroll: a scrollbar on
-   * either side left out). With ⋯ out of view (a turn scrolled it away),
-   * the menu closes instead.
+   * either side left out). It never leaves the screen: with ⋯ scrolled out
+   * of view (a turn, older messages loading above), it stays at the top.
    */
   const placeChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
-    if (!r || r.bottom < 0 || r.top > window.innerHeight) {
+    if (!r) {
       chatMenu.value = false;
       return;
     }
     const page = document.documentElement;
     const left = page.getBoundingClientRect().left + window.scrollX;
-    const at = { top: Math.round(r.bottom + 4), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
+    const top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - 128));
+    const at = { top: Math.round(top), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
     const now = chatMenu.peek();
     if (now && now.top === at.top && now.end === at.end) return;
     chatMenu.value = at;
   };
   // A turned phone, a resized window, the keyboard closing as the menu takes
   // the focus (Android resizes the page), or the page scrolling under it:
-  // placed again, under ⋯ (or closed, ⋯ gone from view). Added and removed in
+  // placed again, under ⋯ (or at the top, ⋯ gone from view). Added and removed in
   // the same commit as the menu, and never reopening one closed. On a resize
   // it runs after useChatScroll's handler (added when the chat opened), so it
   // measures ⋯ where that left it.
