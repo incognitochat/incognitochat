@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.13.0](https://github.com/incognitochat/incognitochat/compare/v2.12.0...v2.13.0) (2026-11-26)
+
+
+### Features
+
+* **scripts:** check what the bot opens ([#254](https://github.com/incognitochat/incognitochat/issues/254)) ([883388e](https://github.com/incognitochat/incognitochat/commit/883388e21cf2183534fe4c915b1e14fcd18e0b1d))
+* **web:** a tab bar with Chats, My link and Settings ([#261](https://github.com/incognitochat/incognitochat/issues/261)) ([42962d0](https://github.com/incognitochat/incognitochat/commit/42962d06e29cc77ef4de30541385f2be4b0b8112))
+* **web:** chat pictures, a menu in the chat header, and grouped Data and storage ([#262](https://github.com/incognitochat/incognitochat/issues/262)) ([30786ba](https://github.com/incognitochat/incognitochat/commit/30786baf5c1da8ee6bf1317c05ac3a8840ebe6a3))
+
+
+### Bug Fixes
+
+* **bootstrap:** read the secret list through a process substitution ([#257](https://github.com/incognitochat/incognitochat/issues/257)) ([3942d14](https://github.com/incognitochat/incognitochat/commit/3942d14669a57f7f6a7ab047df69034353a20ea8))
+* **scripts:** bot check: drop the named Mini App check ([#258](https://github.com/incognitochat/incognitochat/issues/258)) ([fd8407d](https://github.com/incognitochat/incognitochat/commit/fd8407df6cc1afe08db0279452ce74cfbfbd22d0))
+* **scripts:** check-pins: find pins however they're spaced, and fail on unreadable requirements ([#259](https://github.com/incognitochat/incognitochat/issues/259)) ([45cb12d](https://github.com/incognitochat/incognitochat/commit/45cb12d37ca23c3d537db82cd4b94d130b6ea304))
+* **verify:** stop the rebuild on the wrong Node, show npm's errors, and fix two flaky checks ([#256](https://github.com/incognitochat/incognitochat/issues/256)) ([998f97c](https://github.com/incognitochat/incognitochat/commit/998f97c9c9962b7d207a1fb0ffe805d26108e7f9))
+
 ## [2.12.0](https://github.com/incognitochat/incognitochat/compare/v2.11.0...v2.12.0) (2026-11-23)
 
 
