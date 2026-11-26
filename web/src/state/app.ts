@@ -1171,8 +1171,8 @@ export function createApp(deps: Deps) {
   // previews or unread counts, until something drew it again).
   let homeDraws = 0;
   // Actions started on home (busy), each drawing home itself once done; and
-  // the draws of home asked for a tab (a tap, Telegram's Settings item, an
-  // action's end). A home draw is dropped once a newer one of either began.
+  // the draws of home (showHome). A home draw is dropped once a newer one of
+  // either began: the newer one shows.
   let homeActions = 0;
   let tabAsks = 0;
 
@@ -2548,7 +2548,7 @@ export function createApp(deps: Deps) {
   /** Draws home. overHome: a tab switch, drawn only if home is still on screen (not over a chat opened meanwhile). */
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean } = {}): Promise<void> {
     const actions = homeActions;
-    const ask = options.tab ? ++tabAsks : tabAsks;
+    const ask = ++tabAsks;
     const shownTab = options.tab ?? tab;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
@@ -2604,8 +2604,11 @@ export function createApp(deps: Deps) {
     };
     // A newer tab asked for, or an action started on home meanwhile (it draws
     // home itself once done, or the screen its end calls for): that one shows.
-    if (ask !== tabAsks || actions !== homeActions) return;
-    if (options.overHome && screen.value.kind !== 'home') return;
+    if (ask !== tabAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {
+      // Its homeDraws++ may have dropped a refresh's draw: read again.
+      void refresh();
+      return;
+    }
     tab = drawn.tab;
     backButton(false);
     screen.value = drawn;
@@ -2661,10 +2664,10 @@ export function createApp(deps: Deps) {
 
   /** Joins with an invitation code (typed, pasted, or from an invitation link). */
   async function redeem(input: string): Promise<void> {
-    const code = normalizeCode(input);
-    if (!code) return showHome({ notice: 'invalid-invitation' });
     const current = screen.value;
     if ((current.kind === 'invitation' || current.kind === 'home') && current.busy) return;
+    const code = normalizeCode(input);
+    if (!code) return showHome({ notice: 'invalid-invitation' });
     if (current.kind === 'home') homeActions++;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
     if (current.kind === 'invitation') screen.value = { ...current, busy: true, error: null };
