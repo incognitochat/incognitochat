@@ -763,13 +763,28 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const openChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
     const rtl = document.documentElement.dir === 'rtl';
-    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left : window.innerWidth - r.right) } : { top: 56, end: 8 };
+    // The page's width without a scrollbar, as the menu's overlay has it.
+    const width = document.documentElement.clientWidth;
+    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left : width - r.right) } : { top: 56, end: 8 };
   };
-  // Asking whether to block: the focus goes to Cancel; once answered with Cancel, back to ⋯.
+  // Placed when it opened: a turned phone or a resized window closes it.
+  useEffect(() => {
+    if (!menuShown) return;
+    const close = () => (chatMenu.value = false);
+    addEventListener('resize', close);
+    return () => removeEventListener('resize', close);
+  }, [menuShown]);
+  // Blocked or read-only meanwhile: the menu goes, for good.
+  useEffect(() => {
+    if (screen.blocked || screen.readOnly) chatMenu.value = false;
+  }, [screen.blocked, screen.readOnly]);
+  // Asking whether to block: the focus goes to Cancel. Answered with Cancel
+  // (the focus gone with it), back to ⋯; closed by Back or Settings while the
+  // user was elsewhere (typing, say), the focus stays where it is.
   const asked = useRef(false);
   useEffect(() => {
-    if (confirmingBlock.value) cancelBlock.current?.focus();
-    else if (asked.current) menuButton.current?.focus();
+    if (confirmingBlock.value) cancelBlock.current?.focus({ preventScroll: true });
+    else if (asked.current && (!document.activeElement || document.activeElement === document.body)) menuButton.current?.focus({ preventScroll: true });
     asked.current = confirmingBlock.value;
   }, [confirmingBlock.value]);
   const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
@@ -804,6 +819,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replyKept.current = null;
     menu.value = null;
     chatMenu.value = false;
+    confirmingBlock.value = false;
+    asked.current = false;
   }, [screen.id]);
   // A quote's message older than those shown: loaded, then jumped to.
   const jumping = useRef<string | null>(null);
@@ -1291,7 +1308,7 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
           <legend class="group-title">{tr('keepMedia')}</legend>
           <div class="segmented">
             {(['forever', 'month', 'week'] as const).map((keep) => (
-              <label class={settings.keep === keep ? 'segment checked' : 'segment'} key={keep}>
+              <label class={`segment${settings.keep === keep ? ' checked' : ''}${busy ? ' disabled' : ''}`} key={keep}>
                 <input type="radio" name="keep-media" checked={settings.keep === keep} onChange={() => void app.setKeepMedia(keep)} />
                 {tr(KEEP_TEXT[keep])}
               </label>
