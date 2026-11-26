@@ -271,18 +271,18 @@ records go in that same request.
   is refused, the server deletes the encrypted chat ID and language the next
   time the app is opened (above), and the app doesn't turn notices on again
   unless the user taps Turn on notices.
-- **Choose what stays on the device** (Data and storage, on the Link tab): keep
+- **Choose what stays on the device** (Settings, Data and storage): keep
   attachments forever, for a month or for a week; clear a chat's or all of
   them; and choose which kinds download by themselves. Even those download
   by themselves only in a chat the user has written in, and only if they
   come after the user's first message there in the chat; anything else
   waits for a tap. A cleared attachment can be fetched again only while the
   server still holds it.
-- **Choose the app's language** (Data and storage): one of the app's
+- **Choose the app's language** (Settings, Language): one of the app's
   languages, or the same as Telegram, the default. The choice stays on the device and isn't
   sent; notices follow the language Telegram gives the server, and the app
   tells the server again when that changes.
-- **Delete their account** in the app (on the Link tab). If they tick
+- **Delete their account** in the app (in Settings). If they tick
   **Also delete my chats for the other side**, the app first deletes each
   chat in their list for both sides, as a chat's own Delete does: the
   other side's app is asked to delete it, and the uploads of what they

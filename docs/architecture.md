@@ -419,7 +419,7 @@ The panel under the message box has emoji and stickers, as in Telegram.
   backend.
 - **Languages:** those listed in `web/src/i18n/languages.ts`, right-to-left
   included: Telegram's language (else the device's, else English), unless
-  the user picks one in Data and storage (kept on the device). Telegram's
+  the user picks one in Settings, Language (kept on the device). Telegram's
   theme is mapped onto the app's own colours.
 
 ## The backend
