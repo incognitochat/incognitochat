@@ -92,6 +92,7 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif, 
 .tab-bar { position: sticky; inset-block-end: 0; z-index: 5; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0.25rem 0.5rem calc(0.25rem + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))); background: var(--app-bar, var(--app-bg)); border-block-start: 1px solid var(--app-separator, rgb(127 127 127 / 0.2)); }
 .tab-item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.125rem; min-block-size: 3.25rem; padding: 0.25rem; border: 0; background: none; color: var(--app-muted); font: inherit; font-size: 0.75rem; font-weight: 500; line-height: 1.2; cursor: pointer; }
 .tab-item[aria-current='page'] { color: var(--app-text); font-weight: 600; }
+.tab-item:disabled { opacity: 0.5; cursor: default; }
 .tab-item[aria-current='page'] .tab-icon { color: var(--app-link); }
 .tab-icon { position: relative; display: flex; }
 .tab-icon svg { inline-size: 1.625rem; block-size: 1.625rem; }

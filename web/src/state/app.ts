@@ -1170,6 +1170,8 @@ export function createApp(deps: Deps) {
   // that read storage before another can't draw over it (an older list,
   // previews or unread counts, until something drew it again).
   let homeDraws = 0;
+  // Actions started on home (busy), each drawing home itself once done.
+  let homeActions = 0;
 
   /**
    * Redraws the current screen from storage (after new messages, or another
@@ -1445,6 +1447,7 @@ export function createApp(deps: Deps) {
     if (!messaging) return;
     const current = screen.value;
     if ((current.kind === 'home' || current.kind === 'conversation') && current.busy) return;
+    if (current.kind === 'home') homeActions++;
     if (current.kind === 'home' || current.kind === 'conversation') screen.value = { ...current, busy: true };
     try {
       // Told before blocking, which ends our way of writing to them.
@@ -2540,7 +2543,7 @@ export function createApp(deps: Deps) {
   }
 
   async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab } = {}): Promise<void> {
-    if (options.tab) tab = options.tab;
+    const actions = homeActions;
     const { config, db } = deps;
     // Signed out, the chats are only read: the server isn't asked.
     let offline = (options.offline ?? false) || signedOut !== null || deletionPaused;
@@ -2573,10 +2576,9 @@ export function createApp(deps: Deps) {
     // Read from here on: a refresh that read before draws nothing over it.
     homeDraws++;
     const links = await linkViews();
-    backButton(false);
-    screen.value = {
-      kind: 'home',
-      tab,
+    const drawn = {
+      kind: 'home' as const,
+      tab: options.tab ?? tab,
       conversations: await conversations(),
       offline,
       limited,
@@ -2592,8 +2594,14 @@ export function createApp(deps: Deps) {
       signedOut,
       deletionPaused,
       // Last measured (null the first time): measured again below, without holding the tab up.
-      media: tab === 'settings' ? mediaBytes : null,
+      media: (options.tab ?? tab) === 'settings' ? mediaBytes : null,
     };
+    const latest = screen.value;
+    // An action started on home meanwhile draws home itself once done.
+    if (actions !== homeActions && latest.kind === 'home' && latest.busy) return;
+    tab = drawn.tab;
+    backButton(false);
+    screen.value = drawn;
     if (tab === 'settings') void measureMedia();
     if (screen.value.kind === 'home' && screen.value.notice === 'new-signing-key') await toldNewKey(db);
     // By itself only if Telegram never refused one (never set up, or a new
@@ -2650,6 +2658,7 @@ export function createApp(deps: Deps) {
     if (!code) return showHome({ notice: 'invalid-invitation' });
     const current = screen.value;
     if (current.kind === 'invitation' && current.busy) return;
+    if (current.kind === 'home') homeActions++;
     if (current.kind === 'home') screen.value = { ...current, busy: true, notice: null };
     if (current.kind === 'invitation') screen.value = { ...current, busy: true, error: null };
     let notice: HomeNotice = 'joined';
@@ -2813,6 +2822,7 @@ export function createApp(deps: Deps) {
   async function linkAction(action: () => Promise<unknown>, done: HomeNotice): Promise<void> {
     const current = screen.value;
     if (current.kind !== 'home' || current.busy) return;
+    homeActions++;
     screen.value = { ...current, busy: true, notice: null };
     let notice: HomeNotice = done;
     try {

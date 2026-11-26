@@ -381,7 +381,7 @@ function TabBar({ app, language, screen }: { app: AppState; language: Language; 
   return (
     <nav class="tab-bar">
       {TABS.map(({ tab, text, icon }) => (
-        <button type="button" class="tab-item" aria-current={screen.tab === tab ? 'page' : undefined} onClick={() => void app.showTab(tab)}>
+        <button type="button" class="tab-item" aria-current={screen.tab === tab ? 'page' : undefined} disabled={screen.busy} onClick={() => void app.showTab(tab)}>
           <span class="tab-icon">
             <Icon name={icon} />
             {tab === 'chats' && unread > 0 && (

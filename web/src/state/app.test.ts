@@ -3185,7 +3185,7 @@ describe('the Settings tab', () => {
     settings.release();
   });
 
-  it("keeps the newer size when Settings' measurement ends before Data and storage's later one", async () => {
+  it("keeps Data and storage's newer size when Settings' older measurement ends after it", async () => {
     const owner = await registered(fakeServer().api);
     const photo = (id: string, s: number) =>
       addMessage(
@@ -3225,16 +3225,59 @@ describe('the Settings tab', () => {
       if (method === 'POST' && path === '/links') await held;
       return request(method, path, init, check);
     }) as Api['request'];
-    const creating = owner.app.createLink();
-    await vi.waitFor(() => expect(home(owner.app.screen.value).busy).toBe(true));
-    await owner.app.showTab('chats');
-    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
-    // Creating again meanwhile asks nothing more.
-    await owner.app.createLink();
-    release();
-    await creating;
-    expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
-    expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    try {
+      const creating = owner.app.createLink();
+      await vi.waitFor(() => expect(home(owner.app.screen.value).busy).toBe(true));
+      await owner.app.showTab('chats');
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      // Creating again meanwhile asks nothing more.
+      await owner.app.createLink();
+      release();
+      await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+      expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  it("doesn't let a tab switch still loading draw over an action started meanwhile", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.showTab('links');
+    let releaseAccount = () => {};
+    const accountHeld = new Promise<void>((r) => (releaseAccount = r));
+    let releaseLink = () => {};
+    const linkHeld = new Promise<void>((r) => (releaseLink = r));
+    let holdAccount = true;
+    const request = server.api.request.bind(server.api);
+    server.api.request = (async (method, path, init, check) => {
+      if (holdAccount && method === 'GET' && path === '/account') {
+        holdAccount = false;
+        await accountHeld;
+      }
+      if (method === 'POST' && path === '/links') await linkHeld;
+      return request(method, path, init, check);
+    }) as Api['request'];
+    try {
+      // A tap on Settings on a slow network: nothing changes yet, so the user taps Create my link.
+      const switching = owner.app.showTab('settings');
+      await tick();
+      const creating = owner.app.createLink();
+      await vi.waitFor(() => expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true }));
+      releaseAccount();
+      await switching;
+      // Settings didn't draw over the action: still busy on My link, so nothing can be asked twice.
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', busy: true });
+      await owner.app.createLink();
+      releaseLink();
+      await creating;
+      expect(home(owner.app.screen.value)).toMatchObject({ tab: 'links', notice: 'created' });
+      expect(server.calls.filter((c) => c === 'POST /links')).toHaveLength(1);
+    } finally {
+      releaseAccount();
+      releaseLink();
+    }
   });
 
   it("forgets the size when another copy changes the account, so the old account's never shows", async () => {
