@@ -779,16 +779,23 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     if (now && now.top === at.top && now.end === at.end) return;
     chatMenu.value = at;
   };
-  // A turned phone, a resized window, or the keyboard closing as the menu
-  // takes the focus (Android resizes the page): placed again, under ⋯. Added
-  // and removed in the same commit as the menu, and never reopening one closed.
+  // A turned phone, a resized window, the keyboard closing as the menu takes
+  // the focus (Android resizes the page), or the page scrolling under it:
+  // placed again, under ⋯ (or closed, ⋯ gone from view). Added and removed in
+  // the same commit as the menu, and never reopening one closed. On a resize
+  // it runs after useChatScroll's handler (added when the chat opened), so it
+  // measures ⋯ where that left it.
   useLayoutEffect(() => {
     if (!menuShown) return;
     const placeAgain = () => {
       if (chatMenu.peek()) placeChatMenu();
     };
     addEventListener('resize', placeAgain);
-    return () => removeEventListener('resize', placeAgain);
+    addEventListener('scroll', placeAgain, { passive: true });
+    return () => {
+      removeEventListener('resize', placeAgain);
+      removeEventListener('scroll', placeAgain);
+    };
   }, [menuShown]);
   // Blocked or read-only meanwhile: the menu goes, for good.
   useEffect(() => {
@@ -888,7 +895,11 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
               aria-haspopup="menu"
               aria-expanded={menuShown}
               disabled={screen.busy}
-              onClick={placeChatMenu}
+              onClick={() => {
+                // From the keyboard, ⋯ may be out of view: brought into it first.
+                menuButton.current?.scrollIntoView({ block: 'nearest' });
+                placeChatMenu();
+              }}
             >
               <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="5" cy="12" r="2" />
