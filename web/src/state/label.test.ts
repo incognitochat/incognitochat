@@ -8,10 +8,12 @@ describe('labelParts', () => {
     expect(labelParts('⭐ 0ABC')).toEqual({ emoji: '⭐', code: '0ABC' });
     expect(labelParts('⚓ ZZZZ')).toEqual({ emoji: '⚓', code: 'ZZZZ' });
     expect(labelParts('❤️ ABCD')).toEqual({ emoji: '❤️', code: 'ABCD' });
+    // Everything after the first space is the code, as written.
+    expect(labelParts('🦊  K3F9')).toEqual({ emoji: '🦊', code: ' K3F9' });
   });
 
   it('keeps any other label whole, with no emoji', () => {
-    for (const label of ['K3F9', '', ' K3F9', 'AB CD', '🦊', '🦊 ', '🦊K3F9', 'a🦊 K3F9']) {
+    for (const label of ['K3F9', '', ' K3F9', 'AB CD', '🦊', '🦊 ', '🦊K3F9', 'a🦊 K3F9', '🦊x K3F9']) {
       expect(labelParts(label)).toEqual({ emoji: null, code: label });
     }
   });

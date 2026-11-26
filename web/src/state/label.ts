@@ -3,7 +3,7 @@
 // chat's picture, and the code beside it.
 
 /** An emoji, maybe with variation selectors or joined to others. */
-const EMOJI = /^\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*️?$/u;
+const EMOJI = /^\p{Extended_Pictographic}(?:\u{FE0F}|\u{200D}\p{Extended_Pictographic})*$/u;
 
 /** The label's emoji and code; a label of another shape is all code, with no emoji. */
 export function labelParts(label: string): { emoji: string | null; code: string } {

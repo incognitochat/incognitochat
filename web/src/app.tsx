@@ -754,9 +754,24 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const confirmingBlock = useSignal(false);
   useBackCloses(confirmingBlock.value, () => (confirmingBlock.value = false));
-  // The ⋯ menu in the header: Block, Delete.
-  const chatMenu = useSignal(false);
-  useBackCloses(chatMenu.value, () => (chatMenu.value = false));
+  // The ⋯ menu in the header: Block, Delete. Only while they can be done.
+  const chatMenu = useSignal<{ top: number; end: number } | false>(false);
+  const menuShown = !!chatMenu.value && !screen.blocked && !screen.readOnly && !confirmingBlock.value;
+  useBackCloses(menuShown, () => (chatMenu.value = false));
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const cancelBlock = useRef<HTMLButtonElement>(null);
+  const openChatMenu = () => {
+    const r = menuButton.current?.getBoundingClientRect();
+    const rtl = document.documentElement.dir === 'rtl';
+    chatMenu.value = r ? { top: Math.round(r.bottom + 4), end: Math.round(rtl ? r.left : window.innerWidth - r.right) } : { top: 56, end: 8 };
+  };
+  // Asking whether to block: the focus goes to Cancel; once answered with Cancel, back to ⋯.
+  const asked = useRef(false);
+  useEffect(() => {
+    if (confirmingBlock.value) cancelBlock.current?.focus();
+    else if (asked.current) menuButton.current?.focus();
+    asked.current = confirmingBlock.value;
+  }, [confirmingBlock.value]);
   const scroll = useChatScroll(app, screen.id, screen.messages, screen.more);
   const sending = app.preparing.value.filter((p) => p.conv === screen.id).length;
   useEffect(() => {
@@ -788,6 +803,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replying.value = null;
     replyKept.current = null;
     menu.value = null;
+    chatMenu.value = false;
   }, [screen.id]);
   // A quote's message older than those shown: loaded, then jumped to.
   const jumping = useRef<string | null>(null);
@@ -831,11 +847,12 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             <button
               type="button"
               class="bar-icon chat-menu-button"
+              ref={menuButton}
               aria-label={tr('chatActions')}
               aria-haspopup="menu"
-              aria-expanded={chatMenu.value}
+              aria-expanded={menuShown}
               disabled={screen.busy}
-              onClick={() => (chatMenu.value = true)}
+              onClick={openChatMenu}
             >
               <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="5" cy="12" r="2" />
@@ -851,15 +868,16 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
             <Button kind="danger" disabled={screen.busy} onClick={app.block}>
               {tr('blockYes')}
             </Button>
-            <Button kind="secondary" disabled={screen.busy} onClick={() => (confirmingBlock.value = false)}>
+            <button type="button" class="button secondary" ref={cancelBlock} disabled={screen.busy} onClick={() => (confirmingBlock.value = false)}>
               {tr('cancel')}
-            </Button>
+            </button>
           </div>
         )}
       </header>
-      {chatMenu.value && (
+      {menuShown && (
         <ChatMenu
           language={language}
+          at={chatMenu.value || null}
           onClose={() => (chatMenu.value = false)}
           onBlock={() => (confirmingBlock.value = true)}
           onDelete={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}
@@ -1273,7 +1291,7 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
           <legend class="group-title">{tr('keepMedia')}</legend>
           <div class="segmented">
             {(['forever', 'month', 'week'] as const).map((keep) => (
-              <label class="segment" key={keep}>
+              <label class={settings.keep === keep ? 'segment checked' : 'segment'} key={keep}>
                 <input type="radio" name="keep-media" checked={settings.keep === keep} onChange={() => void app.setKeepMedia(keep)} />
                 {tr(KEEP_TEXT[keep])}
               </label>
@@ -1282,7 +1300,7 @@ function Storage({ app, language, screen }: { app: AppState; language: Language;
         </fieldset>
         <fieldset class="group-set" disabled={busy}>
           <legend class="group-title">{tr('autoDownload')}</legend>
-          <div class="group plain">
+          <div class="group no-icons">
             {(['photos', 'voice', 'gifs'] as const).map((kind) => (
               <label class="cell" key={kind}>
                 <span class="cell-label">{tr(AUTO_TEXT[kind])}</span>
@@ -1447,24 +1465,30 @@ const SLOP = 10;
 
 type Gesture = { x: number; y: number; pointer: number; mode: 'pending' | 'swipe' | 'scroll'; base: number; timer: number; pressed: boolean };
 
-/**
- * A chat in the list. Tap opens it; swiping it toward the start reveals
- * Delete; a long press (or a right click) asks to delete it straight away.
- */
-/** A chat's picture: its label's emoji in a circle (empty for a label without one). */
+/** A chat's picture: its label's emoji in a circle (empty for a label without one). Read out with the name (LabelCode), not here. */
 function Avatar({ label, small }: { label: string; small?: boolean }) {
-  return <span class={small ? 'avatar small' : 'avatar'}>{labelParts(label).emoji}</span>;
+  return (
+    <span class={small ? 'avatar small' : 'avatar'} aria-hidden="true">
+      {labelParts(label).emoji}
+    </span>
+  );
 }
 
-/** A chat's name beside its picture: the label's code (all of it, for a label without an emoji). */
+/** A chat's name beside its picture: the label's code (all of it, for a label without an emoji); screen readers hear the emoji too. */
 function LabelCode({ label }: { label: string }) {
+  const { emoji, code } = labelParts(label);
   return (
     <bdi dir="ltr" class="label">
-      {labelParts(label).code}
+      {emoji && <span class="visually-hidden">{emoji} </span>}
+      {code}
     </bdi>
   );
 }
 
+/**
+ * A chat in the list. Tap opens it; swiping it toward the start reveals
+ * Delete; a long press (or a right click) asks to delete it straight away.
+ */
 function ChatRow({
   app,
   language,
@@ -3361,19 +3385,33 @@ function Reactions({ message: m, language, canReact, onReact }: { message: Messa
 
 const formatCount = (language: Language, n: number) => new Intl.NumberFormat(locale(language)).format(n);
 
-/** The long-press menu of a message: reactions, then Reply, Copy, Delete for me. */
 /** The chat's own menu, from the ⋯ in its header: Block (asks first, below the header) and Delete (its dialog). */
-function ChatMenu({ language, onClose, onBlock, onDelete }: { language: Language; onClose: () => void; onBlock: () => void; onDelete: () => void }) {
+function ChatMenu({
+  language,
+  at,
+  onClose,
+  onBlock,
+  onDelete,
+}: {
+  language: Language;
+  /** Where it opens: below the ⋯ button (px from the top, and from the window's inline end). */
+  at: { top: number; end: number } | null;
+  onClose: () => void;
+  onBlock: () => void;
+  onDelete: () => void;
+}) {
   const tr = (key: Key) => t(language, key);
   const focus = useDialogFocus<HTMLDivElement>('menu');
+  // The menu goes first (its focus back to ⋯), then what was picked opens and takes the focus.
   const act = (f: () => void) => () => {
     onClose();
-    f();
+    setTimeout(f);
   };
   return (
     <div class="overlay popover" onClick={onClose} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
       <div
-        class="dialog menu"
+        class="dialog menu chat-menu"
+        style={at ? { insetBlockStart: `${at.top}px`, insetInlineEnd: `${at.end}px` } : undefined}
         role="dialog"
         aria-modal="true"
         aria-label={tr('chatActions')}
@@ -3400,6 +3438,7 @@ function ChatMenu({ language, onClose, onBlock, onDelete }: { language: Language
   );
 }
 
+/** The long-press menu of a message: reactions, then Reply, Copy, Delete for me. */
 function MessageMenu({
   message,
   language,
