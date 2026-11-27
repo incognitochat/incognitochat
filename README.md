@@ -18,7 +18,9 @@ whom.
   files, music, voice messages, round video messages, emoji and stickers,
   reactions, editing, deleting for both sides, and "sent" and "seen" ticks.
 - **Anonymous both ways:** a sender is a label like `🦊 K3F9`, the same each
-  time they write through your link, and unlinkable to anything else they do.
+  time they write through your link, and unlinkable to anything else they do
+  (unless a recipient works with someone who holds the server's data: see the
+  [security model](docs/security.md#what-still-leaks)).
 - **Silent blocks:** the blocked person isn't told; their messages just stop
   arriving.
 - **Notices** from the bot when a message arrives: a generic "New message",
@@ -48,7 +50,9 @@ More: [how it works](docs/architecture.md), and the
 ## Security at a glance
 
 **The operator can't** read messages or attachments, learn from stored data
-who wrote to whom or who an anonymous sender is, forge messages, or swap keys
+who wrote to whom or who an anonymous sender is (unless a recipient hands over
+the sender's mailbox, taken from the recipient's own device: see the [security
+model](docs/security.md#what-still-leaks)), forge messages, or swap keys
 unnoticed (links carry their key's fingerprint).
 
 **The operator could, but would be caught,** serving app code that differs
@@ -69,7 +73,8 @@ from this repository: builds are reproducible, hashed and attested, and
 And, as with any app, users trust their own device and the Telegram app.
 
 What still leaks (timing, IP addresses, which links Telegram sees opened,
-rough attachment sizes) and the other limits are listed in full in the
+rough attachment sizes, a sender's account to a recipient working with someone
+who holds the server's data) and the other limits are listed in full in the
 [security model](docs/security.md). What is kept, where and for how long is in
 [what the software stores](docs/data.md).
 

@@ -1182,8 +1182,8 @@ each mailbox's owner, to deliver, but not who writes to it.
   old one if the replacement is refused, trying again after about 1, 2,
   then every 4 minutes. A socket that closes is reopened after about a
   second, then twice as long each time, up to a minute.
-- `POST /mailboxes/{id}/discard` ends a mailbox (a block, or an ended
-  conversation); a link's intro mailbox ends with the link.
+- `POST /mailboxes/{id}/discard` ends a mailbox (a block; deleting a chat
+  doesn't); a link's intro mailbox ends with the link.
 - `POST /mailboxes/check {ids}` (at most 1,000 IDs) returns which of the
   given mailboxes aren't the caller's (any more). At upkeep, at most once a
   day, the app drops those from its pool and
