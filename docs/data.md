@@ -268,6 +268,11 @@ records go in that same request.
 - **Delete a conversation** on their device; the other person keeps theirs.
   Or for both sides (unticked by default): it goes from the other person's
   device too, both sides' messages, until either writes again.
+  Several at once too: holding a chat in the list selects it, and the
+  others are added with a tap. Several deleted for both sides go one at a
+  time, paced as before deleting the account (each is one of the day's
+  messages); if it stops, the rest stay with the other side unless the user
+  tries again.
 - **Block** someone. They're not told; their messages are no longer delivered.
 - **Replace their link.** The old one stops working at once.
 - **Turn notices off** by blocking the bot in Telegram. Once the next notice
