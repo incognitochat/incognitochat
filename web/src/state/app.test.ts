@@ -1570,6 +1570,18 @@ describe('links', () => {
     expect(ownerAgain.screen.value).toMatchObject({ kind: 'link', status: 'own' });
   });
 
+  it("leaves someone's link for the Chats tab", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    const url = home(owner.app.screen.value).links[0]!.url;
+    const sender = await registered(server.api, { launch: launchWith(payloadOf(url)) });
+    expect(sender.app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
+    // The link screen's button ("Go to my chats").
+    await sender.app.home();
+    expect(sender.app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+  });
+
   it('catches a server that swaps the keys', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);
