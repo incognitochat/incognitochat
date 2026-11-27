@@ -3637,6 +3637,26 @@ describe('switching tabs while home loads (a slow network)', () => {
     }
   });
 
+  it("opens Settings from a chat that refreshes while Settings loads (a new message, say)", async () => {
+    const server = fakeServer();
+    const tg = recordingBridge();
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    await chatOnDevice(owner.db);
+    await owner.app.openConversation('c1');
+    const release = holdFirst(server, account);
+    try {
+      tg.fire('settings_button_pressed');
+      await release.reached;
+      // The same chat, drawn again.
+      await owner.app.refresh();
+      expect(owner.app.screen.value).toMatchObject({ kind: 'conversation', id: 'c1' });
+      release();
+      await vi.waitFor(() => expect(home(owner.app.screen.value).tab).toBe('settings'));
+    } finally {
+      release();
+    }
+  });
+
   it('a tab tapped, a chat opened, then Back: home stays on the tab Back went to', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);
