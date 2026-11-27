@@ -54,6 +54,32 @@ export function firstCharacters(text: string, max: number): string {
 }
 
 /**
+ * A word a keyboard just put together into a name (`now`), against the name
+ * as it was when the word began (`before`): what changed is found character
+ * by character (as people count them, so an emoji or a letter with its marks
+ * is never split), and only as much of it as fits in `max` characters stays,
+ * where it went in; the rest of the name is kept whole. The new name, and
+ * where the caret goes (after the word).
+ */
+export function fitComposed(before: string, now: string, max = NAME_MAX): { value: string; caret: number } {
+  const was = characters(before);
+  const is = characters(now);
+  let start = 0;
+  while (start < was.length && start < is.length && was[start] === is[start]) start++;
+  let end = is.length;
+  let kept = was.length;
+  while (end > start && kept > start && was[kept - 1] === is[end - 1]) {
+    end--;
+    kept--;
+  }
+  const head = is.slice(0, start);
+  const tail = is.slice(end);
+  const word = is.slice(start, end).slice(0, Math.max(0, max - head.length - tail.length));
+  const all = [...head, ...word, ...tail].slice(0, max);
+  return { value: all.join(''), caret: all.slice(0, Math.min(head.length + word.length, all.length)).join('').length };
+}
+
+/**
  * Text typed or pasted into a name over start..end: as much of it as fits
  * in `max` characters goes in there (none at the cap), and the rest of the
  * name stays whole. The new name, and where the caret goes (after it).

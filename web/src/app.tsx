@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { characterCount, cleanName, firstCharacters, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
+import { characterCount, cleanName, firstCharacters, fitComposed, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -1243,21 +1243,9 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
     const before = beforeWord.current ?? '';
     beforeWord.current = null;
     if (characterCount(value) > NAME_MAX) {
-      let start = 0;
-      while (start < before.length && start < value.length && before[start] === value[start]) start++;
-      let end = value.length;
-      let kept = before.length;
-      while (end > start && kept > start && before[kept - 1] === value[end - 1]) {
-        end--;
-        kept--;
-      }
-      // Not inside a pair of UTF-16 halves.
-      if (start > 0 && /[\uD800-\uDBFF]/.test(value[start - 1]!)) start--;
-      if (end < value.length && /[\uDC00-\uDFFF]/.test(value[end]!)) end++;
-      const next = insertInto(value, start, end, value.slice(start, end));
-      const cut = firstCharacters(next.value, NAME_MAX);
-      field.value = cut;
-      field.setSelectionRange(Math.min(next.caret, cut.length), Math.min(next.caret, cut.length));
+      const next = fitComposed(before, value);
+      field.value = next.value;
+      field.setSelectionRange(next.caret, next.caret);
     }
     name.value = field.value;
   };
