@@ -1582,6 +1582,18 @@ describe('links', () => {
     expect(sender.app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
   });
 
+  it('goes to the Chats tab from anywhere, whatever tab was open last', async () => {
+    const server = fakeServer();
+    const { app } = await registered(server.api);
+    await app.showTab('settings');
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'settings' });
+    await app.chats();
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+    // Remembered from here on: home again stays on Chats.
+    await app.home();
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+  });
+
   it('catches a server that swaps the keys', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);

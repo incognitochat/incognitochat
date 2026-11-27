@@ -3029,6 +3029,8 @@ export function createApp(deps: Deps) {
     /** The time messages are dated by now (Unix ms): what a message's age, for editing, is counted from. */
     messageNow: () => clock.messageNow(),
     home: () => showHome(),
+    /** The home screen on its Chats tab, whatever tab was open last: the way out of someone's link screen. */
+    chats: () => showHome({ tab: 'chats' }),
     /** Scrolled to the top of the open chat: older messages (or all from the one with this ID, to jump to its quote). */
     loadOlder,
     /** The open conversation's newest messages are in view: tell the other side, while the user is using the app. */
