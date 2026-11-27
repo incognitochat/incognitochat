@@ -166,6 +166,9 @@ const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'levelL
 const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm', 'revokeConfirm', 'blockConfirmOwner', 'blockConfirmSender'];
 const POPUP_BUTTONS: readonly Key[] = ['clearMedia', 'pause', 'resume', 'deleteHereOnly', 'newLink', 'revokeYes', 'blockYes'];
 
+/** The line under a chat's name, in its header, which stays at the top: one line on a 320 px screen (about 160 px of 13 px text). */
+const CHAT_HEADER_LINES: readonly Key[] = ['aboutOwnerConversation', 'aboutSenderConversation'];
+
 /** What the app says about safety and privacy: a translation must keep exactly what each says (checked by back-translation before a language ships). */
 const SECURITY_KEYS: readonly Key[] = [
   'welcomeBody', 'homeIntro', 'newLinkConfirm', 'revokeConfirm', 'noticeReplaced', 'noticeNewSigningKey', 'joinBody',
@@ -246,6 +249,12 @@ describe('every language', () => {
     for (const language of ALL) {
       for (const key of POPUP_MESSAGES) expect(filled(language, key).length, `${language} ${key}`).toBeLessThanOrEqual(256);
       for (const key of POPUP_BUTTONS) expect(filled(language, key).length, `${language} ${key}`).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("fits the chat header's one line", () => {
+    for (const language of ALL) {
+      for (const key of CHAT_HEADER_LINES) expect(t(language, key).length, `${language} ${key}`).toBeLessThanOrEqual(24);
     }
   });
 
