@@ -593,6 +593,87 @@ describe('conversations in the app', () => {
     expect(screenOf(owner.screen.value, 'home').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
   });
 
+  it("renames a chat on this device only: shown in the list, the chat and Blocked; gone with a delete, kept by a delete that also blocks", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+    await owner.openConversation(id);
+
+    // Named: nothing goes to the server, and it's stored sealed, as message previews are.
+    const before = b.calls.length;
+    await owner.rename({ name: '  Alex\u202e  ', emoji: '🇨🇦' });
+    expect(b.calls.length).toBe(before);
+    const stored = await owner.db.get('conversations', id);
+    expect(stored!.custom).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(stored!.custom)).not.toContain('Alex');
+    expect(JSON.stringify(stored)).not.toContain('Alex');
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label: '🇨🇦 Alex', original: label, custom: { name: 'Alex', emoji: '🇨🇦' } });
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual(['🇨🇦 Alex']);
+
+    // Only a picture; then back to the label.
+    await owner.openConversation(id);
+    await owner.rename({ emoji: '🌻' });
+    expect(screenOf(owner.screen.value, 'conversation').label).toBe(`🌻 ${label.split(' ')[1]}`);
+    await owner.rename(null);
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
+    // A name that cleans to nothing, and a picture that isn't one emoji: the label.
+    await owner.rename({ name: ' \n\u2066 ', emoji: 'xy' });
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
+
+    // Deleted: the name goes with it; when they write again, the label.
+    await owner.rename({ name: 'Alex' });
+    await owner.deleteConversation(id, false);
+    await sender.sendMessage('anyone?');
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+
+    // Deleted and blocked: Blocked shows the name.
+    await owner.openConversation(id);
+    await owner.rename({ name: 'Alex' });
+    await owner.deleteConversation(id, true);
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    // Not renamed while blocked (no ⋯ menu then).
+    await owner.openConversation(id);
+    await owner.rename({ name: 'Other' });
+    expect(screenOf(owner.screen.value, 'conversation').label).toBe(`${label.split(' ')[0]} Alex`);
+
+    // Unblocked: it was deleted, so in neither list now; the name goes. They write again: the label.
+    await owner.unblock(id);
+    await sender.sync();
+    await sender.sendMessage('still there?');
+    await owner.sync();
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+  });
+
+  it('keeps the name of a chat blocked without a delete when it is unblocked', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+    await owner.openConversation(id);
+    await owner.rename({ name: 'Alex' });
+    await owner.block();
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    await owner.unblock(id);
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+  });
+
   it('shows the delivery state of the last message in the list', async () => {
     const b = await backend();
     const owner = await person(b);

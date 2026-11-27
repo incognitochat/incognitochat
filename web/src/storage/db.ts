@@ -145,6 +145,14 @@ export interface ConversationRecord {
    */
   hidden?: boolean;
   /**
+   * The user's own name and picture for it (state/label.ts), on this
+   * device only: never sent, and the other side never sees it. Deleting the
+   * chat deletes it, unless the chat stays in Blocked (a delete that also
+   * blocks); it goes once the chat is in neither list. Sealed, as message
+   * previews are (messaging/store.ts sealChatName).
+   */
+  custom?: Uint8Array<ArrayBuffer>;
+  /**
    * The user opened it here. Missing in conversations from before it was
    * kept: of those, one opened shows it by our key, which its "seen" made.
    */

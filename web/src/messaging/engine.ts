@@ -94,6 +94,8 @@ import {
   patchMessage,
   pendingUploadDeletes,
   putConversation,
+  sealChatName,
+  type ChatName,
   putMedia,
   putSweep,
   queueUploadDeletes,
@@ -1427,6 +1429,15 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
+   * Gives a chat the user's own name and picture, or (null) takes them away:
+   * stored with it here, never sent.
+   */
+  async function rename(conv: string, custom: ChatName | null): Promise<void> {
+    const sealed = custom && (custom.name || custom.emoji) ? await sealChatName(db, conv, custom) : null;
+    await update(conv, ({ custom: _, ...current }) => (sealed ? { ...current, custom: sealed } : current));
+  }
+
+  /**
    * Undoes a block. Their sender tag is forgotten, so they can write through
    * our link again. Their app still writes to the mailbox we discarded, so
    * if we had one, we send them a quiet key update from a new mailbox (and,
@@ -1452,7 +1463,12 @@ export function createMessaging(deps: MessagingDeps) {
       await transmit(c.id, { kind: 'key_update', id: envelope, at: await stampIn(c.id, envelope) });
     }
     if (c.role === 'owner' && c.tag) await removeBlockedTag(c.link.fingerprint, c.tag);
-    await update(conv, ({ unblocking: _, ...current }) => ({ ...current, status: 'active' }));
+    // Deleted before (in neither list now): the name the user gave it goes too.
+    await update(conv, ({ unblocking: _, ...current }) => {
+      if (!current.hidden) return { ...current, status: 'active' };
+      const { custom: _custom, ...rest } = current;
+      return { ...rest, status: 'active' };
+    });
   }
 
   /**
@@ -2848,7 +2864,7 @@ export function createMessaging(deps: MessagingDeps) {
     return walk !== null && !paused();
   }
 
-  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
+  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, rename, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;
