@@ -3657,6 +3657,33 @@ describe('switching tabs while home loads (a slow network)', () => {
     }
   });
 
+  it("doesn't let Telegram's Settings item, still loading, draw over a chat opened meanwhile", async () => {
+    const server = fakeServer();
+    const tg = recordingBridge();
+    const owner = await registered(server.api, { bridge: tg.bridge });
+    await chatOnDevice(owner.db);
+    await owner.app.showTab('chats');
+    const release = holdFirst(server, account);
+    try {
+      tg.fire('settings_button_pressed');
+      await release.reached;
+      await owner.app.openConversation('c1');
+      expect(owner.app.screen.value).toMatchObject({ kind: 'conversation', id: 'c1' });
+      // The older draw reads the chats twice, the second just before it decides: hold that one, then let it decide.
+      const first = holdRead('listConversations');
+      release();
+      await first.atRead;
+      const last = holdRead('listConversations');
+      first.release();
+      await last.atRead;
+      last.release();
+      await tick();
+      expect(owner.app.screen.value).toMatchObject({ kind: 'conversation', id: 'c1' });
+    } finally {
+      release();
+    }
+  });
+
   it('a tab tapped, a chat opened, then Back: home stays on the tab Back went to', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);
