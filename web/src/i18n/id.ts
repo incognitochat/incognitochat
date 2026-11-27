@@ -193,7 +193,7 @@ export const id = {
   chatName: 'Nama',
   chatPicture: 'Gambar',
   chatNameNote: 'Hanya Anda yang melihat nama dan gambar ini, di perangkat ini.',
-  originalName: 'Pakai nama asli',
+  originalName: 'Gunakan nama semula',
   deleteForMe: 'Hapus untuk saya',
   deleteMessageConfirm: 'Hapus pesan ini dari perangkat ini? Pihak lain tetap menyimpan salinannya.',
   deleteOwnMessageConfirm: 'Hapus pesan ini?',

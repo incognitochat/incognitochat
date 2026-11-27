@@ -196,7 +196,7 @@ export const pl = {
   rename: 'Zmień nazwę',
   chatName: 'Nazwa',
   chatPicture: 'Obrazek',
-  chatNameNote: 'Tylko ty widzisz tę nazwę i obrazek, na tym urządzeniu.',
+  chatNameNote: 'Tylko ty widzisz tę nazwę i ten obrazek, na tym urządzeniu.',
   originalName: 'Użyj pierwotnej nazwy',
   deleteForMe: 'Usuń u mnie',
   deleteMessageConfirm: 'Usunąć tę wiadomość z tego urządzenia? Druga strona zachowa swoją kopię.',

@@ -192,7 +192,7 @@ export const fa = {
   chatName: 'نام',
   chatPicture: 'تصویر',
   chatNameNote: 'این نام و تصویر را فقط شما، روی همین دستگاه، می‌بینید.',
-  originalName: 'استفاده از نام اصلی',
+  originalName: 'استفاده از نام اولیه',
   deleteForMe: 'پاک کردن برای من',
   deleteMessageConfirm: 'این پیام از این دستگاه پاک شود؟ نسخهٔ طرف مقابل می‌ماند.',
   deleteOwnMessageConfirm: 'این پیام پاک شود؟',
