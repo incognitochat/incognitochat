@@ -144,7 +144,7 @@ describe('a word a keyboard put together, at most NAME_MAX characters', () => {
     const name = 'Jon from the office, 3rd floor!!';
     expect(fitComposed(name, 3, 3, 'John' + name.slice(3))).toEqual({ value: name, caret: 3 });
     expect(fitComposed('abc', 3, 3, 'XYZ' + 'z'.repeat(NAME_MAX))).toEqual({ value: 'abc', caret: 3 });
-    // No start seen: the same.
+    // No start seen (before is empty): the first NAME_MAX characters.
     expect(fitComposed('', 0, 0, 'z'.repeat(NAME_MAX + 5))).toEqual({ value: 'z'.repeat(NAME_MAX), caret: NAME_MAX });
   });
 });
