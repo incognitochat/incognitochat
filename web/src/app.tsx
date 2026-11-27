@@ -522,8 +522,10 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
           <button type="button" class="bar-icon" aria-label={tr('clearSelection')} onClick={clear}>
             <Icon name="close" />
           </button>
+          {/* The number alone, as in Telegram (it fits beside the icons in every language); screen readers hear what it counts. */}
           <h1 class="select-count" aria-live="polite">
-            {t(language, 'selectedCount', { count: selected.length })}
+            <span aria-hidden="true">{t(language, 'unreadCount', { count: selected.length })}</span>
+            <span class="visually-hidden">{t(language, 'selectedCount', { count: selected.length })}</span>
           </h1>
           {selected.length === 1 && (
             <button type="button" class="bar-icon" aria-label={tr('rename')} disabled={screen.busy} onClick={() => openRename(selected[0]!)}>
