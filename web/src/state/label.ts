@@ -34,17 +34,23 @@ export type ChatCustom = ChatName;
 /** The longest name the user may give a chat, in characters (as people count them: a flag is one). */
 export const NAME_MAX = 32;
 
-const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+// Made when first needed: a web view without it fails only here (code points then), not as the app loads.
+let graphemes: Intl.Segmenter | null | undefined;
+
+/** A text's characters as people count them: a joined emoji or a flag is one. */
+function characters(text: string): string[] {
+  graphemes ??= typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  return graphemes ? Array.from(graphemes.segment(text), (s) => s.segment) : Array.from(text);
+}
+
+/** How many characters a text has, as people count them. */
+export function characterCount(text: string): number {
+  return characters(text).length;
+}
 
 /** The first `max` characters of a text (a joined emoji or a flag is one, and is never split). */
 export function firstCharacters(text: string, max: number): string {
-  let out = '';
-  let n = 0;
-  for (const { segment } of graphemes.segment(text)) {
-    if (n++ === max) break;
-    out += segment;
-  }
-  return out;
+  return characters(text).slice(0, max).join('');
 }
 
 /**

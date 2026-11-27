@@ -41,6 +41,7 @@ import {
   patchMessage,
   pendingUploadDeletes,
   putConversation,
+  sealChatName,
   putMedia,
   queueUploadDeletes,
   saveConversation,
@@ -7030,5 +7031,32 @@ describe('someone with the link flooding the owner', () => {
     expect(await shown()).toEqual({ out: false, text: 'hello' });
     await owner.messaging.remove(mine);
     expect((await getConversation(owner.db, mine))!.preview).toBeNull();
+  });
+});
+
+describe("a chat's own name in upkeep", () => {
+  it('goes from a chat in neither list (a delete that stopped when the app closed); stays on one in a list or in Blocked', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const ids: string[] = [];
+    for (const who of ['a', 'b', 'c']) {
+      const sender = await person(backend, who);
+      await sender.messaging.startConversation(ref, bundle, `hello from ${who}`);
+    }
+    await owner.messaging.sync();
+    for (const c of await listConversations(owner.db)) ids.push(c.id);
+    expect(ids).toHaveLength(3);
+    const [deleted, listed, blocked] = ids as [string, string, string];
+    const name = async (id: string) => sealChatName(owner.db, id, { name: 'Alex' });
+    // Opened (so upkeep keeps the record), named; one deleted and not blocked, one in the list, one blocked and deleted.
+    await putConversation(owner.db, { ...(await getConversation(owner.db, deleted))!, opened: true, hidden: true, custom: await name(deleted) });
+    await putConversation(owner.db, { ...(await getConversation(owner.db, listed))!, opened: true, custom: await name(listed) });
+    await putConversation(owner.db, { ...(await getConversation(owner.db, blocked))!, opened: true, hidden: true, status: 'blocked', custom: await name(blocked) });
+
+    await owner.messaging.maintain();
+    expect((await getConversation(owner.db, deleted))!.custom).toBeUndefined();
+    expect((await getConversation(owner.db, listed))!.custom).toBeInstanceOf(Uint8Array);
+    expect((await getConversation(owner.db, blocked))!.custom).toBeInstanceOf(Uint8Array);
   });
 });

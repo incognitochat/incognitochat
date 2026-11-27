@@ -690,6 +690,40 @@ describe('conversations in the app', () => {
       expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
     });
 
+    it('offers no Rename on a chat out of the list (opened again from their link) until someone writes in it', async () => {
+      const { owner, sender } = await pair();
+      await owner.sendMessage('hi');
+      await sender.sync();
+      // The sender is in the chat they started.
+      const sid = screenOf(sender.screen.value, 'conversation').id;
+      await sender.deleteConversation(sid, false);
+      await owner.home();
+      const again = await sender.reopen(payloadOf(owner));
+      await again.openConversation(existingChat(again.screen.value));
+      expect(screenOf(again.screen.value, 'conversation')).toMatchObject({ id: sid, hidden: true });
+      await again.rename(sid, { name: 'Bob' });
+      expect(await named(sender, sid)).toBe(false);
+      // Written in: back in the list, and named as asked.
+      await again.sendMessage('again');
+      expect(screenOf(again.screen.value, 'conversation').hidden).toBe(false);
+      await again.rename(sid, { name: 'Bob' });
+      expect(screenOf(again.screen.value, 'conversation').label).toMatch(/ Bob$/u);
+    });
+
+    it('keeps the name when a delete fails before anything changed (still in the list)', async () => {
+      const { b, owner, id } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      const held = holdAndFail(b, /send/);
+      const run = owner.deleteConversation(id, false, true);
+      await held.atServer;
+      held.fail(new NetworkError('offline'));
+      await run;
+      const stored = await owner.db.get('conversations', id);
+      expect(stored!.hidden).toBeFalsy();
+      expect(stored!.custom).toBeInstanceOf(Uint8Array);
+    });
+
     it('when another copy deleted it, a rename from a copy still showing it stores nothing', async () => {
       const { owner, id } = await pair();
       const other = await owner.reopen('');

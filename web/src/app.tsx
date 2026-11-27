@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { cleanName, firstCharacters, isCode, labelParts, NAME_MAX } from './state/label';
+import { characterCount, cleanName, firstCharacters, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -929,7 +929,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           language={language}
           at={chatMenu.value || null}
           onClose={() => (chatMenu.value = false)}
-          onRename={() => openRename(screen)}
+          // Not for a chat out of the list (deleted here, opened from their link): a name lasts only while it's in one.
+          onRename={screen.hidden ? null : () => openRename(screen)}
           onBlock={() => void confirmBlock(app, language, screen.id, screen.role)}
           onDelete={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}
         />
@@ -1210,6 +1211,22 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   const picking = useSignal(false);
   const pictureButton = useRef<HTMLButtonElement>(null);
   const close = () => (renaming.value = null);
+  // At most NAME_MAX characters, as people count them (a flag is one): typing
+  // on at the cap is refused (the caret stays put), a longer paste is cut.
+  const capName = (field: HTMLInputElement): string => {
+    const typed = field.value;
+    if (characterCount(typed) <= NAME_MAX) return typed;
+    const before = name.peek();
+    if (characterCount(before) >= NAME_MAX) {
+      const caret = Math.max(0, (field.selectionStart ?? typed.length) - (typed.length - before.length));
+      field.value = before;
+      field.setSelectionRange(caret, caret);
+      return before;
+    }
+    const cut = firstCharacters(typed, NAME_MAX);
+    field.value = cut;
+    return cut;
+  };
   useBackCloses(true, close);
   // Back closes the picture picker first.
   useBackCloses(picking.value, () => (picking.value = false));
@@ -1257,14 +1274,11 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             aria-label={tr('chatName')}
             placeholder={code}
             value={name.value}
-            // At most NAME_MAX characters, as people count them (a flag is one): cut while typing, not only on Save.
-            onInput={(e) => {
-              const capped = firstCharacters(e.currentTarget.value, NAME_MAX);
-              if (capped !== e.currentTarget.value) e.currentTarget.value = capped;
-              name.value = capped;
-            }}
-            // Not while a keyboard is still putting a word together (it confirms it with Enter).
-            onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && (e.preventDefault(), save())}
+            // Capped while typing, not only on Save; but not while a keyboard is still putting a word together (capped once it's done).
+            onInput={(e) => (name.value = (e as InputEvent).isComposing ? e.currentTarget.value : capName(e.currentTarget))}
+            onCompositionEnd={(e) => (name.value = capName(e.currentTarget))}
+            // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
+            onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}
           />
         </div>
         {picking.value && (
@@ -3575,7 +3589,7 @@ function ChatMenu({
   /** Where it opens: px from the top and from the window's inline end (below ⋯, kept on screen). */
   at: { top: number; end: number } | null;
   onClose: () => void;
-  onRename: () => void;
+  onRename: (() => void) | null;
   onBlock: () => void;
   onDelete: () => void;
 }) {
@@ -3603,10 +3617,12 @@ function ChatMenu({
         onClick={(e) => e.stopPropagation()}
       >
         <div class="menu-items" role="menu" aria-label={tr('chatActions')}>
-          <button type="button" role="menuitem" class="menu-item" onClick={act(onRename)}>
-            <Icon name="edit" class="menu-icon" />
-            {tr('rename')}
-          </button>
+          {onRename && (
+            <button type="button" role="menuitem" class="menu-item" onClick={act(onRename)}>
+              <Icon name="edit" class="menu-icon" />
+              {tr('rename')}
+            </button>
+          )}
           <button type="button" role="menuitem" class="menu-item" onClick={act(onBlock)}>
             <Icon name="blocked" class="menu-icon" />
             {tr('block')}

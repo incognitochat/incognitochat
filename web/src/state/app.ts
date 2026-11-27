@@ -456,6 +456,8 @@ export type Screen =
       original: string;
       /** The user's own name and picture for it, if any: on this device only. */
       custom: ChatCustom | null;
+      /** Deleted here, out of the list until either side writes (opened again from their link): no Rename then. */
+      hidden: boolean;
       role: 'owner' | 'sender';
       ended: boolean;
       /** Blocked: shown read-only, with Unblock. */
@@ -1245,7 +1247,7 @@ export function createApp(deps: Deps) {
     conv: string,
     shown: { messages: MessageView[]; more: boolean } | null,
     older?: true | string,
-  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] } & Partial<{ label: string; original: string; custom: ChatCustom | null }>> {
+  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] } & Partial<{ label: string; original: string; custom: ChatCustom | null; hidden: boolean }>> {
     const base = shown?.messages.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
     let since = base?.[0]?.at;
     if (typeof older === 'string') {
@@ -1280,7 +1282,7 @@ export function createApp(deps: Deps) {
     }
     // Its name, read again with it: renamed meanwhile (here or in another copy of the app), it shows.
     const c = await getConversation(deps.db, conv);
-    return { ...page, quoted, ...(c ? { ...(await chatName(c)), original: c.label } : {}) };
+    return { ...page, quoted, ...(c ? { ...(await chatName(c)), original: c.label, hidden: !!c.hidden } : {}) };
   }
 
   /** What a chat is shown as, and the user's own name and picture for it (sealed: opened here). */
@@ -1491,11 +1493,12 @@ export function createApp(deps: Deps) {
    * Gives the open chat (if it's still `id`) the user's own name and
    * picture (null, or nothing left once cleaned: back to its label). On
    * this device only: nothing is sent. Not while it's busy, blocked or
-   * read-only (the ⋯ menu isn't offered then).
+   * read-only (the ⋯ menu isn't offered then), nor while it's out of the
+   * list (Rename isn't offered then: a name lasts only while it's in a list).
    */
   async function rename(id: string, custom: ChatCustom | null): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'conversation' || current.id !== id || !messaging || current.busy || current.blocked || current.readOnly) return;
+    if (current.kind !== 'conversation' || current.id !== id || !messaging || current.busy || current.blocked || current.readOnly || current.hidden) return;
     const name = custom?.name ? cleanName(custom.name) : '';
     const emoji = custom?.emoji && isEmoji(custom.emoji) ? custom.emoji : '';
     await messaging.rename(current.id, name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null);
@@ -1523,6 +1526,7 @@ export function createApp(deps: Deps) {
         id,
         ...(await chatName(c)),
         original: c.label,
+        hidden: !!c.hidden,
         role: c.role,
         ended: c.status === 'ended',
         blocked: c.status === 'blocked',

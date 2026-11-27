@@ -1438,6 +1438,11 @@ export function createMessaging(deps: MessagingDeps) {
     await update(conv, ({ custom: _, ...current }) => (current.hidden || current.status === 'blocked' ? null : sealed ? { ...current, custom: sealed } : current));
   }
 
+  /** In upkeep: a name the user gave a chat that's in neither list goes (a delete that stopped when the app closed, say). */
+  async function forgetNames(): Promise<void> {
+    for (const c of await listConversations(db)) if (c.custom && c.hidden && c.status !== 'blocked') await tidyName(c.id);
+  }
+
   /** Takes away the name the user gave a chat that's in neither list (deleted, not blocked): after a delete that stopped partway. */
   async function tidyName(conv: string): Promise<void> {
     await update(conv, ({ custom, ...current }) => (custom && current.hidden && current.status !== 'blocked' ? current : null));
@@ -2742,6 +2747,7 @@ export function createMessaging(deps: MessagingDeps) {
     const steps = [
       forgetExpired,
       forgetEmpty,
+      forgetNames,
       sweep,
       healMailboxes,
       topUpPool,
