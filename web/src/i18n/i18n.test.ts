@@ -160,7 +160,7 @@ describe('i18n', () => {
 });
 
 /** Counted keys whose number stands alone ("Level 2: 5"): no noun agrees with it, so they may stay plain in any language. */
-const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'levelLine', 'messagesLeftToday', 'deletingChatsLeft'];
+const COUNT_STANDS_ALONE: readonly Key[] = ['unreadCount', 'usageCount', 'levelLine', 'messagesLeftToday', 'deletingChatsLeft', 'selectedCount', 'deletingSelectedLeft'];
 
 /** Shown in Telegram's own popups (app.tsx: confirmSwitch, confirmDeleteHereOnly, confirmReplace, confirmRevoke, confirmBlock, and clearing media): at most 256 characters for a message and 64 for a button. A new popup's keys go here. */
 const POPUP_MESSAGES: readonly Key[] = ['clearMediaConfirm', 'confirmPauseUploads', 'confirmPauseDownloads', 'confirmResumeUploads', 'confirmResumeDownloads', 'deleteHereOnlyConfirm', 'newLinkConfirm', 'revokeConfirm', 'blockConfirmOwner', 'blockConfirmSender'];
@@ -173,7 +173,7 @@ const CHAT_HEADER_LINES: readonly Key[] = ['aboutOwnerConversation', 'aboutSende
 const SECURITY_KEYS: readonly Key[] = [
   'welcomeBody', 'homeIntro', 'newLinkConfirm', 'revokeConfirm', 'noticeReplaced', 'noticeNewSigningKey', 'joinBody',
   'linkVerified', 'linkExisting', 'linkExistingHint', 'linkMismatch', 'noticesAsk', 'firstMessageHint',
-  'aboutOwnerConversation', 'aboutSenderConversation', 'chatNameNote', 'deleteConfirm', 'deleteConfirmBoth', 'alsoDeleteFor', 'alsoBlock',
+  'aboutOwnerConversation', 'aboutSenderConversation', 'chatNameNote', 'deleteChatsConfirm', 'deleteChatsConfirmBoth', 'deletingSelectedLeft', 'deleteConfirm', 'deleteConfirmBoth', 'alsoDeleteFor', 'alsoBlock',
   'blockConfirmOwner', 'blockConfirmSender', 'noticeBlocked', 'blockedConversation', 'noticeUnblocked', 'storageNote',
   'deleteMessageConfirm', 'elsewhereBody', 'elsewhereLost', 'replaceBody', 'replaceWarning', 'deleteBody', 'deleteWarning',
   'deletingAccount', 'deletingElsewhereBody', 'deleteHereOnlyNote', 'accountDeletedHere', 'deleteHereOnlyConfirm',

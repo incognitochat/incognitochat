@@ -58,6 +58,30 @@ newMessages:
   101: 101 neue Nachrichten
   102: 102 neue Nachrichten
   1000000: 1.000.000 neue Nachrichten
+selectedCount:
+  0: Ausgewählt: 0
+  1: Ausgewählt: 1
+  2: Ausgewählt: 2
+  3: Ausgewählt: 3
+  5: Ausgewählt: 5
+  11: Ausgewählt: 11
+  21: Ausgewählt: 21
+  100: Ausgewählt: 100
+  101: Ausgewählt: 101
+  102: Ausgewählt: 102
+  1000000: Ausgewählt: 1.000.000
+deletingSelectedLeft:
+  0: Auf der anderen Seite nicht gelöschte Chats: 0. Wenn du hier aufhörst, bleiben sie dort.
+  1: Auf der anderen Seite nicht gelöschte Chats: 1. Wenn du hier aufhörst, bleiben sie dort.
+  2: Auf der anderen Seite nicht gelöschte Chats: 2. Wenn du hier aufhörst, bleiben sie dort.
+  3: Auf der anderen Seite nicht gelöschte Chats: 3. Wenn du hier aufhörst, bleiben sie dort.
+  5: Auf der anderen Seite nicht gelöschte Chats: 5. Wenn du hier aufhörst, bleiben sie dort.
+  11: Auf der anderen Seite nicht gelöschte Chats: 11. Wenn du hier aufhörst, bleiben sie dort.
+  21: Auf der anderen Seite nicht gelöschte Chats: 21. Wenn du hier aufhörst, bleiben sie dort.
+  100: Auf der anderen Seite nicht gelöschte Chats: 100. Wenn du hier aufhörst, bleiben sie dort.
+  101: Auf der anderen Seite nicht gelöschte Chats: 101. Wenn du hier aufhörst, bleiben sie dort.
+  102: Auf der anderen Seite nicht gelöschte Chats: 102. Wenn du hier aufhörst, bleiben sie dort.
+  1000000: Auf der anderen Seite nicht gelöschte Chats: 1.000.000. Wenn du hier aufhörst, bleiben sie dort.
 usageCount:
   0: 0
   1: 1

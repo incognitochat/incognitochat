@@ -223,6 +223,9 @@ export type HomeNotice =
   | 'blocked'
   | 'unblocked'
   | 'deleted'
+  /** Several chats selected in the list: deleted here; deleted on both sides. */
+  | 'deleted-many'
+  | 'deleted-many-both'
   | 'replaced'
   | 'created'
   | 'revoked'
@@ -328,7 +331,11 @@ function downloadError(error: SendError | null): boolean {
 /** A conversation in the list. */
 interface ConversationView {
   id: string;
+  /** What it's shown as (shownLabel): the user's own name and picture where they gave one. */
   label: string;
+  /** The label it came with, and the user's own name and picture for it (Rename, from the list's selection). */
+  original: string;
+  custom: ChatCustom | null;
   role: 'owner' | 'sender';
   unread: number;
   lastAt: number;
@@ -394,6 +401,14 @@ export type Screen =
    * deleted for both sides stay deleted.
    */
   | { kind: 'deleting-chats'; done: number; total: number; stopped: { reason: ChatsStop; left: number; until?: number | null } | null }
+  /**
+   * Deleting chats the user selected in the list for both sides (and
+   * blocking them, if asked), one at a time and paced as before deleting
+   * the account: done of total, or why it stopped and how many are left
+   * (Try again, or Stop: they stay with the other side). Nothing of it is
+   * saved: leaving the screen, or closing the app, stops it.
+   */
+  | { kind: 'deleting-selected'; done: number; total: number; stopped: { reason: ChatsStop; left: number; until?: number | null } | null }
   /**
    * The account is being deleted, as the user confirmed: in steps, carried
    * on at every launch until done. error: the last try failed; Try again
@@ -618,6 +633,8 @@ export function createApp(deps: Deps) {
     if (close) close();
     // Leaves deleting the chats for both sides at once: the account is kept.
     else if (currentScreen().kind === 'deleting-chats') void keepAccount();
+    // At once, not once home has loaded (that waits for the server): no more deletes go out after Back.
+    else if (currentScreen().kind === 'deleting-selected') void stopDeletingSelected();
     else void showHome();
   });
   // Telegram's Settings item: shown on the screens that have somewhere to
@@ -1221,7 +1238,8 @@ export function createApp(deps: Deps) {
     return Promise.all(
       list.map(async (c) => ({
         id: c.id,
-        label: (await chatName(c)).label,
+        ...(await chatName(c)),
+        original: c.label,
         role: c.role,
         unread: c.unread,
         lastAt: c.lastAt,
@@ -1499,12 +1517,16 @@ export function createApp(deps: Deps) {
    */
   async function rename(id: string, custom: ChatCustom | null): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'conversation' || current.id !== id || !messaging || current.busy || current.blocked || current.readOnly || current.hidden) return;
+    const fromChat = current.kind === 'conversation' && current.id === id && !current.busy && !current.blocked && !current.readOnly && !current.hidden;
+    // From the list's selection: a chat in the list (the engine leaves one deleted or blocked meanwhile as it is).
+    const fromList = current.kind === 'home' && !current.busy && current.signedOut === null && !current.deletionPaused && current.conversations.some((c) => c.id === id);
+    if (!messaging || !(fromChat || fromList)) return;
     const name = custom?.name ? cleanName(custom.name) : '';
     const emoji = custom?.emoji && isEmoji(custom.emoji) ? custom.emoji : '';
-    await messaging.rename(current.id, name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null);
+    await messaging.rename(id, name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null);
     deps.broadcast({ type: 'data-changed' });
-    await showChat(current.id);
+    if (fromChat) await showChat(id);
+    else await refresh();
   }
 
   /**
@@ -2180,17 +2202,12 @@ export function createApp(deps: Deps) {
     show();
     // Messaging, if it couldn't start before: the box is never ignored.
     if (total > 0) await createEngine();
-    const gap = deps.chatDeleteGapMs ?? CHAT_DELETE_GAP_MS;
-    const window = deps.chatDeleteWindow ?? { count: CHAT_DELETES_PER_WINDOW, ms: CHAT_DELETE_WINDOW_MS };
     for (const id of ids) {
       if (!ours()) return;
       // Blocked, deleted, or deleted for both sides meanwhile (another copy):
       // nothing left to do. Looked at again after the wait, which can be long.
       if (open(await getConversation(deps.db, id))) {
-        while (chatSends.length > 0 && chatSends[0]! <= Date.now() - window.ms) chatSends.shift();
-        let wait = chatSends.length > 0 ? chatSends.at(-1)! + gap - Date.now() : 0;
-        if (chatSends.length >= window.count) wait = Math.max(wait, chatSends[chatSends.length - window.count]! + window.ms - Date.now());
-        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        await chatDeleteTurn();
         const account = await readAccount(deps.db);
         const still = open(await getConversation(deps.db, id));
         if (!ours()) return;
@@ -2235,6 +2252,163 @@ export function createApp(deps: Deps) {
     backButton(false);
     screen.value = { kind: 'deleting', error: null };
     return confirmDeletion(accountId);
+  }
+
+  /**
+   * Waits for the next delete for both sides' turn (CHAT_DELETE_GAP_MS
+   * apart, at most CHAT_DELETES_PER_WINDOW in a window), across runs: before
+   * deleting the account, and of chats selected in the list, alike.
+   */
+  async function chatDeleteTurn(): Promise<void> {
+    const gap = deps.chatDeleteGapMs ?? CHAT_DELETE_GAP_MS;
+    const window = deps.chatDeleteWindow ?? { count: CHAT_DELETES_PER_WINDOW, ms: CHAT_DELETE_WINDOW_MS };
+    while (chatSends.length > 0 && chatSends[0]! <= Date.now() - window.ms) chatSends.shift();
+    let wait = chatSends.length > 0 ? chatSends.at(-1)! + gap - Date.now() : 0;
+    if (chatSends.length >= window.count) wait = Math.max(wait, chatSends[chatSends.length - window.count]! + window.ms - Date.now());
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+
+  /** Counts runs of deleteSelectedForBoth: a new run, or leaving its screen, ends the one under way. */
+  let selectedRun = 0;
+  /** The latest run's chats it didn't delete, if it stopped: Try again carries on with them, as asked (alsoBlock). */
+  let selectedLeft: { run: number; ids: string[]; alsoBlock: boolean } | null = null;
+
+  /**
+   * Deletes chats selected in the list (the list's own order): one alone as
+   * its own Delete does (deleteConversation); several here, or for both
+   * sides (deleteSelectedForBoth), blocking them too if asked.
+   */
+  async function deleteChats(ids: string[], alsoBlock: boolean, forBoth: boolean): Promise<void> {
+    if (ids.length === 1) return deleteConversation(ids[0]!, alsoBlock, forBoth);
+    const current = screen.value;
+    if (ids.length === 0 || current.kind !== 'home' || current.busy || !messaging) return;
+    if (forBoth) {
+      homeActions++;
+      return deleteSelectedForBoth(ids, alsoBlock);
+    }
+    homeActions++;
+    screen.value = { ...current, busy: true, notice: null };
+    try {
+      for (const id of ids) {
+        // Blocked, deleted, or gone meanwhile (another copy): nothing left to do.
+        const c = await getConversation(deps.db, id);
+        if (!c || c.hidden || c.status === 'blocked') continue;
+        // Blocked first: the name it was given then stays, for Blocked.
+        if (alsoBlock) await messaging.block(id);
+        await messaging.remove(id);
+      }
+    } catch (err) {
+      if (handleGone(err)) return;
+      deps.broadcast({ type: 'data-changed' });
+      return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
+    }
+    deps.broadcast({ type: 'data-changed' });
+    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted-many' });
+  }
+
+  /**
+   * Deletes chats selected in the list for both sides, as their own Delete
+   * does (messaging.remove: their app is told; one of the day's messages
+   * each), blocking each too if asked; one at a time, paced as before
+   * deleting the account (chatDeleteTurn). One that can't be deleted for
+   * both sides any more (ended, or deleted here meanwhile) is deleted here,
+   * as asked. A chat whose link takes no more first messages this hour
+   * (link_busy) is left for later, and the others go on. One that can't be
+   * sent stops it (deleting-selected's stopped): Try again (the ones left),
+   * or Stop (they stay with the other side). Nothing of this is saved:
+   * leaving the screen (Cancel, back), or closing the app, stops it.
+   */
+  async function deleteSelectedForBoth(ids: string[], alsoBlock: boolean): Promise<void> {
+    const run = ++selectedRun;
+    selectedLeft = null;
+    let done = 0;
+    const total = ids.length;
+    /** Left for later: their link takes no more first messages this hour; and until when (Unix ms, the latest the server said). */
+    const busy: string[] = [];
+    let busyUntil: number | null = null;
+    const ours = () => run === selectedRun && currentScreen().kind === 'deleting-selected';
+    const show = () => {
+      if (ours()) screen.value = { kind: 'deleting-selected', done, total, stopped: null };
+    };
+    const stop = (reason: ChatsStop, left: string[]) => {
+      if (!ours()) return;
+      selectedLeft = { run, ids: left, alsoBlock };
+      const until = reason === 'link-busy' ? { until: busyUntil } : {};
+      screen.value = { kind: 'deleting-selected', done, total, stopped: { reason, left: left.length, ...until } };
+    };
+    const forBoth = (c: ConversationRecord | undefined): boolean => !!c && c.status === 'active' && !c.hidden;
+    backButton(true);
+    screen.value = { kind: 'deleting-selected', done, total, stopped: null };
+    // Messaging, if it couldn't start before.
+    await createEngine();
+    for (const [i, id] of ids.entries()) {
+      if (!ours()) return;
+      const left = () => [...busy, ...ids.slice(i)];
+      let c = await getConversation(deps.db, id);
+      if (forBoth(c)) {
+        await chatDeleteTurn();
+        if (!ours()) return;
+        // Looked at again after the wait, which can be long.
+        c = await getConversation(deps.db, id);
+      }
+      // Held here: signed out meanwhile, the app's own messaging goes, not this one.
+      const m = messaging;
+      // Left (Back) meanwhile: nothing more goes out.
+      if (!ours()) return;
+      if (c && forBoth(c)) {
+        // This build can't send (its token key won't load): a fresh copy of the app can.
+        if (!m) return stop('outdated', left());
+        try {
+          // The name it was given is kept through it if it's to be blocked (for Blocked).
+          await m.remove(id, true, alsoBlock);
+          // Blocked too, as asked, even if left meanwhile: the delete went out, and its name, kept for
+          // Blocked, would otherwise wait for upkeep.
+          if (alsoBlock) await m.block(id);
+          deps.broadcast({ type: 'data-changed' });
+        } catch (err) {
+          // Deleted for both, not blocked (the block failed): the name goes, left or not; Try again blocks it.
+          await m.tidyName(id).catch(() => {});
+          if (!ours()) return;
+          if (handleGone(err)) return;
+          const now = await getConversation(deps.db, id);
+          const stillOpen = !!now && now.status === 'active' && !now.hidden;
+          if (stillOpen && err instanceof ApiError && err.code === 'link_busy') {
+            // Its link is full for this hour: the others go on, and it's left for later.
+            busy.push(id);
+            const until = limitError('link-busy', err).until;
+            if (until !== null) busyUntil = Math.max(busyUntil ?? 0, until);
+          } else if (stillOpen || (alsoBlock && !!now && now.status !== 'blocked')) return stop(chatsStop(err), left());
+        } finally {
+          chatSends.push(Date.now());
+        }
+      } else if (c && c.status !== 'blocked') {
+        // Not for both sides (ended, or deleted here, before the run or during its wait): here, as asked.
+        if (!m) return stop('outdated', left());
+        try {
+          if (alsoBlock) await m.block(id);
+          if (!c.hidden) await m.remove(id);
+          deps.broadcast({ type: 'data-changed' });
+        } catch (err) {
+          if (!ours()) return;
+          if (handleGone(err)) return;
+          return stop(chatsStop(err), left());
+        }
+      }
+      done++;
+      show();
+    }
+    if (!ours()) return;
+    if (busy.length > 0) return stop('link-busy', busy);
+    selectedRun++;
+    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted-many-both' });
+  }
+
+  /** Leaves deleting selected chats for both sides (Cancel, Stop, or back): at once, the rest kept. */
+  function stopDeletingSelected(): Promise<void> | undefined {
+    if (currentScreen().kind !== 'deleting-selected') return;
+    selectedRun++;
+    backButton(false);
+    return showHome({ tab: 'chats' });
   }
 
   /** What stopped the deletes for both sides before the account, for the user. */
@@ -3104,6 +3278,17 @@ export function createApp(deps: Deps) {
     /** Asks Telegram to let the bot write; notices are set up once it may. */
     allowNotices: () => deps.bridge?.post('web_app_request_write_access'),
     deleteConversation,
+    /** Deletes chats selected in the list: here, or for both sides (paced, deleting-selected), blocking them too if asked. */
+    deleteChats,
+    /** Stopped deleting selected chats for both sides: Try again, with the ones left. */
+    retryDeletingSelected: async () => {
+      const current = currentScreen();
+      const left = selectedLeft;
+      if (current.kind !== 'deleting-selected' || !current.stopped || left?.run !== selectedRun || !canRetryChats(current.stopped.reason)) return;
+      return deleteSelectedForBoth(left.ids, left.alsoBlock);
+    },
+    /** While deleting selected chats for both sides (Cancel), or once it stopped (Stop): the rest stay with the other side. */
+    stopDeletingSelected,
     rename,
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,

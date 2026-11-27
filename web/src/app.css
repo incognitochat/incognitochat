@@ -429,3 +429,14 @@ button.quote { cursor: pointer; margin-block-end: 0.25rem; }
 .rename-name { flex: 1; min-inline-size: 0; font: inherit; padding: 0.625rem 0.75rem; border-radius: 0.5rem; border: 1px solid var(--app-muted); background: var(--app-bg); color: var(--app-text); unicode-bidi: plaintext; }
 .rename-emoji { block-size: 14rem; }
 .rename-dialog .text-button { align-self: flex-start; padding-inline: 0; }
+/* Selecting chats (a hold, as in Telegram): the title row holds the count and
+   the actions; each selected chat has a check on its picture. */
+.select-bar { display: flex; align-items: center; gap: 0.25rem; min-block-size: 2.75rem; margin-inline-start: -0.5rem; }
+.select-bar .select-count { flex: 1; min-inline-size: 0; font-size: 1.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.select-bar .bar-icon { color: var(--app-link); inline-size: 2.75rem; block-size: 2.75rem; }
+.select-bar .bar-icon:focus-visible { outline: 2px solid var(--app-accent); outline-offset: -2px; }
+.select-bar .select-delete { color: var(--app-danger); }
+.avatar-wrap { position: relative; flex: none; display: inline-flex; }
+.pick-check { position: absolute; inset-block-end: -0.125rem; inset-inline-end: -0.125rem; inline-size: 1.375rem; block-size: 1.375rem; border-radius: 50%; background: var(--app-accent); color: var(--app-on-accent); box-shadow: 0 0 0 2px var(--app-bg); display: flex; align-items: center; justify-content: center; }
+.pick-check svg { inline-size: 0.875rem; block-size: 0.875rem; stroke-width: 3; }
+.chat[aria-pressed='true'] { background: var(--app-surface); }

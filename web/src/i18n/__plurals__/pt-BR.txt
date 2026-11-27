@@ -58,6 +58,30 @@ newMessages:
   101: 101 novas mensagens
   102: 102 novas mensagens
   1000000: 1.000.000 de novas mensagens
+selectedCount:
+  0: Selecionados: 0
+  1: Selecionados: 1
+  2: Selecionados: 2
+  3: Selecionados: 3
+  5: Selecionados: 5
+  11: Selecionados: 11
+  21: Selecionados: 21
+  100: Selecionados: 100
+  101: Selecionados: 101
+  102: Selecionados: 102
+  1000000: Selecionados: 1.000.000
+deletingSelectedLeft:
+  0: Chats não apagados para as outras pessoas: 0. Se você parar aqui, eles continuam com elas.
+  1: Chats não apagados para as outras pessoas: 1. Se você parar aqui, eles continuam com elas.
+  2: Chats não apagados para as outras pessoas: 2. Se você parar aqui, eles continuam com elas.
+  3: Chats não apagados para as outras pessoas: 3. Se você parar aqui, eles continuam com elas.
+  5: Chats não apagados para as outras pessoas: 5. Se você parar aqui, eles continuam com elas.
+  11: Chats não apagados para as outras pessoas: 11. Se você parar aqui, eles continuam com elas.
+  21: Chats não apagados para as outras pessoas: 21. Se você parar aqui, eles continuam com elas.
+  100: Chats não apagados para as outras pessoas: 100. Se você parar aqui, eles continuam com elas.
+  101: Chats não apagados para as outras pessoas: 101. Se você parar aqui, eles continuam com elas.
+  102: Chats não apagados para as outras pessoas: 102. Se você parar aqui, eles continuam com elas.
+  1000000: Chats não apagados para as outras pessoas: 1.000.000. Se você parar aqui, eles continuam com elas.
 usageCount:
   0: 0
   1: 1

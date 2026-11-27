@@ -2,7 +2,7 @@ import { signal, useSignal } from '@preact/signals';
 import { createContext, createPortal, type ComponentChildren, type RefObject } from 'preact';
 import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
-import { menuKeyDown, moveInMenu } from './a11y/keys';
+import { isMenuKey, menuKeyDown, moveInMenu } from './a11y/keys';
 import { clockTime, formatSize, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import { LANGUAGE_CHOICES, type LanguageSetting } from './state/language';
@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { characterCount, cleanName, firstCharacters, fitComposed, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
+import { characterCount, cleanName, firstCharacters, fitComposed, insertInto, isCode, labelParts, NAME_MAX, type ChatCustom } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -92,6 +92,7 @@ export function App({ app, setting }: { app: AppState; setting: LanguageSetting 
     <BackStack.Provider value={app.onBack}>
       <Screen app={app} language={language} setting={setting} />
       <DeleteDialog app={app} language={language} />
+      <DeleteManyDialog app={app} language={language} />
       <RenameDialog app={app} language={language} />
       {toast.value && (
         <p class="toast" role="status">
@@ -156,6 +157,8 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
       return <ConfirmDelete app={app} language={language} busy={screen.busy} error={screen.error} finishing={screen.finishing ?? false} />;
     case 'deleting-chats':
       return <DeletingChats app={app} language={language} screen={screen} />;
+    case 'deleting-selected':
+      return <DeletingSelected app={app} language={language} screen={screen} />;
     case 'deleting':
       // Confirmed already: nothing to cancel, only to carry on.
       return (
@@ -370,6 +373,7 @@ const ICONS = {
   chevron: <path d="m9 18 6-6-6-6" />,
   external: <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />,
   check: <path d="M20 6 9 17l-5-5" />,
+  close: <path d="M6 6l12 12M18 6 6 18" />,
 };
 
 const TABS: readonly { tab: HomeScreen['tab']; text: Key; icon: keyof typeof ICONS }[] = [
@@ -493,9 +497,54 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
   // The chat swiped open to show its Delete button.
   const revealed = useSignal<string | null>(null);
   const link = screen.links[screen.links.length - 1];
+  // Selected chats still in the list (deleted ones drop out); none: not selecting.
+  const selected = screen.conversations.filter((c) => selection.value.includes(c.id));
+  const selecting = selected.length > 0;
+  // Signed out, or the account's deletion paused: no selecting (nor swiping); a hold asks to delete, as before.
+  const canSelect = !screen.signedOut && !screen.deletionPaused;
+  const clear = () => (selection.value = []);
+  const toggle = (id: string) => {
+    const now = selection.peek().filter((x) => screen.conversations.some((c) => c.id === x));
+    selection.value = now.includes(id) ? now.filter((x) => x !== id) : [...now, id];
+  };
+  useBackCloses(selecting, clear);
+  // Leaving the Chats tab (or home) ends selecting.
+  useEffect(() => () => void (selection.value = []), []);
+  // A chat that left the list (deleted, blocked) leaves the selection, so it isn't selected if it comes back;
+  // and signed out, or the account's deletion paused, there's no selecting.
+  useEffect(() => {
+    const kept = canSelect ? selection.peek().filter((id) => screen.conversations.some((c) => c.id === id)) : [];
+    if (kept.length !== selection.peek().length) selection.value = kept;
+  }, [screen.conversations, canSelect]);
+  const deleteSelected = () => {
+    if (selected.length === 1) return confirmDelete(selected[0]!.id, selected[0]!.label, selected[0]!.status === 'active');
+    deletingMany.value = { ids: selected.map((c) => c.id), active: selected.some((c) => c.status === 'active') };
+  };
   return (
-    <main class="page home-tab">
-      <h1>{tr('tabChats')}</h1>
+    <main class="page home-tab" onKeyDown={(e) => e.key === 'Escape' && selecting && clear()}>
+      {selecting ? (
+        // Telegram's way: the title row holds how many are selected, and what can be done with them.
+        <div class="select-bar">
+          <button type="button" class="bar-icon" aria-label={tr('clearSelection')} onClick={clear}>
+            <Icon name="close" />
+          </button>
+          {/* The number alone, as in Telegram (it fits beside the icons in every language); screen readers hear what it counts. */}
+          <h1 class="select-count" aria-live="polite">
+            <span aria-hidden="true">{formatCount(language, selected.length)}</span>
+            <span class="visually-hidden">{t(language, 'selectedCount', { count: selected.length })}</span>
+          </h1>
+          {selected.length === 1 && (
+            <button type="button" class="bar-icon" aria-label={tr('rename')} disabled={screen.busy} onClick={() => openRename(selected[0]!)}>
+              <Icon name="edit" />
+            </button>
+          )}
+          <button type="button" class="bar-icon select-delete" aria-label={tr('delete')} disabled={screen.busy} onClick={deleteSelected}>
+            <Icon name="trash" />
+          </button>
+        </div>
+      ) : (
+        <h1>{tr('tabChats')}</h1>
+      )}
       {top}
       {screen.askNotices && (
         <div class="card">
@@ -524,8 +573,11 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
               app={app}
               language={language}
               chat={c}
-              revealed={revealed.value === c.id}
+              revealed={!selecting && revealed.value === c.id}
               onReveal={(id) => (revealed.value = screen.signedOut || screen.deletionPaused ? null : id)}
+              selecting={selecting}
+              selected={selected.includes(c)}
+              onSelect={canSelect ? toggle : null}
             />
           ))}
         </ul>
@@ -1136,6 +1188,70 @@ function confirmDelete(id: string, label: string, active: boolean): void {
   deleting.value = { id, label, active };
 }
 
+/**
+ * The chats selected in the list (a hold starts it, as in Telegram): an
+ * action on them, once confirmed, ends it; so does leaving the Chats tab.
+ */
+const selection = signal<string[]>([]);
+
+/** The chats the delete dialog for several is open for, and whether any can be deleted for both sides. */
+const deletingMany = signal<{ ids: string[]; active: boolean } | null>(null);
+
+function DeleteManyDialog({ app, language }: { app: AppState; language: Language }) {
+  const target = deletingMany.value;
+  return target ? <DeleteMany key={target.ids.join(' ')} app={app} language={language} target={target} /> : null;
+}
+
+/** Several chats, as one's DeleteDialog: here, and if asked, for both sides (paced, with progress) and blocked too. */
+function DeleteMany({ app, language, target }: { app: AppState; language: Language; target: NonNullable<typeof deletingMany.value> }) {
+  const alsoBlock = useSignal(false);
+  const forBoth = useSignal(false);
+  const close = () => (deletingMany.value = null);
+  useBackCloses(true, close);
+  const focus = useDialogFocus<HTMLDivElement>();
+  const confirm = () => {
+    const block = alsoBlock.value;
+    const both = target.active && forBoth.value;
+    close();
+    selection.value = [];
+    void app.deleteChats(target.ids, block, both);
+  };
+  return (
+    <div class="overlay" onClick={close} onKeyDown={(e) => e.key === 'Escape' && close()}>
+      <div
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-many-text"
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={focus.onKeyDown}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p id="delete-many-text">{t(language, target.active && forBoth.value ? 'deleteChatsConfirmBoth' : 'deleteChatsConfirm')}</p>
+        {target.active && (
+          <label class="check">
+            <input type="checkbox" checked={forBoth.value} onChange={(e) => (forBoth.value = e.currentTarget.checked)} />
+            <span>{t(language, 'alsoDeleteForOthers')}</span>
+          </label>
+        )}
+        <label class="check">
+          <input type="checkbox" checked={alsoBlock.value} onChange={(e) => (alsoBlock.value = e.currentTarget.checked)} />
+          <span>{t(language, 'alsoBlock')}</span>
+        </label>
+        <div class="row">
+          <button type="button" class="button danger" onClick={confirm}>
+            {t(language, 'delete')}
+          </button>
+          <Button kind="secondary" onClick={close}>
+            {t(language, 'cancel')}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DeleteDialog({ app, language }: { app: AppState; language: Language }) {
   const target = deleting.value;
   // Keyed, so each conversation's dialog opens afresh: unticked, and taking the focus.
@@ -1152,6 +1268,7 @@ function DeleteConversation({ app, language, target }: { app: AppState; language
     const block = alsoBlock.value;
     const both = target.active && forBoth.value;
     close();
+    selection.value = [];
     void app.deleteConversation(target.id, block, both);
   };
   return (
@@ -1193,8 +1310,8 @@ function DeleteConversation({ app, language, target }: { app: AppState; language
 /** The chat the rename dialog is open for: its ID, its label, and the name and picture the user gave it, if any. */
 const renaming = signal<{ id: string; original: string; custom: { name?: string; emoji?: string } | null } | null>(null);
 
-function openRename(screen: Extract<Screen, { kind: 'conversation' }>): void {
-  renaming.value = { id: screen.id, original: screen.original, custom: screen.custom };
+function openRename(chat: { id: string; original: string; custom: ChatCustom | null }): void {
+  renaming.value = { id: chat.id, original: chat.original, custom: chat.custom };
 }
 
 function RenameDialog({ app, language }: { app: AppState; language: Language }) {
@@ -1267,10 +1384,12 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
     const given = cleanName(name.value);
     const emoji = picture.value && picture.value !== labelEmoji ? picture.value : undefined;
     close();
+    selection.value = [];
     void app.rename(target.id, given && given !== code ? { name: given, ...(emoji ? { emoji } : {}) } : emoji ? { emoji } : null);
   };
   const reset = () => {
     close();
+    selection.value = [];
     void app.rename(target.id, null);
   };
   return (
@@ -1710,9 +1829,14 @@ function LabelCode({ label }: { label: string }) {
   );
 }
 
+/** A hold's trailing contextmenu (the browser sends one after a hold, or the Menu key) within this long is the same hold. */
+const HOLD_ONCE_MS = 800;
+
 /**
  * A chat in the list. Tap opens it; swiping it toward the start reveals
- * Delete; a long press (or a right click) asks to delete it straight away.
+ * Delete; a hold (or a right click, the Menu key) selects it and starts
+ * selecting, where a tap selects or unselects (signed out: a hold asks to
+ * delete it, as before).
  */
 function ChatRow({
   app,
@@ -1720,25 +1844,39 @@ function ChatRow({
   chat: c,
   revealed,
   onReveal,
+  selecting,
+  selected,
+  onSelect,
 }: {
   app: AppState;
   language: Language;
   chat: Extract<Screen, { kind: 'home' }>['conversations'][number];
   revealed: boolean;
   onReveal: (id: string | null) => void;
+  /** Chats are being selected: a tap (or a hold) selects this one or not, and it doesn't swipe. */
+  selecting: boolean;
+  selected: boolean;
+  /** Selects it or not; null: no selecting (signed out), a hold asks to delete it. */
+  onSelect: ((id: string) => void) | null;
 }) {
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const gesture = useRef<Gesture | null>(null);
   const suppressClick = useRef(false);
+  // When it was last held: a hold's contextmenu (or the Menu key's) after it is the same hold, not another toggle.
+  const heldAt = useRef(0);
   // How far the chat is pulled aside while dragging; null when not dragging.
   const dragging = useSignal<number | null>(null);
   const shown = dragging.value ?? (revealed ? ACTION_WIDTH : 0);
   // Swipes go toward the inline start: left in English, right in Persian.
   const direction = () => (document.documentElement.dir === 'rtl' ? -1 : 1);
 
-  const longPress = () => {
+  // fromMenu: the browser's contextmenu, which a hold (or the Menu key) just
+  // before it also brings: that's the same hold, not another toggle.
+  const longPress = (fromMenu = false) => {
     const g = gesture.current;
     if (g && (g.pressed || g.mode !== 'pending')) return;
+    if (fromMenu && Date.now() - heldAt.current < HOLD_ONCE_MS) return;
+    heldAt.current = Date.now();
     if (g) {
       g.pressed = true;
       clearTimeout(g.timer);
@@ -1746,17 +1884,21 @@ function ChatRow({
     }
     onReveal(null);
     app.haptic();
-    void confirmDelete(c.id, c.label, c.status === 'active');
+    // As in Telegram: a hold selects it (and starts selecting).
+    if (onSelect) onSelect(c.id);
+    else void confirmDelete(c.id, c.label, c.status === 'active');
   };
   const onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
+    // A new press: a hold before it that no click followed (touch) doesn't swallow this one's.
+    suppressClick.current = false;
     gesture.current = {
       x: e.clientX,
       y: e.clientY,
       pointer: e.pointerId,
       mode: 'pending',
       base: revealed ? ACTION_WIDTH : 0,
-      timer: window.setTimeout(longPress, LONG_PRESS_MS),
+      timer: window.setTimeout(() => longPress(), LONG_PRESS_MS),
       pressed: false,
     };
   };
@@ -1768,7 +1910,7 @@ function ChatRow({
     if (g.mode === 'pending') {
       if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return;
       clearTimeout(g.timer);
-      g.mode = Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'scroll';
+      g.mode = !selecting && Math.abs(dx) > Math.abs(dy) ? 'swipe' : 'scroll';
       if (g.mode === 'swipe') (e.currentTarget as Element).setPointerCapture(e.pointerId);
     }
     if (g.mode === 'swipe') dragging.value = Math.min(ACTION_WIDTH, Math.max(0, g.base - dx * direction()));
@@ -1789,6 +1931,7 @@ function ChatRow({
       suppressClick.current = false;
       return;
     }
+    if (selecting && onSelect) return onSelect(c.id);
     if (revealed) return onReveal(null);
     void app.openConversation(c.id);
   };
@@ -1810,6 +1953,7 @@ function ChatRow({
       <button
         type="button"
         class="chat"
+        aria-pressed={selecting ? selected : undefined}
         style={{ transform: `translateX(${-shown * direction()}px)` }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -1817,13 +1961,24 @@ function ChatRow({
         onPointerCancel={onPointerEnd}
         onContextMenu={(e) => {
           e.preventDefault();
-          longPress();
+          longPress(true);
         }}
-        // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does.
-        onKeyDown={(e) => menuKeyDown(e, longPress, { enter: false })}
+        // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does (once per press: held down, it repeats).
+        onKeyDown={(e) => {
+          // Held down, a key repeats: one toggle per press, and the repeats' own context menus don't come either.
+          if (e.repeat) return void (isMenuKey(e) && e.preventDefault());
+          menuKeyDown(e, () => longPress(), { enter: false });
+        }}
         onClick={onClick}
       >
-        <Avatar label={c.label} />
+        <span class="avatar-wrap">
+          <Avatar label={c.label} />
+          {selected && (
+            <span class="pick-check" aria-hidden="true">
+              <Icon name="check" />
+            </span>
+          )}
+        </span>
         <span class="chat-body">
           <span class="chat-top">
             <span class="chat-name">
@@ -4211,6 +4366,40 @@ function DeletingChats({ app, language, screen }: { app: AppState; language: Lan
       </Button>
       <Button kind="secondary" onClick={app.keepAccount}>
         {tr('keepAccount')}
+      </Button>
+    </Page>
+  );
+}
+
+/** Deleting chats selected in the list for both sides: as DeletingChats, with Stop instead of the account's choices. */
+function DeletingSelected({ app, language, screen }: { app: AppState; language: Language; screen: Extract<Screen, { kind: 'deleting-selected' }> }) {
+  const { done, total, stopped } = screen;
+  const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
+  if (!stopped) {
+    return (
+      <Page title={tr('deleteChatsTitle')} busy>
+        <p class="muted" role="status">
+          {tr('deletingSelected', { done, total })}
+        </p>
+        <Button kind="secondary" onClick={app.stopDeletingSelected}>
+          {tr('cancel')}
+        </Button>
+      </Page>
+    );
+  }
+  return (
+    <Page title={tr('deleteChatsTitle')}>
+      <p class="notice" role="alert">
+        {stopped.reason === 'no-tokens'
+          ? tr('deletingChatsNoMessages', { time: clockTime(language, nextUtc(DAY_MS)) })
+          : stopped.reason === 'link-busy'
+            ? tr('errorLinkBusy', { time: clockTime(language, stopped.until ?? nextUtc(HOUR_MS)) })
+            : tr(CHATS_STOP_TEXT[stopped.reason])}
+      </p>
+      <p>{tr('deletingSelectedLeft', { count: stopped.left })}</p>
+      {canRetryChats(stopped.reason) && <Button onClick={app.retryDeletingSelected}>{tr('tryAgain')}</Button>}
+      <Button kind="secondary" onClick={app.stopDeletingSelected}>
+        {tr('stopDeleting')}
       </Button>
     </Page>
   );

@@ -2082,4 +2082,126 @@ describe('deleting the account', () => {
     expect(await hasChat(others[0]!)).toBe(true);
     expect(await hasChat(others[1]!)).toBe(false);
   });
+
+  describe('deleting chats selected in the list', () => {
+    const labels = (p: Person) => screenOf(p.screen.value, 'home').conversations.map((c) => c.id);
+
+    it('deletes several here, nothing sent; blocking them keeps them in Blocked with the names given', async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 3);
+      const [x, y, z] = chats as [string, string, string];
+      await a.rename(x, { name: 'Alex' });
+      expect(screenOf(a.screen.value, 'home').conversations.find((c) => c.id === x)).toMatchObject({ label: expect.stringMatching(/ Alex$/u), custom: { name: 'Alex' } });
+      const sent = b.sends.length;
+      await a.deleteChats([y, z], false, false);
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted-many', busy: false });
+      expect(labels(a)).toEqual([x]);
+      expect(b.sends.length).toBe(sent);
+      expect(await hasChat(others[1]!)).toBe(true);
+      // Blocked too: in Blocked, the name given kept.
+      await a.home();
+      await a.showTab('chats');
+      await a.deleteChats([x], true, false);
+      await a.blocked();
+      expect(screenOf(a.screen.value, 'blocked').conversations.map((c) => [c.id, c.label.endsWith(' Alex')])).toEqual([[x, true]]);
+    });
+
+    it('deletes several for both sides, paced, then shows the list; blocking them too keeps the names', async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 3);
+      const [x, y, z] = chats as [string, string, string];
+      await a.rename(y, { name: 'Bob' });
+      const sent = b.sends.length;
+      await a.deleteChats([x, y], true, true);
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'blocked' });
+      expect(labels(a)).toEqual([z]);
+      // One delete each, quietly.
+      const deletes = b.sends.slice(sent).filter((d) => d.quiet === true);
+      expect(deletes).toHaveLength(2);
+      expect(await hasChat(others[0]!)).toBe(false);
+      expect(await hasChat(others[1]!)).toBe(false);
+      expect(await hasChat(others[2]!)).toBe(true);
+      await a.home();
+      await a.blocked();
+      expect(screenOf(a.screen.value, 'blocked').conversations.map((c) => c.id).sort()).toEqual([x, y].sort());
+      expect(screenOf(a.screen.value, 'blocked').conversations.find((c) => c.id === y)!.label).toMatch(/ Bob$/u);
+      // (This test server doesn't know /discard: each block waits its retry, about 2 s.)
+    }, 20_000);
+
+    it("stops when the day's messages run out: Try again does nothing until they reset; Stop leaves the rest with the other side", async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 3);
+      await oneTokenLeft(b, a);
+      await a.deleteChats(chats, false, true);
+      expect(a.screen.value).toEqual({ kind: 'deleting-selected', done: 1, total: 3, stopped: { reason: 'no-tokens', left: 2 } });
+      const asked = b.calls.length;
+      await a.retryDeletingSelected();
+      expect(b.calls.length).toBe(asked);
+      // Nothing of the account's deletion: its own flow is untouched.
+      expect(b.calls).not.toContain('DELETE /account');
+      await a.stopDeletingSelected();
+      expect(screenOf(a.screen.value, 'home').tab).toBe('chats');
+      expect(labels(a)).toHaveLength(2);
+      expect((await Promise.all(others.map(hasChat))).filter(Boolean)).toHaveLength(2);
+    });
+
+    it('carries on with the ones left on Try again, after a network failure', async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 2);
+      const held = holdAndFail(b, /send/);
+      const run = a.deleteChats(chats, false, true);
+      await held.atServer;
+      held.fail(new NetworkError('offline'));
+      await run;
+      expect(a.screen.value).toMatchObject({ kind: 'deleting-selected', done: 0, total: 2, stopped: { reason: 'network', left: 2 } });
+      await a.retryDeletingSelected();
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted-many-both' });
+      expect(labels(a)).toEqual([]);
+      expect(await hasChat(others[0]!)).toBe(false);
+      expect(await hasChat(others[1]!)).toBe(false);
+    });
+
+    it('stops at Back while it runs, the rest kept', async () => {
+      const b = await backend();
+      const tg = telegram();
+      const { a, chats } = await withChats(b, 2, {}, tg.bridge);
+      const held = holdAndFail(b, /send/);
+      const run = a.deleteChats(chats, false, true);
+      await held.atServer;
+      tg.fire('back_button_pressed', undefined);
+      await vi.waitFor(() => expect(a.screen.value.kind).toBe('home'));
+      held.fail(new NetworkError('offline'));
+      await run;
+      expect(screenOf(a.screen.value, 'home').tab).toBe('chats');
+      // The first one's delete didn't go out (it failed); nothing after it was tried.
+      expect(labels(a)).toHaveLength(2);
+    });
+
+    it('stops at once at Back, not once home has loaded (which waits for the server): no delete goes out after it', async () => {
+      const b = await backend();
+      const tg = telegram();
+      const { a, chats } = await withChats(b, 3, {}, tg.bridge);
+      const sent = b.sends.length;
+      // Home's own read of the account waits, as on a slow network.
+      const home = holdAndFail(b, /^\/account$/);
+      const run = a.deleteChats(chats, false, true);
+      expect(a.screen.value.kind).toBe('deleting-selected');
+      tg.fire('back_button_pressed', undefined);
+      await run;
+      expect(b.sends.slice(sent).filter((d) => d.quiet === true)).toHaveLength(0);
+      await home.atServer;
+      home.fail(new NetworkError('offline'));
+      await vi.waitFor(() => expect(a.screen.value.kind).toBe('home'));
+      expect(labels(a)).toHaveLength(3);
+    });
+
+    it('deletes one selected chat as its own Delete does, for both sides too', async () => {
+      const b = await backend();
+      const { a, others, chats } = await withChats(b, 2);
+      await a.deleteChats([chats[0]!], false, true);
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ notice: 'deleted' });
+      expect(labels(a)).toEqual([chats[1]]);
+      expect(await hasChat(others[0]!)).toBe(false);
+    });
+  });
 });

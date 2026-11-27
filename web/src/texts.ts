@@ -17,6 +17,8 @@ export const ERROR_TEXT: Record<ErrorKind, Key> = {
 export const NOTICE_TEXT: Record<HomeNotice, Key> = {
   blocked: 'noticeBlocked',
   deleted: 'noticeDeleted',
+  'deleted-many': 'noticeDeletedMany',
+  'deleted-many-both': 'noticeDeletedManyBoth',
   unblocked: 'noticeUnblocked',
   replaced: 'noticeReplaced',
   created: 'noticeCreated',
