@@ -82,7 +82,7 @@ describe('typing into a name, at most NAME_MAX characters', () => {
     // At the cap: nothing goes in, the caret stays.
     expect(insertInto(full, 5, 5, 'Q')).toEqual({ value: full, caret: 5 });
     // A paste in the middle: as much as fits, the end of the name kept.
-    const name = 'a'.repeat(NAME_MAX - 3) ;
+    const name = 'a'.repeat(NAME_MAX - 3);
     expect(insertInto(name, 0, 0, '12345678')).toEqual({ value: '123' + name, caret: 3 });
     // Over a selection: it makes room.
     expect(insertInto(full, 0, 3, 'abc')).toEqual({ value: 'abc' + full.slice(3), caret: 3 });

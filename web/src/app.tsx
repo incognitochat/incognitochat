@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { cleanName, firstCharacters, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
+import { characterCount, cleanName, firstCharacters, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -1221,8 +1221,9 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   // is (the rest of the name stays whole, the caret after it); a word a
   // keyboard puts together is cut once it's done. Deleting is never held up.
   const fitIn = (e: InputEvent, field: HTMLInputElement) => {
-    const text = e.data ?? e.dataTransfer?.getData('text/plain') ?? '';
-    if (e.isComposing || !text || !e.inputType.startsWith('insert')) return;
+    // Line breaks as spaces, as a one-line field takes them.
+    const text = (e.data ?? e.dataTransfer?.getData('text/plain') ?? '').replace(/\r\n|\r|\n/g, ' ');
+    if (e.isComposing || !e.cancelable || !text || !e.inputType.startsWith('insert')) return;
     const start = field.selectionStart ?? field.value.length;
     const next = insertInto(field.value, start, field.selectionEnd ?? start, text);
     // All of it fits: the field takes it as usual (its own undo, too).
@@ -1232,10 +1233,25 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
     field.setSelectionRange(next.caret, next.caret);
     name.value = next.value;
   };
-  const composed = (field: HTMLInputElement) => {
-    const cut = firstCharacters(field.value, NAME_MAX);
-    if (cut !== field.value) field.value = cut;
-    name.value = cut;
+  // A word just put together, past the cap: only as much of it as fits
+  // stays, where it went in; the rest of the name is kept whole.
+  const composed = (e: CompositionEvent, field: HTMLInputElement) => {
+    const value = field.value;
+    if (characterCount(value) > NAME_MAX) {
+      const end = field.selectionStart ?? value.length;
+      const word = e.data ?? '';
+      const start = end - word.length;
+      const next = start >= 0 && value.slice(start, end) === word ? insertInto(value, start, end, word) : { value: firstCharacters(value, NAME_MAX), caret: NAME_MAX };
+      field.value = next.value;
+      field.setSelectionRange(next.caret, next.caret);
+    }
+    name.value = field.value;
+  };
+  // Whatever else got past fitIn and composed (a redo, an insert that can't
+  // be stopped): the name is cut to the cap here, never left over it.
+  const typed = (e: InputEvent, field: HTMLInputElement) => {
+    if (!e.isComposing && characterCount(field.value) > NAME_MAX) field.value = firstCharacters(field.value, NAME_MAX);
+    name.value = field.value;
   };
   useBackCloses(true, close);
   // Back closes the picture picker first.
@@ -1284,10 +1300,10 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             aria-label={tr('chatName')}
             placeholder={code}
             value={name.value}
-            // At most NAME_MAX characters while typing, not only on Save (fitIn, composed).
+            // At most NAME_MAX characters while typing, not only on Save (fitIn, composed, typed).
             onBeforeInput={(e) => fitIn(e as InputEvent, e.currentTarget)}
-            onInput={(e) => (name.value = e.currentTarget.value)}
-            onCompositionEnd={(e) => composed(e.currentTarget)}
+            onInput={(e) => typed(e as InputEvent, e.currentTarget)}
+            onCompositionEnd={(e) => composed(e, e.currentTarget)}
             // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
             onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}
           />
