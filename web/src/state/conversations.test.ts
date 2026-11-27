@@ -607,7 +607,7 @@ describe('conversations in the app', () => {
 
     // Named: nothing goes to the server, and it's stored sealed, as message previews are.
     const before = b.calls.length;
-    await owner.rename({ name: '  Alex\u202e  ', emoji: '🇨🇦' });
+    await owner.rename(id, { name: '  Alex\u202e  ', emoji: '🇨🇦' });
     expect(b.calls.length).toBe(before);
     const stored = await owner.db.get('conversations', id);
     expect(stored!.custom).toBeInstanceOf(Uint8Array);
@@ -619,16 +619,16 @@ describe('conversations in the app', () => {
 
     // Only a picture; then back to the label.
     await owner.openConversation(id);
-    await owner.rename({ emoji: '🌻' });
+    await owner.rename(id, { emoji: '🌻' });
     expect(screenOf(owner.screen.value, 'conversation').label).toBe(`🌻 ${label.split(' ')[1]}`);
-    await owner.rename(null);
+    await owner.rename(id, null);
     expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
     // A name that cleans to nothing, and a picture that isn't one emoji: the label.
-    await owner.rename({ name: ' \n\u2066 ', emoji: 'xy' });
+    await owner.rename(id, { name: ' \n\u2066 ', emoji: 'xy' });
     expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
 
     // Deleted: the name goes with it; when they write again, the label.
-    await owner.rename({ name: 'Alex' });
+    await owner.rename(id, { name: 'Alex' });
     await owner.deleteConversation(id, false);
     await sender.sendMessage('anyone?');
     await owner.sync();
@@ -636,13 +636,13 @@ describe('conversations in the app', () => {
 
     // Deleted and blocked: Blocked shows the name.
     await owner.openConversation(id);
-    await owner.rename({ name: 'Alex' });
+    await owner.rename(id, { name: 'Alex' });
     await owner.deleteConversation(id, true);
     await owner.blocked();
     expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
     // Not renamed while blocked (no ⋯ menu then).
     await owner.openConversation(id);
-    await owner.rename({ name: 'Other' });
+    await owner.rename(id, { name: 'Other' });
     expect(screenOf(owner.screen.value, 'conversation').label).toBe(`${label.split(' ')[0]} Alex`);
 
     // Unblocked: it was deleted, so in neither list now; the name goes. They write again: the label.
@@ -665,7 +665,7 @@ describe('conversations in the app', () => {
     await owner.sync();
     const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
     await owner.openConversation(id);
-    await owner.rename({ name: 'Alex' });
+    await owner.rename(id, { name: 'Alex' });
     await owner.block();
     await owner.blocked();
     expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);

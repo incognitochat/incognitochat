@@ -418,3 +418,13 @@ button.quote { cursor: pointer; margin-block-end: 0.25rem; }
 .switch:checked::before { inset-inline-start: calc(100% - 1.5625rem); }
 .switch:disabled { opacity: 0.5; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::before { transition: none; } }
+/* Renaming a chat: its picture (a button opening the emoji picker) beside
+   the name field; the picker below, shorter than the message bar's. */
+.dialog h2 { margin: 0; font-size: 1.125rem; }
+.rename-row { display: flex; align-items: center; gap: 0.75rem; }
+.rename-picture { border: 0; padding: 0; color: inherit; font-family: inherit; cursor: pointer; }
+.rename-picture:focus-visible { outline: 2px solid var(--app-accent); outline-offset: 2px; }
+.rename-picture[aria-expanded='true'] { box-shadow: 0 0 0 2px var(--app-accent); }
+.rename-name { flex: 1; min-inline-size: 0; font: inherit; padding: 0.625rem 0.75rem; border-radius: 0.5rem; border: 1px solid var(--app-muted); background: var(--app-bg); color: var(--app-text); unicode-bidi: plaintext; }
+.rename-emoji { block-size: 14rem; }
+.rename-dialog .text-button { align-self: flex-start; padding-inline: 0; }

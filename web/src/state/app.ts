@@ -1486,14 +1486,14 @@ export function createApp(deps: Deps) {
   }
 
   /**
-   * Gives the open chat the user's own name and picture (null, or nothing
-   * left once cleaned: back to its label). On this device only: nothing is
-   * sent. Not while it's busy, blocked or read-only (the ⋯ menu isn't
-   * offered then).
+   * Gives the open chat (if it's still `id`) the user's own name and
+   * picture (null, or nothing left once cleaned: back to its label). On
+   * this device only: nothing is sent. Not while it's busy, blocked or
+   * read-only (the ⋯ menu isn't offered then).
    */
-  async function rename(custom: ChatCustom | null): Promise<void> {
+  async function rename(id: string, custom: ChatCustom | null): Promise<void> {
     const current = screen.value;
-    if (current.kind !== 'conversation' || !messaging || current.busy || current.blocked || current.readOnly) return;
+    if (current.kind !== 'conversation' || current.id !== id || !messaging || current.busy || current.blocked || current.readOnly) return;
     const name = custom?.name ? cleanName(custom.name) : '';
     const emoji = custom?.emoji && isEmoji(custom.emoji) ? custom.emoji : '';
     await messaging.rename(current.id, name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null);

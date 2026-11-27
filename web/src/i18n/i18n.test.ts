@@ -173,7 +173,7 @@ const CHAT_HEADER_LINES: readonly Key[] = ['aboutOwnerConversation', 'aboutSende
 const SECURITY_KEYS: readonly Key[] = [
   'welcomeBody', 'homeIntro', 'newLinkConfirm', 'revokeConfirm', 'noticeReplaced', 'noticeNewSigningKey', 'joinBody',
   'linkVerified', 'linkExisting', 'linkExistingHint', 'linkMismatch', 'noticesAsk', 'firstMessageHint',
-  'aboutOwnerConversation', 'aboutSenderConversation', 'deleteConfirm', 'deleteConfirmBoth', 'alsoDeleteFor', 'alsoBlock',
+  'aboutOwnerConversation', 'aboutSenderConversation', 'chatNameNote', 'deleteConfirm', 'deleteConfirmBoth', 'alsoDeleteFor', 'alsoBlock',
   'blockConfirmOwner', 'blockConfirmSender', 'noticeBlocked', 'blockedConversation', 'noticeUnblocked', 'storageNote',
   'deleteMessageConfirm', 'elsewhereBody', 'elsewhereLost', 'replaceBody', 'replaceWarning', 'deleteBody', 'deleteWarning',
   'deletingAccount', 'deletingElsewhereBody', 'deleteHereOnlyNote', 'accountDeletedHere', 'deleteHereOnlyConfirm',
