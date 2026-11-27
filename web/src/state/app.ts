@@ -2348,17 +2348,19 @@ export function createApp(deps: Deps) {
         await chatDeleteTurn();
         if (!ours()) return;
         // This build can't send (its token key won't load): a fresh copy of the app can.
-        if (!messaging) return stop('outdated', left());
-        // Looked at again after the wait, which can be long.
-        if (forBoth(await getConversation(deps.db, id))) {
+        // Held here: signed out meanwhile, the app's own messaging goes, not this one.
+        const m = messaging;
+        if (!m) return stop('outdated', left());
+        // Looked at again after the wait, which can be long; and left (Back) meanwhile: nothing goes out.
+        if (forBoth(await getConversation(deps.db, id)) && ours()) {
           try {
             // The name it was given is kept through it if it's to be blocked (for Blocked).
-            await messaging.remove(id, true, alsoBlock);
-            if (alsoBlock) await messaging.block(id);
+            await m.remove(id, true, alsoBlock);
+            if (alsoBlock) await m.block(id);
             deps.broadcast({ type: 'data-changed' });
           } catch (err) {
             // Deleted for both, not blocked (the block failed): the name goes, left or not; Try again blocks it.
-            await messaging.tidyName(id).catch(() => {});
+            await m.tidyName(id).catch(() => {});
             if (!ours()) return;
             if (handleGone(err)) return;
             const now = await getConversation(deps.db, id);
@@ -2376,11 +2378,13 @@ export function createApp(deps: Deps) {
       } else {
         // Not for both sides (ended, or deleted here meanwhile): here, as asked.
         const c = await getConversation(deps.db, id);
-        if (c && c.status !== 'blocked' && !messaging) return stop('outdated', left());
-        if (c && c.status !== 'blocked' && messaging) {
+        const m = messaging;
+        if (!ours()) return;
+        if (c && c.status !== 'blocked' && !m) return stop('outdated', left());
+        if (c && c.status !== 'blocked' && m) {
           try {
-            if (alsoBlock) await messaging.block(id);
-            if (!c.hidden) await messaging.remove(id);
+            if (alsoBlock) await m.block(id);
+            if (!c.hidden) await m.remove(id);
             deps.broadcast({ type: 'data-changed' });
           } catch (err) {
             if (!ours()) return;

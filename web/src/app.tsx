@@ -530,7 +530,7 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
           </button>
           {/* The number alone, as in Telegram (it fits beside the icons in every language); screen readers hear what it counts. */}
           <h1 class="select-count" aria-live="polite">
-            <span aria-hidden="true">{t(language, 'unreadCount', { count: selected.length })}</span>
+            <span aria-hidden="true">{formatCount(language, selected.length)}</span>
             <span class="visually-hidden">{t(language, 'selectedCount', { count: selected.length })}</span>
           </h1>
           {selected.length === 1 && (
@@ -1829,13 +1829,15 @@ function LabelCode({ label }: { label: string }) {
   );
 }
 
-/**
- * A chat in the list. Tap opens it; swiping it toward the start reveals
- * Delete; a long press (or a right click) asks to delete it straight away.
- */
-/** A hold's own repeats (its contextmenu, the Menu key's) within this long count once. */
+/** A hold's trailing contextmenu (the browser sends one after a hold, or the Menu key) within this long is the same hold. */
 const HOLD_ONCE_MS = 800;
 
+/**
+ * A chat in the list. Tap opens it; swiping it toward the start reveals
+ * Delete; a hold (or a right click, the Menu key) selects it and starts
+ * selecting, where a tap selects or unselects (signed out: a hold asks to
+ * delete it, as before).
+ */
 function ChatRow({
   app,
   language,
@@ -1868,10 +1870,12 @@ function ChatRow({
   // Swipes go toward the inline start: left in English, right in Persian.
   const direction = () => (document.documentElement.dir === 'rtl' ? -1 : 1);
 
-  const longPress = () => {
+  // fromMenu: the browser's contextmenu, which a hold (or the Menu key) just
+  // before it also brings: that's the same hold, not another toggle.
+  const longPress = (fromMenu = false) => {
     const g = gesture.current;
     if (g && (g.pressed || g.mode !== 'pending')) return;
-    if (Date.now() - heldAt.current < HOLD_ONCE_MS) return;
+    if (fromMenu && Date.now() - heldAt.current < HOLD_ONCE_MS) return;
     heldAt.current = Date.now();
     if (g) {
       g.pressed = true;
@@ -1894,7 +1898,7 @@ function ChatRow({
       pointer: e.pointerId,
       mode: 'pending',
       base: revealed ? ACTION_WIDTH : 0,
-      timer: window.setTimeout(longPress, LONG_PRESS_MS),
+      timer: window.setTimeout(() => longPress(), LONG_PRESS_MS),
       pressed: false,
     };
   };
@@ -1957,10 +1961,10 @@ function ChatRow({
         onPointerCancel={onPointerEnd}
         onContextMenu={(e) => {
           e.preventDefault();
-          longPress();
+          longPress(true);
         }}
         // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does.
-        onKeyDown={(e) => menuKeyDown(e, longPress, { enter: false })}
+        onKeyDown={(e) => menuKeyDown(e, () => longPress(), { enter: false })}
         onClick={onClick}
       >
         <span class="avatar-wrap">
