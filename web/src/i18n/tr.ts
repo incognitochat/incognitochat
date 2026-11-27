@@ -101,7 +101,7 @@ export const tr = {
   linkNotFound: 'Bu bağlantı mevcut değil ya da sahibi onu değiştirmiş veya silmiş.',
   linkMismatch:
     'Bu bağlantının anahtarları bağlantıyla eşleşmiyor. Biri mesajlarınızı ele geçirmeye çalışıyor olabilir. Bu bağlantıyı kullanmayın.',
-  goHome: 'Bağlantılarınıza git',
+  goHome: 'Sohbetlerime git',
 
   tabChats: 'Sohbetler',
   tabLinks: 'Bağlantım',

@@ -105,7 +105,7 @@ export const pl = {
   openChat: 'Otwórz czat',
   linkNotFound: 'Ten link nie istnieje albo jego właściciel go wymienił lub usunął.',
   linkMismatch: 'Klucze tego linku do niego nie pasują. Ktoś może próbować przechwycić twoje wiadomości. Nie używaj go.',
-  goHome: 'Przejdź do swoich linków',
+  goHome: 'Przejdź do moich czatów',
 
   tabChats: 'Czaty',
   tabLinks: 'Mój link',

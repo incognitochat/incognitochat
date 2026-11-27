@@ -101,7 +101,7 @@ export const de = {
   linkNotFound: 'Diesen Link gibt es nicht, oder sein Inhaber hat ihn ersetzt oder gelöscht.',
   linkMismatch:
     'Die Schlüssel dieses Links passen nicht zum Link. Vielleicht versucht jemand, deine Nachrichten abzufangen. Benutze ihn nicht.',
-  goHome: 'Zu deinen Links',
+  goHome: 'Zu meinen Chats',
 
   tabChats: 'Chats',
   tabLinks: 'Mein Link',

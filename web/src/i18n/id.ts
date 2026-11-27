@@ -101,7 +101,7 @@ export const id = {
   linkNotFound: 'Tautan ini tidak ada, atau pemiliknya sudah mengganti atau menghapusnya.',
   linkMismatch:
     'Kunci tautan ini tidak cocok dengan tautannya. Mungkin ada yang mencoba menyadap pesan Anda. Jangan gunakan tautan ini.',
-  goHome: 'Ke tautan Anda',
+  goHome: 'Ke obrolan saya',
 
   tabChats: 'Obrolan',
   tabLinks: 'Tautan saya',

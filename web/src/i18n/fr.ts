@@ -105,7 +105,7 @@ export const fr = {
   linkNotFound: "Ce lien n'existe pas, ou la personne à qui il appartient l'a remplacé ou supprimé.",
   linkMismatch:
     "Les clés de ce lien ne lui correspondent pas. Quelqu'un essaie peut-être d'intercepter vos messages. Ne l'utilisez pas.",
-  goHome: 'Aller à vos liens',
+  goHome: 'Aller à mes échanges',
 
   tabChats: 'Échanges',
   tabLinks: 'Mon lien',
