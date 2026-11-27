@@ -1222,7 +1222,7 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   // keyboard puts together is cut once it's done. Deleting is never held up.
   const fitIn = (e: InputEvent, field: HTMLInputElement) => {
     // Line breaks as spaces, as a one-line field takes them.
-    const text = (e.data ?? e.dataTransfer?.getData('text/plain') ?? '').replace(/\r\n|\r|\n/g, ' ');
+    const text = (e.data ?? e.dataTransfer?.getData('text/plain') ?? '').replace(/[\r\n]+$/, '').replace(/\r\n|\r|\n/g, ' ');
     if (e.isComposing || !e.cancelable || !text || !e.inputType.startsWith('insert')) return;
     const start = field.selectionStart ?? field.value.length;
     const next = insertInto(field.value, start, field.selectionEnd ?? start, text);
@@ -1234,16 +1234,30 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
     name.value = next.value;
   };
   // A word just put together, past the cap: only as much of it as fits
-  // stays, where it went in; the rest of the name is kept whole.
-  const composed = (e: CompositionEvent, field: HTMLInputElement) => {
+  // stays, where it went in; the rest of the name is kept whole. What it
+  // put in is what differs from the field as it was when the word began
+  // (not the caret, which a tap elsewhere may have moved).
+  const beforeWord = useRef<string | null>(null);
+  const composed = (field: HTMLInputElement) => {
     const value = field.value;
+    const before = beforeWord.current ?? '';
+    beforeWord.current = null;
     if (characterCount(value) > NAME_MAX) {
-      const end = field.selectionStart ?? value.length;
-      const word = e.data ?? '';
-      const start = end - word.length;
-      const next = start >= 0 && value.slice(start, end) === word ? insertInto(value, start, end, word) : { value: firstCharacters(value, NAME_MAX), caret: NAME_MAX };
-      field.value = next.value;
-      field.setSelectionRange(next.caret, next.caret);
+      let start = 0;
+      while (start < before.length && start < value.length && before[start] === value[start]) start++;
+      let end = value.length;
+      let kept = before.length;
+      while (end > start && kept > start && before[kept - 1] === value[end - 1]) {
+        end--;
+        kept--;
+      }
+      // Not inside a pair of UTF-16 halves.
+      if (start > 0 && /[\uD800-\uDBFF]/.test(value[start - 1]!)) start--;
+      if (end < value.length && /[\uDC00-\uDFFF]/.test(value[end]!)) end++;
+      const next = insertInto(value, start, end, value.slice(start, end));
+      const cut = firstCharacters(next.value, NAME_MAX);
+      field.value = cut;
+      field.setSelectionRange(Math.min(next.caret, cut.length), Math.min(next.caret, cut.length));
     }
     name.value = field.value;
   };
@@ -1258,10 +1272,10 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   useBackCloses(picking.value, () => (picking.value = false));
   const focus = useDialogFocus<HTMLDivElement>();
   const save = () => {
-    const typed = cleanName(name.value);
+    const given = cleanName(name.value);
     const emoji = picture.value && picture.value !== labelEmoji ? picture.value : undefined;
     close();
-    void app.rename(target.id, typed && typed !== code ? { name: typed, ...(emoji ? { emoji } : {}) } : emoji ? { emoji } : null);
+    void app.rename(target.id, given && given !== code ? { name: given, ...(emoji ? { emoji } : {}) } : emoji ? { emoji } : null);
   };
   const reset = () => {
     close();
@@ -1303,7 +1317,8 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             // At most NAME_MAX characters while typing, not only on Save (fitIn, composed, typed).
             onBeforeInput={(e) => fitIn(e as InputEvent, e.currentTarget)}
             onInput={(e) => typed(e as InputEvent, e.currentTarget)}
-            onCompositionEnd={(e) => composed(e, e.currentTarget)}
+            onCompositionStart={(e) => (beforeWord.current = e.currentTarget.value)}
+            onCompositionEnd={(e) => composed(e.currentTarget)}
             // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
             onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}
           />
