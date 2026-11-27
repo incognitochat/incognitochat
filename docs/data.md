@@ -50,7 +50,10 @@ shows of its newest message (the start of its text, or what its attachment
 or sticker is), sealed under the storage key like the message, until a
 newer one replaces it or the message goes. Attachments can also be cleared
 on their own (Settings, Data and storage); their messages stay, with each file's
-key, to fetch it again.
+key, to fetch it again. A name and picture the user gives a chat
+(Rename, in its ⋯ menu) stay with its record, sealed under the storage key
+like message text, and are never sent: deleting the chat deletes them,
+unless it's also blocked (Blocked then shows them, until it's unblocked).
 Downloads are marked not to be kept in the web view's cache.
 
 So that a message delivered again, or late, can't undo anything (bring back
@@ -278,6 +281,8 @@ records go in that same request.
   come after the user's first message there in the chat; anything else
   waits for a tap. A cleared attachment can be fetched again only while the
   server still holds it.
+- **Rename a chat** (its ⋯ menu): a name and a picture shown in place of
+  its label, on this device only; the other side never sees them.
 - **Choose the app's language** (Settings, Language): one of the app's
   languages, or the same as Telegram, the default. The choice stays on the device and isn't
   sent; notices follow the language Telegram gives the server, and the app

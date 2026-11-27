@@ -142,6 +142,30 @@ export async function findLinkConversation(db: Database, link: string, wire: str
   return started.find((c) => c.firstKey === from) ?? started.find((c) => c.firstKey === undefined);
 }
 
+/** The user's own name and picture for a chat (state/label.ts): each optional. */
+export interface ChatName {
+  name?: string;
+  emoji?: string;
+}
+
+/** A chat's own name and picture, sealed like a message (the chat's ID tells them apart): stored with the chat, never sent. */
+export function sealChatName(db: Database, conv: string, custom: ChatName): Promise<Uint8Array<ArrayBuffer>> {
+  return seal(db, `name:${conv}`, custom);
+}
+
+/** A chat's own name and picture, opened; null if they can't be (another storage key, say): the label then. */
+export async function openChatName(db: Database, conv: string, sealed: Uint8Array<ArrayBuffer>): Promise<ChatName | null> {
+  try {
+    const value = await unseal<ChatName>(db, `name:${conv}`, sealed);
+    if (!value || typeof value !== 'object') return null;
+    const name = typeof value.name === 'string' ? value.name : undefined;
+    const emoji = typeof value.emoji === 'string' ? value.emoji : undefined;
+    return name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function putConversation(db: Database, conversation: ConversationRecord): Promise<void> {
   await db.put('conversations', conversation);
 }

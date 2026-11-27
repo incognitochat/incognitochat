@@ -561,6 +561,269 @@ describe('conversations in the app', () => {
     expect(back.map((c) => [c.id, c.last?.text, c.unread])).toEqual([[id, 'anyone?', 1]]);
   });
 
+  it('keeps a chat\'s label through a delete and their return, and in Blocked after a delete that also blocks', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const first = screenOf(owner.screen.value, 'home').conversations[0]!;
+    expect(first.label).toMatch(/^\S+ [0-9A-Z]{4}$/u);
+
+    // Deleted, then they write again: the same label.
+    await owner.deleteConversation(first.id, false);
+    await sender.sendMessage('anyone?');
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+
+    // Deleted and blocked: Blocked shows it by the same label.
+    await owner.deleteConversation(first.id, true);
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+
+    // Unblocked (it was deleted: in neither list), then they write again: the same label.
+    await owner.unblock(first.id);
+    await sender.sync();
+    await sender.sendMessage('still there?');
+    await owner.sync();
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+  });
+
+  it("renames a chat on this device only: shown in the list, the chat and Blocked; gone with a delete, kept by a delete that also blocks", async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+    await owner.openConversation(id);
+
+    // Named: nothing goes to the server, and it's stored sealed, as message previews are.
+    const before = b.calls.length;
+    await owner.rename(id, { name: '  Alex\u202e  ', emoji: '🇨🇦' });
+    expect(b.calls.length).toBe(before);
+    const stored = await owner.db.get('conversations', id);
+    expect(stored!.custom).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(stored!.custom)).not.toContain('Alex');
+    expect(JSON.stringify(stored)).not.toContain('Alex');
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label: '🇨🇦 Alex', original: label, custom: { name: 'Alex', emoji: '🇨🇦' } });
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual(['🇨🇦 Alex']);
+
+    // Only a picture; then back to the label.
+    await owner.openConversation(id);
+    await owner.rename(id, { emoji: '🌻' });
+    expect(screenOf(owner.screen.value, 'conversation').label).toBe(`🌻 ${label.split(' ')[1]}`);
+    await owner.rename(id, null);
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
+    // A name that cleans to nothing, and a picture that isn't one emoji: the label.
+    await owner.rename(id, { name: ' \n\u2066 ', emoji: 'xy' });
+    expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ label, custom: null });
+
+    // Deleted: the name goes with it; when they write again, the label.
+    await owner.rename(id, { name: 'Alex' });
+    await owner.deleteConversation(id, false);
+    await sender.sendMessage('anyone?');
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+
+    // Deleted and blocked: Blocked shows the name.
+    await owner.openConversation(id);
+    await owner.rename(id, { name: 'Alex' });
+    await owner.deleteConversation(id, true);
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    // Not renamed while blocked (no ⋯ menu then).
+    await owner.openConversation(id);
+    await owner.rename(id, { name: 'Other' });
+    expect(screenOf(owner.screen.value, 'conversation').label).toBe(`${label.split(' ')[0]} Alex`);
+
+    // Unblocked: it was deleted, so in neither list now; the name goes. They write again: the label.
+    await owner.unblock(id);
+    await sender.sync();
+    await sender.sendMessage('still there?');
+    await owner.sync();
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+  });
+
+  describe("a chat's own name goes once the chat is in neither list, on every path", () => {
+    const payloadOf = (p: Awaited<ReturnType<typeof person>>) => new URL(screenOf(p.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    async function pair() {
+      const b = await backend();
+      const owner = await person(b);
+      await owner.createLink();
+      const sender = await person(b, payloadOf(owner));
+      await sender.writeToLink('hello');
+      await owner.showTab('chats');
+      await owner.sync();
+      const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+      await owner.openConversation(id);
+      return { b, owner, sender, id, label };
+    }
+    const named = async (app: Awaited<ReturnType<typeof person>>, id: string) => !!(await app.db.get('conversations', id))?.custom;
+
+    it('when they delete it for both sides, and they write again: the label', async () => {
+      const { owner, sender, id, label } = await pair();
+      await owner.sendMessage('hi');
+      await sender.sync();
+      await owner.rename(id, { name: 'Alex' });
+      await sender.home();
+      const sid = screenOf(sender.screen.value, 'home').conversations[0]!.id;
+      await sender.deleteConversation(sid, false, true);
+      await owner.home();
+      await owner.sync();
+      expect(screenOf(owner.screen.value, 'home').conversations).toEqual([]);
+      expect(await named(owner, id)).toBe(false);
+      const again = await sender.reopen(payloadOf(owner));
+      await again.openConversation(existingChat(again.screen.value));
+      await again.sendMessage('again');
+      await owner.sync();
+      await owner.home();
+      expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+    });
+
+    it('offers no Rename on a chat out of the list (opened again from their link) until someone writes in it', async () => {
+      const { owner, sender } = await pair();
+      await owner.sendMessage('hi');
+      await sender.sync();
+      // The sender is in the chat they started.
+      const sid = screenOf(sender.screen.value, 'conversation').id;
+      await sender.deleteConversation(sid, false);
+      await owner.home();
+      const again = await sender.reopen(payloadOf(owner));
+      await again.openConversation(existingChat(again.screen.value));
+      expect(screenOf(again.screen.value, 'conversation')).toMatchObject({ id: sid, hidden: true });
+      await again.rename(sid, { name: 'Bob' });
+      expect(await named(sender, sid)).toBe(false);
+      // Written in: back in the list, and named as asked.
+      await again.sendMessage('again');
+      expect(screenOf(again.screen.value, 'conversation').hidden).toBe(false);
+      await again.rename(sid, { name: 'Bob' });
+      expect(screenOf(again.screen.value, 'conversation').label).toMatch(/ Bob$/u);
+    });
+
+    it('shows a chat another copy blocked as blocked (no ⋯ menu, no Rename) once it is drawn again', async () => {
+      const { owner, id } = await pair();
+      const other = await owner.reopen('');
+      await other.openConversation(id);
+      await other.block();
+      await owner.refresh();
+      expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ id, blocked: true });
+    });
+
+    it('keeps the name when a delete fails before anything changed (still in the list)', async () => {
+      const { b, owner, id } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      const held = holdAndFail(b, /send/);
+      const run = owner.deleteConversation(id, false, true);
+      await held.atServer;
+      held.fail(new NetworkError('offline'));
+      await run;
+      const stored = await owner.db.get('conversations', id);
+      expect(stored!.hidden).toBeFalsy();
+      expect(stored!.custom).toBeInstanceOf(Uint8Array);
+    });
+
+    it('when another copy deleted it, a rename from a copy still showing it stores nothing', async () => {
+      const { owner, id } = await pair();
+      const other = await owner.reopen('');
+      await other.deleteConversation(id, false);
+      await owner.sync();
+      await owner.rename(id, { name: 'Alex' });
+      expect(await named(owner, id)).toBe(false);
+    });
+
+    it('when a delete for both that also blocks stops after the delete went out: the name goes', async () => {
+      const { b, owner, id } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      const held = holdAndFail(b, /discard/);
+      const run = owner.deleteConversation(id, true, true);
+      await held.atServer;
+      held.fail(new NetworkError('offline'));
+      await run;
+      const stored = await owner.db.get('conversations', id);
+      expect(stored).toMatchObject({ hidden: true, status: 'active' });
+      expect(stored!.custom).toBeUndefined();
+    });
+
+    it('and a delete for both that also blocks keeps it, for Blocked', async () => {
+      const { owner, id, label } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      await owner.deleteConversation(id, true, true);
+      await owner.blocked();
+      expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    });
+
+    it("when deleting the account deletes chats for both sides, stops, and the account is kept: the names go", async () => {
+      const b = await backend();
+      const a = await person(b);
+      await a.createLink();
+      const others: Awaited<ReturnType<typeof person>>[] = [];
+      for (let i = 0; i < 2; i++) {
+        const o = await person(b, payloadOf(a));
+        await o.writeToLink(`hello ${i}`);
+        others.push(o);
+      }
+      await a.showTab('chats');
+      await a.sync();
+      const list = screenOf(a.screen.value, 'home').conversations;
+      const chats = others.map((_, i) => list.find((c) => c.last?.text === `hello ${i}`)!.id);
+      for (const [i, chat] of chats.entries()) {
+        await a.openConversation(chat);
+        await a.sendMessage(`hi ${i}`);
+        await a.rename(chat, { name: `Name${i}` });
+        await others[i]!.sync();
+      }
+      await a.home();
+      // Tokens for one chat's delete only: it stops after the first.
+      const held = await countTokens(a.db, b.issuer.keyId);
+      if (held > 1) await takeTokens(a.db, b.issuer.keyId, held - 1);
+      b.state.tokensLeft = 0;
+      a.askDeleteAccount();
+      await a.deleteAccount(true);
+      await a.keepAccount();
+      const stored = await Promise.all(chats.map((id) => a.db.get('conversations', id)));
+      // The chat deleted for both sides is in neither list: its name went. The other is as it was.
+      const gone = stored.filter((c) => c!.hidden);
+      const left = stored.filter((c) => !c!.hidden);
+      expect(gone).toHaveLength(1);
+      expect(gone[0]!.custom).toBeUndefined();
+      expect(left).toHaveLength(1);
+      expect(left[0]!.custom).toBeInstanceOf(Uint8Array);
+    });
+  });
+
+  it('keeps the name of a chat blocked without a delete when it is unblocked', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+    await owner.openConversation(id);
+    await owner.rename(id, { name: 'Alex' });
+    await owner.block();
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    await owner.unblock(id);
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+  });
+
   it('shows the delivery state of the last message in the list', async () => {
     const b = await backend();
     const owner = await person(b);

@@ -47,6 +47,7 @@ import {
   comesAfter,
   failStuck,
   getConversation,
+  openChatName,
   getMedia,
   getMessage,
   lastShown,
@@ -78,6 +79,7 @@ import { findSourceUrl } from '../platform/source';
 import { deleteMeta, getMeta, putMeta, wipe, type ConversationRecord, type Database } from '../storage/db';
 import { withLock, type SyncEvent } from '../sync/locks';
 import { createPace } from '../sync/pace';
+import { cleanName, isEmoji, shownLabel, type ChatCustom } from './label';
 
 /** Whether the device says it's offline (its saying online proves nothing). */
 const offline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -448,7 +450,14 @@ export type Screen =
   | {
       kind: 'conversation';
       id: string;
+      /** What it's shown as: the user's own name and picture where they gave one (shownLabel). */
       label: string;
+      /** The label it came with ("🦊 K3F9"), under any name the user gave it. */
+      original: string;
+      /** The user's own name and picture for it, if any: on this device only. */
+      custom: ChatCustom | null;
+      /** Deleted here, out of the list until either side writes (opened again from their link): no Rename then. */
+      hidden: boolean;
       role: 'owner' | 'sender';
       ended: boolean;
       /** Blocked: shown read-only, with Unblock. */
@@ -1212,7 +1221,7 @@ export function createApp(deps: Deps) {
     return Promise.all(
       list.map(async (c) => ({
         id: c.id,
-        label: c.label,
+        label: (await chatName(c)).label,
         role: c.role,
         unread: c.unread,
         lastAt: c.lastAt,
@@ -1238,7 +1247,7 @@ export function createApp(deps: Deps) {
     conv: string,
     shown: { messages: MessageView[]; more: boolean } | null,
     older?: true | string,
-  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] }> {
+  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] } & Partial<{ label: string; original: string; custom: ChatCustom | null; hidden: boolean; blocked: boolean }>> {
     const base = shown?.messages.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
     let since = base?.[0]?.at;
     if (typeof older === 'string') {
@@ -1271,7 +1280,16 @@ export function createApp(deps: Deps) {
       const m = await getMessage(deps.db, conv, id);
       if (m) quoted.push(m);
     }
-    return { ...page, quoted };
+    // Its name, and whether it's out of the list or blocked, read again with
+    // it: changed meanwhile (here or in another copy of the app), it shows.
+    const c = await getConversation(deps.db, conv);
+    return { ...page, quoted, ...(c ? { ...(await chatName(c)), original: c.label, hidden: !!c.hidden, blocked: c.status === 'blocked' } : {}) };
+  }
+
+  /** What a chat is shown as, and the user's own name and picture for it (sealed: opened here). */
+  async function chatName(c: ConversationRecord): Promise<{ label: string; custom: ChatCustom | null }> {
+    const custom = c.custom ? await openChatName(deps.db, c.id, c.custom) : null;
+    return { label: shownLabel(c.label, custom ?? undefined), custom };
   }
 
   type ChatScreen = Extract<Screen, { kind: 'conversation' }>;
@@ -1456,16 +1474,37 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home') homeActions++;
     if (current.kind === 'home' || current.kind === 'conversation') screen.value = { ...current, busy: true };
     try {
-      // Told before blocking, which ends our way of writing to them.
-      if (forBoth) await messaging.remove(id, true);
+      // Told before blocking, which ends our way of writing to them. The
+      // name the user gave it goes with it (messaging), unless it stays in
+      // Blocked: kept through the delete for both that comes first.
+      if (forBoth) await messaging.remove(id, true, alsoBlock);
       if (alsoBlock) await messaging.block(id);
       if (!forBoth) await messaging.remove(id);
     } catch (err) {
+      // Stopped partway (deleted, not blocked): the name goes all the same.
+      await messaging.tidyName(id).catch(() => {});
       if (handleGone(err)) return;
       return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     deps.broadcast({ type: 'data-changed' });
     return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
+  }
+
+  /**
+   * Gives the open chat (if it's still `id`) the user's own name and
+   * picture (null, or nothing left once cleaned: back to its label). On
+   * this device only: nothing is sent. Not while it's busy, blocked or
+   * read-only (the ⋯ menu isn't offered then), nor while it's out of the
+   * list (Rename isn't offered then: a name lasts only while it's in a list).
+   */
+  async function rename(id: string, custom: ChatCustom | null): Promise<void> {
+    const current = screen.value;
+    if (current.kind !== 'conversation' || current.id !== id || !messaging || current.busy || current.blocked || current.readOnly || current.hidden) return;
+    const name = custom?.name ? cleanName(custom.name) : '';
+    const emoji = custom?.emoji && isEmoji(custom.emoji) ? custom.emoji : '';
+    await messaging.rename(current.id, name || emoji ? { ...(name ? { name } : {}), ...(emoji ? { emoji } : {}) } : null);
+    deps.broadcast({ type: 'data-changed' });
+    await showChat(current.id);
   }
 
   /**
@@ -1486,7 +1525,9 @@ export function createApp(deps: Deps) {
       screen.value = {
         kind: 'conversation',
         id,
-        label: c.label,
+        ...(await chatName(c)),
+        original: c.label,
+        hidden: !!c.hidden,
         role: c.role,
         ended: c.status === 'ended',
         blocked: c.status === 'blocked',
@@ -1853,7 +1894,7 @@ export function createApp(deps: Deps) {
     const run = ++mediaRuns;
     const { total, byConversation } = await mediaUsage(deps.db);
     if (run === mediaRuns) mediaBytes = total;
-    const labels = new Map((await listConversations(deps.db)).map((c) => [c.id, c.label]));
+    const labels = new Map(await Promise.all((await listConversations(deps.db)).map(async (c) => [c.id, (await chatName(c)).label] as const)));
     const chats = Object.entries(byConversation)
       .filter(([, bytes]) => bytes > 0)
       .map(([id, bytes]) => ({ id, label: labels.get(id) ?? '', bytes }))
@@ -3063,6 +3104,7 @@ export function createApp(deps: Deps) {
     /** Asks Telegram to let the bot write; notices are set up once it may. */
     allowNotices: () => deps.bridge?.post('web_app_request_write_access'),
     deleteConversation,
+    rename,
     /** Whether this build can send and receive attachments. */
     media: !!deps.config?.media,
     sendMedia,

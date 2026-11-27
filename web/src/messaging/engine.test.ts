@@ -41,6 +41,7 @@ import {
   patchMessage,
   pendingUploadDeletes,
   putConversation,
+  sealChatName,
   putMedia,
   queueUploadDeletes,
   saveConversation,
@@ -7030,5 +7031,52 @@ describe('someone with the link flooding the owner', () => {
     expect(await shown()).toEqual({ out: false, text: 'hello' });
     await owner.messaging.remove(mine);
     expect((await getConversation(owner.db, mine))!.preview).toBeNull();
+  });
+});
+
+describe("a chat's own name in upkeep", () => {
+  it('stays through upkeep while a chat is being deleted for both sides and then blocked', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const sender = await person(backend, 'sender');
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const [c] = await listConversations(owner.db);
+    await owner.messaging.rename(c!.id, { name: 'Alex' });
+    // Deleted for both, keeping the name for the block that follows; upkeep runs in between.
+    await owner.messaging.remove(c!.id, true, true);
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ hidden: true, status: 'active' });
+    await owner.messaging.maintain();
+    expect((await getConversation(owner.db, c!.id))!.custom).toBeInstanceOf(Uint8Array);
+    await owner.messaging.block(c!.id);
+    // Blocked: in Blocked, named; upkeep leaves it.
+    await owner.messaging.maintain();
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ status: 'blocked', custom: expect.any(Uint8Array) });
+  });
+
+  it('goes from a chat in neither list (a delete that stopped when the app closed); stays on one in a list or in Blocked', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const ids: string[] = [];
+    for (const who of ['a', 'b', 'c']) {
+      const sender = await person(backend, who);
+      await sender.messaging.startConversation(ref, bundle, `hello from ${who}`);
+    }
+    await owner.messaging.sync();
+    for (const c of await listConversations(owner.db)) ids.push(c.id);
+    expect(ids).toHaveLength(3);
+    const [deleted, listed, blocked] = ids as [string, string, string];
+    const name = async (id: string) => sealChatName(owner.db, id, { name: 'Alex' });
+    // Opened (so upkeep keeps the record), named; one deleted and not blocked, one in the list, one blocked and deleted.
+    await putConversation(owner.db, { ...(await getConversation(owner.db, deleted))!, opened: true, hidden: true, custom: await name(deleted) });
+    await putConversation(owner.db, { ...(await getConversation(owner.db, listed))!, opened: true, custom: await name(listed) });
+    await putConversation(owner.db, { ...(await getConversation(owner.db, blocked))!, opened: true, hidden: true, status: 'blocked', custom: await name(blocked) });
+
+    await owner.messaging.maintain();
+    expect((await getConversation(owner.db, deleted))!.custom).toBeUndefined();
+    expect((await getConversation(owner.db, listed))!.custom).toBeInstanceOf(Uint8Array);
+    expect((await getConversation(owner.db, blocked))!.custom).toBeInstanceOf(Uint8Array);
   });
 });

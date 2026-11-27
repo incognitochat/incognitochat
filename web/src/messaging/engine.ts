@@ -94,6 +94,8 @@ import {
   patchMessage,
   pendingUploadDeletes,
   putConversation,
+  sealChatName,
+  type ChatName,
   putMedia,
   putSweep,
   queueUploadDeletes,
@@ -1396,6 +1398,15 @@ export function createMessaging(deps: MessagingDeps) {
    * dropped too. Nobody is told. The keys stay, so it can be undone (unblock).
    */
   async function block(conv: string): Promise<void> {
+    try {
+      await blockNow(conv);
+    } finally {
+      // Blocked, or not (then the app tidies the name away): upkeep may look at it again.
+      keepingNames.delete(conv);
+    }
+  }
+
+  async function blockNow(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (!c) return;
     if (c.role === 'owner' && c.tag) await addBlockedTag(c.link.fingerprint, c.tag);
@@ -1427,6 +1438,30 @@ export function createMessaging(deps: MessagingDeps) {
   }
 
   /**
+   * Gives a chat the user's own name and picture, or (null) takes them away:
+   * stored with it here, never sent.
+   */
+  async function rename(conv: string, custom: ChatName | null): Promise<void> {
+    const sealed = custom && (custom.name || custom.emoji) ? await sealChatName(db, conv, custom) : null;
+    // Read again under the chat's lock: deleted (hidden) or blocked meanwhile, by another copy say, it's left as it is.
+    await update(conv, ({ custom: _, ...current }) => (current.hidden || current.status === 'blocked' ? null : sealed ? { ...current, custom: sealed } : current));
+  }
+
+  /** Chats being deleted for both sides and then blocked (keepName): their names stay through it, upkeep or not. */
+  const keepingNames = new Set<string>();
+
+  /** In upkeep: a name the user gave a chat that's in neither list goes (a delete that stopped when the app closed, say). */
+  async function forgetNames(): Promise<void> {
+    for (const c of await listConversations(db)) if (c.custom && c.hidden && c.status !== 'blocked' && !keepingNames.has(c.id)) await tidyName(c.id);
+  }
+
+  /** Takes away the name the user gave a chat that's in neither list (deleted, not blocked): after a delete that stopped partway. */
+  async function tidyName(conv: string): Promise<void> {
+    keepingNames.delete(conv);
+    await update(conv, ({ custom, ...current }) => (custom && current.hidden && current.status !== 'blocked' ? current : null));
+  }
+
+  /**
    * Undoes a block. Their sender tag is forgotten, so they can write through
    * our link again. Their app still writes to the mailbox we discarded, so
    * if we had one, we send them a quiet key update from a new mailbox (and,
@@ -1452,7 +1487,12 @@ export function createMessaging(deps: MessagingDeps) {
       await transmit(c.id, { kind: 'key_update', id: envelope, at: await stampIn(c.id, envelope) });
     }
     if (c.role === 'owner' && c.tag) await removeBlockedTag(c.link.fingerprint, c.tag);
-    await update(conv, ({ unblocking: _, ...current }) => ({ ...current, status: 'active' }));
+    // Deleted before (in neither list now): the name the user gave it goes too.
+    await update(conv, ({ unblocking: _, ...current }) => {
+      if (!current.hidden) return { ...current, status: 'active' };
+      const { custom: _custom, ...rest } = current;
+      return { ...rest, status: 'active' };
+    });
   }
 
   /**
@@ -1475,7 +1515,7 @@ export function createMessaging(deps: MessagingDeps) {
    * edits, unless we never answered: they share a budget with all such
    * chats (and count against it), so they go.
    */
-  async function remove(conv: string, forBoth = false): Promise<void> {
+  async function remove(conv: string, forBoth = false, keepName = false): Promise<void> {
     // On this device only: everything here now.
     let upTo = { theirs: Infinity, ours: Infinity };
     let floor: number | undefined;
@@ -1528,8 +1568,15 @@ export function createMessaging(deps: MessagingDeps) {
       }
       // Ours: so their reactions or edits naming one aren't kept for later.
       for (const m of going) if (m.out && couldCome(dayOf(m.at), now())) dropMine(ids, await idTag(secret, c.id, m.id), m.at);
-      // Out of the list, unless something came meanwhile.
+      // Out of the list, unless something came meanwhile. In neither list
+      // then (not blocked), the name the user gave it goes too, unless it's
+      // about to be blocked (keepName: a delete for both that also blocks).
       kept = await withPreview(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) });
+      if (keepName) keepingNames.add(conv);
+      if (left === 0 && kept.status !== 'blocked' && !keepName) {
+        const { custom: _, ...rest } = kept;
+        kept = rest;
+      }
       await saveConversation(db, kept, ids, before, { now: edits, before: editsBefore });
     });
     // Nor is when we last sent something there kept, or what. Only after a
@@ -2486,8 +2533,12 @@ export function createMessaging(deps: MessagingDeps) {
         { forgetAnswered: clear },
       );
       conv.unread = unread;
-      // Out of the list until either side writes again.
-      if (left === 0) conv.hidden = true;
+      // Out of the list until either side writes again. In neither list
+      // then (not blocked): the name the user gave it goes too.
+      if (left === 0) {
+        conv.hidden = true;
+        if (conv.status !== 'blocked') delete conv.custom;
+      }
       // Edits and reactions waiting for messages it took (sent before them) go too.
       if (edits.some((e) => e.at <= upTo)) edits = edits.filter((e) => e.at > upTo);
       if (conv.reactions) conv.reactions = conv.reactions.filter((r) => r.at > upTo);
@@ -2710,6 +2761,7 @@ export function createMessaging(deps: MessagingDeps) {
     const steps = [
       forgetExpired,
       forgetEmpty,
+      forgetNames,
       sweep,
       healMailboxes,
       topUpPool,
@@ -2848,7 +2900,7 @@ export function createMessaging(deps: MessagingDeps) {
     return walk !== null && !paused();
   }
 
-  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, remove, maintain, forgetKeys };
+  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, rename, tidyName, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

@@ -1,9 +1,18 @@
 // A chat's label, as messaging/secret.ts makes it ("🦊 K3F9": one of 64
 // emoji, a space, four characters), in its two parts: the emoji, shown as the
-// chat's picture, and the code beside it.
+// chat's picture, and the code beside it. The user may give a chat their own
+// name and picture instead (on this device only): shown the same way, as
+// "<emoji> <name>".
 
-/** An emoji, maybe with variation selectors or joined to others. */
-const EMOJI = /^\p{Extended_Pictographic}(?:\u{FE0F}|\u{200D}\p{Extended_Pictographic})*$/u;
+import type { ChatName } from '../messaging/store';
+
+/**
+ * An emoji: a pictograph (maybe with a skin tone, a variation selector,
+ * tag characters as in a subdivision flag, or joined to others), a flag (two
+ * regional indicators), or a keycap.
+ */
+const EMOJI =
+  /^(?:\p{Regional_Indicator}{2}|[#*0-9]\u{FE0F}?\u{20E3}|\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|\u{FE0F}|[\u{E0020}-\u{E007F}])*(?:\u{200D}\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|\u{FE0F})*)*)$/u;
 
 /** The label's emoji and code; a label of another shape is all code, with no emoji. */
 export function labelParts(label: string): { emoji: string | null; code: string } {
@@ -12,4 +21,94 @@ export function labelParts(label: string): { emoji: string | null; code: string 
   const code = label.slice(space + 1);
   if (!EMOJI.test(emoji) || code.trim() === '') return { emoji: null, code: label };
   return { emoji, code };
+}
+
+/** Whether a string is one emoji, as a chat's picture can be. */
+export function isEmoji(s: string): boolean {
+  return EMOJI.test(s);
+}
+
+/** The user's own name and picture for a chat (each optional: the label's stands in). */
+export type ChatCustom = ChatName;
+
+/** The longest name the user may give a chat, in characters (as people count them: a flag is one). */
+export const NAME_MAX = 32;
+
+// Made when first needed: a web view without it fails only here (code points then), not as the app loads.
+let graphemes: Intl.Segmenter | null | undefined;
+
+/** A text's characters as people count them: a joined emoji or a flag is one. */
+function characters(text: string): string[] {
+  graphemes ??= typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  return graphemes ? Array.from(graphemes.segment(text), (s) => s.segment) : Array.from(text);
+}
+
+/** How many characters a text has, as people count them. */
+export function characterCount(text: string): number {
+  return characters(text).length;
+}
+
+/** The first `max` characters of a text (a joined emoji or a flag is one, and is never split). */
+export function firstCharacters(text: string, max: number): string {
+  return characters(text).slice(0, max).join('');
+}
+
+/**
+ * A word a keyboard just put together: `before` is the name as it was when
+ * the word began, with the word going over before[start..end] (the caret,
+ * or the selection, then), and `now` the field with the word in. The name
+ * around it is kept exactly; only as much of the word as fits in `max`
+ * characters (as people count them) stays. If the keyboard changed more
+ * than that place (`now` doesn't hold the rest of the name as it was, as
+ * when it rewrites a word already there, a suggestion picked say), the name
+ * as it was, with the caret where it was: there's no room for the change.
+ * (With no start seen, `before` is empty: the first `max` characters.) The
+ * new name, and where the caret goes.
+ */
+export function fitComposed(before: string, start: number, end: number, now: string, max = NAME_MAX): { value: string; caret: number } {
+  const head = before.slice(0, start);
+  const tail = before.slice(end);
+  if (now.length >= head.length + tail.length && now.startsWith(head) && now.endsWith(tail)) {
+    return insertInto(before, start, end, now.slice(head.length, now.length - tail.length), max);
+  }
+  return { value: before, caret: Math.min(start, before.length) };
+}
+
+/**
+ * Text typed or pasted into a name over start..end: as much of it as fits
+ * in `max` characters goes in there (none at the cap), and the rest of the
+ * name stays whole. The new name, and where the caret goes (after it).
+ */
+export function insertInto(name: string, start: number, end: number, text: string, max = NAME_MAX): { value: string; caret: number } {
+  const head = name.slice(0, start);
+  const tail = name.slice(end);
+  const fit = firstCharacters(text, Math.max(0, max - characterCount(head + tail)));
+  return { value: head + fit + tail, caret: head.length + fit.length };
+}
+
+/**
+ * A name as typed, made fit to show: control and direction-changing
+ * characters out (a name can't reorder what's around it), spaces joined
+ * into one, trimmed, at most NAME_MAX characters. Empty: no name.
+ */
+export function cleanName(typed: string): string {
+  const plain = typed
+    .replace(/[\p{Cc}\u{200E}\u{200F}\u{202A}-\u{202E}\u{2066}-\u{2069}\u{061C}]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return firstCharacters(plain, NAME_MAX).trim();
+}
+
+/** What a chat is shown as: the user's own name and picture where they gave one, else the label's. */
+export function shownLabel(label: string, custom?: ChatCustom): string {
+  if (!custom?.name && !custom?.emoji) return label;
+  const { emoji, code } = labelParts(label);
+  const picture = custom.emoji && isEmoji(custom.emoji) ? custom.emoji : emoji;
+  const name = custom.name ? cleanName(custom.name) || code : code;
+  return picture ? `${picture} ${name}` : name;
+}
+
+/** Whether a name is a label's code (four of its letters and digits), shown left to right. */
+export function isCode(name: string): boolean {
+  return /^[0-9A-HJKMNP-TV-Z]{4}$/.test(name);
 }

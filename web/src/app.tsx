@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { labelParts } from './state/label';
+import { characterCount, cleanName, firstCharacters, fitComposed, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -92,6 +92,7 @@ export function App({ app, setting }: { app: AppState; setting: LanguageSetting 
     <BackStack.Provider value={app.onBack}>
       <Screen app={app} language={language} setting={setting} />
       <DeleteDialog app={app} language={language} />
+      <RenameDialog app={app} language={language} />
       {toast.value && (
         <p class="toast" role="status">
           {toast.value}
@@ -353,6 +354,7 @@ const ICONS = {
   usage: <path d="M18 20V10M12 20V4M6 20v-6" />,
   admin: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
   code: <path d="m16 18 6-6-6-6M8 6l-6 6 6 6" />,
+  edit: <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16zM13.5 6.5l4 4" />,
   trash: (
     <>
       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
@@ -800,8 +802,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     const now = chatMenu.peek();
     const inView = r.bottom > 0 && r.top < window.innerHeight;
     const wanted = inView || !now ? r.bottom + 4 : now.top;
-    // On screen, with room below for the menu's two items (about 120 px).
-    const top = Math.max(8, Math.min(wanted, window.innerHeight - 128));
+    // On screen, with room below for the menu's three items (about 170 px).
+    const top = Math.max(8, Math.min(wanted, window.innerHeight - 176));
     const at = { top: Math.round(top), end: Math.round(page.dir === 'rtl' ? r.left - left : left + page.clientWidth - r.right) };
     if (now && now.top === at.top && now.end === at.end) return;
     chatMenu.value = at;
@@ -860,6 +862,11 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replyKept.current = null;
     menu.value = null;
   }, [screen.id]);
+  // Out of the list or blocked meanwhile (their delete for both, another
+  // copy): an open Rename dialog for it goes, as Rename does from the menu.
+  useEffect(() => {
+    if ((screen.hidden || screen.blocked) && renaming.peek()?.id === screen.id) renaming.value = null;
+  }, [screen.id, screen.hidden, screen.blocked]);
   // Before the new chat paints: the old one's ⋯ menu doesn't show on it.
   useLayoutEffect(() => {
     chatMenu.value = false;
@@ -927,6 +934,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           language={language}
           at={chatMenu.value || null}
           onClose={() => (chatMenu.value = false)}
+          // Not for a chat out of the list (deleted here, opened from their link): a name lasts only while it's in one.
+          onRename={screen.hidden ? null : () => openRename(screen)}
           onBlock={() => void confirmBlock(app, language, screen.id, screen.role)}
           onDelete={() => void confirmDelete(screen.id, screen.label, !screen.blocked && !screen.ended)}
         />
@@ -1174,6 +1183,161 @@ function DeleteConversation({ app, language, target }: { app: AppState; language
           </button>
           <Button kind="secondary" onClick={close}>
             {t(language, 'cancel')}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The chat the rename dialog is open for: its ID, its label, and the name and picture the user gave it, if any. */
+const renaming = signal<{ id: string; original: string; custom: { name?: string; emoji?: string } | null } | null>(null);
+
+function openRename(screen: Extract<Screen, { kind: 'conversation' }>): void {
+  renaming.value = { id: screen.id, original: screen.original, custom: screen.custom };
+}
+
+function RenameDialog({ app, language }: { app: AppState; language: Language }) {
+  const target = renaming.value;
+  // Keyed, so each chat's dialog opens afresh, with its own name and picture.
+  return target ? <RenameChat key={target.id} app={app} language={language} target={target} /> : null;
+}
+
+/**
+ * Gives a chat the user's own name and picture: on this device only. The
+ * label's code is the field's placeholder, and its emoji the picture until
+ * another is picked; "Use the original name" takes both away.
+ */
+function RenameChat({ app, language, target }: { app: AppState; language: Language; target: NonNullable<typeof renaming.value> }) {
+  const tr = (key: Key) => t(language, key);
+  const { emoji: labelEmoji, code } = labelParts(target.original);
+  const name = useSignal(target.custom?.name ?? '');
+  const picture = useSignal(target.custom?.emoji ?? labelEmoji ?? '');
+  const picking = useSignal(false);
+  const pictureButton = useRef<HTMLButtonElement>(null);
+  const close = () => (renaming.value = null);
+  // At most NAME_MAX characters, as people count them (a flag is one):
+  // what's typed or pasted goes in only as far as it fits, where the caret
+  // is (the rest of the name stays whole, the caret after it); a word a
+  // keyboard puts together is cut once it's done. Deleting is never held up.
+  const fitIn = (e: InputEvent, field: HTMLInputElement) => {
+    // Line breaks as spaces, as a one-line field takes them.
+    const text = (e.data ?? e.dataTransfer?.getData('text/plain') ?? '').replace(/[\r\n]+$/, '').replace(/\r\n|\r|\n/g, ' ');
+    if (e.isComposing || !e.cancelable || !text || !e.inputType.startsWith('insert')) return;
+    const start = field.selectionStart ?? field.value.length;
+    const next = insertInto(field.value, start, field.selectionEnd ?? start, text);
+    // All of it fits: the field takes it as usual (its own undo, too).
+    if (next.caret - start === text.length) return;
+    e.preventDefault();
+    field.value = next.value;
+    field.setSelectionRange(next.caret, next.caret);
+    name.value = next.value;
+  };
+  // A word just put together, past the cap: only as much of it as fits
+  // stays, where it went in (the caret or selection when the word began:
+  // not now, which a tap elsewhere may have moved); the rest of the name is
+  // kept exactly.
+  const beforeWord = useRef<{ value: string; start: number; end: number } | null>(null);
+  const wordStarts = (field: HTMLInputElement) => {
+    const start = field.selectionStart ?? field.value.length;
+    beforeWord.current = { value: field.value, start, end: field.selectionEnd ?? start };
+  };
+  const composed = (field: HTMLInputElement) => {
+    const value = field.value;
+    const before = beforeWord.current ?? { value: '', start: 0, end: 0 };
+    beforeWord.current = null;
+    if (characterCount(value) > NAME_MAX) {
+      const next = fitComposed(before.value, before.start, before.end, value);
+      field.value = next.value;
+      field.setSelectionRange(next.caret, next.caret);
+    }
+    name.value = field.value;
+  };
+  // Whatever else got past fitIn and composed (a redo, an insert that can't
+  // be stopped): the name is cut to the cap here, never left over it.
+  const typed = (e: InputEvent, field: HTMLInputElement) => {
+    if (!e.isComposing && characterCount(field.value) > NAME_MAX) field.value = firstCharacters(field.value, NAME_MAX);
+    name.value = field.value;
+  };
+  useBackCloses(true, close);
+  // Back closes the picture picker first.
+  useBackCloses(picking.value, () => (picking.value = false));
+  const focus = useDialogFocus<HTMLDivElement>();
+  const save = () => {
+    const given = cleanName(name.value);
+    const emoji = picture.value && picture.value !== labelEmoji ? picture.value : undefined;
+    close();
+    void app.rename(target.id, given && given !== code ? { name: given, ...(emoji ? { emoji } : {}) } : emoji ? { emoji } : null);
+  };
+  const reset = () => {
+    close();
+    void app.rename(target.id, null);
+  };
+  return (
+    <div class="overlay" onClick={close} onKeyDown={(e) => e.key === 'Escape' && (picking.value ? (picking.value = false) : close())}>
+      <div
+        class="dialog rename-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rename-title"
+        tabIndex={-1}
+        ref={focus.ref}
+        onKeyDown={focus.onKeyDown}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 id="rename-title">{tr('rename')}</h2>
+        <div class="rename-row">
+          <button
+            type="button"
+            class="avatar rename-picture"
+            ref={pictureButton}
+            aria-label={`${tr('chatPicture')} ${picture.value}`}
+            aria-expanded={picking.value}
+            onClick={() => (picking.value = !picking.value)}
+          >
+            {picture.value}
+          </button>
+          <input
+            class="rename-name"
+            type="text"
+            dir="auto"
+            enterKeyHint="done"
+            autoComplete="off"
+            aria-label={tr('chatName')}
+            placeholder={code}
+            value={name.value}
+            // At most NAME_MAX characters while typing, not only on Save (fitIn, composed, typed).
+            onBeforeInput={(e) => fitIn(e as InputEvent, e.currentTarget)}
+            onInput={(e) => typed(e as InputEvent, e.currentTarget)}
+            onCompositionStart={(e) => wordStarts(e.currentTarget)}
+            onCompositionEnd={(e) => composed(e.currentTarget)}
+            // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
+            onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}
+          />
+        </div>
+        {picking.value && (
+          <div class="sticker-panel rename-emoji">
+            <EmojiSection
+              language={language}
+              onEmoji={(e) => {
+                picture.value = e;
+                picking.value = false;
+                // The picker goes with the focus inside it: back to the picture.
+                setTimeout(() => pictureButton.current?.focus());
+              }}
+            />
+          </div>
+        )}
+        <p class="muted">{tr('chatNameNote')}</p>
+        {target.custom && (
+          <button type="button" class="text-button" onClick={reset}>
+            {tr('originalName')}
+          </button>
+        )}
+        <div class="row">
+          <Button onClick={save}>{tr('save')}</Button>
+          <Button kind="secondary" onClick={close}>
+            {tr('cancel')}
           </Button>
         </div>
       </div>
@@ -1535,11 +1699,11 @@ function Avatar({ label, small }: { label: string; small?: boolean }) {
   );
 }
 
-/** A chat's name beside its picture: the label's code (all of it, for a label without an emoji); screen readers hear the emoji too. */
+/** A chat's name beside its picture: the label's code (all of it, for a label without an emoji), or the name the user gave it (in its own direction); screen readers hear the emoji too. */
 function LabelCode({ label }: { label: string }) {
   const { emoji, code } = labelParts(label);
   return (
-    <bdi dir="ltr" class="label">
+    <bdi dir={isCode(code) ? 'ltr' : 'auto'} class="label">
       {emoji && <span class="visually-hidden">{emoji} </span>}
       {code}
     </bdi>
@@ -3451,6 +3615,7 @@ function ChatMenu({
   language,
   at,
   onClose,
+  onRename,
   onBlock,
   onDelete,
 }: {
@@ -3458,6 +3623,7 @@ function ChatMenu({
   /** Where it opens: px from the top and from the window's inline end (below ⋯, kept on screen). */
   at: { top: number; end: number } | null;
   onClose: () => void;
+  onRename: (() => void) | null;
   onBlock: () => void;
   onDelete: () => void;
 }) {
@@ -3485,6 +3651,12 @@ function ChatMenu({
         onClick={(e) => e.stopPropagation()}
       >
         <div class="menu-items" role="menu" aria-label={tr('chatActions')}>
+          {onRename && (
+            <button type="button" role="menuitem" class="menu-item" onClick={act(onRename)}>
+              <Icon name="edit" class="menu-icon" />
+              {tr('rename')}
+            </button>
+          )}
           <button type="button" role="menuitem" class="menu-item" onClick={act(onBlock)}>
             <Icon name="blocked" class="menu-icon" />
             {tr('block')}
