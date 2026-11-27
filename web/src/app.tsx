@@ -757,11 +757,28 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const menuShown = !!chatMenu.value && !screen.blocked && !screen.readOnly;
   useBackCloses(menuShown, () => (chatMenu.value = false));
   const menuButton = useRef<HTMLButtonElement>(null);
+  // The header stays at the top (CSS): a message focused, or scrolled into
+  // view, comes out below it (with room for its focus ring), not under it.
+  // The header's height (watched: a turn, a long line wrapping) is the
+  // messages' scroll margin (--chat-head), not the page's scroll padding,
+  // which would scroll the page whenever ⋯, inside the header, took the focus.
+  const page = useRef<HTMLElement>(null);
+  const head = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const el = head.current;
+    const main = page.current;
+    if (!el || !main) return;
+    const measure = () => main.style.setProperty('--chat-head', `${Math.ceil(el.getBoundingClientRect().height) + 8}px`);
+    measure();
+    const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    watch?.observe(el);
+    return () => watch?.disconnect();
+  }, []);
   /**
-   * Where the menu goes: just below ⋯, its end edge on ⋯'s, measured from
-   * the menu's overlay (the page's box less any scroll: a scrollbar on
-   * either side left out). With ⋯ scrolled out of view (a turn, older
-   * messages loading above), it stays where it was, kept on the screen.
+   * Where the menu goes: just below ⋯ (the header, ⋯ with it, stays at the
+   * top), its end edge on ⋯'s, measured from the menu's overlay (the page's
+   * box less any scroll: a scrollbar on either side left out). Were ⋯ ever
+   * out of view, the menu would stay where it was, kept on the screen.
    */
   const placeChatMenu = () => {
     const r = menuButton.current?.getBoundingClientRect();
@@ -781,8 +798,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     chatMenu.value = at;
   };
   // A turned phone, a resized window, the keyboard closing as the menu takes
-  // the focus (Android resizes the page), or the page scrolling under it:
-  // placed again, under ⋯ (or where it was, ⋯ gone from view). Added and removed in
+  // the focus (Android resizes the page), or the page scrolling: placed
+  // again, under ⋯ (or where it was, were ⋯ ever gone from view). Added and removed in
   // the same commit as the menu, and never reopening one closed. On a resize
   // it runs after useChatScroll's handler (added when the chat opened), so it
   // measures ⋯ where that left it.
@@ -865,8 +882,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     return () => clearTimeout(timer);
   }, []);
   return (
-    <main class="page conversation">
-      <header class="conversation-head">
+    <main class="page conversation" ref={page}>
+      <header class="conversation-head" ref={head}>
         <div class="chat-title">
           <Avatar label={screen.label} />
           <span class="chat-title-text">
@@ -885,11 +902,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
               aria-haspopup="menu"
               aria-expanded={menuShown}
               disabled={screen.busy}
-              onClick={() => {
-                // From the keyboard, ⋯ may be out of view: brought into it first.
-                menuButton.current?.scrollIntoView({ block: 'nearest' });
-                placeChatMenu();
-              }}
+              onClick={placeChatMenu}
             >
               <svg class="icon-fill" viewBox="0 0 24 24" aria-hidden="true">
                 <circle cx="5" cy="12" r="2" />
