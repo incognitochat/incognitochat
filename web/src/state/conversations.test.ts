@@ -710,6 +710,15 @@ describe('conversations in the app', () => {
       expect(screenOf(again.screen.value, 'conversation').label).toMatch(/ Bob$/u);
     });
 
+    it('shows a chat another copy blocked as blocked (no ⋯ menu, no Rename) once it is drawn again', async () => {
+      const { owner, id } = await pair();
+      const other = await owner.reopen('');
+      await other.openConversation(id);
+      await other.block();
+      await owner.refresh();
+      expect(screenOf(owner.screen.value, 'conversation')).toMatchObject({ id, blocked: true });
+    });
+
     it('keeps the name when a delete fails before anything changed (still in the list)', async () => {
       const { b, owner, id } = await pair();
       await owner.sendMessage('hi');

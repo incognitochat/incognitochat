@@ -1247,7 +1247,7 @@ export function createApp(deps: Deps) {
     conv: string,
     shown: { messages: MessageView[]; more: boolean } | null,
     older?: true | string,
-  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] } & Partial<{ label: string; original: string; custom: ChatCustom | null; hidden: boolean }>> {
+  ): Promise<{ messages: MessageView[]; more: boolean; quoted: MessageView[] } & Partial<{ label: string; original: string; custom: ChatCustom | null; hidden: boolean; blocked: boolean }>> {
     const base = shown?.messages.filter((m) => !(m.out && (m.status === 'sending' || m.status === 'failed'))) ?? null;
     let since = base?.[0]?.at;
     if (typeof older === 'string') {
@@ -1280,9 +1280,10 @@ export function createApp(deps: Deps) {
       const m = await getMessage(deps.db, conv, id);
       if (m) quoted.push(m);
     }
-    // Its name, read again with it: renamed meanwhile (here or in another copy of the app), it shows.
+    // Its name, and whether it's out of the list or blocked, read again with
+    // it: changed meanwhile (here or in another copy of the app), it shows.
     const c = await getConversation(deps.db, conv);
-    return { ...page, quoted, ...(c ? { ...(await chatName(c)), original: c.label, hidden: !!c.hidden } : {}) };
+    return { ...page, quoted, ...(c ? { ...(await chatName(c)), original: c.label, hidden: !!c.hidden, blocked: c.status === 'blocked' } : {}) };
   }
 
   /** What a chat is shown as, and the user's own name and picture for it (sealed: opened here). */

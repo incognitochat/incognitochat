@@ -1398,6 +1398,15 @@ export function createMessaging(deps: MessagingDeps) {
    * dropped too. Nobody is told. The keys stay, so it can be undone (unblock).
    */
   async function block(conv: string): Promise<void> {
+    try {
+      await blockNow(conv);
+    } finally {
+      // Blocked, or not (then the app tidies the name away): upkeep may look at it again.
+      keepingNames.delete(conv);
+    }
+  }
+
+  async function blockNow(conv: string): Promise<void> {
     const c = await getConversation(db, conv);
     if (!c) return;
     if (c.role === 'owner' && c.tag) await addBlockedTag(c.link.fingerprint, c.tag);
@@ -1438,13 +1447,17 @@ export function createMessaging(deps: MessagingDeps) {
     await update(conv, ({ custom: _, ...current }) => (current.hidden || current.status === 'blocked' ? null : sealed ? { ...current, custom: sealed } : current));
   }
 
+  /** Chats being deleted for both sides and then blocked (keepName): their names stay through it, upkeep or not. */
+  const keepingNames = new Set<string>();
+
   /** In upkeep: a name the user gave a chat that's in neither list goes (a delete that stopped when the app closed, say). */
   async function forgetNames(): Promise<void> {
-    for (const c of await listConversations(db)) if (c.custom && c.hidden && c.status !== 'blocked') await tidyName(c.id);
+    for (const c of await listConversations(db)) if (c.custom && c.hidden && c.status !== 'blocked' && !keepingNames.has(c.id)) await tidyName(c.id);
   }
 
   /** Takes away the name the user gave a chat that's in neither list (deleted, not blocked): after a delete that stopped partway. */
   async function tidyName(conv: string): Promise<void> {
+    keepingNames.delete(conv);
     await update(conv, ({ custom, ...current }) => (custom && current.hidden && current.status !== 'blocked' ? current : null));
   }
 
@@ -1559,6 +1572,7 @@ export function createMessaging(deps: MessagingDeps) {
       // then (not blocked), the name the user gave it goes too, unless it's
       // about to be blocked (keepName: a delete for both that also blocks).
       kept = await withPreview(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) });
+      if (keepName) keepingNames.add(conv);
       if (left === 0 && kept.status !== 'blocked' && !keepName) {
         const { custom: _, ...rest } = kept;
         kept = rest;

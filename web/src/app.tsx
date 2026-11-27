@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { characterCount, cleanName, firstCharacters, isCode, labelParts, NAME_MAX } from './state/label';
+import { cleanName, firstCharacters, insertInto, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -862,6 +862,11 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     replyKept.current = null;
     menu.value = null;
   }, [screen.id]);
+  // Out of the list or blocked meanwhile (their delete for both, another
+  // copy): an open Rename dialog for it goes, as Rename does from the menu.
+  useEffect(() => {
+    if ((screen.hidden || screen.blocked) && renaming.peek()?.id === screen.id) renaming.value = null;
+  }, [screen.id, screen.hidden, screen.blocked]);
   // Before the new chat paints: the old one's ⋯ menu doesn't show on it.
   useLayoutEffect(() => {
     chatMenu.value = false;
@@ -1211,21 +1216,26 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   const picking = useSignal(false);
   const pictureButton = useRef<HTMLButtonElement>(null);
   const close = () => (renaming.value = null);
-  // At most NAME_MAX characters, as people count them (a flag is one): typing
-  // on at the cap is refused (the caret stays put), a longer paste is cut.
-  const capName = (field: HTMLInputElement): string => {
-    const typed = field.value;
-    if (characterCount(typed) <= NAME_MAX) return typed;
-    const before = name.peek();
-    if (characterCount(before) >= NAME_MAX) {
-      const caret = Math.max(0, (field.selectionStart ?? typed.length) - (typed.length - before.length));
-      field.value = before;
-      field.setSelectionRange(caret, caret);
-      return before;
-    }
-    const cut = firstCharacters(typed, NAME_MAX);
-    field.value = cut;
-    return cut;
+  // At most NAME_MAX characters, as people count them (a flag is one):
+  // what's typed or pasted goes in only as far as it fits, where the caret
+  // is (the rest of the name stays whole, the caret after it); a word a
+  // keyboard puts together is cut once it's done. Deleting is never held up.
+  const fitIn = (e: InputEvent, field: HTMLInputElement) => {
+    const text = e.data ?? e.dataTransfer?.getData('text/plain') ?? '';
+    if (e.isComposing || !text || !e.inputType.startsWith('insert')) return;
+    const start = field.selectionStart ?? field.value.length;
+    const next = insertInto(field.value, start, field.selectionEnd ?? start, text);
+    // All of it fits: the field takes it as usual (its own undo, too).
+    if (next.caret - start === text.length) return;
+    e.preventDefault();
+    field.value = next.value;
+    field.setSelectionRange(next.caret, next.caret);
+    name.value = next.value;
+  };
+  const composed = (field: HTMLInputElement) => {
+    const cut = firstCharacters(field.value, NAME_MAX);
+    if (cut !== field.value) field.value = cut;
+    name.value = cut;
   };
   useBackCloses(true, close);
   // Back closes the picture picker first.
@@ -1274,9 +1284,10 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             aria-label={tr('chatName')}
             placeholder={code}
             value={name.value}
-            // Capped while typing, not only on Save; but not while a keyboard is still putting a word together (capped once it's done).
-            onInput={(e) => (name.value = (e as InputEvent).isComposing ? e.currentTarget.value : capName(e.currentTarget))}
-            onCompositionEnd={(e) => (name.value = capName(e.currentTarget))}
+            // At most NAME_MAX characters while typing, not only on Save (fitIn, composed).
+            onBeforeInput={(e) => fitIn(e as InputEvent, e.currentTarget)}
+            onInput={(e) => (name.value = e.currentTarget.value)}
+            onCompositionEnd={(e) => composed(e.currentTarget)}
             // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
             onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}
           />

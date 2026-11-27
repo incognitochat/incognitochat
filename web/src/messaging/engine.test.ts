@@ -7035,6 +7035,26 @@ describe('someone with the link flooding the owner', () => {
 });
 
 describe("a chat's own name in upkeep", () => {
+  it('stays through upkeep while a chat is being deleted for both sides and then blocked', async () => {
+    const backend = await fakeBackend();
+    const owner = await person(backend, 'owner');
+    const { ref, bundle } = await linkOf(backend, owner);
+    const sender = await person(backend, 'sender');
+    await sender.messaging.startConversation(ref, bundle, 'hello');
+    await owner.messaging.sync();
+    const [c] = await listConversations(owner.db);
+    await owner.messaging.rename(c!.id, { name: 'Alex' });
+    // Deleted for both, keeping the name for the block that follows; upkeep runs in between.
+    await owner.messaging.remove(c!.id, true, true);
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ hidden: true, status: 'active' });
+    await owner.messaging.maintain();
+    expect((await getConversation(owner.db, c!.id))!.custom).toBeInstanceOf(Uint8Array);
+    await owner.messaging.block(c!.id);
+    // Blocked: in Blocked, named; upkeep leaves it.
+    await owner.messaging.maintain();
+    expect(await getConversation(owner.db, c!.id)).toMatchObject({ status: 'blocked', custom: expect.any(Uint8Array) });
+  });
+
   it('goes from a chat in neither list (a delete that stopped when the app closed); stays on one in a list or in Blocked', async () => {
     const backend = await fakeBackend();
     const owner = await person(backend, 'owner');

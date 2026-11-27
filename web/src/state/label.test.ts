@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMOJI_GROUPS } from '../emoji/data';
-import { cleanName, firstCharacters, isCode, isEmoji, labelParts, NAME_MAX, shownLabel } from './label';
+import { cleanName, firstCharacters, insertInto, isCode, isEmoji, labelParts, NAME_MAX, shownLabel } from './label';
 
 describe('labelParts', () => {
   it('splits a label into its emoji and its code', () => {
@@ -72,5 +72,22 @@ describe("a chat's own name and picture", () => {
     expect(isCode('K3F9')).toBe(true);
     expect(isCode('0ABZ')).toBe(true);
     for (const s of ['Alex', 'k3f9', 'K3F', 'K3F9X', 'KIL0', 'علی']) expect(isCode(s), s).toBe(false);
+  });
+});
+
+describe('typing into a name, at most NAME_MAX characters', () => {
+  const full = 'x'.repeat(NAME_MAX);
+  it('takes what fits where it goes, and keeps the rest of the name whole', () => {
+    expect(insertInto('Alex', 4, 4, ' B')).toEqual({ value: 'Alex B', caret: 6 });
+    // At the cap: nothing goes in, the caret stays.
+    expect(insertInto(full, 5, 5, 'Q')).toEqual({ value: full, caret: 5 });
+    // A paste in the middle: as much as fits, the end of the name kept.
+    const name = 'a'.repeat(NAME_MAX - 3) ;
+    expect(insertInto(name, 0, 0, '12345678')).toEqual({ value: '123' + name, caret: 3 });
+    // Over a selection: it makes room.
+    expect(insertInto(full, 0, 3, 'abc')).toEqual({ value: 'abc' + full.slice(3), caret: 3 });
+    expect(insertInto(full, 0, 3, 'abcd')).toEqual({ value: 'abc' + full.slice(3), caret: 3 });
+    // Flags and joined emoji: whole or not at all.
+    expect(insertInto('x'.repeat(NAME_MAX - 1), NAME_MAX - 1, NAME_MAX - 1, '🇨🇦🇨🇦').value).toBe('x'.repeat(NAME_MAX - 1) + '🇨🇦');
   });
 });

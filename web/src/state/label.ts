@@ -54,6 +54,18 @@ export function firstCharacters(text: string, max: number): string {
 }
 
 /**
+ * Text typed or pasted into a name over start..end: as much of it as fits
+ * in `max` characters goes in there (none at the cap), and the rest of the
+ * name stays whole. The new name, and where the caret goes (after it).
+ */
+export function insertInto(name: string, start: number, end: number, text: string, max = NAME_MAX): { value: string; caret: number } {
+  const head = name.slice(0, start);
+  const tail = name.slice(end);
+  const fit = firstCharacters(text, Math.max(0, max - characterCount(head + tail)));
+  return { value: head + fit + tail, caret: head.length + fit.length };
+}
+
+/**
  * A name as typed, made fit to show: control and direction-changing
  * characters out (a name can't reorder what's around it), spaces joined
  * into one, trimmed, at most NAME_MAX characters. Empty: no name.
