@@ -622,10 +622,12 @@ export function createApp(deps: Deps) {
     deps.bridge?.post('web_app_setup_settings_button', { is_visible: visible });
   });
   deps.bridge?.on('settings_button_pressed', () => {
-    if (!offersSettings(currentScreen())) return;
+    const pressedOn = currentScreen();
+    if (!offersSettings(pressedOn)) return;
     // Closing takes each one off as it redraws, later: all of them, as they are now.
     for (const close of [...onTop].reverse()) close();
-    void showHome({ tab: 'settings' });
+    // Drawn only while the screen it was pressed on is still there: not over a chat opened meanwhile, say.
+    void showHome({ tab: 'settings', over: placeOf(pressedOn) });
   });
   let messaging: Messaging | null = null;
   let mediaSettings: MediaSettings = DEFAULT_MEDIA_SETTINGS;
@@ -2546,8 +2548,17 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home' && current.tab === 'settings') screen.value = { ...current, media: total };
   }
 
-  /** Draws home. overHome: a tab switch, drawn only if home is still on screen (not over a chat opened meanwhile). */
-  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean } = {}): Promise<void> {
+  /** Where a screen is, to tell whether it's still there: its kind, and for a chat, which one (drawn again, it's the same place). */
+  function placeOf(s: Screen): string {
+    return s.kind === 'conversation' ? `conversation:${s.id}` : s.kind;
+  }
+
+  /**
+   * Draws home. overHome: a tab switch, drawn only if home is still on screen
+   * (not over a chat opened meanwhile). over: Telegram's Settings item, drawn
+   * only if the screen it was pressed on (placeOf) still is.
+   */
+  async function showHome(options: { offline?: boolean; notice?: HomeNotice | null; tab?: HomeTab; overHome?: boolean; over?: string } = {}): Promise<void> {
     const actions = homeActions;
     const ask = ++homeAsks;
     const shownTab = options.tab ?? tab;
@@ -2605,8 +2616,10 @@ export function createApp(deps: Deps) {
     };
     // Dropped if a newer showHome began meanwhile, or an action on home (it
     // draws home itself once done, or the screen its end calls for); or, a
-    // tab switch, if home has left the screen (a chat opened, say).
-    if (ask !== homeAsks || actions !== homeActions || (options.overHome && screen.value.kind !== 'home')) {
+    // tab switch, if home has left the screen (a chat opened, say); or,
+    // Telegram's Settings item, if the screen it was pressed on has.
+    const moved = (options.overHome && screen.value.kind !== 'home') || (options.over !== undefined && placeOf(screen.value) !== options.over);
+    if (ask !== homeAsks || actions !== homeActions || moved) {
       // Its homeDraws++ may have dropped a refresh's draw: read again.
       void refresh();
       return;
