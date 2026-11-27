@@ -561,6 +561,38 @@ describe('conversations in the app', () => {
     expect(back.map((c) => [c.id, c.last?.text, c.unread])).toEqual([[id, 'anyone?', 1]]);
   });
 
+  it('keeps a chat\'s label through a delete and their return, and in Blocked after a delete that also blocks', async () => {
+    const b = await backend();
+    const owner = await person(b);
+    await owner.createLink();
+    const payload = new URL(screenOf(owner.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    const sender = await person(b, payload);
+    await sender.writeToLink('hello');
+    await owner.showTab('chats');
+    await owner.sync();
+    const first = screenOf(owner.screen.value, 'home').conversations[0]!;
+    expect(first.label).toMatch(/^\S+ [0-9A-Z]{4}$/u);
+
+    // Deleted, then they write again: the same label.
+    await owner.deleteConversation(first.id, false);
+    await sender.sendMessage('anyone?');
+    await owner.sync();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+
+    // Deleted and blocked: Blocked shows it by the same label.
+    await owner.deleteConversation(first.id, true);
+    await owner.blocked();
+    expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+
+    // Unblocked (it was deleted: in neither list), then they write again: the same label.
+    await owner.unblock(first.id);
+    await sender.sync();
+    await sender.sendMessage('still there?');
+    await owner.sync();
+    await owner.home();
+    expect(screenOf(owner.screen.value, 'home').conversations.map((c) => [c.id, c.label])).toEqual([[first.id, first.label]]);
+  });
+
   it('shows the delivery state of the last message in the list', async () => {
     const b = await backend();
     const owner = await person(b);
