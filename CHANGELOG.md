@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.14.0](https://github.com/incognitochat/incognitochat/compare/v2.13.0...v2.14.0) (2026-11-27)
+
+
+### Features
+
+* **web:** hold a chat to select it; rename or delete selected chats, for both sides too ([#269](https://github.com/incognitochat/incognitochat/issues/269)) ([5fb6333](https://github.com/incognitochat/incognitochat/commit/5fb6333aa3ff81535d0c61af13e8072fa2593cf5))
+* **web:** rename a chat and change its picture, on this device only ([#268](https://github.com/incognitochat/incognitochat/issues/268)) ([ce5d3ed](https://github.com/incognitochat/incognitochat/commit/ce5d3eda1809594b0d05b9c126881fba16c3d618))
+* **web:** the chat's header stays at the top, with one short line under the name ([#263](https://github.com/incognitochat/incognitochat/issues/263)) ([6d7c0ec](https://github.com/incognitochat/incognitochat/commit/6d7c0ece6adf35e6c505c4fae2a194d71af6d729))
+
+
+### Bug Fixes
+
+* **web:** a message focused from the keyboard comes out above the message bar ([#267](https://github.com/incognitochat/incognitochat/issues/267)) ([6345df8](https://github.com/incognitochat/incognitochat/commit/6345df8cf89232b95ce3239b0e6f902a0220655a))
+* **web:** Telegram's Settings item doesn't draw over a chat opened while it loads ([#266](https://github.com/incognitochat/incognitochat/issues/266)) ([0ee9667](https://github.com/incognitochat/incognitochat/commit/0ee96678722c48b8f138571bc6e7c9da9f687b4a))
+* **web:** the link screen's button says Go to my chats, and opens Chats ([#265](https://github.com/incognitochat/incognitochat/issues/265)) ([6d5bfee](https://github.com/incognitochat/incognitochat/commit/6d5bfeeb4932bbc95e515e2bdb28e54081fc4e07))
+
 ## [2.13.0](https://github.com/incognitochat/incognitochat/compare/v2.12.0...v2.13.0) (2026-11-26)
 
 
