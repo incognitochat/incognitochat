@@ -2125,7 +2125,8 @@ describe('deleting the account', () => {
       await a.blocked();
       expect(screenOf(a.screen.value, 'blocked').conversations.map((c) => c.id).sort()).toEqual([x, y].sort());
       expect(screenOf(a.screen.value, 'blocked').conversations.find((c) => c.id === y)!.label).toMatch(/ Bob$/u);
-    });
+      // (This test server doesn't know /discard: each block waits its retry, about 2 s.)
+    }, 20_000);
 
     it("stops when the day's messages run out: Try again does nothing until they reset; Stop leaves the rest with the other side", async () => {
       const b = await backend();

@@ -2336,7 +2336,7 @@ export function createApp(deps: Deps) {
       const until = reason === 'link-busy' ? { until: busyUntil } : {};
       screen.value = { kind: 'deleting-selected', done, total, stopped: { reason, left: left.length, ...until } };
     };
-    const forBoth = (c: ConversationRecord | undefined): c is ConversationRecord => !!c && c.status === 'active' && !c.hidden;
+    const forBoth = (c: ConversationRecord | undefined): boolean => !!c && c.status === 'active' && !c.hidden;
     backButton(true);
     screen.value = { kind: 'deleting-selected', done, total, stopped: null };
     // Messaging, if it couldn't start before.
@@ -2344,53 +2344,54 @@ export function createApp(deps: Deps) {
     for (const [i, id] of ids.entries()) {
       if (!ours()) return;
       const left = () => [...busy, ...ids.slice(i)];
-      if (forBoth(await getConversation(deps.db, id))) {
+      let c = await getConversation(deps.db, id);
+      if (forBoth(c)) {
         await chatDeleteTurn();
         if (!ours()) return;
+        // Looked at again after the wait, which can be long.
+        c = await getConversation(deps.db, id);
+      }
+      // Held here: signed out meanwhile, the app's own messaging goes, not this one.
+      const m = messaging;
+      // Left (Back) meanwhile: nothing more goes out.
+      if (!ours()) return;
+      if (c && forBoth(c)) {
         // This build can't send (its token key won't load): a fresh copy of the app can.
-        // Held here: signed out meanwhile, the app's own messaging goes, not this one.
-        const m = messaging;
         if (!m) return stop('outdated', left());
-        // Looked at again after the wait, which can be long; and left (Back) meanwhile: nothing goes out.
-        if (forBoth(await getConversation(deps.db, id)) && ours()) {
-          try {
-            // The name it was given is kept through it if it's to be blocked (for Blocked).
-            await m.remove(id, true, alsoBlock);
-            if (alsoBlock) await m.block(id);
-            deps.broadcast({ type: 'data-changed' });
-          } catch (err) {
-            // Deleted for both, not blocked (the block failed): the name goes, left or not; Try again blocks it.
-            await m.tidyName(id).catch(() => {});
-            if (!ours()) return;
-            if (handleGone(err)) return;
-            const now = await getConversation(deps.db, id);
-            const stillOpen = !!now && now.status === 'active' && !now.hidden;
-            if (stillOpen && err instanceof ApiError && err.code === 'link_busy') {
-              // Its link is full for this hour: the others go on, and it's left for later.
-              busy.push(id);
-              const until = limitError('link-busy', err).until;
-              if (until !== null) busyUntil = Math.max(busyUntil ?? 0, until);
-            } else if (stillOpen || (alsoBlock && !!now && now.status !== 'blocked')) return stop(chatsStop(err), left());
-          } finally {
-            chatSends.push(Date.now());
-          }
+        try {
+          // The name it was given is kept through it if it's to be blocked (for Blocked).
+          await m.remove(id, true, alsoBlock);
+          // Blocked too, as asked, even if left meanwhile: the delete went out, and its name, kept for
+          // Blocked, would otherwise wait for upkeep.
+          if (alsoBlock) await m.block(id);
+          deps.broadcast({ type: 'data-changed' });
+        } catch (err) {
+          // Deleted for both, not blocked (the block failed): the name goes, left or not; Try again blocks it.
+          await m.tidyName(id).catch(() => {});
+          if (!ours()) return;
+          if (handleGone(err)) return;
+          const now = await getConversation(deps.db, id);
+          const stillOpen = !!now && now.status === 'active' && !now.hidden;
+          if (stillOpen && err instanceof ApiError && err.code === 'link_busy') {
+            // Its link is full for this hour: the others go on, and it's left for later.
+            busy.push(id);
+            const until = limitError('link-busy', err).until;
+            if (until !== null) busyUntil = Math.max(busyUntil ?? 0, until);
+          } else if (stillOpen || (alsoBlock && !!now && now.status !== 'blocked')) return stop(chatsStop(err), left());
+        } finally {
+          chatSends.push(Date.now());
         }
-      } else {
-        // Not for both sides (ended, or deleted here meanwhile): here, as asked.
-        const c = await getConversation(deps.db, id);
-        const m = messaging;
-        if (!ours()) return;
-        if (c && c.status !== 'blocked' && !m) return stop('outdated', left());
-        if (c && c.status !== 'blocked' && m) {
-          try {
-            if (alsoBlock) await m.block(id);
-            if (!c.hidden) await m.remove(id);
-            deps.broadcast({ type: 'data-changed' });
-          } catch (err) {
-            if (!ours()) return;
-            if (handleGone(err)) return;
-            return stop(chatsStop(err), left());
-          }
+      } else if (c && c.status !== 'blocked') {
+        // Not for both sides (ended, or deleted here, before the run or during its wait): here, as asked.
+        if (!m) return stop('outdated', left());
+        try {
+          if (alsoBlock) await m.block(id);
+          if (!c.hidden) await m.remove(id);
+          deps.broadcast({ type: 'data-changed' });
+        } catch (err) {
+          if (!ours()) return;
+          if (handleGone(err)) return;
+          return stop(chatsStop(err), left());
         }
       }
       done++;

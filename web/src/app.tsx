@@ -1963,8 +1963,8 @@ function ChatRow({
           e.preventDefault();
           longPress(true);
         }}
-        // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does.
-        onKeyDown={(e) => menuKeyDown(e, () => longPress(), { enter: false })}
+        // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does (once per press: held down, it repeats).
+        onKeyDown={(e) => !e.repeat && menuKeyDown(e, () => longPress(), { enter: false })}
         onClick={onClick}
       >
         <span class="avatar-wrap">

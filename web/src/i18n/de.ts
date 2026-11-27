@@ -241,7 +241,7 @@ export const de = {
   selectedCount: 'Ausgewählt: {count}',
   clearSelection: 'Auswahl aufheben',
   deleteChatsConfirm: 'Die ausgewählten Chats von diesem Gerät löschen? Die anderen behalten ihre Kopien und werden nicht informiert. Schreibt jemand wieder, kommt der jeweilige Chat zurück.',
-  deleteChatsConfirmBoth: 'Die ausgewählten Chats auf beiden Seiten löschen? Sie verschwinden auch von den Geräten der anderen. Schreibt jemand wieder, kommt der jeweilige Chat zurück.',
+  deleteChatsConfirmBoth: 'Die ausgewählten Chats auf beiden Seiten löschen? Sie verschwinden auch von den Geräten der anderen. Schreibt eine der beiden Seiten wieder, kommt der jeweilige Chat zurück.',
   alsoDeleteForOthers: 'Auch auf der anderen Seite löschen',
   deleteChatsTitle: 'Chats löschen',
   deletingSelected: 'Chats werden auf der anderen Seite gelöscht: {done} von {total}…',
