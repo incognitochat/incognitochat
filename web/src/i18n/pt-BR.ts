@@ -213,7 +213,7 @@ export const ptBR = {
   notSent: 'Não enviada',
   resend: 'Enviar de novo',
   firstMessageHint: 'Escreva a primeira mensagem. A pessoa não vai saber quem você é.',
-  aboutOwnerConversation: 'Anônimo para você',
+  aboutOwnerConversation: 'Você não sabe quem é',
   aboutSenderConversation: 'Você está no anonimato',
   startedByThem: 'Iniciado por alguém pelo seu link',
   startedByYou: 'Você iniciou este chat pelo link da pessoa',

@@ -215,7 +215,7 @@ export const pl = {
   notSent: 'Nie wysłano',
   resend: 'Wyślij ponownie',
   firstMessageHint: 'Napisz pierwszą wiadomość. Ta osoba nie będzie wiedzieć, kim jesteś.',
-  aboutOwnerConversation: 'To anonimowa osoba',
+  aboutOwnerConversation: 'Nie wiesz, kto to jest',
   aboutSenderConversation: 'Piszesz anonimowo',
   startedByThem: 'Czat rozpoczęty przez kogoś za pomocą twojego linku',
   startedByYou: 'Czat rozpoczęty przez ciebie za pomocą linku tej osoby',
