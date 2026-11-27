@@ -105,7 +105,7 @@ export const es = {
   linkNotFound: 'Este enlace no existe, o quien lo tenía lo cambió o lo eliminó.',
   linkMismatch:
     'Las claves de este enlace no coinciden con él. Puede que alguien esté intentando interceptar tus mensajes. No lo uses.',
-  goHome: 'Ir a tus enlaces',
+  goHome: 'Ir a mis chats',
 
   tabChats: 'Chats',
   tabLinks: 'Mi enlace',

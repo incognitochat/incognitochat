@@ -1570,6 +1570,30 @@ describe('links', () => {
     expect(ownerAgain.screen.value).toMatchObject({ kind: 'link', status: 'own' });
   });
 
+  it("leaves someone's link for the Chats tab", async () => {
+    const server = fakeServer();
+    const owner = await registered(server.api);
+    await owner.app.createLink();
+    const url = home(owner.app.screen.value).links[0]!.url;
+    const sender = await registered(server.api, { launch: launchWith(payloadOf(url)) });
+    expect(sender.app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
+    // Home, as the link screen's button did before it asked for Chats itself (app.chats, below).
+    await sender.app.home();
+    expect(sender.app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+  });
+
+  it('goes to the Chats tab from anywhere, whatever tab was open last', async () => {
+    const server = fakeServer();
+    const { app } = await registered(server.api);
+    await app.showTab('settings');
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'settings' });
+    await app.chats();
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+    // Remembered from here on: home again stays on Chats.
+    await app.home();
+    expect(app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
+  });
+
   it('catches a server that swaps the keys', async () => {
     const server = fakeServer();
     const owner = await registered(server.api);

@@ -219,7 +219,7 @@ function Screen({ app, language, setting }: { app: AppState; language: Language;
           )}
           {screen.status === 'network' && <Button onClick={app.retry}>{tr('tryAgain')}</Button>}
           {screen.status !== 'checking' && (
-            <Button kind="secondary" onClick={app.home}>
+            <Button kind="secondary" onClick={app.chats}>
               {tr('goHome')}
             </Button>
           )}

@@ -100,7 +100,7 @@ export const en = {
   linkNotFound: "This link doesn't exist, or its owner replaced or deleted it.",
   linkMismatch:
     "This link's keys don't match the link. Someone may be trying to intercept your messages. Don't use it.",
-  goHome: 'Go to your links',
+  goHome: 'Go to my chats',
 
   tabChats: 'Chats',
   tabLinks: 'My link',

@@ -104,7 +104,7 @@ export const ptBR = {
   openChat: 'Abrir chat',
   linkNotFound: 'Este link não existe, ou o dono o trocou ou apagou.',
   linkMismatch: 'As chaves deste link não correspondem ao link. Alguém pode estar tentando interceptar suas mensagens. Não o use.',
-  goHome: 'Ir para seus links',
+  goHome: 'Ir para meus chats',
 
   tabChats: 'Chats',
   tabLinks: 'Meu link',

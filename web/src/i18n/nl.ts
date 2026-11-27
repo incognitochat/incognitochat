@@ -101,7 +101,7 @@ export const nl = {
   openChat: 'Chat openen',
   linkNotFound: 'Deze link bestaat niet, of de eigenaar heeft hem vervangen of verwijderd.',
   linkMismatch: 'De sleutels van deze link kloppen niet met de link. Misschien probeert iemand je berichten te onderscheppen. Gebruik hem niet.',
-  goHome: 'Naar je links',
+  goHome: 'Naar mijn chats',
 
   tabChats: 'Chats',
   tabLinks: 'Mijn link',
