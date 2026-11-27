@@ -58,6 +58,30 @@ newMessages:
   101: 101 mensajes nuevos
   102: 102 mensajes nuevos
   1000000: 1.000.000 de mensajes nuevos
+selectedCount:
+  0: Seleccionados: 0
+  1: Seleccionados: 1
+  2: Seleccionados: 2
+  3: Seleccionados: 3
+  5: Seleccionados: 5
+  11: Seleccionados: 11
+  21: Seleccionados: 21
+  100: Seleccionados: 100
+  101: Seleccionados: 101
+  102: Seleccionados: 102
+  1000000: Seleccionados: 1.000.000
+deletingSelectedLeft:
+  0: Chats no eliminados para las otras personas: 0. Si te detienes aquí, las otras personas los conservan.
+  1: Chats no eliminados para las otras personas: 1. Si te detienes aquí, las otras personas los conservan.
+  2: Chats no eliminados para las otras personas: 2. Si te detienes aquí, las otras personas los conservan.
+  3: Chats no eliminados para las otras personas: 3. Si te detienes aquí, las otras personas los conservan.
+  5: Chats no eliminados para las otras personas: 5. Si te detienes aquí, las otras personas los conservan.
+  11: Chats no eliminados para las otras personas: 11. Si te detienes aquí, las otras personas los conservan.
+  21: Chats no eliminados para las otras personas: 21. Si te detienes aquí, las otras personas los conservan.
+  100: Chats no eliminados para las otras personas: 100. Si te detienes aquí, las otras personas los conservan.
+  101: Chats no eliminados para las otras personas: 101. Si te detienes aquí, las otras personas los conservan.
+  102: Chats no eliminados para las otras personas: 102. Si te detienes aquí, las otras personas los conservan.
+  1000000: Chats no eliminados para las otras personas: 1.000.000. Si te detienes aquí, las otras personas los conservan.
 usageCount:
   0: 0
   1: 1

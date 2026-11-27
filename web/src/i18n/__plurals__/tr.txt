@@ -58,6 +58,30 @@ newMessages:
   101: 101 yeni mesaj
   102: 102 yeni mesaj
   1000000: 1.000.000 yeni mesaj
+selectedCount:
+  0: Seçilen: 0
+  1: Seçilen: 1
+  2: Seçilen: 2
+  3: Seçilen: 3
+  5: Seçilen: 5
+  11: Seçilen: 11
+  21: Seçilen: 21
+  100: Seçilen: 100
+  101: Seçilen: 101
+  102: Seçilen: 102
+  1000000: Seçilen: 1.000.000
+deletingSelectedLeft:
+  0: Karşı taraftan silinmeyen sohbetler: 0. Burada durursanız bu sohbetler karşı tarafta kalır.
+  1: Karşı taraftan silinmeyen sohbetler: 1. Burada durursanız bu sohbetler karşı tarafta kalır.
+  2: Karşı taraftan silinmeyen sohbetler: 2. Burada durursanız bu sohbetler karşı tarafta kalır.
+  3: Karşı taraftan silinmeyen sohbetler: 3. Burada durursanız bu sohbetler karşı tarafta kalır.
+  5: Karşı taraftan silinmeyen sohbetler: 5. Burada durursanız bu sohbetler karşı tarafta kalır.
+  11: Karşı taraftan silinmeyen sohbetler: 11. Burada durursanız bu sohbetler karşı tarafta kalır.
+  21: Karşı taraftan silinmeyen sohbetler: 21. Burada durursanız bu sohbetler karşı tarafta kalır.
+  100: Karşı taraftan silinmeyen sohbetler: 100. Burada durursanız bu sohbetler karşı tarafta kalır.
+  101: Karşı taraftan silinmeyen sohbetler: 101. Burada durursanız bu sohbetler karşı tarafta kalır.
+  102: Karşı taraftan silinmeyen sohbetler: 102. Burada durursanız bu sohbetler karşı tarafta kalır.
+  1000000: Karşı taraftan silinmeyen sohbetler: 1.000.000. Burada durursanız bu sohbetler karşı tarafta kalır.
 usageCount:
   0: 0
   1: 1

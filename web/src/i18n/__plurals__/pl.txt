@@ -58,6 +58,30 @@ newMessages:
   101: 101 nowych wiadomości
   102: 102 nowe wiadomości
   1000000: 1 000 000 nowych wiadomości
+selectedCount:
+  0: Wybrane: 0
+  1: Wybrane: 1
+  2: Wybrane: 2
+  3: Wybrane: 3
+  5: Wybrane: 5
+  11: Wybrane: 11
+  21: Wybrane: 21
+  100: Wybrane: 100
+  101: Wybrane: 101
+  102: Wybrane: 102
+  1000000: Wybrane: 1 000 000
+deletingSelectedLeft:
+  0: Czaty nieusunięte u drugiej strony: 0. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  1: Czaty nieusunięte u drugiej strony: 1. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  2: Czaty nieusunięte u drugiej strony: 2. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  3: Czaty nieusunięte u drugiej strony: 3. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  5: Czaty nieusunięte u drugiej strony: 5. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  11: Czaty nieusunięte u drugiej strony: 11. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  21: Czaty nieusunięte u drugiej strony: 21. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  100: Czaty nieusunięte u drugiej strony: 100. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  101: Czaty nieusunięte u drugiej strony: 101. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  102: Czaty nieusunięte u drugiej strony: 102. Jeśli tu przerwiesz, zostaną u drugiej strony.
+  1000000: Czaty nieusunięte u drugiej strony: 1 000 000. Jeśli tu przerwiesz, zostaną u drugiej strony.
 usageCount:
   0: 0
   1: 1

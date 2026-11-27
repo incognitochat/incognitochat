@@ -58,6 +58,30 @@ newMessages:
   101: 101 nieuwe berichten
   102: 102 nieuwe berichten
   1000000: 1.000.000 nieuwe berichten
+selectedCount:
+  0: Geselecteerd: 0
+  1: Geselecteerd: 1
+  2: Geselecteerd: 2
+  3: Geselecteerd: 3
+  5: Geselecteerd: 5
+  11: Geselecteerd: 11
+  21: Geselecteerd: 21
+  100: Geselecteerd: 100
+  101: Geselecteerd: 101
+  102: Geselecteerd: 102
+  1000000: Geselecteerd: 1.000.000
+deletingSelectedLeft:
+  0: Chats die niet voor de anderen zijn verwijderd: 0. Als je hier stopt, blijven die bij de anderen.
+  1: Chats die niet voor de anderen zijn verwijderd: 1. Als je hier stopt, blijven die bij de anderen.
+  2: Chats die niet voor de anderen zijn verwijderd: 2. Als je hier stopt, blijven die bij de anderen.
+  3: Chats die niet voor de anderen zijn verwijderd: 3. Als je hier stopt, blijven die bij de anderen.
+  5: Chats die niet voor de anderen zijn verwijderd: 5. Als je hier stopt, blijven die bij de anderen.
+  11: Chats die niet voor de anderen zijn verwijderd: 11. Als je hier stopt, blijven die bij de anderen.
+  21: Chats die niet voor de anderen zijn verwijderd: 21. Als je hier stopt, blijven die bij de anderen.
+  100: Chats die niet voor de anderen zijn verwijderd: 100. Als je hier stopt, blijven die bij de anderen.
+  101: Chats die niet voor de anderen zijn verwijderd: 101. Als je hier stopt, blijven die bij de anderen.
+  102: Chats die niet voor de anderen zijn verwijderd: 102. Als je hier stopt, blijven die bij de anderen.
+  1000000: Chats die niet voor de anderen zijn verwijderd: 1.000.000. Als je hier stopt, blijven die bij de anderen.
 usageCount:
   0: 0
   1: 1

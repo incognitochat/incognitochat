@@ -2094,7 +2094,7 @@ describe('deleting the account', () => {
       expect(screenOf(a.screen.value, 'home').conversations.find((c) => c.id === x)).toMatchObject({ label: expect.stringMatching(/ Alex$/u), custom: { name: 'Alex' } });
       const sent = b.sends.length;
       await a.deleteChats([y, z], false, false);
-      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted', busy: false });
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted-many', busy: false });
       expect(labels(a)).toEqual([x]);
       expect(b.sends.length).toBe(sent);
       expect(await hasChat(others[1]!)).toBe(true);
@@ -2154,7 +2154,7 @@ describe('deleting the account', () => {
       await run;
       expect(a.screen.value).toMatchObject({ kind: 'deleting-selected', done: 0, total: 2, stopped: { reason: 'network', left: 2 } });
       await a.retryDeletingSelected();
-      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted' });
+      expect(screenOf(a.screen.value, 'home')).toMatchObject({ tab: 'chats', notice: 'deleted-many-both' });
       expect(labels(a)).toEqual([]);
       expect(await hasChat(others[0]!)).toBe(false);
       expect(await hasChat(others[1]!)).toBe(false);

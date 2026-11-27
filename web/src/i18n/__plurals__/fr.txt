@@ -58,6 +58,30 @@ newMessages:
   101: 101 nouveaux messages
   102: 102 nouveaux messages
   1000000: 1 000 000 de nouveaux messages
+selectedCount:
+  0: Sélectionnés : 0
+  1: Sélectionnés : 1
+  2: Sélectionnés : 2
+  3: Sélectionnés : 3
+  5: Sélectionnés : 5
+  11: Sélectionnés : 11
+  21: Sélectionnés : 21
+  100: Sélectionnés : 100
+  101: Sélectionnés : 101
+  102: Sélectionnés : 102
+  1000000: Sélectionnés : 1 000 000
+deletingSelectedLeft:
+  0: Échanges non supprimés de l'autre côté : 0. Si vous arrêtez ici, ils restent de l'autre côté.
+  1: Échanges non supprimés de l'autre côté : 1. Si vous arrêtez ici, ils restent de l'autre côté.
+  2: Échanges non supprimés de l'autre côté : 2. Si vous arrêtez ici, ils restent de l'autre côté.
+  3: Échanges non supprimés de l'autre côté : 3. Si vous arrêtez ici, ils restent de l'autre côté.
+  5: Échanges non supprimés de l'autre côté : 5. Si vous arrêtez ici, ils restent de l'autre côté.
+  11: Échanges non supprimés de l'autre côté : 11. Si vous arrêtez ici, ils restent de l'autre côté.
+  21: Échanges non supprimés de l'autre côté : 21. Si vous arrêtez ici, ils restent de l'autre côté.
+  100: Échanges non supprimés de l'autre côté : 100. Si vous arrêtez ici, ils restent de l'autre côté.
+  101: Échanges non supprimés de l'autre côté : 101. Si vous arrêtez ici, ils restent de l'autre côté.
+  102: Échanges non supprimés de l'autre côté : 102. Si vous arrêtez ici, ils restent de l'autre côté.
+  1000000: Échanges non supprimés de l'autre côté : 1 000 000. Si vous arrêtez ici, ils restent de l'autre côté.
 usageCount:
   0: 0
   1: 1

@@ -223,6 +223,9 @@ export type HomeNotice =
   | 'blocked'
   | 'unblocked'
   | 'deleted'
+  /** Several chats selected in the list: deleted here; deleted on both sides. */
+  | 'deleted-many'
+  | 'deleted-many-both'
   | 'replaced'
   | 'created'
   | 'revoked'
@@ -2298,7 +2301,7 @@ export function createApp(deps: Deps) {
       return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }
     deps.broadcast({ type: 'data-changed' });
-    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
+    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted-many' });
   }
 
   /**
@@ -2389,7 +2392,7 @@ export function createApp(deps: Deps) {
     if (!ours()) return;
     if (busy.length > 0) return stop('link-busy', busy);
     selectedRun++;
-    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted' });
+    return showHome({ tab: 'chats', notice: alsoBlock ? 'blocked' : 'deleted-many-both' });
   }
 
   /** Leaves deleting selected chats for both sides (Cancel, Stop, or back): at once, the rest kept. */

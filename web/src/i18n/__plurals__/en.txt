@@ -58,6 +58,30 @@ newMessages:
   101: 101 new messages
   102: 102 new messages
   1000000: 1,000,000 new messages
+selectedCount:
+  0: Selected: 0
+  1: Selected: 1
+  2: Selected: 2
+  3: Selected: 3
+  5: Selected: 5
+  11: Selected: 11
+  21: Selected: 21
+  100: Selected: 100
+  101: Selected: 101
+  102: Selected: 102
+  1000000: Selected: 1,000,000
+deletingSelectedLeft:
+  0: Chats not deleted for the other side: 0. If you stop here, they stay with them.
+  1: Chats not deleted for the other side: 1. If you stop here, they stay with them.
+  2: Chats not deleted for the other side: 2. If you stop here, they stay with them.
+  3: Chats not deleted for the other side: 3. If you stop here, they stay with them.
+  5: Chats not deleted for the other side: 5. If you stop here, they stay with them.
+  11: Chats not deleted for the other side: 11. If you stop here, they stay with them.
+  21: Chats not deleted for the other side: 21. If you stop here, they stay with them.
+  100: Chats not deleted for the other side: 100. If you stop here, they stay with them.
+  101: Chats not deleted for the other side: 101. If you stop here, they stay with them.
+  102: Chats not deleted for the other side: 102. If you stop here, they stay with them.
+  1000000: Chats not deleted for the other side: 1,000,000. If you stop here, they stay with them.
 usageCount:
   0: 0
   1: 1

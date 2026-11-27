@@ -58,6 +58,30 @@ newMessages:
   101: 101 pesan baru
   102: 102 pesan baru
   1000000: 1.000.000 pesan baru
+selectedCount:
+  0: Dipilih: 0
+  1: Dipilih: 1
+  2: Dipilih: 2
+  3: Dipilih: 3
+  5: Dipilih: 5
+  11: Dipilih: 11
+  21: Dipilih: 21
+  100: Dipilih: 100
+  101: Dipilih: 101
+  102: Dipilih: 102
+  1000000: Dipilih: 1.000.000
+deletingSelectedLeft:
+  0: Obrolan yang belum dihapus untuk pihak lain: 0. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  1: Obrolan yang belum dihapus untuk pihak lain: 1. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  2: Obrolan yang belum dihapus untuk pihak lain: 2. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  3: Obrolan yang belum dihapus untuk pihak lain: 3. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  5: Obrolan yang belum dihapus untuk pihak lain: 5. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  11: Obrolan yang belum dihapus untuk pihak lain: 11. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  21: Obrolan yang belum dihapus untuk pihak lain: 21. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  100: Obrolan yang belum dihapus untuk pihak lain: 100. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  101: Obrolan yang belum dihapus untuk pihak lain: 101. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  102: Obrolan yang belum dihapus untuk pihak lain: 102. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
+  1000000: Obrolan yang belum dihapus untuk pihak lain: 1.000.000. Jika Anda berhenti di sini, obrolan itu tetap ada pada mereka.
 usageCount:
   0: 0
   1: 1
