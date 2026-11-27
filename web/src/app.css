@@ -172,10 +172,11 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif, 
    overlay and under the message bar (whose own menus, being inside it, must
    cover it too; and on a screen too short for both, typing wins). Where it
    rests is where it sticks: the page's top padding is in it. A message
-   focused or scrolled to stops below it (--chat-head: its height and a little
-   room for a focus ring, app.tsx). */
+   focused or scrolled to stops below it and above the message bar
+   (--chat-head, --chat-foot: their heights and a little room for a focus
+   ring, app.tsx). */
 .conversation-head { position: sticky; inset-block-start: 0; z-index: 4; display: flex; flex-direction: column; gap: 0.125rem; margin-inline: -1rem; padding: 0.5rem 1rem; background: var(--app-bg); border-block-end: 1px solid var(--app-separator, rgb(127 127 127 / 0.2)); }
-.messages, .messages * { scroll-margin-block-start: var(--chat-head, 0px); }
+.messages, .messages * { scroll-margin-block: var(--chat-head, 0px) var(--chat-foot, 0px); }
 .messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.375rem; flex: 1; }
 .messages .earlier { align-self: center; }
 /* A message's whole row takes its gestures; the bubble sits at its start or end. */

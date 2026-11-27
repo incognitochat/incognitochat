@@ -757,21 +757,30 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const menuShown = !!chatMenu.value && !screen.blocked && !screen.readOnly;
   useBackCloses(menuShown, () => (chatMenu.value = false));
   const menuButton = useRef<HTMLButtonElement>(null);
-  // The header stays at the top (CSS): a message focused, or scrolled into
-  // view, comes out below it (with room for its focus ring), not under it.
-  // The header's height (watched: a turn, a long line wrapping) is the
-  // messages' scroll margin (--chat-head), not the page's scroll padding,
-  // which would scroll the page whenever ⋯, inside the header, took the focus.
+  // The header stays at the top and the message bar at the bottom (CSS): a
+  // message focused, or scrolled into view, comes out between them (with
+  // room for its focus ring), not under either. Their heights (watched: a
+  // turn, a long line wrapping, the reply bar or a panel opening) are the
+  // messages' scroll margins (--chat-head, --chat-foot), not the page's
+  // scroll padding, which would scroll the page whenever something inside
+  // them (⋯, the message field) took the focus.
   const page = useRef<HTMLElement>(null);
   const head = useRef<HTMLElement>(null);
+  const foot = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    const el = head.current;
     const main = page.current;
-    if (!el || !main) return;
-    const measure = () => main.style.setProperty('--chat-head', `${Math.ceil(el.getBoundingClientRect().height) + 8}px`);
+    const bars = [
+      [head.current, '--chat-head'],
+      [foot.current, '--chat-foot'],
+    ] as const;
+    if (!main || bars.some(([el]) => !el)) return;
+    const measure = () => {
+      for (const [el, name] of bars) main.style.setProperty(name, `${Math.ceil(el!.getBoundingClientRect().height) + 8}px`);
+    };
     measure();
     const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
-    watch?.observe(el);
+    // Their whole boxes: the message bar's padding follows Telegram's safe area, which can change on its own (a turn).
+    for (const [el] of bars) watch?.observe(el!, { box: 'border-box' });
     return () => watch?.disconnect();
   }, []);
   /**
@@ -1014,7 +1023,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
           }}
         />
       )}
-      <div class="conversation-foot">
+      <div class="conversation-foot" ref={foot}>
         {(scroll.away || scroll.fresh > 0) && (
           <button
             type="button"
