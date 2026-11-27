@@ -779,7 +779,8 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     };
     measure();
     const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
-    for (const [el] of bars) watch?.observe(el!);
+    // Their whole boxes: the message bar's padding follows Telegram's safe area, which can change on its own (a turn).
+    for (const [el] of bars) watch?.observe(el!, { box: 'border-box' });
     return () => watch?.disconnect();
   }, []);
   /**
