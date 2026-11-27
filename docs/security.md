@@ -28,7 +28,9 @@ version 2 moves all content out of Telegram and encrypts it on the device.
   conversation they have with you through their own link. The server gives
   each link signing key to one account for good, so the tag a sender's app
   adds to a first message differs between accounts' links (for links made
-  before that rule, from their next key change: see Other limits).
+  before that rule, from their next key change: see Other limits). None of
+  this protects a sender from a recipient working with someone who holds
+  the server's data (What still leaks).
 - **The app's code is verifiable**: built in public, reproducibly, with
   published hashes and provenance, and served the same to everyone
   ([verifying.md](verifying.md)).
@@ -43,7 +45,7 @@ device.
 
 | Who | Can | Gets |
 |---|---|---|
-| A copy of the database (leak, backup, data request) | Read every stored item | Accounts and the month each was last used, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders, no conversation pairs, no record of who got messages or had the app open when, beyond that month. |
+| A copy of the database (leak, backup, data request) | Read every stored item | Accounts and the month each was last used, public keys, links, mailboxes and their owners, undelivered ciphertext, encrypted attachments; short-lived records under keyed hashes that can't be matched with any of them. No content, no senders or conversation pairs (unless a recipient hands over a sender's mailbox: What still leaks), no record of who got messages or had the app open when, beyond that month. |
 | The operator or AWS account holder, passively | Read the database, logs and settings | The same. With the functions' keys (in SSM), also: which Telegram user owns each account, and so each link and mailbox (the stored hash of a Telegram ID is one keyed hash, and with the key, every possible ID can be hashed in minutes), as the sealed chat IDs of accounts that set up notices also say; and which mailboxes got messages, and which accounts had the app open, minute by minute, for the short-lived records not yet deleted (see What still leaks). |
 | The operator, actively and live | Change server code, log requests, watch traffic | The recipient of each message, timing, IP addresses. Can link people by timing over several messages. Can set, at each login, the clock someone's app dates messages by, anywhere within a minute of the device's: a recipient working with it can read that in what the person sends, as a tag. Can't read content or forge messages, or use old ones to undo later ones, as long as the app itself isn't swapped. |
 | A compromised deploy (a step of the CI job, or a deploy someone got approved) | Deploy code CI signs, change what Terraform manages, read the secrets (older values too), invoke `bot` and `notify` | Through code it deploys, what the functions can reach, until the next deploy replaces it. Can't read the tables, logs or attachments itself. Most ways to leave access behind are denied; some IAM can't deny, and the next deploy finds only some of those (see Other limits). |
@@ -52,7 +54,7 @@ device.
 | Telegram's servers | See app launches and bot traffic | Who opens which link, when notices go out. Timing can link senders to recipients. No content. |
 | The Telegram app on the device | Hosts the app's page | Everything on that device. Trusted, like any app you type into. |
 | GitHub (hosts the app) | Serve the app's files, log visits | IP addresses, and the link being opened (it's in the page address). Could serve different code, but verifiers would see it. |
-| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times). |
+| Other users | Receive messages, compare notes | Can't link an anonymous sender's conversations with different people, or their anonymous and known conversations, also not by leaving envelopes sealed to a key they know in other people's mailboxes, or by timing sends to learn when someone has the app open. Message times carry the server's clock to the second, not the sender's device clock, except in the cases under What still leaks (Message times). Working with someone who holds the server's data, a recipient can find a sender's account (What still leaks). |
 | Spammers | Create Telegram accounts | Bounded by Telegram-only registration, send-token budgets and per-mailbox and per-link caps. |
 | A thief with an unlocked device | Use the device | Everything on it. Remedy: set up again, which ends the old account at once (and with it a copy's logins and signed requests, below). |
 
@@ -65,9 +67,11 @@ it. This is how close it gets.
 
 - Read anyone's messages or attachments.
 - Learn from stored data who wrote to whom, or who an anonymous sender is:
-  nothing stored says so. (With the functions' keys it can read the
-  short-lived records for as long as they're kept, which show some of the
-  timing it can watch live; see 2. below.)
+  nothing stored says so, unless a recipient hands over the sender's
+  mailbox, taken from the recipient's own device (What still leaks). (With
+  the functions' keys it can read the short-lived records for as long as
+  they're kept, which show some of the timing it can watch live; see 2.
+  below.)
 - Forge messages or slip them into a conversation.
 - Undo what happened in a conversation by delivering old envelopes again,
   or out of order: bring back a deleted message or chat, wipe later history
@@ -261,6 +265,27 @@ it. This is how close it gets.
 - **Telegram** sees who opens which link, and when notices are sent.
 - **Recipients are known to the server.** It must know a mailbox's owner to
   deliver to it. Only senders and pairings are hidden.
+- **A recipient with the server's data can find a sender's account.** Each
+  side of a conversation writes to a mailbox the other side owns, and the
+  server knows every mailbox's owner. A sender's own mailbox is passed to the
+  other side only inside encrypted messages, so the server can't tell which
+  conversation it belongs to, but the other side's app knows it. The app
+  doesn't show it; someone would have to take it from that device's storage,
+  or from the requests its app sends. Given that mailbox, anyone with a copy
+  of the database finds the account that owns it, and through the account its
+  link, the earlier links it had (by their signing key's fingerprint) and the
+  invitation codes it made, any of which may be known to belong to someone;
+  with the functions' keys, also the Telegram user who owns the account. This
+  holds while the server keeps the mailbox's owner: until the sender blocks
+  that conversation (deleting the chat, even for both sides, keeps the
+  mailbox), or their account is gone and the cleanup of what it owned has
+  finished. Messages still waiting for the sender's device tie the mailbox to
+  their account too, even after a block, until the device confirms them (at
+  most 30 days). After setting up again, the old account's mailboxes go only
+  as the new device's app cleans up, and until then the new account names the
+  old one ([data.md](data.md#on-the-server)). A copy of the database made
+  earlier keeps all of it. So an anonymous sender is hidden from the server's
+  data alone and from the other side alone, but not from the two together.
 - **Who is still on the old build, while an issuer key is replaced.**
   Replacing a key ([deployment.md](deployment.md#rotating-an-issuer-key))
   splits senders in two while both keys are held. `POST /tokens` names the
@@ -399,8 +424,10 @@ it. This is how close it gets.
   phone's voice recorder may name a recording after the place it was
   made), and a GIF any comments or XMP data in it (its preview, the first
   frame drawn again on the device, has none).
-- **Abuse can't be traced to a person**, by design. Blocks, budgets, caps and
-  replacing a link are the remedies.
+- **The server alone can't trace abuse to a person**, by design; a
+  recipient working with it can (A recipient with the server's data can
+  find a sender's account, above). Blocks, budgets, caps and replacing a
+  link are the remedies.
 
 ## Other limits
 
@@ -701,6 +728,8 @@ it. This is how close it gets.
   it. The operator could then no longer learn which Telegram user owns which
   account or mailbox, or match a sender's IP address to an account. Timing
   and IP addresses would still leak, and users would trust AWS's attestation.
+- Mailboxes the server can't tie to an account, so a sender's mailbox that a
+  recipient hands over names nobody.
 - Unforgeable sender tags (anonymous credentials), so blocks hold against
   modified apps.
 - A per-message ratchet (Double Ratchet or MLS) and post-quantum key exchange.

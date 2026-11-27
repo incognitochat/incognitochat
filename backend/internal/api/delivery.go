@@ -169,7 +169,7 @@ func (s *Server) createMailboxes(ctx context.Context, req httpapi.Request, c cal
 	return httpapi.JSON(http.StatusCreated, map[string][]string{"mailboxes": created})
 }
 
-// discardMailbox ends a mailbox (a block, or a conversation ended): sends to
+// discardMailbox ends a mailbox (a block; deleting a chat doesn't): sends to
 // it then go nowhere, answered exactly like sends to a mailbox that never existed.
 // An ID that isn't the caller's to discard writes nothing: the mailbox is
 // read first, half a directory unit. Copies of a block of one's own
@@ -213,8 +213,8 @@ func (s *Server) discardMailbox(ctx context.Context, _ httpapi.Request, c caller
 // Neither whether the mailbox exists nor whether its owner's app is open
 // changes which calls a send makes, the bytes they carry or the capacity
 // they use, and so neither changes the answer or how it fails:
-//   - A mailbox that doesn't exist (never did, or ended: a block, an ended
-//     conversation) takes the same steps for an account that doesn't
+//   - A mailbox that doesn't exist (never did, or ended: a block, or its
+//     account ended) takes the same steps for an account that doesn't
 //     exist either: its devices are looked up (there are none), and the
 //     delivery's write, the same size, goes to a placeholder that holds
 //     nothing (inbox.Store.Deliver). ws is asked to push to nobody.

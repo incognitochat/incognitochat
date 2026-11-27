@@ -173,7 +173,9 @@ envelope came through.
 
 Each side only ever sees the other as that conversation's key. Two people the
 same sender wrote to see unrelated keys and mailboxes, so they can't compare
-notes. If the owner also writes to the sender's own link, that's a separate
+notes. (Working with someone who holds the server's data, each of them could
+find the sender's account: [security.md](security.md#what-still-leaks).) If
+the owner also writes to the sender's own link, that's a separate
 conversation with nothing shared.
 
 **Labels** like `🦊 K3F9` are computed on the device from the account's own

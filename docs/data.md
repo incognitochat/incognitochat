@@ -14,6 +14,8 @@ A change to what the code stores updates this page in the same change.
 - Messages and attachments are encrypted on the device. Nobody else can read
   them: not whoever runs the server, not Telegram, not the hosting providers.
 - The server doesn't store who writes to whom, or who an anonymous sender is.
+  A recipient working with someone who holds the stored data can still find
+  the sender's account ([security model](security.md#what-still-leaks)).
 - Chats exist only on the user's device. The server can't restore them or hand
   them to anyone, because it doesn't have them.
 - The server does see some things it can't avoid seeing, such as IP addresses
