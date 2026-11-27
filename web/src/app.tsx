@@ -510,6 +510,12 @@ function ChatsTab({ app, language, screen, top }: TabProps) {
   useBackCloses(selecting, clear);
   // Leaving the Chats tab (or home) ends selecting.
   useEffect(() => () => void (selection.value = []), []);
+  // A chat that left the list (deleted, blocked) leaves the selection, so it isn't selected if it comes back;
+  // and signed out, or the account's deletion paused, there's no selecting.
+  useEffect(() => {
+    const kept = canSelect ? selection.peek().filter((id) => screen.conversations.some((c) => c.id === id)) : [];
+    if (kept.length !== selection.peek().length) selection.value = kept;
+  }, [screen.conversations, canSelect]);
   const deleteSelected = () => {
     if (selected.length === 1) return confirmDelete(selected[0]!.id, selected[0]!.label, selected[0]!.status === 'active');
     deletingMany.value = { ids: selected.map((c) => c.id), active: selected.some((c) => c.status === 'active') };
@@ -1827,6 +1833,9 @@ function LabelCode({ label }: { label: string }) {
  * A chat in the list. Tap opens it; swiping it toward the start reveals
  * Delete; a long press (or a right click) asks to delete it straight away.
  */
+/** A hold's own repeats (its contextmenu, the Menu key's) within this long count once. */
+const HOLD_ONCE_MS = 800;
+
 function ChatRow({
   app,
   language,
@@ -1851,6 +1860,8 @@ function ChatRow({
   const tr = (key: Key, values?: Record<string, string | number>) => t(language, key, values);
   const gesture = useRef<Gesture | null>(null);
   const suppressClick = useRef(false);
+  // When it was last held: a hold's contextmenu (or the Menu key's) after it is the same hold, not another toggle.
+  const heldAt = useRef(0);
   // How far the chat is pulled aside while dragging; null when not dragging.
   const dragging = useSignal<number | null>(null);
   const shown = dragging.value ?? (revealed ? ACTION_WIDTH : 0);
@@ -1860,6 +1871,8 @@ function ChatRow({
   const longPress = () => {
     const g = gesture.current;
     if (g && (g.pressed || g.mode !== 'pending')) return;
+    if (Date.now() - heldAt.current < HOLD_ONCE_MS) return;
+    heldAt.current = Date.now();
     if (g) {
       g.pressed = true;
       clearTimeout(g.timer);
@@ -1873,6 +1886,8 @@ function ChatRow({
   };
   const onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
+    // A new press: a hold before it that no click followed (touch) doesn't swallow this one's.
+    suppressClick.current = false;
     gesture.current = {
       x: e.clientX,
       y: e.clientY,

@@ -633,6 +633,8 @@ export function createApp(deps: Deps) {
     if (close) close();
     // Leaves deleting the chats for both sides at once: the account is kept.
     else if (currentScreen().kind === 'deleting-chats') void keepAccount();
+    // At once, not once home has loaded (that waits for the server): no more deletes go out after Back.
+    else if (currentScreen().kind === 'deleting-selected') void stopDeletingSelected();
     else void showHome();
   });
   // Telegram's Settings item: shown on the screens that have somewhere to
@@ -2355,10 +2357,10 @@ export function createApp(deps: Deps) {
             if (alsoBlock) await messaging.block(id);
             deps.broadcast({ type: 'data-changed' });
           } catch (err) {
+            // Deleted for both, not blocked (the block failed): the name goes, left or not; Try again blocks it.
+            await messaging.tidyName(id).catch(() => {});
             if (!ours()) return;
             if (handleGone(err)) return;
-            // Deleted for both, not blocked (the block failed): the name goes; Try again blocks it.
-            await messaging.tidyName(id).catch(() => {});
             const now = await getConversation(deps.db, id);
             const stillOpen = !!now && now.status === 'active' && !now.hidden;
             if (stillOpen && err instanceof ApiError && err.code === 'link_busy') {
@@ -2374,6 +2376,7 @@ export function createApp(deps: Deps) {
       } else {
         // Not for both sides (ended, or deleted here meanwhile): here, as asked.
         const c = await getConversation(deps.db, id);
+        if (c && c.status !== 'blocked' && !messaging) return stop('outdated', left());
         if (c && c.status !== 'blocked' && messaging) {
           try {
             if (alsoBlock) await messaging.block(id);

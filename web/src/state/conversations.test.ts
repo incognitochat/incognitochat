@@ -2176,6 +2176,24 @@ describe('deleting the account', () => {
       expect(labels(a)).toHaveLength(2);
     });
 
+    it('stops at once at Back, not once home has loaded (which waits for the server): no delete goes out after it', async () => {
+      const b = await backend();
+      const tg = telegram();
+      const { a, chats } = await withChats(b, 3, {}, tg.bridge);
+      const sent = b.sends.length;
+      // Home's own read of the account waits, as on a slow network.
+      const home = holdAndFail(b, /^\/account$/);
+      const run = a.deleteChats(chats, false, true);
+      expect(a.screen.value.kind).toBe('deleting-selected');
+      tg.fire('back_button_pressed', undefined);
+      await run;
+      expect(b.sends.slice(sent).filter((d) => d.quiet === true)).toHaveLength(0);
+      await home.atServer;
+      home.fail(new NetworkError('offline'));
+      await vi.waitFor(() => expect(a.screen.value.kind).toBe('home'));
+      expect(labels(a)).toHaveLength(3);
+    });
+
     it('deletes one selected chat as its own Delete does, for both sides too', async () => {
       const b = await backend();
       const { a, others, chats } = await withChats(b, 2);
