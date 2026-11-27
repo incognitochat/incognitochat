@@ -1577,7 +1577,7 @@ describe('links', () => {
     const url = home(owner.app.screen.value).links[0]!.url;
     const sender = await registered(server.api, { launch: launchWith(payloadOf(url)) });
     expect(sender.app.screen.value).toMatchObject({ kind: 'link', status: 'verified' });
-    // The link screen's button ("Go to my chats").
+    // Home, as the link screen's button did before it asked for Chats itself (app.chats, below).
     await sender.app.home();
     expect(sender.app.screen.value).toMatchObject({ kind: 'home', tab: 'chats' });
   });
