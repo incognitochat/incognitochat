@@ -59,8 +59,11 @@ export function firstCharacters(text: string, max: number): string {
  * or the selection, then), and `now` the field with the word in. The name
  * around it is kept exactly; only as much of the word as fits in `max`
  * characters (as people count them) stays. If the keyboard changed more
- * than that place (`now` doesn't hold the rest of the name as it was), the
- * first `max` characters. The new name, and where the caret goes.
+ * than that place (`now` doesn't hold the rest of the name as it was, as
+ * when it rewrites a word already there, a suggestion picked say), the name
+ * as it was, with the caret where it was: there's no room for the change.
+ * (With no start seen, `before` is empty: the first `max` characters.) The
+ * new name, and where the caret goes.
  */
 export function fitComposed(before: string, start: number, end: number, now: string, max = NAME_MAX): { value: string; caret: number } {
   const head = before.slice(0, start);
@@ -68,8 +71,7 @@ export function fitComposed(before: string, start: number, end: number, now: str
   if (now.length >= head.length + tail.length && now.startsWith(head) && now.endsWith(tail)) {
     return insertInto(before, start, end, now.slice(head.length, now.length - tail.length), max);
   }
-  const cut = firstCharacters(now, max);
-  return { value: cut, caret: cut.length };
+  return { value: before, caret: Math.min(start, before.length) };
 }
 
 /**

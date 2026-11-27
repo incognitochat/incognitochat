@@ -110,6 +110,11 @@ describe('a word a keyboard put together, at most NAME_MAX characters', () => {
     expect(compose(e31, 6, '😀😀')).toEqual({ value: '😀'.repeat(32), caret: 8 });
     expect(compose('😀'.repeat(31), 10, '🙏🙌').value).toBe('😀'.repeat(5) + '🙏' + '😀'.repeat(26));
     expect(compose('𠮷'.repeat(31), 6, '𠮷𠮷').value).toBe('𠮷'.repeat(32));
+    // A word ending in a virama, with room: it stays, joined to the letter after it, which stays too.
+    const hiRoom = 'x'.repeat(16) + 'ष' + 'y'.repeat(13);
+    const kept = fitComposed(hiRoom, 16, 16, 'x'.repeat(16) + 'अक्अअ' + 'ष' + 'y'.repeat(13));
+    expect(kept.value).toBe('x'.repeat(16) + 'अक्' + 'ष' + 'y'.repeat(13));
+    expect(kept.caret).toBe(16 + 'अक्'.length);
     // A word whose last character joins the next one: the next one stays.
     const hi = 'x'.repeat(16) + 'ष' + 'y'.repeat(15);
     const rh = compose(hi, 16, 'अक्');
@@ -134,8 +139,11 @@ describe('a word a keyboard put together, at most NAME_MAX characters', () => {
     // Autocorrect: the word being typed ("teh", from the start) became "thereafter".
     const rest = ' ' + 'y'.repeat(NAME_MAX - 4);
     expect(fitComposed(rest, 0, 0, 'thereafter' + rest).value).toBe('the' + rest);
-    // The keyboard changed text outside its place: the first NAME_MAX characters.
-    expect(fitComposed('abc', 3, 3, 'XYZ' + 'z'.repeat(NAME_MAX))).toEqual({ value: ('XYZ' + 'z'.repeat(NAME_MAX)).slice(0, NAME_MAX), caret: NAME_MAX });
+    // The keyboard rewrote a word already there (Android: a suggestion picked
+    // after "Jon"), past the cap: no room for it, the name as it was.
+    const name = 'Jon from the office, 3rd floor!!';
+    expect(fitComposed(name, 3, 3, 'John' + name.slice(3))).toEqual({ value: name, caret: 3 });
+    expect(fitComposed('abc', 3, 3, 'XYZ' + 'z'.repeat(NAME_MAX))).toEqual({ value: 'abc', caret: 3 });
     // No start seen: the same.
     expect(fitComposed('', 0, 0, 'z'.repeat(NAME_MAX + 5))).toEqual({ value: 'z'.repeat(NAME_MAX), caret: NAME_MAX });
   });
