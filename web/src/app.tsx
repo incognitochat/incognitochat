@@ -2,7 +2,7 @@ import { signal, useSignal } from '@preact/signals';
 import { createContext, createPortal, type ComponentChildren, type RefObject } from 'preact';
 import { useContext, useEffect, useLayoutEffect, useRef } from 'preact/hooks';
 import { pressWithoutFocus, useDialogFocus } from './a11y/focus';
-import { menuKeyDown, moveInMenu } from './a11y/keys';
+import { isMenuKey, menuKeyDown, moveInMenu } from './a11y/keys';
 import { clockTime, formatSize, locale, nextUtc, relativeTime, t, type Language } from './i18n';
 import type { Key } from './i18n/en';
 import { LANGUAGE_CHOICES, type LanguageSetting } from './state/language';
@@ -1964,7 +1964,11 @@ function ChatRow({
           longPress(true);
         }}
         // From the keyboard: Enter opens it; the Menu key or Shift+F10 does what a long press does (once per press: held down, it repeats).
-        onKeyDown={(e) => !e.repeat && menuKeyDown(e, () => longPress(), { enter: false })}
+        onKeyDown={(e) => {
+          // Held down, a key repeats: one toggle per press, and the repeats' own context menus don't come either.
+          if (e.repeat) return void (isMenuKey(e) && e.preventDefault());
+          menuKeyDown(e, () => longPress(), { enter: false });
+        }}
         onClick={onClick}
       >
         <span class="avatar-wrap">
