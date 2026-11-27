@@ -16,6 +16,8 @@ import {
   type PendingEdit,
 } from '../storage/db';
 import {
+  openChatName,
+  sealChatName,
   addMessage,
   answeredAt,
   clearMessages,
@@ -633,5 +635,17 @@ describe('the upkeep sweep', () => {
     expect(await getSweep(db)).toEqual({ convs: [{ id: 'ok', seen: 2 }], files: [] });
     await putSweep(db, { convs: [], files: [] });
     expect(await db.get('meta', 'sweep')).toBeUndefined();
+  });
+});
+
+describe("a chat's own name", () => {
+  it('opens only for the chat it was sealed for', async () => {
+    const db = await fresh();
+    const sealed = await sealChatName(db, 'c1', { name: 'Alex', emoji: '🌻' });
+    expect(new TextDecoder().decode(sealed)).not.toContain('Alex');
+    expect(await openChatName(db, 'c1', sealed)).toEqual({ name: 'Alex', emoji: '🌻' });
+    // Moved to another chat, or read with another storage key: nothing (the label shows).
+    expect(await openChatName(db, 'c2', sealed)).toBeNull();
+    expect(await openChatName(await fresh(), 'c1', sealed)).toBeNull();
   });
 });

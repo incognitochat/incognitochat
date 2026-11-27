@@ -29,7 +29,7 @@ import { ART_CREDIT, ART_LICENSE, findSticker, loadArt, PACKS, stickerEmoji, typ
 import { EMOJI_GROUPS, type EmojiGroup } from './emoji/data';
 import { deleteBefore, insertAt, type Caret } from './emoji/edit';
 import { switchEdit, type Box } from './state/draft';
-import { cleanName, isCode, labelParts, NAME_MAX } from './state/label';
+import { cleanName, firstCharacters, isCode, labelParts, NAME_MAX } from './state/label';
 import { ADMIN_NOTICE_TEXT, ERROR_TEXT, INVITATIONS_NOTICE_TEXT, NOTICE_TEXT, SEND_ERROR_TEXT } from './texts';
 import {
   canRetryChats,
@@ -1208,6 +1208,7 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
   const name = useSignal(target.custom?.name ?? '');
   const picture = useSignal(target.custom?.emoji ?? labelEmoji ?? '');
   const picking = useSignal(false);
+  const pictureButton = useRef<HTMLButtonElement>(null);
   const close = () => (renaming.value = null);
   useBackCloses(true, close);
   // Back closes the picture picker first.
@@ -1237,7 +1238,14 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
       >
         <h2 id="rename-title">{tr('rename')}</h2>
         <div class="rename-row">
-          <button type="button" class="avatar rename-picture" aria-label={tr('chatPicture')} aria-expanded={picking.value} onClick={() => (picking.value = !picking.value)}>
+          <button
+            type="button"
+            class="avatar rename-picture"
+            ref={pictureButton}
+            aria-label={`${tr('chatPicture')} ${picture.value}`}
+            aria-expanded={picking.value}
+            onClick={() => (picking.value = !picking.value)}
+          >
             {picture.value}
           </button>
           <input
@@ -1246,12 +1254,17 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             dir="auto"
             enterKeyHint="done"
             autoComplete="off"
-            maxLength={NAME_MAX * 2}
             aria-label={tr('chatName')}
             placeholder={code}
             value={name.value}
-            onInput={(e) => (name.value = e.currentTarget.value)}
-            onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), save())}
+            // At most NAME_MAX characters, as people count them (a flag is one): cut while typing, not only on Save.
+            onInput={(e) => {
+              const capped = firstCharacters(e.currentTarget.value, NAME_MAX);
+              if (capped !== e.currentTarget.value) e.currentTarget.value = capped;
+              name.value = capped;
+            }}
+            // Not while a keyboard is still putting a word together (it confirms it with Enter).
+            onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && (e.preventDefault(), save())}
           />
         </div>
         {picking.value && (
@@ -1261,6 +1274,8 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
               onEmoji={(e) => {
                 picture.value = e;
                 picking.value = false;
+                // The picker goes with the focus inside it: back to the picture.
+                setTimeout(() => pictureButton.current?.focus());
               }}
             />
           </div>

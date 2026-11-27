@@ -1434,7 +1434,13 @@ export function createMessaging(deps: MessagingDeps) {
    */
   async function rename(conv: string, custom: ChatName | null): Promise<void> {
     const sealed = custom && (custom.name || custom.emoji) ? await sealChatName(db, conv, custom) : null;
-    await update(conv, ({ custom: _, ...current }) => (sealed ? { ...current, custom: sealed } : current));
+    // Read again under the chat's lock: deleted (hidden) or blocked meanwhile, by another copy say, it's left as it is.
+    await update(conv, ({ custom: _, ...current }) => (current.hidden || current.status === 'blocked' ? null : sealed ? { ...current, custom: sealed } : current));
+  }
+
+  /** Takes away the name the user gave a chat that's in neither list (deleted, not blocked): after a delete that stopped partway. */
+  async function tidyName(conv: string): Promise<void> {
+    await update(conv, ({ custom, ...current }) => (custom && current.hidden && current.status !== 'blocked' ? current : null));
   }
 
   /**
@@ -1491,7 +1497,7 @@ export function createMessaging(deps: MessagingDeps) {
    * edits, unless we never answered: they share a budget with all such
    * chats (and count against it), so they go.
    */
-  async function remove(conv: string, forBoth = false): Promise<void> {
+  async function remove(conv: string, forBoth = false, keepName = false): Promise<void> {
     // On this device only: everything here now.
     let upTo = { theirs: Infinity, ours: Infinity };
     let floor: number | undefined;
@@ -1544,8 +1550,14 @@ export function createMessaging(deps: MessagingDeps) {
       }
       // Ours: so their reactions or edits naming one aren't kept for later.
       for (const m of going) if (m.out && couldCome(dayOf(m.at), now())) dropMine(ids, await idTag(secret, c.id, m.id), m.at);
-      // Out of the list, unless something came meanwhile.
+      // Out of the list, unless something came meanwhile. In neither list
+      // then (not blocked), the name the user gave it goes too, unless it's
+      // about to be blocked (keepName: a delete for both that also blocks).
       kept = await withPreview(db, { ...kept, unread, ...(left === 0 ? { hidden: true } : {}) });
+      if (left === 0 && kept.status !== 'blocked' && !keepName) {
+        const { custom: _, ...rest } = kept;
+        kept = rest;
+      }
       await saveConversation(db, kept, ids, before, { now: edits, before: editsBefore });
     });
     // Nor is when we last sent something there kept, or what. Only after a
@@ -2502,8 +2514,12 @@ export function createMessaging(deps: MessagingDeps) {
         { forgetAnswered: clear },
       );
       conv.unread = unread;
-      // Out of the list until either side writes again.
-      if (left === 0) conv.hidden = true;
+      // Out of the list until either side writes again. In neither list
+      // then (not blocked): the name the user gave it goes too.
+      if (left === 0) {
+        conv.hidden = true;
+        if (conv.status !== 'blocked') delete conv.custom;
+      }
       // Edits and reactions waiting for messages it took (sent before them) go too.
       if (edits.some((e) => e.at <= upTo)) edits = edits.filter((e) => e.at > upTo);
       if (conv.reactions) conv.reactions = conv.reactions.filter((r) => r.at > upTo);
@@ -2864,7 +2880,7 @@ export function createMessaging(deps: MessagingDeps) {
     return walk !== null && !paused();
   }
 
-  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, rename, remove, maintain, forgetKeys };
+  return { startConversation, send, sendMedia, resend, fetchMedia, discardUploads, flushUploadDeletes, deleteForEveryone, deleteHere, edit, sync, partway, stop, markRead, markSeen, react, block, unblock, rename, tidyName, remove, maintain, forgetKeys };
 }
 
 export type Messaging = ReturnType<typeof createMessaging>;

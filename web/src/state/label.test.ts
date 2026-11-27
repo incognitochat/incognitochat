@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMOJI_GROUPS } from '../emoji/data';
-import { cleanName, isCode, isEmoji, labelParts, NAME_MAX, shownLabel } from './label';
+import { cleanName, firstCharacters, isCode, isEmoji, labelParts, NAME_MAX, shownLabel } from './label';
 
 describe('labelParts', () => {
   it('splits a label into its emoji and its code', () => {
@@ -60,8 +60,12 @@ describe("a chat's own name and picture", () => {
     expect(cleanName('')).toBe('');
     const long = 'x'.repeat(NAME_MAX + 10);
     expect(cleanName(long)).toHaveLength(NAME_MAX);
-    // Counted in characters, not code units: an emoji is one.
+    // Counted in characters as people count them: an emoji, a flag, a joined emoji is one, never split.
     expect(Array.from(cleanName('😀'.repeat(NAME_MAX + 1)))).toHaveLength(NAME_MAX);
+    expect(cleanName('🇨🇦'.repeat(NAME_MAX + 1))).toBe('🇨🇦'.repeat(NAME_MAX));
+    expect(cleanName('a' + '👩‍❤️‍👨'.repeat(NAME_MAX))).toBe('a' + '👩‍❤️‍👨'.repeat(NAME_MAX - 1));
+    expect(firstCharacters('ab🇨🇦c', 3)).toBe('ab🇨🇦');
+    expect(firstCharacters('ab', 5)).toBe('ab');
   });
 
   it("tells a label's code from a name", () => {

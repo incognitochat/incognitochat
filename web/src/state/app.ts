@@ -1471,13 +1471,15 @@ export function createApp(deps: Deps) {
     if (current.kind === 'home') homeActions++;
     if (current.kind === 'home' || current.kind === 'conversation') screen.value = { ...current, busy: true };
     try {
-      // Told before blocking, which ends our way of writing to them.
-      if (forBoth) await messaging.remove(id, true);
+      // Told before blocking, which ends our way of writing to them. The
+      // name the user gave it goes with it (messaging), unless it stays in
+      // Blocked: kept through the delete for both that comes first.
+      if (forBoth) await messaging.remove(id, true, alsoBlock);
       if (alsoBlock) await messaging.block(id);
       if (!forBoth) await messaging.remove(id);
-      // The name the user gave it goes with it, unless it stays in Blocked.
-      if (!alsoBlock) await messaging.rename(id, null);
     } catch (err) {
+      // Stopped partway (deleted, not blocked): the name goes all the same.
+      await messaging.tidyName(id).catch(() => {});
       if (handleGone(err)) return;
       return showHome({ tab: 'chats', notice: deviceLimit(err) ?? (err instanceof NetworkError ? 'network' : 'generic') });
     }

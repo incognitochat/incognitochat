@@ -4,6 +4,8 @@
 // name and picture instead (on this device only): shown the same way, as
 // "<emoji> <name>".
 
+import type { ChatName } from '../messaging/store';
+
 /**
  * An emoji: a pictograph (maybe with a skin tone, a variation selector,
  * tag characters as in a subdivision flag, or joined to others), a flag (two
@@ -27,13 +29,23 @@ export function isEmoji(s: string): boolean {
 }
 
 /** The user's own name and picture for a chat (each optional: the label's stands in). */
-export interface ChatCustom {
-  name?: string;
-  emoji?: string;
-}
+export type ChatCustom = ChatName;
 
-/** The longest name the user may give a chat, in characters. */
+/** The longest name the user may give a chat, in characters (as people count them: a flag is one). */
 export const NAME_MAX = 32;
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/** The first `max` characters of a text (a joined emoji or a flag is one, and is never split). */
+export function firstCharacters(text: string, max: number): string {
+  let out = '';
+  let n = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    if (n++ === max) break;
+    out += segment;
+  }
+  return out;
+}
 
 /**
  * A name as typed, made fit to show: control and direction-changing
@@ -45,7 +57,7 @@ export function cleanName(typed: string): string {
     .replace(/[\p{Cc}\u{200E}\u{200F}\u{202A}-\u{202E}\u{2066}-\u{2069}\u{061C}]/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim();
-  return Array.from(plain).slice(0, NAME_MAX).join('').trim();
+  return firstCharacters(plain, NAME_MAX).trim();
 }
 
 /** What a chat is shown as: the user's own name and picture where they gave one, else the label's. */

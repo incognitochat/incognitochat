@@ -654,6 +654,113 @@ describe('conversations in the app', () => {
     expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
   });
 
+  describe("a chat's own name goes once the chat is in neither list, on every path", () => {
+    const payloadOf = (p: Awaited<ReturnType<typeof person>>) => new URL(screenOf(p.screen.value, 'home').links[0]!.url).searchParams.get('startapp')!;
+    async function pair() {
+      const b = await backend();
+      const owner = await person(b);
+      await owner.createLink();
+      const sender = await person(b, payloadOf(owner));
+      await sender.writeToLink('hello');
+      await owner.showTab('chats');
+      await owner.sync();
+      const { id, label } = screenOf(owner.screen.value, 'home').conversations[0]!;
+      await owner.openConversation(id);
+      return { b, owner, sender, id, label };
+    }
+    const named = async (app: Awaited<ReturnType<typeof person>>, id: string) => !!(await app.db.get('conversations', id))?.custom;
+
+    it('when they delete it for both sides, and they write again: the label', async () => {
+      const { owner, sender, id, label } = await pair();
+      await owner.sendMessage('hi');
+      await sender.sync();
+      await owner.rename(id, { name: 'Alex' });
+      await sender.home();
+      const sid = screenOf(sender.screen.value, 'home').conversations[0]!.id;
+      await sender.deleteConversation(sid, false, true);
+      await owner.home();
+      await owner.sync();
+      expect(screenOf(owner.screen.value, 'home').conversations).toEqual([]);
+      expect(await named(owner, id)).toBe(false);
+      const again = await sender.reopen(payloadOf(owner));
+      await again.openConversation(existingChat(again.screen.value));
+      await again.sendMessage('again');
+      await owner.sync();
+      await owner.home();
+      expect(screenOf(owner.screen.value, 'home').conversations.map((c) => c.label)).toEqual([label]);
+    });
+
+    it('when another copy deleted it, a rename from a copy still showing it stores nothing', async () => {
+      const { owner, id } = await pair();
+      const other = await owner.reopen('');
+      await other.deleteConversation(id, false);
+      await owner.sync();
+      await owner.rename(id, { name: 'Alex' });
+      expect(await named(owner, id)).toBe(false);
+    });
+
+    it('when a delete for both that also blocks stops after the delete went out: the name goes', async () => {
+      const { b, owner, id } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      const held = holdAndFail(b, /discard/);
+      const run = owner.deleteConversation(id, true, true);
+      await held.atServer;
+      held.fail(new NetworkError('offline'));
+      await run;
+      const stored = await owner.db.get('conversations', id);
+      expect(stored).toMatchObject({ hidden: true, status: 'active' });
+      expect(stored!.custom).toBeUndefined();
+    });
+
+    it('and a delete for both that also blocks keeps it, for Blocked', async () => {
+      const { owner, id, label } = await pair();
+      await owner.sendMessage('hi');
+      await owner.rename(id, { name: 'Alex' });
+      await owner.deleteConversation(id, true, true);
+      await owner.blocked();
+      expect(screenOf(owner.screen.value, 'blocked').conversations.map((c) => c.label)).toEqual([`${label.split(' ')[0]} Alex`]);
+    });
+
+    it("when deleting the account deletes chats for both sides, stops, and the account is kept: the names go", async () => {
+      const b = await backend();
+      const a = await person(b);
+      await a.createLink();
+      const others: Awaited<ReturnType<typeof person>>[] = [];
+      for (let i = 0; i < 2; i++) {
+        const o = await person(b, payloadOf(a));
+        await o.writeToLink(`hello ${i}`);
+        others.push(o);
+      }
+      await a.showTab('chats');
+      await a.sync();
+      const list = screenOf(a.screen.value, 'home').conversations;
+      const chats = others.map((_, i) => list.find((c) => c.last?.text === `hello ${i}`)!.id);
+      for (const [i, chat] of chats.entries()) {
+        await a.openConversation(chat);
+        await a.sendMessage(`hi ${i}`);
+        await a.rename(chat, { name: `Name${i}` });
+        await others[i]!.sync();
+      }
+      await a.home();
+      // Tokens for one chat's delete only: it stops after the first.
+      const held = await countTokens(a.db, b.issuer.keyId);
+      if (held > 1) await takeTokens(a.db, b.issuer.keyId, held - 1);
+      b.state.tokensLeft = 0;
+      a.askDeleteAccount();
+      await a.deleteAccount(true);
+      await a.keepAccount();
+      const stored = await Promise.all(chats.map((id) => a.db.get('conversations', id)));
+      // The chat deleted for both sides is in neither list: its name went. The other is as it was.
+      const gone = stored.filter((c) => c!.hidden);
+      const left = stored.filter((c) => !c!.hidden);
+      expect(gone).toHaveLength(1);
+      expect(gone[0]!.custom).toBeUndefined();
+      expect(left).toHaveLength(1);
+      expect(left[0]!.custom).toBeInstanceOf(Uint8Array);
+    });
+  });
+
   it('keeps the name of a chat blocked without a delete when it is unblocked', async () => {
     const b = await backend();
     const owner = await person(b);
