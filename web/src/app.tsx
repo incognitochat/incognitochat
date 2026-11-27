@@ -1234,16 +1234,20 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
     name.value = next.value;
   };
   // A word just put together, past the cap: only as much of it as fits
-  // stays, where it went in; the rest of the name is kept whole. What it
-  // put in is what differs from the field as it was when the word began
-  // (not the caret, which a tap elsewhere may have moved).
-  const beforeWord = useRef<string | null>(null);
+  // stays, where it went in (the caret or selection when the word began:
+  // not now, which a tap elsewhere may have moved); the rest of the name is
+  // kept exactly.
+  const beforeWord = useRef<{ value: string; start: number; end: number } | null>(null);
+  const wordStarts = (field: HTMLInputElement) => {
+    const start = field.selectionStart ?? field.value.length;
+    beforeWord.current = { value: field.value, start, end: field.selectionEnd ?? start };
+  };
   const composed = (field: HTMLInputElement) => {
     const value = field.value;
-    const before = beforeWord.current ?? '';
+    const before = beforeWord.current ?? { value: '', start: 0, end: 0 };
     beforeWord.current = null;
     if (characterCount(value) > NAME_MAX) {
-      const next = fitComposed(before, value);
+      const next = fitComposed(before.value, before.start, before.end, value);
       field.value = next.value;
       field.setSelectionRange(next.caret, next.caret);
     }
@@ -1305,7 +1309,7 @@ function RenameChat({ app, language, target }: { app: AppState; language: Langua
             // At most NAME_MAX characters while typing, not only on Save (fitIn, composed, typed).
             onBeforeInput={(e) => fitIn(e as InputEvent, e.currentTarget)}
             onInput={(e) => typed(e as InputEvent, e.currentTarget)}
-            onCompositionStart={(e) => (beforeWord.current = e.currentTarget.value)}
+            onCompositionStart={(e) => wordStarts(e.currentTarget)}
             onCompositionEnd={(e) => composed(e.currentTarget)}
             // Not the Enter that confirms a word being put together (WebKit sends it as key 229, not composing).
             onKeyDown={(e) => e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && (e.preventDefault(), save())}

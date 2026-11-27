@@ -54,29 +54,22 @@ export function firstCharacters(text: string, max: number): string {
 }
 
 /**
- * A word a keyboard just put together into a name (`now`), against the name
- * as it was when the word began (`before`): what changed is found character
- * by character (as people count them, so an emoji or a letter with its marks
- * is never split), and only as much of it as fits in `max` characters stays,
- * where it went in; the rest of the name is kept whole. The new name, and
- * where the caret goes (after the word).
+ * A word a keyboard just put together: `before` is the name as it was when
+ * the word began, with the word going over before[start..end] (the caret,
+ * or the selection, then), and `now` the field with the word in. The name
+ * around it is kept exactly; only as much of the word as fits in `max`
+ * characters (as people count them) stays. If the keyboard changed more
+ * than that place (`now` doesn't hold the rest of the name as it was), the
+ * first `max` characters. The new name, and where the caret goes.
  */
-export function fitComposed(before: string, now: string, max = NAME_MAX): { value: string; caret: number } {
-  const was = characters(before);
-  const is = characters(now);
-  let start = 0;
-  while (start < was.length && start < is.length && was[start] === is[start]) start++;
-  let end = is.length;
-  let kept = was.length;
-  while (end > start && kept > start && was[kept - 1] === is[end - 1]) {
-    end--;
-    kept--;
+export function fitComposed(before: string, start: number, end: number, now: string, max = NAME_MAX): { value: string; caret: number } {
+  const head = before.slice(0, start);
+  const tail = before.slice(end);
+  if (now.length >= head.length + tail.length && now.startsWith(head) && now.endsWith(tail)) {
+    return insertInto(before, start, end, now.slice(head.length, now.length - tail.length), max);
   }
-  const head = is.slice(0, start);
-  const tail = is.slice(end);
-  const word = is.slice(start, end).slice(0, Math.max(0, max - head.length - tail.length));
-  const all = [...head, ...word, ...tail].slice(0, max);
-  return { value: all.join(''), caret: all.slice(0, Math.min(head.length + word.length, all.length)).join('').length };
+  const cut = firstCharacters(now, max);
+  return { value: cut, caret: cut.length };
 }
 
 /**

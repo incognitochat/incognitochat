@@ -94,43 +94,49 @@ describe('typing into a name, at most NAME_MAX characters', () => {
 
 describe('a word a keyboard put together, at most NAME_MAX characters', () => {
   const count = (s: string) => [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(s)].length;
-  // The word goes in at `at` (characters) of `name`; what's left of it, and the rest of the name.
-  const compose = (name: string, at: number, word: string) => {
-    const chars = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name)].map((s) => s.segment);
-    return fitComposed(name, [...chars.slice(0, at), word, ...chars.slice(at)].join(''));
-  };
-  it('keeps the rest of the name whole, and only what fits of the word, where it went in', () => {
+  // The word goes in at string offset `at` of `name` (the caret when it began).
+  const compose = (name: string, at: number, word: string) => fitComposed(name, at, at, name.slice(0, at) + word + name.slice(at));
+  it('keeps the rest of the name exactly, and only what fits of the word, where it went in', () => {
     const name = 'ABCDEFGHIJ' + 'abcdefghijklmnopqrst';
-    const r = compose(name, 10, 'hello');
-    expect(r.value).toBe('ABCDEFGHIJhe' + 'abcdefghijklmnopqrst');
-    expect(r.caret).toBe(12);
+    expect(compose(name, 10, 'hello')).toEqual({ value: 'ABCDEFGHIJhe' + 'abcdefghijklmnopqrst', caret: 12 });
+    // A word that starts like what follows it.
+    expect(compose('x'.repeat(25) + 'theory', 25, 'the').value).toBe('x'.repeat(25) + 't' + 'theory');
+    expect(compose('a'.repeat(26) + 'night', 26, 'no').value).toBe('a'.repeat(26) + 'n' + 'night');
   });
-  it('never takes an emoji, a rare character or a letter with its marks for part of the word', () => {
-    // An emoji next to one sharing its first UTF-16 half.
+  it('never takes an emoji, a rare character or a letter with its marks apart', () => {
     const full = '😊'.repeat(NAME_MAX);
-    expect(compose(full, 10, '🙏').value).toBe(full);
+    expect(compose(full, 20, '🙏')).toEqual({ value: full, caret: 20 });
     const e31 = '😀'.repeat(31);
-    const r = compose(e31, 5, '🙏🙌');
-    expect(r.value).toBe('😀'.repeat(5) + '🙏' + '😀'.repeat(26));
-    expect(r.caret).toBe('😀'.repeat(5).length + '🙏'.length);
-    const k31 = '𠮷'.repeat(31);
-    expect(compose(k31, 3, '𠮷𠮷').value).toBe('𠮷'.repeat(32));
-    // Hindi, Thai, a skin tone: the letter after the word keeps its marks.
-    const hi = 'x'.repeat(29) + 'कि' + 'x';
-    expect(compose(hi, 29, 'कम').value).toBe('x'.repeat(29) + 'क' + 'कि' + 'x');
-    const th = 'x'.repeat(29) + 'กี่' + 'x';
-    expect(compose(th, 29, 'กา').value).toBe('x'.repeat(29) + 'ก' + 'กี่' + 'x');
-    const tone = 'x'.repeat(30) + '👍🏽';
-    expect(compose(tone, 30, '👍👏').value).toBe('x'.repeat(30) + '👍' + '👍🏽');
-    for (const v of [hi, th, tone]) expect(count(v)).toBeLessThanOrEqual(NAME_MAX);
+    expect(compose(e31, 6, '😀😀')).toEqual({ value: '😀'.repeat(32), caret: 8 });
+    expect(compose('😀'.repeat(31), 10, '🙏🙌').value).toBe('😀'.repeat(5) + '🙏' + '😀'.repeat(26));
+    expect(compose('𠮷'.repeat(31), 6, '𠮷𠮷').value).toBe('𠮷'.repeat(32));
+    // A word whose last character joins the next one: the next one stays.
+    const hi = 'x'.repeat(16) + 'ष' + 'y'.repeat(15);
+    const rh = compose(hi, 16, 'अक्');
+    expect(rh.value.startsWith('x'.repeat(16))).toBe(true);
+    expect(rh.value.endsWith('ष' + 'y'.repeat(15))).toBe(true);
+    for (const [name, at, word] of [
+      [hi, 16, 'अक्'],
+      ['x'.repeat(29) + 'कि' + 'x', 29, 'कम'],
+      ['x'.repeat(30) + '👍🏽', 30, '👍👏'],
+      ['a'.repeat(30) + '🇫🇷', 30, 'a🇦'],
+    ] as const) {
+      const r = compose(name, at, word);
+      expect(count(r.value), `${word}`).toBeLessThanOrEqual(NAME_MAX);
+      expect(r.value.startsWith(name.slice(0, at)) && r.value.endsWith(name.slice(at)), `${word} keeps the name`).toBe(true);
+    }
   });
-  it('over a selection, with a word that replaces text, and with no start seen', () => {
-    // Autocorrect replacing a shorter word with a longer one, at the cap.
-    const name = 'teh ' + 'y'.repeat(NAME_MAX - 4);
-    // ("t" is shared; of "hereafter" only "he" fits beside the rest.)
-    expect(fitComposed(name, 'thereafter ' + 'y'.repeat(NAME_MAX - 4)).value).toBe('the ' + 'y'.repeat(NAME_MAX - 4));
-    // No start seen: the whole field counts as the word; the first NAME_MAX characters stay.
-    const long = 'z'.repeat(NAME_MAX + 5);
-    expect(fitComposed('', long)).toEqual({ value: 'z'.repeat(NAME_MAX), caret: NAME_MAX });
+  it('over a selection; a keyboard that changed more than its place; no start seen', () => {
+    // Over a selection: the selected text goes, the word takes its room.
+    const full = 'x'.repeat(NAME_MAX);
+    expect(compose(full, 0, '')).toEqual({ value: full, caret: 0 });
+    expect(fitComposed(full, 0, 3, 'abcd' + full.slice(3))).toEqual({ value: 'abc' + full.slice(3), caret: 3 });
+    // Autocorrect: the word being typed ("teh", from the start) became "thereafter".
+    const rest = ' ' + 'y'.repeat(NAME_MAX - 4);
+    expect(fitComposed(rest, 0, 0, 'thereafter' + rest).value).toBe('the' + rest);
+    // The keyboard changed text outside its place: the first NAME_MAX characters.
+    expect(fitComposed('abc', 3, 3, 'XYZ' + 'z'.repeat(NAME_MAX))).toEqual({ value: ('XYZ' + 'z'.repeat(NAME_MAX)).slice(0, NAME_MAX), caret: NAME_MAX });
+    // No start seen: the same.
+    expect(fitComposed('', 0, 0, 'z'.repeat(NAME_MAX + 5))).toEqual({ value: 'z'.repeat(NAME_MAX), caret: NAME_MAX });
   });
 });
