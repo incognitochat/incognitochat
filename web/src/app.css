@@ -169,8 +169,12 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif, 
 .conversation { min-block-size: 100dvh; }
 /* The chat's header stays at the top as the messages scroll under it (as the
    message bar stays at the bottom), across the page's width, under every
-   overlay. Where it rests is where it sticks: the page's top padding is in it. */
+   overlay and under the message bar (whose own menus, being inside it, must
+   cover it too; and on a screen too short for both, typing wins). Where it
+   rests is where it sticks: the page's top padding is in it. A message
+   focused or scrolled to stops below it (--chat-head: its height, app.tsx). */
 .conversation-head { position: sticky; inset-block-start: 0; z-index: 4; display: flex; flex-direction: column; gap: 0.125rem; margin-inline: -1rem; padding: 0.5rem 1rem; background: var(--app-bg); border-block-end: 1px solid var(--app-separator, rgb(127 127 127 / 0.2)); }
+.messages, .messages * { scroll-margin-block-start: var(--chat-head, 0px); }
 .messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.375rem; flex: 1; }
 .messages .earlier { align-self: center; }
 /* A message's whole row takes its gestures; the bubble sits at its start or end. */
@@ -184,7 +188,7 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif, 
 .meta-spacer { display: inline-flex; align-items: center; gap: 0.25rem; margin-inline-start: 0.5rem; font-size: 0.75rem; visibility: hidden; pointer-events: none; }
 .bubble .footer { display: flex; align-items: flex-end; gap: 0.5rem; }
 .bubble .footer .meta { margin-inline-start: auto; }
-.conversation-foot { position: sticky; inset-block-end: 0; background: var(--app-bg); display: flex; flex-direction: column; gap: 0.5rem; padding-block: 0.5rem calc(0.375rem + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))); }
+.conversation-foot { position: sticky; inset-block-end: 0; z-index: 5; background: var(--app-bg); display: flex; flex-direction: column; gap: 0.5rem; padding-block: 0.5rem calc(0.375rem + max(var(--app-safe-bottom, 0px), env(safe-area-inset-bottom, 0px))); }
 /* The message bar sits low, as in Telegram: just clear of the home bar, if there is one. */
 .page.conversation { padding-block: 0; }
 /* The message bar, as Telegram's: one rounded field holding the sticker

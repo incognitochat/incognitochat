@@ -759,21 +759,20 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
   const menuButton = useRef<HTMLButtonElement>(null);
   // The header stays at the top (CSS): a message focused, or scrolled into
   // view, comes out below it (with room for its focus ring), not under it.
-  // Its height can change (a turn, a long line wrapping), so it's watched;
-  // gone with the chat.
+  // The header's height (watched: a turn, a long line wrapping) is the
+  // messages' scroll margin (--chat-head), not the page's scroll padding,
+  // which would scroll the page whenever ⋯, inside the header, took the focus.
+  const page = useRef<HTMLElement>(null);
   const head = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const el = head.current;
-    if (!el) return;
-    const root = document.documentElement;
-    const pad = () => root.style.setProperty('scroll-padding-block-start', `${Math.ceil(el.getBoundingClientRect().height) + 8}px`);
-    pad();
-    const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(pad) : null;
+    const main = page.current;
+    if (!el || !main) return;
+    const measure = () => main.style.setProperty('--chat-head', `${Math.ceil(el.getBoundingClientRect().height) + 8}px`);
+    measure();
+    const watch = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     watch?.observe(el);
-    return () => {
-      watch?.disconnect();
-      root.style.removeProperty('scroll-padding-block-start');
-    };
+    return () => watch?.disconnect();
   }, []);
   /**
    * Where the menu goes: just below ⋯ (the header, ⋯ with it, stays at the
@@ -883,7 +882,7 @@ function Conversation({ app, language, screen }: { app: AppState; language: Lang
     return () => clearTimeout(timer);
   }, []);
   return (
-    <main class="page conversation">
+    <main class="page conversation" ref={page}>
       <header class="conversation-head" ref={head}>
         <div class="chat-title">
           <Avatar label={screen.label} />
